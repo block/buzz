@@ -1,5 +1,6 @@
 import 'dart:ui' as ui;
 
+import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
@@ -219,6 +220,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   FocusNode? composerFocusNode,
   bool composerInitiallyFocused = false,
   bool launcherOnNestedRoute = false,
+  ChannelActions Function(Ref ref)? createChannelActions,
   Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
 }) async {
   final sourceHidden = ValueNotifier(false);
@@ -268,6 +270,8 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
               ),
         ),
         reminderServiceProvider.overrideWithValue(reminderService),
+        if (createChannelActions != null)
+          channelActionsProvider.overrideWith(createChannelActions),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -322,6 +326,26 @@ Future<void> _dismissMessageActionsPopover(WidgetTester tester) async {
     tester.element(find.byKey(const ValueKey('message-action-surface'))),
   ).pop();
   await tester.pumpAndSettle();
+}
+
+class _FakeChannelActions extends ChannelActions {
+  final reactions = <({String eventId, String emoji})>[];
+
+  _FakeChannelActions(Ref ref)
+    : super(
+        ref: ref,
+        session: ref.read(relaySessionProvider.notifier),
+        signedEventRelay: SignedEventRelay(
+          session: ref.read(relaySessionProvider.notifier),
+          nsec: null,
+        ),
+        currentPubkey: 'self',
+      );
+
+  @override
+  Future<void> addReaction(String eventId, String emoji) async {
+    reactions.add((eventId: eventId, emoji: emoji));
+  }
 }
 
 void main() {
@@ -886,6 +910,68 @@ void main() {
       expect(harness.container.read(threadFollowsProvider).followedRootIds, {
         'root-9',
       });
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('ignores repeat backdrop taps once dismissal starts', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        launcherOnNestedRoute: true,
+      );
+      final backdrop = tester.widget<GestureDetector>(
+        find.byKey(const ValueKey('message-actions-backdrop')),
+      );
+
+      backdrop.onTap!.call();
+      backdrop.onTap!.call();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('message-actions-underlying-page')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-actions-root-page')),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('ignores repeat quick reactions once dismissal starts', (
+      tester,
+    ) async {
+      final prefs = await _mockPrefs();
+      late _FakeChannelActions actions;
+      await _pumpMessageActionsPopover(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        launcherOnNestedRoute: true,
+        createChannelActions: (ref) => actions = _FakeChannelActions(ref),
+      );
+      final reaction = find.byKey(const ValueKey('quick-reaction-\u{1F44D}'));
+      final detector = tester.widget<GestureDetector>(
+        find.descendant(of: reaction, matching: find.byType(GestureDetector)),
+      );
+
+      detector.onTap!.call();
+      detector.onTap!.call();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('message-actions-underlying-page')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-actions-root-page')),
+        findsNothing,
+      );
+      expect(actions.reactions, [(eventId: 'msg-1', emoji: '\u{1F44D}')]);
       expect(tester.takeException(), isNull);
     });
 

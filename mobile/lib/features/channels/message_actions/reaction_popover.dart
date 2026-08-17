@@ -41,7 +41,7 @@ void _showMessageReactionPopover({
   );
 }
 
-class _MessageReactionPopover extends StatelessWidget {
+class _MessageReactionPopover extends HookWidget {
   final Rect anchorRect;
   final EdgeInsets spotlightPadding;
   final Animation<double> animation;
@@ -61,6 +61,14 @@ class _MessageReactionPopover extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
+    final selectionStarted = useRef(false);
+
+    void select(Object? result, [VoidCallback? effect]) {
+      if (selectionStarted.value) return;
+      selectionStarted.value = true;
+      Navigator.of(context).pop(result);
+      effect?.call();
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -125,7 +133,7 @@ class _MessageReactionPopover extends StatelessWidget {
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.of(context).pop(),
+                onTap: () => select(null),
               ),
             ),
             Positioned(
@@ -141,6 +149,7 @@ class _MessageReactionPopover extends StatelessWidget {
                 message: message,
                 pageContext: pageContext,
                 pageRef: pageRef,
+                onSelected: (result, effect) => select(result, effect),
               ),
             ),
           ],
@@ -159,6 +168,7 @@ class _AnimatedReactionTray extends StatelessWidget {
   final BuildContext pageContext;
   final WidgetRef pageRef;
   final Object? popResult;
+  final void Function(Object? result, VoidCallback effect)? onSelected;
 
   const _AnimatedReactionTray({
     required this.trayKey,
@@ -169,6 +179,7 @@ class _AnimatedReactionTray extends StatelessWidget {
     required this.pageContext,
     required this.pageRef,
     this.popResult,
+    this.onSelected,
   });
 
   @override
@@ -187,6 +198,7 @@ class _AnimatedReactionTray extends StatelessWidget {
             pageRef: pageRef,
             presentationAnimation: animation,
             popResult: popResult,
+            onSelected: onSelected,
           ),
         ),
       ),

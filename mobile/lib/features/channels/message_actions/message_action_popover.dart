@@ -522,11 +522,14 @@ class _MessageActionsPopover extends HookWidget {
     final mediaQuery = MediaQuery.of(context);
     final selectionStarted = useRef(false);
 
-    void selectAction(String actionId) {
+    void select(Object? result, [VoidCallback? effect]) {
       if (selectionStarted.value) return;
       selectionStarted.value = true;
-      Navigator.of(context).pop(actionId);
+      Navigator.of(context).pop(result);
+      effect?.call();
     }
+
+    void selectAction(String actionId) => select(actionId);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -656,8 +659,9 @@ class _MessageActionsPopover extends HookWidget {
             ),
             Positioned.fill(
               child: GestureDetector(
+                key: const ValueKey('message-actions-backdrop'),
                 behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.of(context).pop(),
+                onTap: () => select(null),
               ),
             ),
             if (showPreview)
@@ -725,6 +729,7 @@ class _MessageActionsPopover extends HookWidget {
                   pageContext: pageContext,
                   pageRef: pageRef,
                   popResult: _messageActionReactionSelection,
+                  onSelected: (result, effect) => select(result, effect),
                 ),
               ),
             Positioned.fromRect(
@@ -812,6 +817,7 @@ class _MessageReactionTray extends StatelessWidget {
   final BuildContext pageContext;
   final WidgetRef pageRef;
   final Object popResult;
+  final void Function(Object? result, VoidCallback effect) onSelected;
 
   const _MessageReactionTray({
     required this.animation,
@@ -820,6 +826,7 @@ class _MessageReactionTray extends StatelessWidget {
     required this.pageContext,
     required this.pageRef,
     required this.popResult,
+    required this.onSelected,
   });
 
   @override
@@ -833,6 +840,7 @@ class _MessageReactionTray extends StatelessWidget {
       pageContext: pageContext,
       pageRef: pageRef,
       popResult: popResult,
+      onSelected: onSelected,
     );
   }
 }

@@ -20,6 +20,10 @@ class _QuickReactionRow extends ConsumerWidget {
 
   final Object? popResult;
 
+  /// Selects exactly one popover result and side effect. Bottom sheets leave
+  /// this null and retain their existing local dismissal behavior.
+  final void Function(Object? result, VoidCallback effect)? onSelected;
+
   const _QuickReactionRow({
     required this.message,
     required this.sheetContext,
@@ -27,6 +31,7 @@ class _QuickReactionRow extends ConsumerWidget {
     required this.pageRef,
     this.presentationAnimation,
     this.popResult,
+    this.onSelected,
   });
 
   @override
@@ -76,8 +81,15 @@ class _QuickReactionRow extends ConsumerWidget {
               child: _QuickReactionCircle(
                 size: circleSize,
                 onTap: () {
-                  Navigator.of(sheetContext).pop(popResult);
-                  react(emoji[index]);
+                  void effect() => react(emoji[index]);
+
+                  final select = onSelected;
+                  if (select != null) {
+                    select(popResult, effect);
+                  } else {
+                    Navigator.of(sheetContext).pop(popResult);
+                    effect();
+                  }
                 },
                 child: _QuickReactionGlyph(
                   value: emoji[index],
@@ -92,8 +104,16 @@ class _QuickReactionRow extends ConsumerWidget {
             child: _QuickReactionCircle(
               size: circleSize,
               onTap: () {
-                Navigator.of(sheetContext).pop(popResult);
-                showEmojiPicker(context: pageContext, onSelect: react);
+                void effect() =>
+                    showEmojiPicker(context: pageContext, onSelect: react);
+
+                final select = onSelected;
+                if (select != null) {
+                  select(popResult, effect);
+                } else {
+                  Navigator.of(sheetContext).pop(popResult);
+                  effect();
+                }
               },
               child: Icon(
                 LucideIcons.plus,
