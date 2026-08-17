@@ -1,14 +1,47 @@
 use std::path::Path;
 
+use buzz_core::agent_skill::{
+    build_skill_pointer_event, build_skill_version_event, skill_body_hash, SkillPointerReason,
+    SkillPointerV1, SkillScope,
+};
 use buzz_core::agent_skill::{SkillTestV1, SkillVersionV1};
 use nostr::Keys;
 use tempfile::TempDir;
 
 use crate::skill_learning::{
     evaluate::evaluate_candidate,
+    materialize::materialize_active_skills,
+    rebuild::{rebuild_registry_from_events, skill_rebuild_filters},
     registry::{PublicationKind, PublicationState},
     LearningAction, LearningOutcome, SkillLearningRuntime, TurnLearningEvidence,
 };
+
+fn version(
+    skill_id: &str,
+    version_id: &str,
+    parent_version_id: Option<&str>,
+    source_prefix: &str,
+    body_suffix: &str,
+) -> SkillVersionV1 {
+    let skill_md = format!(
+        "---\nname: {skill_id}\ndescription: Learned checklist.\n---\n# Procedure\n{body_suffix}\n# Boundaries\nNo additional authority.\n"
+    );
+    SkillVersionV1 {
+        skill_id: skill_id.to_string(),
+        version_id: version_id.to_string(),
+        parent_version_id: parent_version_id.map(ToOwned::to_owned),
+        scope: SkillScope::SpecialistPrivate,
+        specialist_id: Some("operations-adviser".to_string()),
+        team_id: None,
+        created_at: "2026-08-17T00:00:00Z".to_string(),
+        source_experience_ids: vec![format!("{source_prefix}-a"), format!("{source_prefix}-b")],
+        required_tools: vec![],
+        inherited_tests: vec![],
+        regression_tests: vec![],
+        content_hash: skill_body_hash(&skill_md),
+        skill_md,
+    }
+}
 
 fn evidence(id: &str, task: &str, outcome: LearningOutcome) -> TurnLearningEvidence {
     TurnLearningEvidence {
@@ -462,4 +495,216 @@ fn evaluator_requires_inherited_checks_byte_for_byte() {
     ) + "\nname: learned-0123456789ab\n";
     misplaced_name.content_hash = buzz_core::agent_skill::skill_body_hash(&misplaced_name.skill_md);
     assert!(evaluate_candidate(&misplaced_name, None).is_err());
+}
+
+#[test]
+fn materializer_atomically_replaces_managed_versions_and_preserves_user_skills() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().join(".agents/skills");
+    let skill_id = "learned-0123456789ab";
+    let first = version(skill_id, "version-first", None, "first", "First procedure.");
+
+    let report = materialize_active_skills(&root, std::slice::from_ref(&first))
+        .expect("first materialization");
+    assert_eq!(report.installed, 1);
+    assert_eq!(
+        std::fs::read_to_string(root.join(skill_id).join("SKILL.md")).expect("first body"),
+        first.skill_md
+    );
+
+    let user_skill = root.join("user-authored");
+    std::fs::create_dir_all(&user_skill).expect("user skill directory");
+    std::fs::write(user_skill.join("SKILL.md"), "user content").expect("user skill body");
+    let stale = version(
+        "learned-abcdef012345",
+        "version-stale",
+        None,
+        "stale",
+        "Stale procedure.",
+    );
+    materialize_active_skills(&root, &[first.clone(), stale.clone()])
+        .expect("materialize stale skill");
+
+    let second = version(
+        skill_id,
+        "version-second",
+        Some("version-first"),
+        "second",
+        "Second procedure.",
+    );
+    let report = materialize_active_skills(&root, std::slice::from_ref(&second))
+        .expect("version replacement");
+    assert_eq!(report.removed, 1);
+    assert_eq!(
+        std::fs::read_to_string(root.join(skill_id).join("SKILL.md")).expect("second body"),
+        second.skill_md
+    );
+    assert!(user_skill.join("SKILL.md").exists());
+    assert!(!root.join(stale.skill_id).exists());
+}
+
+#[test]
+fn materializer_rejects_bad_hash_and_never_removes_unverified_managed_looking_directory() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path().join(".agents/skills");
+    let corrupt_looking = root.join("learned-aaaaaaaaaaaa");
+    std::fs::create_dir_all(&corrupt_looking).expect("corrupt-looking directory");
+    std::fs::write(corrupt_looking.join("SKILL.md"), "user-owned ambiguity")
+        .expect("ambiguous body");
+    std::fs::write(
+        corrupt_looking.join(".skill-version.json"),
+        "{not valid json",
+    )
+    .expect("corrupt marker");
+
+    let mut bad = version(
+        "learned-0123456789ab",
+        "version-bad",
+        None,
+        "bad",
+        "Bad hash.",
+    );
+    bad.content_hash = "0".repeat(64);
+    assert!(materialize_active_skills(&root, &[bad]).is_err());
+    assert_eq!(
+        std::fs::read_to_string(corrupt_looking.join("SKILL.md")).expect("preserved body"),
+        "user-owned ambiguity"
+    );
+
+    let traversal = version(
+        "learned-../../escape",
+        "version-traversal",
+        None,
+        "traversal",
+        "Escape.",
+    );
+    assert!(materialize_active_skills(&root, &[traversal]).is_err());
+    assert!(!temp.path().join("escape").exists());
+}
+
+#[test]
+fn relay_rebuild_selects_highest_valid_pointer_and_recreates_identical_projection() {
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("skills.sqlite");
+    let root = temp.path().join(".agents/skills");
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let skill_id = "learned-0123456789ab";
+    let first = version(skill_id, "version-first", None, "first", "First procedure.");
+    let second = version(
+        skill_id,
+        "version-second",
+        Some("version-first"),
+        "second",
+        "Second procedure.",
+    );
+    let first_event = build_skill_version_event(&agent, &owner.public_key(), &first, 100)
+        .expect("first version event");
+    let second_event = build_skill_version_event(&agent, &owner.public_key(), &second, 200)
+        .expect("second version event");
+    let first_pointer = SkillPointerV1 {
+        skill_id: skill_id.to_string(),
+        active_version_id: first.version_id.clone(),
+        previous_version_id: None,
+        scope: SkillScope::SpecialistPrivate,
+        specialist_id: Some("operations-adviser".to_string()),
+        team_id: None,
+        changed_at: "2026-08-17T00:00:00Z".to_string(),
+        reason: SkillPointerReason::Promotion,
+        evaluation_ids: vec!["evaluation-first".to_string()],
+    };
+    let second_pointer = SkillPointerV1 {
+        active_version_id: second.version_id.clone(),
+        previous_version_id: Some(first.version_id.clone()),
+        changed_at: "2026-08-17T00:01:00Z".to_string(),
+        evaluation_ids: vec!["evaluation-second".to_string()],
+        ..first_pointer.clone()
+    };
+    let missing_pointer = SkillPointerV1 {
+        active_version_id: "version-missing".to_string(),
+        previous_version_id: Some(second.version_id.clone()),
+        changed_at: "2026-08-17T00:02:00Z".to_string(),
+        evaluation_ids: vec!["evaluation-missing".to_string()],
+        ..first_pointer.clone()
+    };
+    let first_pointer_event =
+        build_skill_pointer_event(&agent, &owner.public_key(), &first_pointer, 110)
+            .expect("first pointer event");
+    let second_pointer_event =
+        build_skill_pointer_event(&agent, &owner.public_key(), &second_pointer, 210)
+            .expect("second pointer event");
+    let missing_pointer_event =
+        build_skill_pointer_event(&agent, &owner.public_key(), &missing_pointer, 310)
+            .expect("missing pointer event");
+    let events = vec![
+        missing_pointer_event,
+        first_pointer_event,
+        second_event,
+        first_event,
+        second_pointer_event,
+    ];
+
+    let registry =
+        crate::skill_learning::registry::SkillRegistry::open(&db_path).expect("open registry");
+    let report = rebuild_registry_from_events(
+        &registry,
+        &root,
+        &events,
+        &agent.public_key(),
+        &owner.public_key(),
+        agent.secret_key(),
+        &owner.public_key(),
+    )
+    .expect("first rebuild");
+    assert_eq!(report.active, 1);
+    assert_eq!(report.isolated_pointers, 1);
+    assert_eq!(
+        registry.active_version(skill_id).expect("active version"),
+        Some(second.version_id.clone())
+    );
+    let first_projection =
+        std::fs::read(root.join(skill_id).join("SKILL.md")).expect("first projection");
+    drop(registry);
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", db_path.display()));
+    }
+
+    let registry = crate::skill_learning::registry::SkillRegistry::open(&db_path)
+        .expect("reopen empty registry");
+    rebuild_registry_from_events(
+        &registry,
+        &root,
+        &events,
+        &agent.public_key(),
+        &owner.public_key(),
+        agent.secret_key(),
+        &owner.public_key(),
+    )
+    .expect("second rebuild");
+    assert_eq!(
+        std::fs::read(root.join(skill_id).join("SKILL.md")).expect("second projection"),
+        first_projection
+    );
+}
+
+#[test]
+fn relay_rebuild_uses_separate_owner_scoped_filters() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let filters = skill_rebuild_filters(&agent.public_key(), &owner.public_key());
+    let json = serde_json::to_value(filters).expect("serialize filters");
+    let filters = json.as_array().expect("filter array");
+    assert_eq!(filters.len(), 2);
+    assert_eq!(filters[0]["kinds"], serde_json::json!([30180]));
+    assert_eq!(filters[1]["kinds"], serde_json::json!([30181]));
+    for filter in filters {
+        assert_eq!(
+            filter["authors"],
+            serde_json::json!([agent.public_key().to_hex()])
+        );
+        assert_eq!(
+            filter["#p"],
+            serde_json::json!([owner.public_key().to_hex()])
+        );
+    }
 }

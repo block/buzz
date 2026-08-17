@@ -1,5 +1,7 @@
 pub(crate) mod candidate;
 pub(crate) mod evaluate;
+pub(crate) mod materialize;
+pub(crate) mod rebuild;
 pub(crate) mod registry;
 
 use std::path::Path;

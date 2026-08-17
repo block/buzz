@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Mutex};
+use std::{collections::HashMap, path::Path, sync::Mutex};
 
 use buzz_core::agent_skill::SkillVersionV1;
 use nostr::Event;
@@ -510,5 +510,39 @@ impl SkillRegistry {
         state
             .map(|state| PublicationState::parse(&state))
             .transpose()
+    }
+
+    pub(super) fn replace_authoritative(
+        &self,
+        versions: &[SkillVersionV1],
+        active: &HashMap<String, String>,
+    ) -> Result<(), RegistryError> {
+        let mut connection = self.connection.lock().map_err(|_| RegistryError::Lock)?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM active_skills", [])?;
+        transaction.execute("DELETE FROM skill_versions", [])?;
+        transaction.execute("DELETE FROM skill_evaluations", [])?;
+        transaction.execute("DELETE FROM skill_publication_outbox", [])?;
+        for version in versions {
+            transaction.execute(
+                "INSERT INTO skill_versions
+                 (version_id, skill_id, parent_version_id, payload_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    version.version_id,
+                    version.skill_id,
+                    version.parent_version_id,
+                    serde_json::to_string(version)?
+                ],
+            )?;
+        }
+        for (skill_id, version_id) in active {
+            transaction.execute(
+                "INSERT INTO active_skills (skill_id, active_version_id) VALUES (?1, ?2)",
+                params![skill_id, version_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 }
