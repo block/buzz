@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
+    use crate::managed_agents::RespondTo;
+
+    let allowlist_a = vec!["a".repeat(64)];
+    let allowlist_b = vec!["b".repeat(64)];
+
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+    ));
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::OwnerOnly,
+        &allowlist_a,
+        RespondTo::OwnerOnly,
+        &allowlist_b,
+    ));
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {

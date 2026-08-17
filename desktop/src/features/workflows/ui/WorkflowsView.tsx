@@ -1,10 +1,13 @@
-import { Plus, RefreshCw, Zap } from "lucide-react";
+import { Plus, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { stringify as yamlStringify } from "yaml";
 
 import {
   allWorkflowsQueryKey,
   workflowListFocusRefetchPolicy,
+  workflowQueryKey,
 } from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
@@ -15,10 +18,12 @@ import {
   deleteWorkflow,
   getChannelsWorkflows,
   triggerWorkflow,
+  updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
 import { Button } from "@/shared/ui/button";
-import { Card } from "@/shared/ui/card";
+import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/skeleton";
+import { getWorkflowEnabled, withWorkflowEnabled } from "./workflowDefinition";
 
 type WorkflowsViewProps = {
   channels: Channel[];
@@ -38,32 +43,42 @@ type DialogState =
   | { mode: "edit"; workflow: Workflow }
   | { mode: "duplicate"; workflow: Workflow };
 
+const WORKFLOW_CARD_GRID_CLASS =
+  "grid grid-cols-1 gap-3 [@container(min-width:38rem)]:grid-cols-2 [@container(min-width:54rem)]:grid-cols-3";
+
 function WorkflowsListSkeleton() {
   return (
-    <div className="space-y-2">
+    <div className={WORKFLOW_CARD_GRID_CLASS}>
       {["first", "second", "third", "fourth"].map((card) => (
-        <Card className="p-4" key={card}>
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0 flex-1 space-y-3">
-              <div className="flex items-center gap-2">
-                <Skeleton className="h-5 w-44" />
-                <Skeleton className="h-5 w-16 rounded-full" />
-              </div>
-              <Skeleton className="h-4 w-full max-w-2xl" />
-              <div className="flex flex-wrap gap-2">
-                <Skeleton className="h-5 w-20 rounded-full" />
-                <Skeleton className="h-5 w-24 rounded-full" />
-                <Skeleton className="h-5 w-16 rounded-full" />
-              </div>
-            </div>
-            <div className="hidden shrink-0 gap-2 sm:flex">
-              <Skeleton className="h-8 w-8 rounded-lg" />
-              <Skeleton className="h-8 w-8 rounded-lg" />
-            </div>
+        <div
+          className="flex min-h-60 flex-col rounded-2xl border bg-card p-5"
+          key={card}
+        >
+          <div className="flex items-start justify-between">
+            <Skeleton className="h-9 w-9 rounded-xl" />
+            <Skeleton className="h-6 w-16 rounded-full" />
           </div>
-        </Card>
+          <Skeleton className="mt-5 h-6 w-3/4" />
+          <Skeleton className="mt-3 h-4 w-full" />
+          <Skeleton className="mt-2 h-4 w-4/5" />
+          <Skeleton className="mt-auto h-4 w-32" />
+        </div>
       ))}
     </div>
+  );
+}
+
+function CreateWorkflowCard({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      aria-label="Create Workflow"
+      className="group relative flex min-h-60 w-full min-w-0 items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border/80 bg-transparent text-muted-foreground shadow-xs transition-colors hover:border-border hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid="new-workflow-card"
+      onClick={onClick}
+      type="button"
+    >
+      <Plus className="h-7 w-7 transition-colors" />
+    </button>
   );
 }
 
@@ -132,6 +147,38 @@ export function WorkflowsView({
     },
   });
 
+  const toggleEnabledMutation = useMutation({
+    mutationFn: (workflow: Workflow) =>
+      updateWorkflow(
+        workflow.id,
+        yamlStringify(
+          withWorkflowEnabled(
+            workflow.definition,
+            !getWorkflowEnabled(workflow.definition),
+          ),
+        ),
+        workflow.revision,
+      ),
+    onError: (error) => {
+      toast.error("Couldn’t change workflow status", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The workflow was not changed. Try again.",
+      });
+    },
+    onSuccess: (_data, workflow) => {
+      void queryClient.invalidateQueries({
+        queryKey: workflowQueryKey(workflow.id),
+      });
+      void queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === "workflows" ||
+          query.queryKey[0] === "workflows-all",
+      });
+    },
+  });
+
   const triggerOne = triggerMutation.mutate;
   const handleTrigger = React.useCallback(
     (workflowId: string) => triggerOne(workflowId),
@@ -162,6 +209,12 @@ export function WorkflowsView({
     [],
   );
 
+  const toggleEnabled = toggleEnabledMutation.mutate;
+  const handleToggleEnabled = React.useCallback(
+    (workflow: Workflow) => toggleEnabled(workflow),
+    [toggleEnabled],
+  );
+
   const handleDialogOpenChange = React.useCallback((open: boolean) => {
     if (!open) {
       setDialogState({ mode: "closed" });
@@ -174,73 +227,67 @@ export function WorkflowsView({
       data-testid="workflows-view"
     >
       <div
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8"
         data-scroll-restoration-id="workflows-list"
       >
-        <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold">Workflows</h2>
-            <Button
-              aria-label="Refresh workflows"
-              disabled={allWorkflowsQuery.isFetching}
-              onClick={() => void allWorkflowsQuery.refetch()}
-              size="icon"
-              variant="ghost"
-            >
-              <RefreshCw
-                className={`h-4 w-4 ${allWorkflowsQuery.isFetching ? "animate-spin" : ""}`}
-              />
-            </Button>
-          </div>
-          <Button onClick={() => setDialogState({ mode: "create" })} size="sm">
-            <Plus className="mr-1 h-4 w-4" />
-            Create Workflow
-          </Button>
-        </div>
+        <div className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]">
+          <PageHeader
+            action={
+              <Button
+                aria-label="Refresh workflows"
+                disabled={allWorkflowsQuery.isFetching}
+                onClick={() => void allWorkflowsQuery.refetch()}
+                size="icon"
+                variant="ghost"
+              >
+                <RefreshCw
+                  className={`h-4 w-4 ${allWorkflowsQuery.isFetching ? "animate-spin" : ""}`}
+                />
+              </Button>
+            }
+            description="Automations that keep your community moving."
+            title="Workflows"
+          />
 
-        {allWorkflowsQuery.isLoading ? (
-          <WorkflowsListSkeleton />
-        ) : allWorkflowsQuery.isError ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
-            <p className="text-sm text-red-400">Failed to load workflows</p>
-            <Button
-              onClick={() => void allWorkflowsQuery.refetch()}
-              size="sm"
-              variant="outline"
-            >
-              Retry
-            </Button>
-          </div>
-        ) : allWorkflows.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
-            <Zap className="h-10 w-10 opacity-30" />
-            <p className="text-sm">No workflows yet</p>
-            <Button
-              onClick={() => setDialogState({ mode: "create" })}
-              size="sm"
-              variant="outline"
-            >
-              <Plus className="mr-1 h-4 w-4" />
-              Create your first workflow
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {allWorkflows.map(({ workflow, channelName }) => (
-              <WorkflowCard
-                channelName={channelName}
-                isActive={selectedWorkflowId === workflow.id}
-                key={workflow.id}
-                onDelete={handleDelete}
-                onDuplicate={handleDuplicate}
-                onEdit={handleEdit}
-                onSelect={onSelectWorkflow}
-                onTrigger={handleTrigger}
-                workflow={workflow}
+          {allWorkflowsQuery.isLoading ? (
+            <WorkflowsListSkeleton />
+          ) : allWorkflowsQuery.isError ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
+              <p className="text-sm text-red-400">Failed to load workflows</p>
+              <Button
+                onClick={() => void allWorkflowsQuery.refetch()}
+                size="sm"
+                variant="outline"
+              >
+                Retry
+              </Button>
+            </div>
+          ) : (
+            <div className={WORKFLOW_CARD_GRID_CLASS}>
+              <CreateWorkflowCard
+                onClick={() => setDialogState({ mode: "create" })}
               />
-            ))}
-          </div>
-        )}
+              {allWorkflows.map(({ workflow, channelName }) => (
+                <WorkflowCard
+                  channelName={channelName}
+                  isActive={selectedWorkflowId === workflow.id}
+                  isTogglingEnabled={
+                    toggleEnabledMutation.isPending &&
+                    toggleEnabledMutation.variables?.id === workflow.id
+                  }
+                  key={workflow.id}
+                  onDelete={handleDelete}
+                  onDuplicate={handleDuplicate}
+                  onEdit={handleEdit}
+                  onSelect={onSelectWorkflow}
+                  onToggleEnabled={handleToggleEnabled}
+                  onTrigger={handleTrigger}
+                  workflow={workflow}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {selectedWorkflowId ? (

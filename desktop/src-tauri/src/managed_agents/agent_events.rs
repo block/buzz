@@ -193,6 +193,7 @@ mod tests {
                 config: serde_json::json!({ "api_key": "sk-provider-secret" }),
             },
             backend_agent_id: Some("remote-id".to_string()),
+            provider_policy_pending: false,
             provider_binary_path: Some("/path/to/binary".to_string()),
             team_id: None,
             persona_team_dir: None,
