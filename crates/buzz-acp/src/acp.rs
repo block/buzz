@@ -4075,7 +4075,14 @@ mod tests {
             capture = crate::testshell::quote_for_shell(capture_path),
             response = response,
         );
-        spawn_script(&script).await
+        // READY-gated, because `run_one_steer` gives the fixture an 800ms idle
+        // budget and `spawn_script` would leave MSYS shell startup inside it.
+        // Starting a real bash costs a large and load-dependent fraction of
+        // that budget, so under a loaded suite the read loop idled out before
+        // the fixture had answered at all — surfacing as whichever
+        // capture-based steer test happened to be running, which reads as four
+        // unrelated flakes rather than one shared cause.
+        spawn_script_ready(&script).await
     }
 
     /// Drive one steer through the read loop and return
