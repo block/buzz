@@ -3656,6 +3656,46 @@ fn workflow_attributed_author(event: &nostr::Event, relay_self: Option<&str>) ->
     Some(owner.to_hex())
 }
 
+/// Does `content` carry exactly one owner control `command`, allowing for the
+/// mention text a client renders into the message body?
+///
+/// Clients that mention an agent (desktop, mobile) insert the mention into the
+/// content as literal text — `@Fountain Maintainer !rotate` — alongside the
+/// `p` tag. The `p` tag is what proves the mention; the text is decoration. So
+/// a command matches when the trimmed content is:
+///
+/// - the bare command (`!rotate`), or
+/// - mention text followed by whitespace and the command
+///   (`@Fountain Maintainer !rotate`, `nostr:npub1… !rotate`), or
+/// - the command followed by whitespace and mention text
+///   (`!rotate @Fountain Maintainer`).
+///
+/// Mention text must start with `@` or `nostr:` and may contain spaces (display
+/// names are multi-word, and the harness does not know its own rendered name,
+/// so `@Fountain Maintainer please !rotate` also matches). Content that does
+/// not start with a mention, or that continues past the command — "please
+/// !rotate", "!rotate now" — is a normal message and is forwarded to the agent.
+fn control_command_content_matches(content: &str, command: &str) -> bool {
+    let content = content.trim();
+    if content == command {
+        return true;
+    }
+    let is_mention_text = |s: &str| s.starts_with('@') || s.starts_with("nostr:");
+    if let Some(prefix) = content.strip_suffix(command) {
+        let trimmed = prefix.trim_end();
+        if trimmed.len() < prefix.len() && is_mention_text(trimmed) {
+            return true;
+        }
+    }
+    if let Some(suffix) = content.strip_prefix(command) {
+        let trimmed = suffix.trim_start();
+        if trimmed.len() < suffix.len() && is_mention_text(trimmed) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -3663,7 +3703,7 @@ fn is_owner_control_command(
     agent_pubkey_hex: &str,
 ) -> bool {
     kind_u32 == KIND_STREAM_MESSAGE
-        && event.content.trim() == command
+        && control_command_content_matches(&event.content, command)
         && event_mentions_agent(event, agent_pubkey_hex)
 }
 
@@ -5279,6 +5319,43 @@ mod owner_control_command_tests {
             "!rotate",
             &agent
         ));
+    }
+
+    #[test]
+    fn owner_control_command_tolerates_rendered_mention_text() {
+        // Desktop/mobile insert the mention as literal text next to the p tag.
+        for content in [
+            "@Fountain Maintainer !rotate",
+            "@Fountain Maintainer  !rotate ",
+            "!rotate @Fountain Maintainer",
+            "nostr:npub1abc !rotate",
+            "@fm !rotate",
+            // Display names are multi-word and unknown to the harness, so
+            // words between the mention and the command are treated as part
+            // of the mention text.
+            "@Fountain Maintainer please !rotate",
+        ] {
+            assert!(
+                control_command_content_matches(content, "!rotate"),
+                "{content:?} should match"
+            );
+        }
+        // Anything that is not just mention text around the command is a
+        // normal message for the agent.
+        for content in [
+            "please !rotate",
+            "!rotate now",
+            "@Fountain Maintainer!rotate",
+            "@Fountain Maintainer !rotate now",
+            "!rotate !cancel",
+            "@Fountain Maintainer !rotates",
+            "",
+        ] {
+            assert!(
+                !control_command_content_matches(content, "!rotate"),
+                "{content:?} should not match"
+            );
+        }
     }
 
     #[test]
