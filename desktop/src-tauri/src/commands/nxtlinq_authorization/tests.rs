@@ -39,10 +39,7 @@ fn generated_trust_store_embeds_only_the_verified_public_signer() {
         "review-owner-2026",
         "-----BEGIN PUBLIC KEY-----\nPUBLIC\n-----END PUBLIC KEY-----\n",
     );
-    assert_eq!(
-        document["trustedSigners"][0]["keyId"],
-        "review-owner-2026"
-    );
+    assert_eq!(document["trustedSigners"][0]["keyId"], "review-owner-2026");
     assert_eq!(
         document["trustedSigners"][0]["publicKey"],
         "-----BEGIN PUBLIC KEY-----\nPUBLIC\n-----END PUBLIC KEY-----"

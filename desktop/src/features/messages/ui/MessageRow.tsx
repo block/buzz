@@ -42,17 +42,18 @@ import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
-import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
-import { useOpenVideoReviewAt } from "@/shared/ui/VideoReviewNavigation";
-import { parseVideoReviewTimecode } from "@/shared/ui/videoReviewTimecode";
-import { VideoReviewTimecodeButton } from "@/shared/ui/VideoReviewTimecodeButton";
+import { VideoReviewCommentMarkdown } from "@/shared/ui/VideoReviewCommentMarkdown";
 import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
-import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
+import {
+  MessageAuthorText,
+  MessageHeaderRow,
+  MessageMetaSegments,
+} from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
@@ -297,7 +298,6 @@ export const MessageRow = React.memo(
     const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
-    const openVideoReviewAt = useOpenVideoReviewAt();
 
     const indentRem = getThreadReplyIndentRem(message.depth);
     const descendantGuideOffsetRem = connectDescendants
@@ -407,12 +407,8 @@ export const MessageRow = React.memo(
             );
           }
 
-          const reviewRootEventId = videoReviewCommentRootId;
-          const reviewTimecode = reviewRootEventId
-            ? parseVideoReviewTimecode(message.body)
-            : null;
-          const markdown = (
-            <Markdown
+          return (
+            <VideoReviewCommentMarkdown
               channelNames={channelNames}
               className={cn(
                 "max-w-full text-sm",
@@ -427,7 +423,7 @@ export const MessageRow = React.memo(
                 message,
                 isKnownAgentPubkey,
               )}
-              content={reviewTimecode?.text ?? message.body}
+              content={message.body}
               messageId={message.id}
               linkPreviewsSuppressed={linkPreviewsSuppressed}
               linkPreviewTags={message.tags}
@@ -439,25 +435,9 @@ export const MessageRow = React.memo(
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
               snapshotSharedBy={snapshotSharedBy}
+              videoReviewCommentRootId={videoReviewCommentRootId}
               videoReviewContext={videoReviewContext}
             />
-          );
-          if (!reviewRootEventId || !reviewTimecode || !openVideoReviewAt) {
-            return markdown;
-          }
-
-          return (
-            <div className="flex min-w-0 items-start gap-1.5">
-              <VideoReviewTimecodeButton
-                surface="message"
-                timecode={reviewTimecode.timecode}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  openVideoReviewAt(reviewRootEventId, reviewTimecode.seconds);
-                }}
-              />
-              <div className="min-w-0 flex-1">{markdown}</div>
-            </div>
           );
         }
       }
@@ -523,7 +503,6 @@ export const MessageRow = React.memo(
           className="opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100"
           createdAt={message.createdAt}
           hideDayPeriod
-          time={message.time}
         />
       </div>
     );
@@ -627,10 +606,18 @@ export const MessageRow = React.memo(
 
     const inlineMetadataNode = (
       <div className="flex shrink-0 items-baseline gap-2 text-xs">
-        <MessageTimestamp createdAt={message.createdAt} time={message.time} />
+        <MessageTimestamp createdAt={message.createdAt} />
         {statusMetadataNode}
       </div>
     );
+
+    const personaNode =
+      message.personaDisplayName &&
+      message.personaDisplayName !== message.author ? (
+        <span className="text-xs text-muted-foreground">
+          {message.personaDisplayName}
+        </span>
+      ) : null;
 
     const continuationMetadataNode =
       isDisplayedAsContinuation && statusMetadataNode ? (
@@ -657,14 +644,14 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
-        {agentOwnerNode}
-        {inlineMetadataNode}
-        {message.personaDisplayName &&
-        message.personaDisplayName !== message.author ? (
-          <span className="text-xs text-muted-foreground">
-            {message.personaDisplayName}
-          </span>
-        ) : null}
+        {/* Author is not a segment: "Alice 9:53 AM" needs no divider. */}
+        <MessageMetaSegments
+          segments={[
+            { key: "owner", node: agentOwnerNode },
+            { key: "timestamp", node: inlineMetadataNode },
+            { key: "persona", node: personaNode },
+          ]}
+        />
       </MessageHeaderRow>
     );
     const bodyContainerClass = isDisplayedAsContinuation
@@ -932,7 +919,9 @@ export const MessageRow = React.memo(
     prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
-    prev.message.time === next.message.time &&
+    // The header timestamp and hover gutter both derive from createdAt (the
+    // old `time` prop was the same value pre-formatted; this row reads neither).
+    prev.message.createdAt === next.message.createdAt &&
     prev.message.depth === next.message.depth &&
     prev.message.kind === next.message.kind &&
     prev.message.pending === next.message.pending &&

@@ -10,11 +10,13 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 /// Records subscriptions and DM history queries for Activity projection tests.
 class _RecordingSessionNotifier extends RelaySessionNotifier {
   final List<List<String>> dmQueries = [];
+  final List<int> queryFilterCounts = [];
   final List<NostrEvent> _history = [];
   final List<({NostrFilter filter, void Function(NostrEvent) onEvent})>
   _subscriptions = [];
   Completer<void>? mentionFetchGate;
   bool failNextMentionFetch = false;
+  bool failNextQueryRelay = false;
   int mentionFetchCount = 0;
   int activeMentionFetches = 0;
   int maxActiveMentionFetches = 0;
@@ -49,6 +51,45 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
       }
     }
     return _history.where((event) => _matches(filter, event)).toList();
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryFilterCounts.add(filters.length);
+    if (failNextQueryRelay) {
+      failNextQueryRelay = false;
+      throw StateError('transient HTTP query failure');
+    }
+    for (final filter in filters) {
+      final h = filter.tags['#h'];
+      if (h != null) dmQueries.add(h);
+    }
+    final isMentionFetch = filters.any(
+      (filter) => filter.tags.containsKey('#p') && filter.kinds.contains(40002),
+    );
+    if (isMentionFetch) {
+      mentionFetchCount += 1;
+      activeMentionFetches += 1;
+      if (activeMentionFetches > maxActiveMentionFetches) {
+        maxActiveMentionFetches = activeMentionFetches;
+      }
+      try {
+        final gate = mentionFetchGate;
+        if (gate != null) await gate.future;
+        if (failNextMentionFetch) {
+          failNextMentionFetch = false;
+          throw StateError('transient mention history failure');
+        }
+      } finally {
+        activeMentionFetches -= 1;
+      }
+    }
+    return _history
+        .where((event) => filters.any((filter) => _matches(filter, event)))
+        .toList();
   }
 
   @override
@@ -159,6 +200,7 @@ void main() {
     // Cold start: channels still loading, so the first fetch has no DM ids.
     await container.read(activityProvider.future);
     expect(session.dmQueries, isEmpty);
+    expect(session.queryFilterCounts, [3]);
 
     // Channel list resolves with a DM → Activity must rebuild and query it.
     channels.resolve([_dmChannel('dm1')]);
@@ -167,6 +209,7 @@ void main() {
 
     expect(session.dmQueries, hasLength(1));
     expect(session.dmQueries.single, ['dm1']);
+    expect(session.queryFilterCounts, [3, 4]);
   });
 
   test('does not query DMs when the resolved channel list has none', () async {
@@ -188,6 +231,30 @@ void main() {
     await container.read(activityProvider.future);
 
     expect(session.dmQueries, isEmpty);
+  });
+
+  test('falls back to websocket history when the HTTP batch fails', () async {
+    final session = _RecordingSessionNotifier()
+      ..seed(_mentionEvent('fallback-mention', 1_700_000_001))
+      ..failNextQueryRelay = true;
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final feed = await container.read(activityProvider.future);
+
+    expect(session.queryFilterCounts, [3]);
+    expect(session.mentionFetchCount, 1);
+    expect(feed.mentions.map((item) => item.id), ['fallback-mention']);
   });
 
   test(
@@ -308,7 +375,7 @@ void main() {
     expect(session.maxActiveMentionFetches, 1);
   });
 
-  test('retains the loaded inbox when a live refresh fails', () async {
+  test('recovers a live refresh through websocket history fallback', () async {
     final session = _RecordingSessionNotifier()
       ..seed(_mentionEvent('existing', 1_700_000_001));
     final container = ProviderContainer(
@@ -333,7 +400,10 @@ void main() {
     await _waitFor(() => session.mentionFetchCount >= 2);
     await Future<void>.delayed(const Duration(milliseconds: 10));
 
-    expect(container.read(inboxItemsProvider).single.id, 'existing');
+    expect(
+      container.read(inboxItemsProvider).map((item) => item.id),
+      containsAll(['existing', 'newer']),
+    );
   });
 }
 

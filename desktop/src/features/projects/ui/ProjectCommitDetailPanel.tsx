@@ -8,7 +8,9 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { commitDiscussionQuery } from "@/features/projects/lib/discussionChannels";
 import type { ProjectRepoCommit, ProjectRepoDiff } from "@/shared/api/types";
+import { DiscussedInChannels } from "./DiscussionChannels";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import { PROJECT_DETAIL_PANEL_CLASS } from "./projectPanelStyles";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
@@ -115,6 +117,14 @@ export function ProjectCommitDetailPanel({
         {diff?.commitBody ? (
           <ProjectRichContent content={diff.commitBody} />
         ) : null}
+        <DiscussedInChannels
+          entityLabel="this commit"
+          query={commitDiscussionQuery({
+            hash: commit?.hash ?? commitHash,
+            shortHash: commit?.shortHash,
+          })}
+          testId="commit-discussed-in"
+        />
       </header>
 
       <ProjectDiffFilesPanel

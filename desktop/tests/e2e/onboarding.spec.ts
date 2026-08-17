@@ -500,15 +500,18 @@ async function getMockChannels(page: Page) {
       throw new Error("Mock invoke bridge is unavailable.");
     }
 
-    return (await invoke("get_channels")) as Array<{
-      id: string;
-      name: string;
-      channel_type: string;
-      visibility: "open" | "private";
-      member_count: number;
-      is_member: boolean;
-      ttl_seconds: number | null;
-    }>;
+    const payload = (await invoke("get_channels")) as {
+      channels: Array<{
+        id: string;
+        name: string;
+        channel_type: string;
+        visibility: "open" | "private";
+        member_count: number;
+        is_member: boolean;
+        ttl_seconds: number | null;
+      }> | null;
+    };
+    return payload.channels ?? [];
   });
 }
 
@@ -3211,10 +3214,10 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
   // Greeted by the name typed above — the @mention pill also files the opener
   // into the new user's Inbox mentions feed.
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
+    "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Honey and Bumble, introduce yourselves",
+    "Honey and Pollen, introduce yourselves",
   );
 });
 
@@ -3235,7 +3238,7 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
   await expectPrivateWelcomeLanding(page);
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Hi @Morty QA, I'm Fizz. Welcome to Buzz.",
+    "Hi Morty QA, I'm Fizz. Welcome to Buzz.",
   );
   await page.waitForTimeout(1_500);
   expect(await commandCount(page, "create_managed_agent")).toBe(3);

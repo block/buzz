@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:math' show min;
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
@@ -9,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
+import '../../shared/animated_avatar.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
@@ -17,6 +17,7 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/skeleton.dart';
@@ -25,6 +26,7 @@ import '../profile/profile_provider.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
+import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_link_navigation.dart';
@@ -42,6 +44,8 @@ import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
+import 'ime_metrics_settle_observer.dart';
+import 'latest_message_button.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
@@ -296,6 +300,8 @@ class ChannelDetailPage extends HookConsumerWidget {
     }, [channel.id, readState.isReady, readTimestamp]);
 
     return FrostedScaffold(
+      resizeToAvoidBottomInset:
+          !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
@@ -338,11 +344,12 @@ class ChannelDetailPage extends HookConsumerWidget {
                 ],
               ),
         actions: [
-          _MembersButton(
-            channelId: resolvedChannel.id,
-            channel: resolvedChannel,
-            currentPubkey: currentPubkey,
-          ),
+          if (_showsMembersAction(resolvedChannel))
+            _MembersButton(
+              channelId: resolvedChannel.id,
+              channel: resolvedChannel,
+              currentPubkey: currentPubkey,
+            ),
           IconButton(
             color: context.colors.primary,
             onPressed: () async {
@@ -489,45 +496,48 @@ class ChannelDetailPage extends HookConsumerWidget {
             ],
           ),
           if (showsComposer)
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: ComposerDockSizeReporter(
-                key: const ValueKey('channel-composer-dock'),
-                onHeightChanged: (height) {
-                  if ((composerDockHeight.value - height).abs() < 0.5) return;
-                  composerDockHeight.value = height;
-                },
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AnimatedSize(
-                      duration: MediaQuery.disableAnimationsOf(context)
-                          ? Duration.zero
-                          : const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.bottomCenter,
-                      child: typingEntries.isEmpty
-                          ? const SizedBox.shrink()
-                          : ChannelTypingIndicator(entries: typingEntries),
-                    ),
-                    ComposeBar(
-                      channelId: channel.id,
-                      channelName: resolvedChannel.isDm
-                          ? ''
-                          : resolvedChannel.name,
-                      onSend:
-                          (
-                            content,
-                            mentionPubkeys, {
-                            mediaTags = const <List<String>>[],
-                          }) => sendMessage.call(
-                            channelId: channel.id,
-                            content: content,
-                            mentionPubkeys: mentionPubkeys,
-                            mediaTags: mediaTags,
-                          ),
-                    ),
-                  ],
+            AndroidImeLift(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: ComposerDockSizeReporter(
+                  key: const ValueKey('channel-composer-dock'),
+                  onHeightChanged: (height) {
+                    if ((composerDockHeight.value - height).abs() < 0.5) return;
+                    composerDockHeight.value = height;
+                  },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AnimatedSize(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : const Duration(milliseconds: 180),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.bottomCenter,
+                        child: typingEntries.isEmpty
+                            ? const SizedBox.shrink()
+                            : ChannelTypingIndicator(entries: typingEntries),
+                      ),
+                      ComposeBar(
+                        channelId: channel.id,
+                        channelName: resolvedChannel.isDm
+                            ? ''
+                            : resolvedChannel.name,
+                        onSend:
+                            (
+                              content,
+                              mentionPubkeys, {
+                              mediaTags = const <List<String>>[],
+                            }) => sendMessage.call(
+                              channelId: channel.id,
+                              content: content,
+                              mentionPubkeys: mentionPubkeys,
+                              channel: resolvedChannel,
+                              mediaTags: mediaTags,
+                            ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

@@ -1,6 +1,13 @@
 use super::*;
 
 #[test]
+fn search_messages_limit_allows_discussion_discovery_page() {
+    assert_eq!(search_messages_limit(None), 20);
+    assert_eq!(search_messages_limit(Some(500)), 500);
+    assert_eq!(search_messages_limit(Some(1_000)), 500);
+}
+
+#[test]
 fn marker_author_scope_validates_scope_and_required_pubkey() {
     assert_eq!(
         marker_author_for_scope(None, Some("agent")),

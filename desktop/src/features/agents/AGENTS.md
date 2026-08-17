@@ -160,8 +160,12 @@ with a TypeScript lookup table or an id comparison in a component.
    computer, including files, accounts, and connected tools"; remote names "the
    server it runs on, including any accounts and tools available there" —
    deliberately *not* the owner's files, which aren't theirs to describe on a
-   host they don't own. **An unknown location falls back to the local wording —
-   never hedge with "computer or server".** A remote host requires an
+   host they don't own. **For a persona-linked deployed agent, the profile Edit
+   dialog seeds access from the exact clicked instance and saves access through
+   `update_managed_agent`; persona behavior remains the definition default, but
+   must never bypass the instance command's stop, persist, publish, and restart
+   boundary.** An unknown location falls back to the local wording — never hedge
+   with "computer or server". A remote host requires an
    installed `buzz-backend-*` provider, and without one `WhereToRunSection`
    never renders, so "server" would name a concept the owner has never been
    shown; when it *is* remote they picked that host from the selector
@@ -171,7 +175,33 @@ with a TypeScript lookup table or an id comparison in a component.
    `getAgentAccessOwnerOnly()` is true, every managed agent's access control is
    locked to owner-only, including provider-backed agents. A provider backend
    does not prove remote execution and must never create a policy carve-out.
-12. **Executable wrappers never replace harness identity.** An authorization
+12. **Shared instructions must be reviewable byte-for-byte.** Agent definitions
+   execute their `system_prompt` verbatim, so catalog and snapshot review
+   surfaces render the literal prompt, never the chat Markdown projection
+   (which can conceal spoilers, link destinations, and image sources). Reject
+   Unicode default-ignorable, bidirectional-formatting, and non-layout control
+   characters at both the untrusted catalog parser and the Rust persistence /
+   import boundary. Do not silently strip them: rejection keeps the reviewed
+   string identical to the executed string. New sharing paths must reuse the
+   same validation before they persist or activate a definition.
+13. **Profile runtime sections render only reported agent data.** Missing
+   runtime, model, status, command, MCP, advanced, or diagnostics values stay
+   absent in every build mode. Do not fill profile or agent-panel gaps with
+   development/staging examples, preview controls, or synthetic configuration;
+   those values can be mistaken for the viewed agent's real configuration.
+   Configuration rows show the effective value regardless of whether it came
+   from an explicit choice, global default, config file, or runtime override.
+   Do not add provenance lines, shadowed/struck-through values, pre-start
+   placeholders, or whole-section dimming; use an em dash for an unknown value.
+   Info, activity, agent-configuration, and model-setting rows use the same bare
+   16px leading-icon treatment as agent management actions. Keep semantic icons
+   visible in profile variants and do not wrap them in background shapes. An
+   owned agent profile is entry-point invariant: opening the same deployed
+   agent from Agents, a DM, or a channel must expose the same actions, tabs,
+   fields, and profile-wide activity selection. Caller context may control the
+   panel shell or return navigation, but must not filter or replace profile
+   content.
+14. **Executable wrappers never replace harness identity.** An authorization
    gateway or operator wrapper is stored in `ManagedAgentRecord.command_wrapper`
    and composed only at spawn time around the effective runtime command and
    args. Runtime discovery, readiness, model/provider metadata, and UI labels
@@ -179,14 +209,14 @@ with a TypeScript lookup table or an id comparison in a component.
    `working_directory` is the ACP `session/new.cwd`; do not infer it from the
    wrapper args or let the downstream Agent replace it. Wrapper launch remains
    shell-free, and wrapper/workspace changes must participate in restart drift.
-13. **Authorization presets configure wrappers; they do not own project signing.**
+15. **Authorization presets configure wrappers; they do not own project signing.**
    Nxtlinq discovery and installation remain separate from the ACP runtime
    catalog, because the Gateway wraps a harness rather than becoming one. The
    preset may derive wrapper argv and pass through the Agent's configured env
    names, but it must not silently generate policy private keys, enroll trusted
    signers, or place private keys or operator trust/receipt state inside the
    Agent-writable workspace. The explicit native initialization ceremony in
-   rule 14 is the only key-generation exception.
+   rule 16 is the only key-generation exception.
    Raw wrapper fields are internal launch state and are not exposed to end
    users; the preset owns their deterministic construction. Before enabling a
    preset, the Host may check file presence and operator-path
@@ -200,7 +230,7 @@ with a TypeScript lookup table or an id comparison in a component.
    PATH lookup, or unverified wrapper record is never sufficient. Managed
    installation pins the reviewed Gateway package version, and both readiness
    and process spawn fail closed if that version or executable identity drifts.
-14. **Conversational authorization setup is an owner-reviewed draft, never an
+16. **Conversational authorization setup is an owner-reviewed draft, never an
    Agent-side installer.** An owned Agent may propose the Nxtlinq project root,
    policy-only manifest fields, and a plain-language access explanation through
    the authenticated observer draft channel. Desktop revalidates that the Agent
@@ -256,7 +286,7 @@ with a TypeScript lookup table or an id comparison in a component.
    only for the key pair generated and verified inside that same explicit,
    Agent-stopped Desktop initialization ceremony. Later private-key signing
    remains a separate owner decision.
-15. **Gateway environment filtering must preserve the downstream runtime's
+17. **Gateway environment filtering must preserve the downstream runtime's
    effective configuration.** Nxtlinq starts the ACP runtime with a clean
    environment, so the deterministic wrapper allowlist must include every
    provider credential, endpoint/model override, and Buzz Agent tuning variable
@@ -284,6 +314,15 @@ with a TypeScript lookup table or an id comparison in a component.
 - `lib/agentAccessWarning.test.mjs` — every mode × run-location copy variant
   plus both resolvers, including unknown-reads-as-local and
   blank-`runOn`-is-not-a-provider.
+- `lib/personaCatalogRelay.test.mjs` and
+  `ui/personaCatalogOwnerLabel.test.mjs` — reject invisible definition text
+  and keep Markdown concealment syntax literal in the review surface.
+- `../profile/ui/UserProfileRuntimeContent.test.mjs` — profile runtime panels
+  cannot reintroduce build-mode previews or synthetic fallback controls.
+- `desktop/tests/e2e/profile.spec.ts` — the owned-agent parity flow compares
+  every profile tab when opened from Agents and from the agent's DM.
+- `ui/AgentConfigPanelPresentation.test.mjs` — shared profile/agent config rows
+  show only effective values, with an em dash for unknown values.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and
@@ -291,6 +330,8 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
+- Rust: `definition_validation` and inbound persona tests pin the shared
+  Unicode/control-character policy at local, import, publish, and sync gates.
 
 ## Keep this file true
 

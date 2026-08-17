@@ -253,10 +253,8 @@ fn write_generated_trust_store(
         Ok(_) => return Err("Buzz-managed trust store must be a real file".to_string()),
         Err(_) => return Err("inspect Buzz-managed trust store".to_string()),
     }
-    let payload = serde_json::to_vec_pretty(&generated_trust_store_document(
-        key_id, public_key,
-    ))
-    .map_err(|_| "serialize generated Nxtlinq trust store".to_string())?;
+    let payload = serde_json::to_vec_pretty(&generated_trust_store_document(key_id, public_key))
+        .map_err(|_| "serialize generated Nxtlinq trust store".to_string())?;
     atomic_write_json_restricted(&path, &payload)
         .map_err(|_| "write protected Nxtlinq trust store".to_string())?;
     Ok(path)

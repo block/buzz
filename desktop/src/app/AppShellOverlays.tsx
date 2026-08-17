@@ -15,6 +15,11 @@ const ChannelManagementSheet = React.lazy(async () => {
   return { default: module.ChannelManagementSheet };
 });
 
+const MembersSidebar = React.lazy(async () => {
+  const module = await import("@/features/channels/ui/MembersSidebar");
+  return { default: module.MembersSidebar };
+});
+
 export type BrowseDialogType = "stream" | "forum" | null;
 
 type AppShellOverlaysProps = {
@@ -30,6 +35,7 @@ type AppShellOverlaysProps = {
   onChannelManagementOpenChange: (open: boolean) => void;
   onDeleteActiveChannel: () => void;
   onSelectChannel: (channelId: string) => void;
+  relayUrl?: string;
 };
 
 export function AppShellOverlays({
@@ -45,7 +51,11 @@ export function AppShellOverlays({
   onChannelManagementOpenChange,
   onDeleteActiveChannel,
   onSelectChannel,
+  relayUrl,
 }: AppShellOverlaysProps) {
+  const [membersChannel, setMembersChannel] = React.useState<Channel | null>(
+    null,
+  );
   const [visibleBrowseDialogType, setVisibleBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
   const { cancelDeferredModalOpen, openNextFrame: openModalNextFrame } =
@@ -89,8 +99,25 @@ export function AppShellOverlays({
             channel={activeChannel}
             currentPubkey={currentPubkey}
             onDeleted={onDeleteActiveChannel}
+            onOpenMembers={() => setMembersChannel(activeChannel)}
             onOpenChange={onChannelManagementOpenChange}
             open={true}
+          />
+        </React.Suspense>
+      ) : null}
+
+      {membersChannel ? (
+        <React.Suspense fallback={null}>
+          <MembersSidebar
+            channel={membersChannel}
+            currentPubkey={currentPubkey}
+            onOpenChange={(nextOpen) => {
+              if (!nextOpen) {
+                setMembersChannel(null);
+              }
+            }}
+            open={true}
+            relayUrl={relayUrl}
           />
         </React.Suspense>
       ) : null}

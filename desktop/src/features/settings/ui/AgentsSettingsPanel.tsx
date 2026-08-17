@@ -2,6 +2,7 @@ import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { NxtlinqGatewaySettingsCard } from "./NxtlinqGatewaySettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { SettingsOptionGroupList } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 export function AgentsSettingsPanel() {
@@ -12,12 +13,12 @@ export function AgentsSettingsPanel() {
         description="Control how agents behave in conversations and run on this machine."
       />
 
-      <div className="flex flex-col gap-4">
+      <SettingsOptionGroupList>
         <PreventSleepSettingsCard />
         <NxtlinqGatewaySettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
-      </div>
+      </SettingsOptionGroupList>
     </section>
   );
 }
