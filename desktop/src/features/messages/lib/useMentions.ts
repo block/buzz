@@ -46,7 +46,10 @@ import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
 import { hasMention } from "./hasMention";
 import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
-import { rankMentionCandidates } from "./mentionRanking";
+import {
+  mentionCandidatesForQuery,
+  rankMentionCandidates,
+} from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   appendUniqueName,
@@ -529,7 +532,7 @@ export function useMentions(
     }
 
     return rankMentionCandidates(
-      mentionCandidatesWithTeams,
+      mentionCandidatesForQuery(mentionCandidatesWithTeams, mentionQuery),
       mentionQuery,
       activePersonaIds,
     )
