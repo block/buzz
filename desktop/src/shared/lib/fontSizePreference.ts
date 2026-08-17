@@ -67,7 +67,9 @@ function listenForStorageChanges(): void {
   if (listeningForStorageChanges || !globalThis.window?.addEventListener)
     return;
   globalThis.window.addEventListener("storage", (event) => {
-    if (event.key === FONT_SIZE_STORAGE_KEY) applyStoredFontSize();
+    if (event.key === FONT_SIZE_STORAGE_KEY || event.key === null) {
+      applyStoredFontSize();
+    }
   });
   listeningForStorageChanges = true;
 }

@@ -579,7 +579,7 @@ export function MessageThreadPanel({
           </div>
         ) : (
           <div
-            className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-2 pt-1")}
+            className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
             data-testid="message-thread-head"
           >
             <div className="rounded-2xl">
@@ -637,7 +637,7 @@ export function MessageThreadPanel({
 
         {showThreadHeadDivider ? (
           <div
-            className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-4 pt-3")}
+            className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-2")}
             data-testid="message-thread-head-divider"
           >
             <Separator className="bg-border/60" />
@@ -645,7 +645,7 @@ export function MessageThreadPanel({
         ) : null}
 
         <div
-          className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-4 pt-0")}
+          className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
           {threadRepliesPending && !isHuddleTranscript ? (

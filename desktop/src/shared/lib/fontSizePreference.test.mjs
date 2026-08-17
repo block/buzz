@@ -86,3 +86,12 @@ test("applies font size changes from another window", () => {
   assert.equal(attributes.get("data-font-size"), "smaller");
   assert.equal(styleValues.get("--buzz-type-rem"), "14.857143px");
 });
+
+test("returns to the default when another window clears storage", () => {
+  preference.setFontSize("larger");
+  values.clear();
+  windowListeners.get("storage")({ key: null });
+  assert.equal(preference.getFontSize(), "default");
+  assert.equal(attributes.get("data-font-size"), "default");
+  assert.equal(styleValues.get("--buzz-type-rem"), "16px");
+});

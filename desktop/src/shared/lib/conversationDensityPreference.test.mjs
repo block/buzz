@@ -70,3 +70,11 @@ test("applies conversation density changes from another window", () => {
   assert.equal(preference.getConversationDensity(), "compact");
   assert.equal(attributes.get("data-conversation-density"), "compact");
 });
+
+test("returns to comfortable when another window clears storage", () => {
+  preference.setConversationDensity("spacious");
+  values.clear();
+  windowListeners.get("storage")({ key: null });
+  assert.equal(preference.getConversationDensity(), "comfortable");
+  assert.equal(attributes.get("data-conversation-density"), "comfortable");
+});

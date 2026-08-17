@@ -52,7 +52,7 @@ function listenForStorageChanges(): void {
   if (listeningForStorageChanges || !globalThis.window?.addEventListener)
     return;
   globalThis.window.addEventListener("storage", (event) => {
-    if (event.key === CONVERSATION_DENSITY_STORAGE_KEY) {
+    if (event.key === CONVERSATION_DENSITY_STORAGE_KEY || event.key === null) {
       applyStoredConversationDensity();
     }
   });
