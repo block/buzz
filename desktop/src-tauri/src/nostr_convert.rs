@@ -12,7 +12,10 @@ use std::collections::{BTreeSet, HashMap};
 use nostr::{Event, ToBech32};
 use serde_json::{json, Value};
 
-use crate::models::*;
+use crate::{
+    managed_agents::{agent_events::managed_agent_content_from_event, RelayAgentInfo},
+    models::*,
+};
 
 mod user_search;
 pub use user_search::{
@@ -495,6 +498,167 @@ pub fn agents_from_events(events: &[Event]) -> Value {
     json!({ "agents": arr })
 }
 
+// ── kind:0 + kind:30177 managed-agent directory ────────────────────────────
+
+/// Collect valid agent pubkeys from kind:30177 `d` tags for follow-up relay
+/// queries. Malformed tags are ignored so one hostile event cannot invalidate
+/// the whole directory request.
+pub fn managed_agent_pubkeys_from_events(events: &[Event]) -> std::collections::HashSet<String> {
+    events
+        .iter()
+        .filter_map(|event| first_tag_value(event, "d"))
+        .filter_map(|pubkey| nostr::PublicKey::from_hex(pubkey).ok())
+        .map(|pubkey| pubkey.to_hex())
+        .collect()
+}
+
+fn event_is_newer(candidate: &Event, previous: &Event) -> bool {
+    candidate.created_at > previous.created_at
+        || (candidate.created_at == previous.created_at && candidate.id < previous.id)
+}
+
+fn relay_agents_from_legacy_events(events: &[Event]) -> Vec<RelayAgentInfo> {
+    let mut latest: HashMap<String, &Event> = HashMap::new();
+    for event in events {
+        let pubkey = event.pubkey.to_hex();
+        if latest
+            .get(&pubkey)
+            .is_none_or(|previous| event_is_newer(event, previous))
+        {
+            latest.insert(pubkey, event);
+        }
+    }
+
+    latest
+        .into_values()
+        .filter_map(|event| {
+            let value = agents_from_events(std::slice::from_ref(event));
+            let mut agent: RelayAgentInfo =
+                serde_json::from_value(value.get("agents")?.as_array()?.first()?.clone()).ok()?;
+            // Channel membership is authoritative only in relay-signed kind:39002.
+            agent.channel_ids.clear();
+            Some(agent)
+        })
+        .collect()
+}
+
+/// Merge self-authored kind:10100 runtime profiles with verified Desktop-managed
+/// policy records. Managed policy wins for the same agent; kind:10100-only
+/// headless agents remain discoverable.
+pub fn relay_agents_from_directory_events(
+    directory_events: &[Event],
+    managed_agent_events: &[Event],
+    profile_events: &[Event],
+) -> Vec<RelayAgentInfo> {
+    let mut agents: HashMap<String, RelayAgentInfo> =
+        relay_agents_from_legacy_events(directory_events)
+            .into_iter()
+            .map(|agent| (agent.pubkey.clone(), agent))
+            .collect();
+    for agent in relay_agents_from_managed_agent_events(managed_agent_events, profile_events) {
+        agents.insert(agent.pubkey.clone(), agent);
+    }
+
+    let mut agents: Vec<_> = agents.into_values().collect();
+    agents.sort_by(|left, right| left.name.cmp(&right.name));
+    agents
+}
+
+/// Build the relay agent directory from owner-authenticated managed-agent
+/// records. A kind:30177 event is accepted only when its author matches the
+/// owner cryptographically declared by the agent's own kind:0 NIP-OA tag.
+pub fn relay_agents_from_managed_agent_events(
+    managed_agent_events: &[Event],
+    profile_events: &[Event],
+) -> Vec<RelayAgentInfo> {
+    let mut latest_profiles: HashMap<String, &Event> = HashMap::new();
+    for profile in profile_events {
+        let agent_pubkey = profile.pubkey.to_hex();
+        let replace = latest_profiles
+            .get(&agent_pubkey)
+            .is_none_or(|previous| event_is_newer(profile, previous));
+        if replace {
+            latest_profiles.insert(agent_pubkey, profile);
+        }
+    }
+    let verified_owners: HashMap<String, String> = latest_profiles
+        .into_iter()
+        .filter_map(|(agent_pubkey, profile)| {
+            profile_valid_oa_owner_pubkey(profile).map(|owner| (agent_pubkey, owner))
+        })
+        .collect();
+
+    let mut latest: HashMap<String, (&Event, RelayAgentInfo)> = HashMap::new();
+    for event in managed_agent_events {
+        let Some(agent_pubkey) = first_tag_value(event, "d") else {
+            continue;
+        };
+        let Some(verified_owner) = verified_owners.get(agent_pubkey) else {
+            continue;
+        };
+        if event.pubkey.to_hex() != *verified_owner {
+            continue;
+        }
+        let Ok(content) = managed_agent_content_from_event(event) else {
+            continue;
+        };
+        let info = RelayAgentInfo {
+            pubkey: agent_pubkey.to_string(),
+            name: content.name,
+            agent_type: "agent".to_string(),
+            channels: Vec::new(),
+            channel_ids: Vec::new(),
+            capabilities: Vec::new(),
+            status: "offline".to_string(),
+            respond_to: Some(content.respond_to),
+            respond_to_allowlist: content.respond_to_allowlist,
+        };
+        let replace = latest
+            .get(agent_pubkey)
+            .is_none_or(|(previous, _)| event_is_newer(event, previous));
+        if replace {
+            latest.insert(agent_pubkey.to_string(), (event, info));
+        }
+    }
+
+    let mut agents: Vec<_> = latest.into_values().map(|(_, info)| info).collect();
+    agents.sort_by(|left, right| left.name.cmp(&right.name));
+    agents
+}
+
+/// Build a pubkey-to-channel-id map from current kind:39002 membership heads.
+pub fn agent_channel_ids_from_member_events(
+    events: &[Event],
+    agent_pubkeys: &std::collections::HashSet<String>,
+    relay_pubkey: &str,
+) -> HashMap<String, Vec<String>> {
+    let mut channel_ids: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for event in events {
+        if !event.pubkey.to_hex().eq_ignore_ascii_case(relay_pubkey) {
+            continue;
+        }
+        let Some(channel_id) = first_tag_value(event, "d") else {
+            continue;
+        };
+        for tag in tags_named(event, "p") {
+            let Some(pubkey) = tag.get(1) else {
+                continue;
+            };
+            if agent_pubkeys.contains(pubkey) {
+                channel_ids
+                    .entry(pubkey.clone())
+                    .or_default()
+                    .insert(channel_id.to_string());
+            }
+        }
+    }
+
+    channel_ids
+        .into_iter()
+        .map(|(pubkey, ids)| (pubkey, ids.into_iter().collect()))
+        .collect()
+}
+
 // ── kind:13534 (relay membership list) ──────────────────────────────────────
 
 /// Convert a kind:13534 relay membership list to the relay members format.
@@ -610,6 +774,26 @@ mod tests {
             .sign_with_keys(&agent_keys)
             .expect("sign");
         (event, owner_keys.public_key().to_hex())
+    }
+
+    fn managed_agent_event(
+        owner_keys: &Keys,
+        agent_pubkey: &str,
+        name: &str,
+        respond_to: &str,
+        respond_to_allowlist: &[String],
+    ) -> Event {
+        let content = serde_json::json!({
+            "name": name,
+            "parallelism": 1,
+            "respond_to": respond_to,
+            "respond_to_allowlist": respond_to_allowlist,
+        })
+        .to_string();
+        EventBuilder::new(Kind::Custom(30177), content)
+            .tags([Tag::parse(["d", agent_pubkey]).expect("parse d tag")])
+            .sign_with_keys(owner_keys)
+            .expect("sign managed-agent event")
     }
 
     #[test]
@@ -961,6 +1145,294 @@ mod tests {
             Some(crate::managed_agents::RespondTo::Allowlist)
         );
         assert_eq!(parsed[0].respond_to_allowlist, vec!["a".repeat(64)]);
+    }
+
+    #[test]
+    fn managed_agent_directory_accepts_only_the_verified_owner_policy() {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let attacker_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key().to_hex();
+        let viewer_pubkey = "a".repeat(64);
+
+        let auth_tag_json =
+            buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+                .expect("compute auth tag");
+        let auth_tag_values: Vec<String> =
+            serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+        let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Codex"}"#)
+            .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+            .sign_with_keys(&agent_keys)
+            .expect("sign profile");
+        let authentic = managed_agent_event(
+            &owner_keys,
+            &agent_pubkey,
+            "Codex",
+            "allowlist",
+            std::slice::from_ref(&viewer_pubkey),
+        );
+        let forged =
+            managed_agent_event(&attacker_keys, &agent_pubkey, "Fake Codex", "anyone", &[]);
+
+        let agents = relay_agents_from_managed_agent_events(
+            &[forged, authentic],
+            std::slice::from_ref(&profile),
+        );
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].pubkey, agent_pubkey);
+        assert_eq!(agents[0].name, "Codex");
+        assert_eq!(
+            agents[0].respond_to,
+            Some(crate::managed_agents::RespondTo::Allowlist)
+        );
+        assert_eq!(agents[0].respond_to_allowlist, vec![viewer_pubkey]);
+    }
+
+    #[test]
+    fn managed_agent_directory_rejects_agents_without_verified_owner_profiles() {
+        let owner_keys = Keys::generate();
+        let unverified_agent_keys = Keys::generate();
+        let agent_pubkey = unverified_agent_keys.public_key().to_hex();
+        let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Codex"}"#)
+            .sign_with_keys(&unverified_agent_keys)
+            .expect("sign profile");
+        let managed = managed_agent_event(&owner_keys, &agent_pubkey, "Codex", "anyone", &[]);
+
+        let agents = relay_agents_from_managed_agent_events(
+            std::slice::from_ref(&managed),
+            std::slice::from_ref(&profile),
+        );
+
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn managed_agent_directory_uses_the_latest_profile_head() {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key().to_hex();
+        let auth_tag_json =
+            buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+                .expect("compute auth tag");
+        let auth_tag_values: Vec<String> =
+            serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+        let verified_profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Codex"}"#)
+            .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+            .custom_created_at(nostr::Timestamp::from(10))
+            .sign_with_keys(&agent_keys)
+            .expect("sign verified profile");
+        let revoked_profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Codex"}"#)
+            .custom_created_at(nostr::Timestamp::from(20))
+            .sign_with_keys(&agent_keys)
+            .expect("sign revoked profile");
+        let managed = managed_agent_event(&owner_keys, &agent_pubkey, "Codex", "anyone", &[]);
+
+        let agents = relay_agents_from_managed_agent_events(
+            std::slice::from_ref(&managed),
+            &[verified_profile, revoked_profile],
+        );
+
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn managed_agent_channel_ids_use_current_membership_events() {
+        let relay_keys = Keys::generate();
+        let agent_pubkey = "a".repeat(64);
+        let stranger = "b".repeat(64);
+        let candidates = [agent_pubkey.clone()].into_iter().collect();
+        let general = EventBuilder::new(Kind::Custom(39002), "")
+            .tags([
+                Tag::parse(["d", "family"]).expect("parse d tag"),
+                Tag::parse(["p", &agent_pubkey, "", "bot"]).expect("parse agent tag"),
+                Tag::parse(["p", &stranger, "", "member"]).expect("parse member tag"),
+            ])
+            .sign_with_keys(&relay_keys)
+            .expect("sign membership");
+        let forged = ev(
+            39002,
+            "",
+            vec![vec!["d", "forged"], vec!["p", &agent_pubkey, "", "bot"]],
+        );
+
+        let channel_ids = agent_channel_ids_from_member_events(
+            &[forged, general],
+            &candidates,
+            &relay_keys.public_key().to_hex(),
+        );
+
+        assert_eq!(
+            channel_ids.get(&agent_pubkey),
+            Some(&vec!["family".to_string()])
+        );
+        assert!(!channel_ids.contains_key(&stranger));
+    }
+
+    #[test]
+    fn managed_agent_directory_query_pubkeys_reject_malformed_d_tags() {
+        let valid_pubkey = Keys::generate().public_key().to_hex();
+        let valid = ev(30177, "{}", vec![vec!["d", &valid_pubkey]]);
+        let malformed = ev(30177, "{}", vec![vec!["d", "not-a-pubkey"]]);
+
+        let pubkeys = managed_agent_pubkeys_from_events(&[malformed, valid]);
+
+        assert_eq!(pubkeys, [valid_pubkey].into_iter().collect());
+    }
+
+    #[test]
+    fn relay_agent_directory_preserves_headless_profiles_and_prefers_verified_managed_policy() {
+        let owner_keys = Keys::generate();
+        let managed_agent_keys = Keys::generate();
+        let managed_pubkey = managed_agent_keys.public_key().to_hex();
+        let headless_keys = Keys::generate();
+        let headless_pubkey = headless_keys.public_key().to_hex();
+        let viewer_pubkey = "a".repeat(64);
+
+        let headless_profile = EventBuilder::new(
+            Kind::Custom(10100),
+            serde_json::json!({
+                "name": "Headless",
+                "respond_to": "anyone",
+                "channel_ids": ["untrusted-channel"]
+            })
+            .to_string(),
+        )
+        .sign_with_keys(&headless_keys)
+        .expect("sign headless directory profile");
+        let stale_managed_profile = EventBuilder::new(
+            Kind::Custom(10100),
+            serde_json::json!({
+                "name": "Stale Codex",
+                "respond_to": "anyone"
+            })
+            .to_string(),
+        )
+        .sign_with_keys(&managed_agent_keys)
+        .expect("sign managed directory profile");
+
+        let auth_tag_json = buzz_sdk_pkg::nip_oa::compute_auth_tag(
+            &owner_keys,
+            &managed_agent_keys.public_key(),
+            "",
+        )
+        .expect("compute auth tag");
+        let auth_tag_values: Vec<String> =
+            serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+        let managed_identity = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Codex"}"#)
+            .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+            .sign_with_keys(&managed_agent_keys)
+            .expect("sign managed profile");
+        let managed_policy = managed_agent_event(
+            &owner_keys,
+            &managed_pubkey,
+            "Codex",
+            "allowlist",
+            std::slice::from_ref(&viewer_pubkey),
+        );
+
+        let agents = relay_agents_from_directory_events(
+            &[headless_profile, stale_managed_profile],
+            std::slice::from_ref(&managed_policy),
+            std::slice::from_ref(&managed_identity),
+        );
+
+        assert_eq!(agents.len(), 2);
+        let headless = agents
+            .iter()
+            .find(|agent| agent.pubkey == headless_pubkey)
+            .expect("headless profile retained");
+        assert_eq!(
+            headless.respond_to,
+            Some(crate::managed_agents::RespondTo::Anyone)
+        );
+        assert!(
+            headless.channel_ids.is_empty(),
+            "claimed channel ids are not trusted"
+        );
+
+        let managed = agents
+            .iter()
+            .find(|agent| agent.pubkey == managed_pubkey)
+            .expect("managed profile retained");
+        assert_eq!(managed.name, "Codex");
+        assert_eq!(
+            managed.respond_to,
+            Some(crate::managed_agents::RespondTo::Allowlist)
+        );
+        assert_eq!(managed.respond_to_allowlist, vec![viewer_pubkey]);
+    }
+
+    #[test]
+    fn relay_agent_directory_resolves_equal_timestamp_heads_by_event_id() {
+        let keys = Keys::generate();
+        let timestamp = nostr::Timestamp::from(42);
+        let first = EventBuilder::new(
+            Kind::Custom(10100),
+            r#"{"name":"First","respond_to":"anyone"}"#,
+        )
+        .custom_created_at(timestamp)
+        .sign_with_keys(&keys)
+        .expect("sign first directory head");
+        let second = EventBuilder::new(
+            Kind::Custom(10100),
+            r#"{"name":"Second","respond_to":"anyone"}"#,
+        )
+        .custom_created_at(timestamp)
+        .sign_with_keys(&keys)
+        .expect("sign second directory head");
+        let expected_name = if first.id < second.id {
+            "First"
+        } else {
+            "Second"
+        };
+
+        let forward =
+            relay_agents_from_directory_events(&[first.clone(), second.clone()], &[], &[]);
+        let reverse = relay_agents_from_directory_events(&[second, first], &[], &[]);
+
+        assert_eq!(forward.len(), 1);
+        assert_eq!(reverse.len(), 1);
+        assert_eq!(forward[0].name, expected_name);
+        assert_eq!(reverse[0].name, expected_name);
+    }
+
+    #[test]
+    fn forged_managed_policy_cannot_suppress_a_headless_directory_agent() {
+        let attacker_keys = Keys::generate();
+        let targeted_agent_keys = Keys::generate();
+        let targeted_pubkey = targeted_agent_keys.public_key().to_hex();
+        let headless_keys = Keys::generate();
+        let headless_pubkey = headless_keys.public_key().to_hex();
+        let targeted_profile = EventBuilder::new(
+            Kind::Custom(10100),
+            r#"{"name":"Targeted","respond_to":"anyone"}"#,
+        )
+        .sign_with_keys(&targeted_agent_keys)
+        .expect("sign targeted profile");
+        let headless = EventBuilder::new(
+            Kind::Custom(10100),
+            r#"{"name":"Headless","respond_to":"anyone"}"#,
+        )
+        .sign_with_keys(&headless_keys)
+        .expect("sign headless profile");
+        let forged_policy = managed_agent_event(
+            &attacker_keys,
+            &targeted_pubkey,
+            "Codex",
+            "allowlist",
+            &["a".repeat(64)],
+        );
+
+        let agents = relay_agents_from_directory_events(
+            &[targeted_profile, headless],
+            std::slice::from_ref(&forged_policy),
+            &[],
+        );
+
+        assert_eq!(agents.len(), 2);
+        assert!(agents.iter().any(|agent| agent.pubkey == targeted_pubkey));
+        assert!(agents.iter().any(|agent| agent.pubkey == headless_pubkey));
     }
 
     #[test]

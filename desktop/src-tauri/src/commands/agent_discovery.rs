@@ -1037,30 +1037,135 @@ pub async fn discover_managed_agent_prereqs(
     .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
+const RELAY_DIRECTORY_PAGE_SIZE: usize = 500;
+const PROFILE_AUTHOR_CHUNK_SIZE: usize = 250;
+
+fn advance_relay_cursor(filter: &mut serde_json::Value, page: &[nostr::Event]) {
+    let last = page
+        .last()
+        .expect("a full relay page always has a last event");
+    filter["until"] = serde_json::json!(last.created_at.as_secs());
+    filter["before_id"] = serde_json::json!(last.id.to_hex());
+}
+
+async fn query_all_relay_pages(
+    state: &AppState,
+    mut filter: serde_json::Value,
+) -> Result<Vec<nostr::Event>, String> {
+    filter["limit"] = serde_json::json!(RELAY_DIRECTORY_PAGE_SIZE);
+    let mut events = Vec::new();
+    loop {
+        let page = query_relay(state, &[filter.clone()]).await?;
+        let done = page.len() < RELAY_DIRECTORY_PAGE_SIZE;
+        if !done {
+            advance_relay_cursor(&mut filter, &page);
+        }
+        events.extend(page);
+        if done {
+            return Ok(events);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    // Query kind:10100 agent profile events from the relay.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [10100],
-        })],
-    )
-    .await?;
+    let directory_result =
+        query_all_relay_pages(&state, serde_json::json!({"kinds": [10100]})).await;
+    let managed_result = query_all_relay_pages(&state, serde_json::json!({"kinds": [30177]})).await;
+    let (directory_events, managed_agent_events) = match (directory_result, managed_result) {
+        (Ok(directory), Ok(managed)) => (directory, managed),
+        (_, Err(error)) => return Err(format!("relay agent managed-policy query failed: {error}")),
+        (Err(error), Ok(managed)) => {
+            tracing::warn!("relay agent runtime-directory query failed: {error}");
+            (Vec::new(), managed)
+        }
+    };
 
-    // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
-    // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
-    let agents = value
-        .get("agents")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
+    let agent_pubkeys = nostr_convert::managed_agent_pubkeys_from_events(&managed_agent_events);
+    let agent_pubkeys: Vec<_> = agent_pubkeys.into_iter().collect();
+    let mut profile_events = Vec::new();
+    for authors in agent_pubkeys.chunks(PROFILE_AUTHOR_CHUNK_SIZE) {
+        match query_relay(
+            &state,
+            &[serde_json::json!({
+                "authors": authors,
+                "kinds": [0],
+                "limit": PROFILE_AUTHOR_CHUNK_SIZE,
+            })],
+        )
+        .await
+        {
+            Ok(mut profiles) => profile_events.append(&mut profiles),
+            Err(error) => {
+                return Err(format!("relay agent owner-profile query failed: {error}"));
+            }
+        }
+    }
+    let mut agents = nostr_convert::relay_agents_from_directory_events(
+        &directory_events,
+        &managed_agent_events,
+        &profile_events,
+    );
+    if agents.is_empty() {
+        return Ok(agents);
+    }
+
+    let verified_agent_pubkeys: std::collections::HashSet<String> =
+        agents.iter().map(|agent| agent.pubkey.clone()).collect();
+    let relay_pubkey = match super::identity_archive::fetch_relay_self(&state).await {
+        Ok(Some(pubkey)) => pubkey,
+        Ok(None) => return Ok(agents),
+        Err(error) => {
+            tracing::warn!("relay agent membership authority lookup failed: {error}");
+            return Ok(agents);
+        }
+    };
+    let membership_events = match query_all_relay_pages(
+        &state,
+        serde_json::json!({
+            "kinds": [39002],
+            "authors": [relay_pubkey.clone()],
+        }),
+    )
+    .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!("relay agent channel-membership enrichment failed: {error}");
+            return Ok(agents);
+        }
+    };
+    let channel_ids = nostr_convert::agent_channel_ids_from_member_events(
+        &membership_events,
+        &verified_agent_pubkeys,
+        &relay_pubkey,
+    );
+    for agent in &mut agents {
+        agent.channel_ids = channel_ids.get(&agent.pubkey).cloned().unwrap_or_default();
+    }
+
+    Ok(agents)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_directory_cursor_uses_timestamp_and_event_id() {
+        use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+        let event = EventBuilder::new(Kind::Custom(30177), "{}")
+            .custom_created_at(Timestamp::from(42))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign cursor event");
+        let mut filter = serde_json::json!({"kinds": [30177]});
+
+        advance_relay_cursor(&mut filter, std::slice::from_ref(&event));
+
+        assert_eq!(filter["until"], 42);
+        assert_eq!(filter["before_id"], event.id.to_hex());
+    }
 
     // ── is_npm_global_install ─────────────────────────────────────────────────
 
