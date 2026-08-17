@@ -48,6 +48,7 @@ import {
 } from "@/features/agents/ui/agentConfigControls";
 import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
+import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
   getProviderEffortConfig,
@@ -799,7 +800,9 @@ export function AgentConfigFields({
           <AgentModelField
             allowDefaultModel={fallbackModel !== null}
             defaultModelLabel={
-              fallbackModel ? `Default model (${fallbackModel})` : undefined
+              fallbackModel
+                ? `Default model (${resolveModelLabel(fallbackModel, undefined, effectiveProvider || undefined)})`
+                : undefined
             }
             disableSelectDuringDiscovery={disableModelSelectDuringDiscovery}
             disabled={dependentFieldsDisabled}

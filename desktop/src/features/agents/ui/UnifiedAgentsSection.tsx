@@ -254,6 +254,7 @@ function AgentPersonaCard({
   const modelLabel = resolveAgentCardModelLabel({
     agent,
     personaModel: persona.model,
+    provider: persona.provider,
     defaultModel,
   });
   const isActive = agent ? isManagedAgentActive(agent) : false;
@@ -393,6 +394,7 @@ function StandaloneAgentCard({
       modelLabel={resolveAgentCardModelLabel({
         agent,
         personaModel: null,
+        provider: agent.provider,
         defaultModel,
       })}
       onClick={() => {

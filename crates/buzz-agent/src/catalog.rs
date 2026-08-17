@@ -23,28 +23,42 @@ use crate::{
     types::AgentError,
 };
 
-/// A discovered model entry: `id` is the picker value, `name` is the display
-/// label (same as `id` for Databricks — the API has no separate display name).
+/// A discovered model entry: `id` is the picker value (the raw endpoint id, and
+/// the wire/config value), `name` is the display label. The Databricks API has
+/// no display-name field, so discovery curates `name` from the capability
+/// manifest ([`model_capabilities::databricks_registry_label`]) — a known id
+/// yields its curated label (e.g. `GPT-5.5`), an unknown id falls back to the
+/// raw id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
     pub id: String,
     pub name: String,
 }
 
-/// Known Databricks AI Gateway v2 models — used only when an authenticated
-/// `api/ai-gateway/v2/endpoints` call succeeds with an empty list.
-/// Mirrors goose's `DATABRICKS_V2_KNOWN_MODELS`.
-pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
-    &["databricks-gpt-5-5", "databricks-claude-opus-4-7"];
-
 const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (default catalog)";
 
+/// Curated display label for a discovered Databricks endpoint id: the manifest's
+/// exact-record label when one exists, otherwise the raw id. The API returns no
+/// display name, so this is the single seam that turns a raw endpoint id into a
+/// human label for the picker.
+fn curated_model_name(id: &str) -> String {
+    crate::model_capabilities::databricks_registry_label(id)
+        .unwrap_or(id)
+        .to_string()
+}
+
+/// Fallback catalog used only when an authenticated `api/ai-gateway/v2/endpoints`
+/// call succeeds with an empty list. The known-model ids come from the manifest
+/// ([`model_capabilities::databricks_v2_known_models`]), the single runtime source.
 fn authenticated_empty_v2_catalog() -> Vec<ModelEntry> {
-    DATABRICKS_V2_KNOWN_MODELS
+    crate::model_capabilities::databricks_v2_known_models()
         .iter()
         .map(|id| ModelEntry {
-            id: id.to_string(),
-            name: format!("{id}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}"),
+            id: id.clone(),
+            name: format!(
+                "{}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}",
+                curated_model_name(id)
+            ),
         })
         .collect()
 }
@@ -205,8 +219,8 @@ pub(crate) fn parse_v1_endpoints(json: &serde_json::Value) -> Result<Vec<ModelEn
             }
 
             Some(ModelEntry {
-                id: name.clone(),
-                name,
+                name: curated_model_name(&name),
+                id: name,
             })
         })
         .collect();
@@ -370,8 +384,8 @@ pub(crate) fn parse_v2_endpoints_page(
             }
             Some(V2Endpoint {
                 entry: ModelEntry {
-                    id: name.clone(),
-                    name,
+                    name: curated_model_name(&name),
+                    id: name,
                 },
                 created_ms: endpoint_created_ms(endpoint),
             })
@@ -648,10 +662,59 @@ mod tests {
         let models = authenticated_empty_v2_catalog();
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
 
-        assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS);
+        let known: Vec<&str> = crate::model_capabilities::databricks_v2_known_models()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(ids, known);
+        // `name` is the curated label + provenance suffix, not the raw id.
         assert!(models.iter().all(|model| {
-            model.name == format!("{}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}", model.id)
+            let label = crate::model_capabilities::databricks_registry_label(&model.id)
+                .unwrap_or(model.id.as_str());
+            model.name == format!("{label}{AUTHENTICATED_EMPTY_CATALOG_SUFFIX}")
         }));
+    }
+
+    #[test]
+    fn v2_parse_curates_known_name_and_passes_unknown_through() {
+        // buzz-agent's real discovery contract: the endpoint id IS the name the
+        // API returns. A known id gets its manifest label; an unknown id stays raw.
+        let json = serde_json::json!({
+            "endpoints": [
+                {"name": "databricks-gpt-5-5"},
+                {"name": "custom-unlisted-endpoint"},
+            ]
+        });
+        let (models, _) = parse_v2_endpoints_page(&json).unwrap();
+        let by_id: std::collections::HashMap<&str, &str> = models
+            .iter()
+            .map(|m| (m.entry.id.as_str(), m.entry.name.as_str()))
+            .collect();
+        assert_eq!(by_id["databricks-gpt-5-5"], "GPT-5.5");
+        assert_eq!(
+            by_id["custom-unlisted-endpoint"],
+            "custom-unlisted-endpoint"
+        );
+    }
+
+    #[test]
+    fn v1_parse_curates_known_name_and_passes_unknown_through() {
+        let json = serde_json::json!({
+            "endpoints": [
+                {"name": "databricks-gpt-5-5", "task": "llm/v1/chat"},
+                {"name": "custom-unlisted-endpoint", "task": "llm/v1/chat"},
+            ]
+        });
+        let models = parse_v1_endpoints(&json).unwrap();
+        let by_id: std::collections::HashMap<&str, &str> = models
+            .iter()
+            .map(|m| (m.id.as_str(), m.name.as_str()))
+            .collect();
+        assert_eq!(by_id["databricks-gpt-5-5"], "GPT-5.5");
+        assert_eq!(
+            by_id["custom-unlisted-endpoint"],
+            "custom-unlisted-endpoint"
+        );
     }
 
     #[test]
