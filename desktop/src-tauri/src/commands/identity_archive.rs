@@ -175,13 +175,10 @@ pub struct UnarchiveRequest {
 /// Submit `builder` to the active workspace relay, then trigger `on_success`
 /// exactly once iff the relay accepted the event.
 ///
-/// The seam that pins the archive/unarchive → AGENTS.md-regeneration contract:
-/// regeneration is best-effort roster maintenance, so it must fire on a
-/// successful submission and must NOT fire when the submit is rejected (a
-/// rejected archive changed nothing to re-render). Extracting it as an
-/// `AppHandle`-free core lets the command tests drive the trigger through a
-/// loopback relay without a live Tauri runtime, while the commands keep
-/// passing the real `try_regenerate_nest`.
+/// This pins the shared half of the archive/unarchive → AGENTS.md-regeneration
+/// contract: regeneration is best-effort roster maintenance, so it must fire on
+/// a successful submission and must NOT fire when the submit is rejected (a
+/// rejected request changed nothing to re-render).
 async fn submit_then_regenerate(
     builder: nostr::EventBuilder,
     state: &AppState,
@@ -192,52 +189,81 @@ async fn submit_then_regenerate(
     Ok(response)
 }
 
+/// `AppHandle`-free core of [`archive_identity`]: resolve the owner-of-agent
+/// `auth` tag, build the real `kind:9035` request, submit it, and forward
+/// `on_success` so a successful archive refreshes the roster.
+///
+/// The command wrapper is untestable (it needs a live Tauri runtime for its
+/// `AppHandle`), so extracting this core is what lets a test drive the exact
+/// archive wiring — including the forwarded regeneration callback — through a
+/// loopback relay. RED-on-revert: pass `|| {}` here instead of `on_success` and
+/// `archive_core_fires_regen_only_on_accepted_submit` fails while the unarchive
+/// core test stays green.
+async fn archive_identity_core(
+    req: &ArchiveRequest,
+    state: &AppState,
+    on_success: impl FnOnce(),
+) -> Result<SubmitEventResponse, String> {
+    let auth_tag = maybe_owner_auth_tag(state, &req.target_pubkey).await?;
+    let builder = events::build_archive_identity_request(
+        &req.target_pubkey,
+        &req.content,
+        req.reason.as_deref(),
+        req.replaced_by.as_deref(),
+        auth_tag.as_ref(),
+    )?;
+    submit_then_regenerate(builder, state, on_success).await
+}
+
+/// `AppHandle`-free core of [`unarchive_identity`]: builds the real `kind:9036`
+/// request and forwards `on_success` on acceptance. See [`archive_identity_core`]
+/// for why this seam is extracted. RED-on-revert: pass `|| {}` here and
+/// `unarchive_core_fires_regen_only_on_accepted_submit` fails while the archive
+/// core test stays green.
+async fn unarchive_identity_core(
+    req: &UnarchiveRequest,
+    state: &AppState,
+    on_success: impl FnOnce(),
+) -> Result<SubmitEventResponse, String> {
+    let auth_tag = maybe_owner_auth_tag(state, &req.target_pubkey).await?;
+    let builder = events::build_unarchive_identity_request(
+        &req.target_pubkey,
+        &req.content,
+        req.reason.as_deref(),
+        auth_tag.as_ref(),
+    )?;
+    submit_then_regenerate(builder, state, on_success).await
+}
+
 /// Submit a `kind:9035` archive request to the relay. Consent path is selected
 /// by the relay — we just attach the owner-of-agent `auth` tag when the live
 /// `kind:0` proves we own the target, so the relay can choose the `owner`
 /// path. Self and admin paths require no auth tag.
+///
+/// On acceptance, refresh AGENTS.md so a just-archived agent drops from the
+/// roster without waiting for the next unrelated edit or app restart. The
+/// regen is fire-and-forget and fail-open like every other mutation site; it
+/// races the relay's kind:13535 snapshot update, so a stale render self-heals
+/// on the next regen.
 #[tauri::command]
 pub async fn archive_identity(
     req: ArchiveRequest,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
-    let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
-    let auth_ref = auth_tag.as_ref();
-
-    let builder = events::build_archive_identity_request(
-        &req.target_pubkey,
-        &req.content,
-        req.reason.as_deref(),
-        req.replaced_by.as_deref(),
-        auth_ref,
-    )?;
-    // Refresh AGENTS.md so a just-archived agent drops from the roster without
-    // waiting for the next unrelated edit or app restart. Fire-and-forget and
-    // fail-open like every other mutation site; it races the relay's kind:13535
-    // snapshot update, so a stale render self-heals on the next regen.
-    submit_then_regenerate(builder, &state, || try_regenerate_nest(&app)).await
+    archive_identity_core(&req, &state, || try_regenerate_nest(&app)).await
 }
 
-/// Submit a `kind:9036` unarchive request to the relay.
+/// Submit a `kind:9036` unarchive request to the relay. See
+/// [`archive_identity`]: refresh the roster so an unarchived agent reappears
+/// promptly, fail-open against the same snapshot race.
 #[tauri::command]
 pub async fn unarchive_identity(
     req: UnarchiveRequest,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SubmitEventResponse, String> {
-    let auth_tag = maybe_owner_auth_tag(&state, &req.target_pubkey).await?;
-    let auth_ref = auth_tag.as_ref();
-
-    let builder = events::build_unarchive_identity_request(
-        &req.target_pubkey,
-        &req.content,
-        req.reason.as_deref(),
-        auth_ref,
-    )?;
-    // See `archive_identity`: refresh the roster so an unarchived agent
-    // reappears promptly, fail-open against the same snapshot race.
-    submit_then_regenerate(builder, &state, || try_regenerate_nest(&app)).await
+    unarchive_identity_core(&req, &state, || try_regenerate_nest(&app)).await
 }
 
 /// If the current user is the verified NIP-OA owner of `target`, return the
@@ -661,27 +687,31 @@ mod tests {
     }
 
     /// Spawn a loopback `/events` relay that answers every submit with the
-    /// given `accepted` verdict, so `submit_then_regenerate` sees a real
+    /// given `accepted` verdict, so the archive/unarchive cores see a real
     /// success or rejection over the wire. Returns the `ws://` base.
+    ///
+    /// The literal `/events` route below is why this file carries an
+    /// `EVENTS_INVENTORY` row (one occurrence, zero guard calls): a test
+    /// loopback, never a production egress site.
     #[cfg(not(target_os = "windows"))]
     async fn spawn_submit_relay(accepted: bool) -> String {
         use axum::{routing::post, Json, Router};
 
-        // Assemble the route path at runtime so this source file contains no
-        // contiguous `/events` literal — that substring is reserved by the
-        // egress-guard inventory scan for real submission sites, and this is a
-        // test loopback, not an egress site.
-        let events_path = ["/ev", "ents"].concat();
-        let router = Router::new().route(
-            &events_path,
-            post(move || async move {
-                Json(serde_json::json!({
-                    "event_id": "e".repeat(64),
-                    "accepted": accepted,
-                    "message": if accepted { "" } else { "rejected by relay" },
-                }))
-            }),
-        );
+        let router = Router::new()
+            .route(
+                "/events",
+                post(move || async move {
+                    Json(serde_json::json!({
+                        "event_id": "e".repeat(64),
+                        "accepted": accepted,
+                        "message": if accepted { "" } else { "rejected by relay" },
+                    }))
+                }),
+            )
+            // The cores resolve the owner-of-agent auth tag first, which reads
+            // the target's live kind:0; answer with an empty result set so that
+            // read resolves to "no owner tag" without a live upstream relay.
+            .route("/query", post(|| async { Json(serde_json::json!([])) }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -690,17 +720,16 @@ mod tests {
         format!("ws://{addr}")
     }
 
-    /// Regression for the outsider-reported item 1: a successful archive/
-    /// unarchive MUST trigger nest regeneration, and a rejected submit MUST
-    /// NOT. The production commands wire `try_regenerate_nest` into
-    /// `submit_then_regenerate`; here we drive the same seam with a counting
-    /// hook against a loopback relay. RED-on-revert: delete the `on_success()`
-    /// call in `submit_then_regenerate` and the two "fires" assertions fail;
-    /// call it unconditionally (before the `?`) and the rejection assertion
-    /// fails.
+    /// Regression for the outsider-reported item 1, archive site: a successful
+    /// `kind:9035` archive MUST trigger nest regeneration, and a rejected
+    /// submit MUST NOT. This drives the production [`archive_identity_core`]
+    /// (the exact seam the command wrapper delegates to), forwarding a counting
+    /// hook against a loopback relay. RED-on-revert: replace the core's
+    /// forwarded `on_success` with `|| {}` and the "fires once" assertion fails;
+    /// this pins the archive command's callback independently of unarchive.
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
-    async fn regeneration_fires_only_on_accepted_submit() {
+    async fn archive_core_fires_regen_only_on_accepted_submit() {
         use crate::app_state::build_app_state;
         use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -709,18 +738,21 @@ mod tests {
         reset_rate_limit_gate();
 
         let state = build_app_state();
-        let target = Keys::generate().public_key().to_hex();
+        let req = ArchiveRequest {
+            target_pubkey: Keys::generate().public_key().to_hex(),
+            content: String::new(),
+            reason: None,
+            replaced_by: None,
+        };
 
         // Accepted archive → hook fires exactly once.
         *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(true).await);
         let fired = AtomicUsize::new(0);
-        let builder =
-            events::build_archive_identity_request(&target, "", None, None, None).unwrap();
-        let response = submit_then_regenerate(builder, &state, || {
+        let response = archive_identity_core(&req, &state, || {
             fired.fetch_add(1, Ordering::SeqCst);
         })
         .await
-        .expect("accepted submit returns Ok");
+        .expect("accepted archive returns Ok");
         assert!(response.accepted);
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -728,14 +760,55 @@ mod tests {
             "an accepted archive must trigger regeneration exactly once"
         );
 
-        // Accepted unarchive → hook fires exactly once (same seam, 9036 path).
+        // Rejected submit → error propagates, hook never fires.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(false).await);
         let fired = AtomicUsize::new(0);
-        let builder = events::build_unarchive_identity_request(&target, "", None, None).unwrap();
-        submit_then_regenerate(builder, &state, || {
+        let result = archive_identity_core(&req, &state, || {
+            fired.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert!(result.is_err(), "a rejected archive must return an error");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "a rejected archive changed nothing, so regeneration must not fire"
+        );
+
+        reset_rate_limit_gate();
+    }
+
+    /// Regression for item 1, unarchive site: mirrors
+    /// [`archive_core_fires_regen_only_on_accepted_submit`] against the
+    /// `kind:9036` [`unarchive_identity_core`]. RED-on-revert: replace that
+    /// core's forwarded `on_success` with `|| {}` and this fails while the
+    /// archive test stays green — proving each command's callback is pinned
+    /// independently, not just the shared `submit_then_regenerate`.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn unarchive_core_fires_regen_only_on_accepted_submit() {
+        use crate::app_state::build_app_state;
+        use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _serial = TEST_SERIAL.lock().await;
+        reset_rate_limit_gate();
+
+        let state = build_app_state();
+        let req = UnarchiveRequest {
+            target_pubkey: Keys::generate().public_key().to_hex(),
+            content: String::new(),
+            reason: None,
+        };
+
+        // Accepted unarchive → hook fires exactly once.
+        *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(true).await);
+        let fired = AtomicUsize::new(0);
+        let response = unarchive_identity_core(&req, &state, || {
             fired.fetch_add(1, Ordering::SeqCst);
         })
         .await
         .expect("accepted unarchive returns Ok");
+        assert!(response.accepted);
         assert_eq!(
             fired.load(Ordering::SeqCst),
             1,
@@ -745,17 +818,15 @@ mod tests {
         // Rejected submit → error propagates, hook never fires.
         *state.relay_url_override.lock().unwrap() = Some(spawn_submit_relay(false).await);
         let fired = AtomicUsize::new(0);
-        let builder =
-            events::build_archive_identity_request(&target, "", None, None, None).unwrap();
-        let result = submit_then_regenerate(builder, &state, || {
+        let result = unarchive_identity_core(&req, &state, || {
             fired.fetch_add(1, Ordering::SeqCst);
         })
         .await;
-        assert!(result.is_err(), "a rejected submit must return an error");
+        assert!(result.is_err(), "a rejected unarchive must return an error");
         assert_eq!(
             fired.load(Ordering::SeqCst),
             0,
-            "a rejected archive changed nothing, so regeneration must not fire"
+            "a rejected unarchive changed nothing, so regeneration must not fire"
         );
 
         reset_rate_limit_gate();
