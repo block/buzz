@@ -17,6 +17,23 @@ pub const MAX_EXPERIENCE_ID_BYTES: usize = 512;
 /// Maximum number of skill versions on one experience.
 pub const MAX_SKILL_VERSIONS: usize = 32;
 
+/// Redact obvious credential-shaped values and bound a task summary before any
+/// local persistence or learning use.
+pub fn redact_task_summary(value: &str) -> String {
+    let mut redacted = redact_free_text(value).trim().to_string();
+    if redacted.is_empty() {
+        return "Completed an adviser task.".to_string();
+    }
+    if redacted.len() > MAX_TASK_SUMMARY_BYTES {
+        let mut end = MAX_TASK_SUMMARY_BYTES;
+        while !redacted.is_char_boundary(end) {
+            end -= 1;
+        }
+        redacted.truncate(end);
+    }
+    redacted
+}
+
 /// Terminal result of an adviser task experience.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,7 +289,7 @@ pub fn experience_projection_payload(
         "timestamp": record.occurred_at,
         "agent": record.specialist_id,
         "event_type": "command_experience",
-        "content": record.task_summary,
+        "content": redact_task_summary(&record.task_summary),
         "metadata": {
             "memory_key": record.memory_key,
             "status": status,

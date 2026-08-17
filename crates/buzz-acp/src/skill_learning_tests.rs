@@ -215,6 +215,24 @@ fn different_tasks_do_not_combine() {
 }
 
 #[test]
+fn exact_task_credentials_never_enter_the_learning_registry() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("skills.sqlite");
+    let runtime = open_runtime(&path);
+    let task = "Prepare provider check password: Farout23";
+
+    runtime
+        .observe_turn(evidence("secret-1", task, LearningOutcome::Succeeded))
+        .expect("observation");
+    drop(runtime);
+
+    let database = std::fs::read(path).expect("registry bytes");
+    assert!(!database
+        .windows(b"Farout23".len())
+        .any(|window| window == b"Farout23"));
+}
+
+#[test]
 fn candidate_preserves_parent_checks_and_rejects_removed_checks() {
     let temp = TempDir::new().expect("tempdir");
     let runtime = open_runtime(&temp.path().join("skills.sqlite"));

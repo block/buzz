@@ -25,6 +25,8 @@ fn published_fixture(outbox: &ExperienceOutbox, suffix: &str) -> String {
             prompt_template_id: "buzz-acp-v1".into(),
             memory_view_revision: "nip-ae-core".into(),
             rag_snapshot_id: "snapshot-f88174".into(),
+            skill_versions: vec![],
+            validation_results: vec![],
         },
     )
     .expect("capture")

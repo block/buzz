@@ -6,8 +6,11 @@ pub(crate) mod registry;
 
 use std::path::Path;
 
-use buzz_core::agent_skill::{
-    build_skill_pointer_event, build_skill_version_event, SkillPointerReason, SkillPointerV1,
+use buzz_core::{
+    agent_experience::redact_task_summary,
+    agent_skill::{
+        build_skill_pointer_event, build_skill_version_event, SkillPointerReason, SkillPointerV1,
+    },
 };
 use chrono::DateTime;
 use nostr::{Keys, PublicKey};
@@ -89,7 +92,7 @@ impl SkillLearningRuntime {
         &self,
         evidence: TurnLearningEvidence,
     ) -> Result<LearningAction, SkillLearningError> {
-        let normalized_task = normalize_task(&evidence.task_text);
+        let normalized_task = normalize_task(&redact_task_summary(&evidence.task_text));
         if normalized_task.is_empty()
             || evidence.experience_id.is_empty()
             || DateTime::parse_from_rfc3339(&evidence.occurred_at).is_err()

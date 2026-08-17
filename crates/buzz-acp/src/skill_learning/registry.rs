@@ -383,6 +383,27 @@ impl SkillRegistry {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub(crate) fn pending_materializations(&self) -> Result<Vec<String>, RegistryError> {
+        let connection = self.connection.lock().map_err(|_| RegistryError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT operation_id FROM skill_publication_outbox
+             WHERE state = 'pointer_published' ORDER BY created_at, operation_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub(crate) fn has_inflight(&self) -> Result<bool, RegistryError> {
+        let connection = self.connection.lock().map_err(|_| RegistryError::Lock)?;
+        let count: u64 = connection.query_row(
+            "SELECT COUNT(*) FROM skill_publication_outbox
+             WHERE state != 'materialized'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub(super) fn has_inflight_for_skill(&self, skill_id: &str) -> Result<bool, RegistryError> {
         let connection = self.connection.lock().map_err(|_| RegistryError::Lock)?;
         let count: u64 = connection.query_row(
@@ -493,6 +514,27 @@ impl SkillRegistry {
             .optional()?;
         json.map(|json| serde_json::from_str(&json).map_err(Into::into))
             .transpose()
+    }
+
+    pub(crate) fn active_versions(&self) -> Result<Vec<SkillVersionV1>, RegistryError> {
+        let connection = self.connection.lock().map_err(|_| RegistryError::Lock)?;
+        let mut statement = connection.prepare(
+            "SELECT v.payload_json
+             FROM active_skills a
+             JOIN skill_versions v ON v.version_id = a.active_version_id
+             ORDER BY a.skill_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let json: String = row.get(0)?;
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub(crate) fn publication_state(
