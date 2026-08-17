@@ -5,8 +5,10 @@ import {
   circuitCooldownRemainingMs,
   getAgentCircuitStatus,
   getOpenCircuitPubkeySignature,
+  injectObserverEventsForE2E,
   resetAgentObserverStore,
   subscribeAgentObserverStore,
+  syncAgentObserverEvents,
   _testProcessLiveObserverEvents,
 } from "./observerRelayStore.ts";
 
@@ -300,6 +302,89 @@ describe("getAgentCircuitStatus", () => {
     assert.equal(status.message, null);
     assert.equal(status.channelId, null);
     assert.equal(status.timestamp, null);
+  });
+});
+
+describe("injectObserverEventsForE2E and syncAgentObserverEvents fold circuit events", () => {
+  // Regression coverage: a prior merge with upstream (which changed
+  // appendAgentEvents' return shape) silently dropped the applyCircuitEvent
+  // loop from both of these functions — no textual conflict, so it merged
+  // clean but wrong. _testProcessLiveObserverEvents alone wouldn't have
+  // caught it, since neither of these functions routes through it.
+  beforeEach(() => {
+    resetAgentObserverStore();
+  });
+
+  afterEach(() => {
+    resetAgentObserverStore();
+  });
+
+  it("injectObserverEventsForE2E updates circuit status, not just the raw journal", () => {
+    injectObserverEventsForE2E(AGENT, [
+      makeEvent({
+        seq: 1,
+        timestamp: "2024-01-01T00:00:00Z",
+        kind: "circuit_open",
+        agentIndex: 0,
+        channelId: "chan-uuid-1",
+        payload: { error: "opened" },
+      }),
+    ]);
+
+    assert.equal(getAgentCircuitStatus(AGENT).isOpen, true);
+  });
+
+  it("syncAgentObserverEvents updates circuit status, not just the raw journal", () => {
+    syncAgentObserverEvents(AGENT, [
+      makeEvent({
+        seq: 1,
+        timestamp: "2024-01-01T00:00:00Z",
+        kind: "circuit_open",
+        agentIndex: 0,
+        channelId: "chan-uuid-1",
+        payload: { error: "opened" },
+      }),
+    ]);
+
+    assert.equal(getAgentCircuitStatus(AGENT).isOpen, true);
+  });
+
+  it("injectObserverEventsForE2E notifies subscribers on a circuit-only change (no new raw events appended)", () => {
+    injectObserverEventsForE2E(AGENT, [
+      makeEvent({
+        seq: 1,
+        timestamp: "2024-01-01T00:00:00Z",
+        kind: "acp_read",
+        agentIndex: null,
+        channelId: "chan-uuid-1",
+        payload: {},
+      }),
+    ]);
+
+    let notifyCount = 0;
+    const unsubscribe = subscribeAgentObserverStore(() => {
+      notifyCount += 1;
+    });
+    try {
+      // Same (timestamp, seq) as the event above — appendAgentEvents treats
+      // this as a duplicate and returns null, but it's the first-ever circuit
+      // event for this slot, so applyCircuitEvent still applies it.
+      injectObserverEventsForE2E(AGENT, [
+        makeEvent({
+          seq: 1,
+          timestamp: "2024-01-01T00:00:00Z",
+          kind: "circuit_open",
+          agentIndex: 0,
+          channelId: "chan-uuid-1",
+          payload: { error: "opened" },
+        }),
+      ]);
+    } finally {
+      unsubscribe();
+    }
+
+    assert.equal(notifyCount, 1);
+    assert.equal(getAgentCircuitStatus(AGENT).isOpen, true);
   });
 });
 

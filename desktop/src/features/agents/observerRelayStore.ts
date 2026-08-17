@@ -896,6 +896,11 @@ export function injectObserverEventsForE2E(
   events: ObserverEvent[],
 ) {
   const added = appendAgentEvents(agentPubkey, events);
+  // Circuit events must still be folded even when appendAgentEvents rejects
+  // the raw journal entry (see the matching comment in processLiveObserverEvents) —
+  // this path exists specifically so E2E specs exercise the real ingestion
+  // pipeline, and a circuit_open/circuit_recovered event injected here that
+  // silently failed to update circuit state would make that guarantee false.
   let circuitChanged = false;
   for (const event of events) {
     if (applyCircuitEvent(agentPubkey, event)) circuitChanged = true;
