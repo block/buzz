@@ -2025,6 +2025,19 @@ async fn tokio_main() -> Result<()> {
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
 
+    // Relay `self` pubkey (NIP-11), used to recognize relay-signed workflow
+    // messages in the inbound author gate. Best-effort: `None` simply means
+    // workflow messages get no attributed-author exemption (pre-fix behavior),
+    // so a fetch failure degrades gracefully instead of blocking startup.
+    let relay_self: Option<String> = relay.rest_client().fetch_relay_self().await;
+    match &relay_self {
+        Some(pk) => tracing::info!("relay self pubkey: {pk}"),
+        None => tracing::warn!(
+            "relay self pubkey unavailable (NIP-11 fetch failed or no stable relay key) — \
+             relay-signed workflow messages will be dropped by the author gate"
+        ),
+    }
+
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
     let mut relay_observer_publisher = None;
@@ -2836,7 +2849,30 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
+                                // Relay-signed workflow messages (workflow
+                                // `send_message` actions) are authored by the
+                                // relay keypair, not the workflow owner — the
+                                // plain author gate would drop them and the
+                                // scheduled @mention would silently never wake
+                                // the agent. Gate them on their *attributed*
+                                // author (the workflow owner's `p` tag)
+                                // instead. See `workflow_attributed_author`
+                                // for the recognition + trust argument.
+                                let author = match workflow_attributed_author(
+                                    &buzz_event.event,
+                                    relay_self.as_deref(),
+                                ) {
+                                    Some(attributed) => {
+                                        tracing::debug!(
+                                            channel_id = %buzz_event.channel_id,
+                                            relay_author = %buzz_event.event.pubkey.to_hex(),
+                                            attributed_author = %attributed,
+                                            "relay-signed workflow message — gating on attributed author"
+                                        );
+                                        attributed
+                                    }
+                                    None => buzz_event.event.pubkey.to_hex(),
+                                };
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -3514,6 +3550,53 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     event.tags.iter().any(|t| {
         t.as_slice().first().map(|s| s.as_str()) == Some("p")
             && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
+    })
+}
+
+/// If `event` is a relay-signed workflow message, return its *attributed*
+/// author for inbound author gating; otherwise `None`.
+///
+/// Workflow `send_message` actions are signed by the **relay keypair**
+/// (`event.pubkey` = the relay's NIP-11 `self` key), not by the human who owns
+/// the workflow — so the plain author gate would drop them even though they
+/// carry `p` tags meant to wake mentioned agents. The relay attributes the
+/// message to the workflow owner via the **first `p` tag** (see
+/// `workflow_sink.rs`: the owner `p` tag is pushed before any mention `p`
+/// tags), and it has already verified that owner's access to the destination
+/// channel before emitting the event.
+///
+/// Recognition requires ALL of:
+/// 1. a known relay `self` pubkey (fetched from NIP-11 at startup) — no
+///    `relay_self`, no exemption (fail closed);
+/// 2. `event.pubkey` == relay `self` — only the relay holds that key, and the
+///    relay verifies signatures on submitted events, so this cannot be forged
+///    by another member;
+/// 3. a `buzz:workflow` tag — the marker the relay puts on workflow-emitted
+///    messages (also used for workflow-loop prevention relay-side).
+///
+/// The returned pubkey is gated exactly like a direct author: owner/sibling
+/// under `owner-only`, plus the explicit list under `allowlist`. A workflow
+/// owned by a random channel member therefore still cannot wake an
+/// owner-only agent.
+fn workflow_attributed_author(event: &nostr::Event, relay_self: Option<&str>) -> Option<String> {
+    let relay_self = relay_self?;
+    if event.pubkey.to_hex() != relay_self {
+        return None;
+    }
+    let is_workflow = event
+        .tags
+        .iter()
+        .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("buzz:workflow"));
+    if !is_workflow {
+        return None;
+    }
+    event.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        if s.first().map(|k| k.as_str()) == Some("p") {
+            s.get(1).map(|v| v.to_string())
+        } else {
+            None
+        }
     })
 }
 
@@ -5669,6 +5752,96 @@ mod author_gate_tests {
         assert!(
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
+        );
+    }
+}
+
+#[cfg(test)]
+mod workflow_attributed_author_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// Build a kind:9 event signed by `signer` with the given extra tags.
+    fn make_event(signer: &Keys, tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "wake up")
+            .tags(tags)
+            .sign_with_keys(signer)
+            .expect("sign test event")
+    }
+
+    fn workflow_tags(owner_hex: &str, mention_hex: &str) -> Vec<Tag> {
+        vec![
+            Tag::parse(["p", owner_hex]).unwrap(),
+            Tag::parse(["h", "3204e3f9-fd09-4e95-b749-76966794c287"]).unwrap(),
+            Tag::parse(["buzz:workflow", "true"]).unwrap(),
+            Tag::parse(["p", mention_hex]).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn relay_signed_workflow_message_attributes_to_first_p_tag_owner() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = make_event(&relay, workflow_tags(&owner, &agent));
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            Some(owner),
+            "a relay-signed buzz:workflow event must attribute to the owner \
+             (first p tag), not the mentioned agent"
+        );
+    }
+
+    #[test]
+    fn no_relay_self_means_no_exemption() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = make_event(&relay, workflow_tags(&owner, &agent));
+        assert_eq!(
+            workflow_attributed_author(&event, None),
+            None,
+            "without a known relay self pubkey the exemption must not apply (fail closed)"
+        );
+    }
+
+    #[test]
+    fn non_relay_author_gets_no_exemption_even_with_workflow_tag() {
+        // A member forging the buzz:workflow tag on their own event must not
+        // be able to attribute it to someone else via a p tag.
+        let forger = Keys::generate();
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = make_event(&forger, workflow_tags(&owner, &agent));
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "a buzz:workflow tag on a non-relay-signed event must be ignored"
+        );
+    }
+
+    #[test]
+    fn relay_signed_message_without_workflow_tag_gets_no_exemption() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = make_event(&relay, vec![Tag::parse(["p", &owner]).unwrap()]);
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "relay-signed events without the buzz:workflow tag keep the plain author gate"
+        );
+    }
+
+    #[test]
+    fn workflow_message_without_p_tag_attributes_to_no_one() {
+        let relay = Keys::generate();
+        let event = make_event(&relay, vec![Tag::parse(["buzz:workflow", "true"]).unwrap()]);
+        assert_eq!(
+            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
+            None,
+            "a workflow message with no p tags has no attributed author and must \
+             fall through to the plain (relay-pubkey) author gate"
         );
     }
 }
