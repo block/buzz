@@ -6,7 +6,10 @@ import {
   msgContextKey,
 } from "@/features/channels/readState/readStateFormat";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
-import { isThreadReply } from "@/features/messages/lib/threading";
+import {
+  getThreadReference,
+  isThreadReply,
+} from "@/features/messages/lib/threading";
 import type { Channel, FeedItem, HomeFeed } from "@/shared/api/types";
 
 type ReadTimestamp = (contextKey: string) => number | null;
@@ -35,6 +38,29 @@ export function resolveChannelActivityFeedItemReadAt(
   return maxReadAt(
     getOwnReadAt(msgContextKey(item.id)),
     item.channelId ? getOwnReadAt(item.channelId) : null,
+  );
+}
+
+/**
+ * Read frontier for a thread reply, folding in the thread's own marker.
+ *
+ * `resolveChannelActivityFeedItemReadAt` knows only the per-message and
+ * channel markers. Reading a thread advances `thread:<rootId>`, a key it never
+ * looks at — so without this, marking a thread read leaves all of its replies
+ * looking unread indefinitely, since nothing else advances a marker that
+ * function can see. `getThreadReadAt` already folds the channel marker in
+ * itself; taking the max here is belt-and-braces for a reply whose own message
+ * marker is ahead of both.
+ */
+export function resolveThreadActivityItemReadAt(
+  item: Pick<FeedItem, "channelId" | "id" | "tags">,
+  getOwnReadAt: ReadTimestamp,
+  getThreadReadAt: (rootId: string, channelId?: string | null) => number | null,
+): number | null {
+  const rootId = getThreadReference(item.tags).rootId;
+  return maxReadAt(
+    resolveChannelActivityFeedItemReadAt(item, getOwnReadAt),
+    rootId ? getThreadReadAt(rootId, item.channelId) : null,
   );
 }
 
@@ -112,10 +138,16 @@ export function useChannelActivityProjection({
       (item) =>
         isThreadReply(item.tags) &&
         (unreadFeedItemIds.has(item.id) ||
-          item.createdAt > (getChannelActivityItemReadAt(item) ?? 0)),
+          item.createdAt >
+            (resolveThreadActivityItemReadAt(
+              item,
+              getOwnReadAt,
+              getThreadReadAt,
+            ) ?? 0)),
     );
   }, [
-    getChannelActivityItemReadAt,
+    getOwnReadAt,
+    getThreadReadAt,
     locallyUnreadFeedItems,
     readStateVersion,
     threadActivityFeedItems,
