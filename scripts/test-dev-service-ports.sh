@@ -25,19 +25,76 @@ validate_local_service_port "Redis" "redis://127.0.0.1:16379" "16379" "6379"
 validate_local_service_port "MinIO" "http://[::1]:19000" "19000" "80"
 validate_local_service_port "External Postgres" "postgres://db.example.com:5432/buzz" "15432" "5432"
 
-validation_error="${TMP_DIR}/validation-error"
-if validate_local_service_port \
-  "Postgres" \
-  "postgres://buzz:do-not-print@localhost:5432/buzz" \
+local_aliases=(
+  "localhost"
+  "localhost."
+  "agent.localhost"
+  "agent.localhost."
+  "127.0.0.1"
+  "127.1"
+  "127.255.255.254"
+  "2130706433"
+  "0177.0.0.1"
+  "0x7f000001"
+  "[::1]"
+  "[::ffff:127.0.0.1]"
+  "[::ffff:7f00:1]"
+)
+for host in "${local_aliases[@]}"; do
+  validate_local_service_port \
+    "Postgres" \
+    "postgres://buzz:secret@${host}:15432/buzz" \
+    "15432" \
+    "5432"
+done
+
+assert_validation_rejected() {
+  local description="$1"
+  local url="$2"
+  local expected_port="$3"
+  local default_url_port="$4"
+  local validation_error="${TMP_DIR}/validation-error"
+
+  if validate_local_service_port \
+    "${description}" \
+    "${url}" \
+    "${expected_port}" \
+    "${default_url_port}" 2> "${validation_error}"; then
+    echo "${description} unexpectedly passed validation" >&2
+    exit 1
+  fi
+  if grep -q 'do-not-print' "${validation_error}"; then
+    echo "${description} leaked URL credentials" >&2
+    exit 1
+  fi
+}
+
+for host in "${local_aliases[@]}"; do
+  assert_validation_rejected \
+    "mismatched local alias ${host}" \
+    "postgres://buzz:do-not-print@${host}:5432/buzz" \
+    "15432" \
+    "5432"
+done
+
+assert_validation_rejected \
+  "unspecified IPv4 address" \
+  "postgres://buzz:do-not-print@0.0.0.0:15432/buzz" \
   "15432" \
-  "5432" 2> "${validation_error}"; then
-  echo "mismatched local URL and host port unexpectedly passed validation" >&2
-  exit 1
-fi
-if grep -q 'do-not-print' "${validation_error}"; then
-  echo "port validation leaked URL credentials" >&2
-  exit 1
-fi
+  "5432"
+assert_validation_rejected \
+  "unspecified IPv6 address" \
+  "postgres://buzz:do-not-print@[::]:15432/buzz" \
+  "15432" \
+  "5432"
+assert_validation_rejected \
+  "IPv4-mapped unspecified address" \
+  "postgres://buzz:do-not-print@[::ffff:0.0.0.0]:15432/buzz" \
+  "15432" \
+  "5432"
+
+# Special-scheme URLs use their protocol default when the port is omitted.
+validate_local_service_port "HTTPS MinIO" "https://localhost" "443" "80"
 
 # The shared relay launcher may honor Compose host-port overrides, but it must
 # never apply schemas to or start against service URLs and credentials inherited
@@ -220,7 +277,7 @@ cat > "${setup_probe_root}/mock-hermit" <<'EOF'
 set -euo pipefail
 
 # Mimic the generated Hermit node shim closely enough for the URL parser used
-# by dev-service-env.sh. The probe only uses the three default local URLs.
+# by dev-service-env.sh. The direct helper matrix above exercises real Node.
 url="${7}"
 default_port="${8}"
 case "${url}" in
@@ -270,6 +327,55 @@ fi
 if ! grep -Fqx 'dev-setup reached Compose' "${setup_probe_output}"; then
   cat "${setup_probe_output}" >&2
   echo "dev-setup did not use its Hermit node shim before validating service URLs" >&2
+  exit 1
+fi
+
+# A mismatched alternate loopback spelling must fail before setup starts
+# Compose or migrations. The direct helper matrix above protects the real
+# classifier; this probe protects its ordering in the setup boundary.
+cat > "${setup_probe_root}/.env" <<'EOF'
+PGPORT=15432
+DATABASE_URL=postgres://buzz:do-not-print@localhost.:5432/buzz
+EOF
+
+setup_side_effects="${TMP_DIR}/setup-side-effects"
+cat > "${setup_probe_root}/bin/just" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo compose >> "${SETUP_SIDE_EFFECTS}"
+exit 1
+EOF
+chmod +x "${setup_probe_root}/bin/just"
+cat > "${setup_probe_root}/bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo migration >> "${SETUP_SIDE_EFFECTS}"
+exit 1
+EOF
+chmod +x "${setup_probe_root}/bin/cargo"
+
+if (
+  cd "${setup_probe_root}"
+  PATH="${setup_probe_root}/mock-bin:/usr/bin:/bin" \
+    HERMIT_EXE="${setup_probe_root}/mock-hermit" \
+    SETUP_SIDE_EFFECTS="${setup_side_effects}" \
+    ./scripts/dev-setup.sh
+) > "${setup_probe_output}" 2>&1; then
+  echo "dev-setup unexpectedly accepted a mismatched local alias" >&2
+  exit 1
+fi
+if ! grep -Fq 'DATABASE_URL URL uses local port 5432, but its Compose host port is 15432' "${setup_probe_output}"; then
+  cat "${setup_probe_output}" >&2
+  echo "dev-setup did not report the alternate-loopback port mismatch" >&2
+  exit 1
+fi
+if [[ -e "${setup_side_effects}" ]]; then
+  cat "${setup_side_effects}" >&2
+  echo "dev-setup reached Compose or migrations after rejecting its service URL" >&2
+  exit 1
+fi
+if grep -q 'do-not-print' "${setup_probe_output}"; then
+  echo "dev-setup leaked URL credentials in its validation error" >&2
   exit 1
 fi
 

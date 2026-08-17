@@ -10,12 +10,45 @@ validate_local_service_port() {
 
   # shellcheck disable=SC2016
   if ! parsed=$(node -e '
+    const { BlockList, isIP } = require("node:net");
+
     try {
       const url = new URL(process.argv[1]);
-      const host = url.hostname.toLowerCase();
-      const isLocal = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
-      const port = url.port || process.argv[2];
-      process.stdout.write(`${isLocal ? "local" : "remote"}\t${port}`);
+      const rawHost = url.hostname.toLowerCase();
+      const dnsHost = rawHost.endsWith(".") ? rawHost.slice(0, -1) : rawHost;
+
+      // Reparse through a special-scheme URL to canonicalize legacy numeric
+      // IPv4 forms such as 127.1, 0177.0.0.1, and 2130706433. The original
+      // postgres:/redis: URLs are non-special and preserve those spellings.
+      const canonicalHost = new URL(`http://${rawHost}/`)
+        .hostname
+        .replace(/^\[|\]$/g, "");
+      const family = isIP(canonicalHost);
+      const addressType = family === 4 ? "ipv4" : "ipv6";
+
+      const loopback = new BlockList();
+      loopback.addSubnet("127.0.0.0", 8, "ipv4");
+      loopback.addAddress("::1", "ipv6");
+      loopback.addSubnet("::ffff:127.0.0.0", 104, "ipv6");
+
+      const unspecified = new BlockList();
+      unspecified.addAddress("0.0.0.0", "ipv4");
+      unspecified.addAddress("::", "ipv6");
+      unspecified.addAddress("::ffff:0.0.0.0", "ipv6");
+
+      const isLocalName = dnsHost === "localhost" || dnsHost.endsWith(".localhost");
+      const isLoopbackAddress = family !== 0 && loopback.check(canonicalHost, addressType);
+      const isUnspecifiedAddress = family !== 0 && unspecified.check(canonicalHost, addressType);
+      const protocolDefault = url.protocol === "https:" ? "443"
+        : url.protocol === "http:" ? "80"
+        : process.argv[2];
+      const port = url.port || protocolDefault;
+      const location = isUnspecifiedAddress
+        ? "unspecified"
+        : isLocalName || isLoopbackAddress
+          ? "local"
+          : "remote";
+      process.stdout.write(`${location}\t${port}`);
     } catch {
       process.exit(1);
     }
@@ -26,6 +59,10 @@ validate_local_service_port() {
 
   local location="${parsed%%$'\t'*}"
   local actual_port="${parsed#*$'\t'}"
+  if [[ "${location}" == "unspecified" ]]; then
+    echo "${service} URL uses an unspecified local address; use localhost, a loopback address, or an explicit remote host" >&2
+    return 1
+  fi
   if [[ "${location}" == "local" && "${actual_port}" != "${expected_port}" ]]; then
     echo "${service} URL uses local port ${actual_port}, but its Compose host port is ${expected_port}" >&2
     return 1
