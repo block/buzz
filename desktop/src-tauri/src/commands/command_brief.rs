@@ -217,15 +217,66 @@ pub fn get_model_routing_preference(
     })
 }
 
-/// Persist one of the two fixed provider orders for subsequent brief runs.
+fn restart_live_command_advisers(app: &AppHandle) {
+    use std::collections::HashSet;
+    use tauri::Manager;
+
+    let records = match crate::managed_agents::load_managed_agents(app) {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("buzz-desktop: could not scan advisers after routing change: {error}");
+            return;
+        }
+    };
+    let adviser_pubkeys = records
+        .iter()
+        .filter(|record| {
+            record
+                .persona_id
+                .as_deref()
+                .is_some_and(crate::managed_agents::runtime::is_command_adviser_persona)
+        })
+        .map(|record| record.pubkey.clone())
+        .collect::<HashSet<_>>();
+    let targets = {
+        let state = app.state::<AppState>();
+        let runtimes = state
+            .managed_agent_processes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        runtimes
+            .keys()
+            .filter(|key| adviser_pubkeys.contains(&key.pubkey))
+            .map(|key| (key.pubkey.clone(), key.relay_url.clone()))
+            .collect::<Vec<_>>()
+    };
+    for (pubkey, relay_url) in targets {
+        if let Err(error) = crate::managed_agents::restart_managed_agent_runtime(
+            pubkey.clone(),
+            relay_url,
+            app.clone(),
+        ) {
+            eprintln!(
+                "buzz-desktop: adviser {pubkey} failed to restart after routing change: {error}"
+            );
+        }
+    }
+}
+
+/// Persist one of the two fixed provider orders for subsequent briefs and
+/// Command Team conversations.
 #[tauri::command]
-pub fn set_model_routing_preference(
+pub async fn set_model_routing_preference(
     app: AppHandle,
     state: State<'_, AppState>,
     preference: ModelRoutingPreference,
 ) -> Result<ModelRoutingPreferenceView, String> {
     let _owner = require_active_owner(&state).map_err(str::to_string)?;
     save_routing_preference(&trusted_lan_config_path(&app)?, preference)
+        .map_err(|_| command_error())?;
+    let restart_app = app.clone();
+    tokio::task::spawn_blocking(move || restart_live_command_advisers(&restart_app))
+        .await
         .map_err(|_| command_error())?;
     Ok(ModelRoutingPreferenceView { preference })
 }

@@ -1,4 +1,9 @@
 use tauri::{AppHandle, Manager};
+
+use crate::command_services::trusted_lan::{
+    load_optional as load_optional_trusted_lan_config, ModelRoutingPreference,
+};
+use crate::managed_agents::GlobalAgentConfig;
 const ENV_KEYS: &[&str] = &[
     "COMMAND_ADVISER_PERSONA_ID",
     "COMMAND_ADVISER_MEMORY_URL",
@@ -9,7 +14,7 @@ const ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_EXPERIENCE_OUTBOX",
 ];
 
-pub(super) fn is_command_adviser_persona(persona_id: &str) -> bool {
+pub(crate) fn is_command_adviser_persona(persona_id: &str) -> bool {
     matches!(
         persona_id,
         "builtin:command-chief-of-staff"
@@ -21,6 +26,51 @@ pub(super) fn is_command_adviser_persona(persona_id: &str) -> bool {
             | "builtin:command-reporting"
             | "builtin:command-plans"
     )
+}
+
+pub(crate) fn qualified_local_model(
+    persona_id: Option<&str>,
+    runtime: Option<&crate::managed_agents::KnownAcpRuntime>,
+) -> Option<&'static str> {
+    (persona_id.is_some_and(is_command_adviser_persona)
+        && runtime.is_some_and(|runtime| runtime.id == "buzz-lmstudio-agent"))
+    .then_some(crate::commands::QUALIFIED_INSTANCE_ID)
+}
+
+pub(crate) fn should_publish_agent_output(
+    persona_id: Option<&str>,
+    runtime: Option<&crate::managed_agents::KnownAcpRuntime>,
+) -> bool {
+    persona_id.is_some_and(is_command_adviser_persona)
+        && runtime.is_some_and(|runtime| runtime.id == "buzz-lmstudio-agent")
+}
+
+pub(crate) fn routed_global_agent_config_for_app(
+    app: &AppHandle,
+    persona_id: Option<&str>,
+    global: &GlobalAgentConfig,
+) -> GlobalAgentConfig {
+    if !persona_id.is_some_and(is_command_adviser_persona) {
+        return global.clone();
+    }
+    let preference = app
+        .path()
+        .app_config_dir()
+        .ok()
+        .and_then(|directory| {
+            load_optional_trusted_lan_config(&directory.join("trusted-lan-sources.json"))
+                .ok()
+                .flatten()
+        })
+        .map(|config| config.routing_preference());
+    if preference != Some(ModelRoutingPreference::LocalFirst) {
+        return global.clone();
+    }
+    let mut routed = global.clone();
+    routed.preferred_runtime = Some("buzz-lmstudio-agent".to_string());
+    routed.model = Some(crate::commands::QUALIFIED_INSTANCE_ID.to_string());
+    routed.provider = Some("lmstudio-native".to_string());
+    routed
 }
 
 pub(super) fn should_enable_mcp_hooks(

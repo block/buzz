@@ -17,6 +17,7 @@ use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRoll
 mod admission;
 #[path = "agent_models/lmstudio.rs"]
 mod lmstudio;
+pub(crate) use admission::QUALIFIED_INSTANCE_ID;
 #[allow(unused_imports)]
 pub use admission::{OfflineModelAdmission, OfflineModelAdmissionState, OfflineRuntimeIdentity};
 #[cfg(test)]

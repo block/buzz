@@ -611,6 +611,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Whether native ACP message chunks should be posted as the agent reply.
+    pub publish_agent_output: bool,
     /// Optional derived active-memory service. Failure always degrades to core and context.
     pub active_memory: Option<crate::engram_recall::ActiveMemoryClient>,
 }
@@ -2245,6 +2247,22 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            if ctx.publish_agent_output {
+                if let (Some(output), Some(batch)) =
+                    (agent.acp.take_agent_message_output(), batch.as_ref())
+                {
+                    if let Some(trigger) = batch.events.last() {
+                        publish_agent_output(
+                            &ctx.rest_client,
+                            batch.channel_id,
+                            &trigger.event,
+                            &output,
+                        )
+                        .await;
+                    }
+                }
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -4013,6 +4031,61 @@ pub(crate) async fn post_failure_notice(
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+    }
+}
+
+fn build_agent_output_event(
+    channel_id: Uuid,
+    trigger: &nostr::Event,
+    content: &str,
+) -> Result<nostr::EventBuilder, buzz_sdk::SdkError> {
+    let trigger_tags = crate::queue::parse_thread_tags(trigger);
+    let root_event_id = trigger_tags
+        .root_event_id
+        .as_deref()
+        .and_then(|value| nostr::EventId::from_hex(value).ok())
+        .unwrap_or(trigger.id);
+    let thread_ref = buzz_sdk::ThreadRef {
+        root_event_id,
+        parent_event_id: trigger.id,
+    };
+    let author = trigger.pubkey.to_hex();
+    buzz_sdk::build_message(
+        channel_id,
+        content,
+        Some(&thread_ref),
+        &[author.as_str()],
+        false,
+        &[],
+    )
+}
+
+async fn publish_agent_output(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    trigger: &nostr::Event,
+    content: &str,
+) {
+    let builder = match build_agent_output_event(channel_id, trigger, content) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, "agent output: build failed: {error}");
+            return;
+        }
+    };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, "agent output: sign failed: {error}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => tracing::info!(channel = %channel_id, "agent output published"),
+        Ok(Err(error)) => {
+            tracing::warn!(channel = %channel_id, "agent output publish failed: {error}")
+        }
+        Err(_) => tracing::warn!(channel = %channel_id, "agent output publish timed out"),
     }
 }
 
@@ -6632,6 +6705,32 @@ mod tests {
         make_prompt_context_impl(&agent_keys, None)
     }
 
+    #[test]
+    fn local_agent_output_replies_to_triggering_message() {
+        let keys = nostr::Keys::generate();
+        let author = nostr::Keys::generate();
+        let channel_id = uuid::Uuid::new_v4();
+        let trigger = buzz_sdk::build_message(channel_id, "test", None, &[], false, &[])
+            .expect("build trigger")
+            .sign_with_keys(&author)
+            .expect("sign trigger");
+
+        let event = build_agent_output_event(channel_id, &trigger, "LOCAL NAV READY")
+            .expect("build output")
+            .sign_with_keys(&keys)
+            .expect("sign output");
+        let tags = crate::queue::parse_thread_tags(&event);
+        let trigger_id = trigger.id.to_hex();
+
+        assert_eq!(tags.root_event_id.as_deref(), Some(trigger_id.as_str()));
+        assert_eq!(tags.parent_event_id.as_deref(), Some(trigger_id.as_str()));
+        assert!(tags
+            .mentioned_pubkeys
+            .iter()
+            .any(|value| value == &author.public_key().to_hex()));
+        assert_eq!(event.content, "LOCAL NAV READY");
+    }
+
     fn make_prompt_context_with_owner(
         agent_keys: &nostr::Keys,
         owner_pubkey: nostr::PublicKey,
@@ -6680,6 +6779,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            publish_agent_output: false,
             active_memory: None,
         }
     }

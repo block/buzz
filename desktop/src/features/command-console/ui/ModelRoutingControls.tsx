@@ -26,8 +26,8 @@ export function ModelRoutingControls({
             Adviser model routing
           </h2>
           <p className="mt-1 max-w-2xl text-sm text-slate-300">
-            Choose the first provider for the next brief; fallback remains
-            automatic.
+            Choose cloud or local models for Command Team chats and the next
+            brief. Running advisers restart when this changes.
           </p>
         </div>
         <fieldset className="flex flex-wrap gap-2">

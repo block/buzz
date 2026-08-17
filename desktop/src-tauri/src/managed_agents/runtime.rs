@@ -34,6 +34,9 @@ pub(crate) use lmstudio::{
 };
 
 mod command_adviser;
+pub(crate) use command_adviser::{
+    is_command_adviser_persona, qualified_local_model, routed_global_agent_config_for_app,
+};
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -146,6 +149,9 @@ pub fn build_managed_agent_summary(
 ) -> Result<ManagedAgentSummary, String> {
     use crate::managed_agents::BackendKind;
 
+    let routed_global =
+        routed_global_agent_config_for_app(app, record.persona_id.as_deref(), global_config);
+
     // Community-scoped truth: this summary describes the pair for the active
     // workspace relay. An agent running only in another community must read
     // as stopped here — matching by pubkey alone would show every community a
@@ -204,12 +210,10 @@ pub fn build_managed_agent_summary(
 
     let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
 
-    let global_for_summary =
-        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
         record,
         personas,
-        &global_for_summary,
+        &routed_global,
     );
     let (effective_model, effective_provider, effective_prompt, model_source) = match effective_cfg
     {
@@ -232,6 +236,15 @@ pub fn build_managed_agent_summary(
             (None, None, None, None)
         }
     };
+    let effective_model = qualified_local_model(
+        record.persona_id.as_deref(),
+        routed_global
+            .preferred_runtime
+            .as_deref()
+            .and_then(known_acp_runtime),
+    )
+    .map(str::to_string)
+    .or(effective_model);
 
     // Restart badge: the running process stamped the effective spawn config
     // it was launched with; recompute a prospective one from current disk
@@ -260,7 +273,7 @@ pub fn build_managed_agent_summary(
             personas,
             &teams,
             &key.relay_url,
-            global_config,
+            &routed_global,
         );
         (runtime, current)
     });
@@ -283,7 +296,7 @@ pub fn build_managed_agent_summary(
     let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
         record,
         personas,
-        global_config,
+        &routed_global,
     )
     .unwrap_or_else(|e| {
         // Dangling harness — surface the missing id so the UI tells the same
@@ -432,6 +445,7 @@ pub fn spawn_agent_child(
     // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
     // and for the env-var merge at spawn time.
     let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let global = routed_global_agent_config_for_app(app, record.persona_id.as_deref(), &global);
 
     // Resolve model/provider/prompt ONCE, here, at the shared spawn boundary —
     // the single source both the env writes below and the spawn-config snapshot
@@ -718,7 +732,9 @@ pub fn spawn_agent_child(
     #[cfg(feature = "mesh-llm")]
     let mesh_model_id = effective_cfg.relay_mesh_model_id();
     let effective_prompt = effective_cfg.system_prompt.value;
-    let effective_model = effective_cfg.model.value;
+    let effective_model = qualified_local_model(record.persona_id.as_deref(), runtime_meta)
+        .map(str::to_string)
+        .or(effective_cfg.model.value);
     let effective_provider = effective_cfg.provider.value;
 
     if let Some(prompt) = &effective_prompt {
@@ -730,6 +746,11 @@ pub fn spawn_agent_child(
         command.env("BUZZ_ACP_MODEL", model);
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
+    }
+    if command_adviser::should_publish_agent_output(record.persona_id.as_deref(), runtime_meta) {
+        command.env("BUZZ_ACP_PUBLISH_AGENT_OUTPUT", "true");
+    } else {
+        command.env_remove("BUZZ_ACP_PUBLISH_AGENT_OUTPUT");
     }
     // Session title for the harness to pass out-of-band on `session/new`. The
     // adapter names the session after it; it never reaches the prompt, so this
