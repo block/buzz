@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use buzz_core::reasoning::{resolve_anthropic_thinking, AnthropicThinking, ThinkingEffort};
 use clap::Parser;
 use clap::ValueEnum;
 use nostr::Keys;
@@ -47,6 +48,10 @@ pub enum ConfigError {
     ConfigFile(String),
 }
 
+/// Shared effort selector used by the native runner and external ACP harnesses.
+pub const THINKING_EFFORT_ENV: &str = "BUZZ_AGENT_THINKING_EFFORT";
+const CLAUDE_UNRESOLVED_MODEL_MESSAGE: &str =
+    "resolved BUZZ_AGENT_THINKING_EFFORT for Claude: model name does not identify a versioned Claude family, omitting thinking options; use a canonical model ID through Custom model... (for example, claude-opus-5[1m])";
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum SubscribeMode {
     Mentions,
@@ -423,6 +428,10 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Reasoning effort translated to the configured external ACP harness.
+    #[arg(long, env = "BUZZ_AGENT_THINKING_EFFORT")]
+    pub thinking_effort: Option<String>,
+
     /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
     /// `_meta`. Adapters that recognize it name the session after this value;
     /// others ignore it. Never enters the prompt.
@@ -540,6 +549,8 @@ pub struct Config {
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Validated reasoning effort. `None` preserves the harness default.
+    pub thinking_effort: Option<ThinkingEffort>,
     /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
     /// `None` when unset or when the configured value sanitized to empty.
     pub session_title: Option<String>,
@@ -706,6 +717,112 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
             _ => character,
         })
         .collect()
+}
+
+/// Map the shared effort axis to Codex's supported range.
+///
+/// Codex has no `none` or `max`: saturate those endpoints to its documented
+/// minimum and maximum (`minimal` and `xhigh`) rather than dropping the setting.
+pub(crate) fn codex_reasoning_effort(effort: ThinkingEffort) -> &'static str {
+    match effort {
+        ThinkingEffort::None | ThinkingEffort::Minimal => "minimal",
+        ThinkingEffort::Low => "low",
+        ThinkingEffort::Medium => "medium",
+        ThinkingEffort::High => "high",
+        ThinkingEffort::XHigh | ThinkingEffort::Max => "xhigh",
+    }
+}
+
+pub(crate) fn codex_reasoning_effort_for_command(
+    command: &str,
+    effort: Option<ThinkingEffort>,
+) -> Option<&'static str> {
+    matches!(
+        normalize_agent_command_identity(command).as_str(),
+        "codex" | "codex-acp"
+    )
+    .then(|| effort.map(codex_reasoning_effort))
+    .flatten()
+}
+
+/// Build the Claude Agent SDK options sent through `_meta.claudeCode.options`.
+///
+/// Unknown model families deliberately return `None`; guessing adaptive versus
+/// manual thinking can produce an invalid SDK request. `none`/`minimal` are
+/// rejected during startup for Claude and remain defensive omissions here.
+pub(crate) fn claude_thinking_options(
+    model: &str,
+    effort: ThinkingEffort,
+) -> Option<serde_json::Value> {
+    if matches!(effort, ThinkingEffort::None | ThinkingEffort::Minimal) {
+        return None;
+    }
+    match resolve_anthropic_thinking(model, effort)? {
+        AnthropicThinking::Adaptive { effort } => Some(serde_json::json!({
+            "effort": effort.as_str(),
+            "thinking": { "type": "adaptive" }
+        })),
+        AnthropicThinking::ManualBudget { budget_tokens } => Some(serde_json::json!({
+            "thinking": { "type": "enabled", "budgetTokens": budget_tokens }
+        })),
+    }
+}
+
+fn resolve_thinking_effort(
+    raw: Option<&str>,
+    agent_command: &str,
+    model: Option<&str>,
+) -> Result<Option<ThinkingEffort>, ConfigError> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let effort = raw
+        .parse::<ThinkingEffort>()
+        .map_err(ConfigError::ConfigFile)?;
+    let harness = normalize_agent_command_identity(agent_command);
+    match harness.as_str() {
+        "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+            if matches!(effort, ThinkingEffort::None | ThinkingEffort::Minimal) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "{THINKING_EFFORT_ENV}={} is not supported by claude-agent-acp; accepted Claude values: low|medium|high|xhigh|max",
+                    effort.as_str()
+                )));
+            }
+            match model.and_then(|model| claude_thinking_options(model, effort)) {
+                Some(options) => tracing::info!(
+                    effort = effort.as_str(),
+                    model = model.unwrap_or_default(),
+                    options = %options,
+                    "resolved BUZZ_AGENT_THINKING_EFFORT for Claude via session/new _meta.claudeCode.options"
+                ),
+                None => tracing::info!(
+                    effort = effort.as_str(),
+                    model = model.unwrap_or("<unset>"),
+                    "{CLAUDE_UNRESOLVED_MODEL_MESSAGE}"
+                ),
+            }
+        }
+        "codex" | "codex-acp" => tracing::info!(
+            effort = effort.as_str(),
+            model_reasoning_effort = codex_reasoning_effort(effort),
+            "resolved BUZZ_AGENT_THINKING_EFFORT for Codex via merged CODEX_CONFIG"
+        ),
+        "buzz-agent" => tracing::info!(
+            effort = effort.as_str(),
+            "resolved BUZZ_AGENT_THINKING_EFFORT for native buzz-agent via inherited environment"
+        ),
+        "opencode" | "opencode-acp" => {
+            return Err(ConfigError::ConfigFile(format!(
+                "{THINKING_EFFORT_ENV} is not supported for opencode: OPENCODE_CONFIG is a file path and buzz-acp will not create or rewrite user config files; remove the variable or configure agent.build.variant in opencode"
+            )));
+        }
+        _ => {
+            return Err(ConfigError::ConfigFile(format!(
+                "{THINKING_EFFORT_ENV} is set but harness `{harness}` has no supported effort translation; supported harnesses: claude-agent-acp, codex-acp, buzz-agent"
+            )));
+        }
+    }
+    Ok(Some(effort))
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
@@ -1056,7 +1173,20 @@ impl Config {
         // Spawned desktop agents now carry a complete instance snapshot. Team
         // instructions arrive independently so they can be layered at runtime.
         let mut persona_env_vars = Vec::new();
-        let model = args.model;
+        let model = args.model.filter(|value| !value.trim().is_empty());
+        let thinking_effort = resolve_thinking_effort(
+            args.thinking_effort.as_deref(),
+            &agent_command,
+            model.as_deref(),
+        )?;
+        if normalize_agent_command_identity(&agent_command) == "buzz-agent" {
+            if let Some(effort) = thinking_effort {
+                // Environment-launched agents inherit this naturally. Also add
+                // it explicitly so the equivalent --thinking-effort CLI flag
+                // reaches the native child when no parent variable exists.
+                persona_env_vars.push((THINKING_EFFORT_ENV.into(), effort.as_str().into()));
+            }
+        }
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
@@ -1105,6 +1235,7 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            thinking_effort,
             session_title: args
                 .session_title
                 .as_deref()
@@ -1480,6 +1611,7 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            thinking_effort: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
@@ -2981,5 +3113,123 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+    #[test]
+    fn codex_effort_matrix_saturates_only_unsupported_endpoints() {
+        use buzz_core::reasoning::ThinkingEffort::*;
+        for (input, expected) in [
+            (None, "minimal"),
+            (Minimal, "minimal"),
+            (Low, "low"),
+            (Medium, "medium"),
+            (High, "high"),
+            (XHigh, "xhigh"),
+            (Max, "xhigh"),
+        ] {
+            assert_eq!(codex_reasoning_effort(input), expected);
+        }
+    }
+
+    #[test]
+    fn claude_adaptive_effort_matrix_preserves_high_xhigh_and_max() {
+        use buzz_core::reasoning::ThinkingEffort::*;
+        for effort in [Low, Medium, High, XHigh, Max] {
+            let options = claude_thinking_options("claude-opus-4-8", effort).unwrap();
+            assert_eq!(options["thinking"]["type"], "adaptive");
+            assert_eq!(options["effort"], effort.as_str());
+        }
+        assert_ne!(
+            claude_thinking_options("claude-opus-4-8", High).unwrap()["effort"],
+            claude_thinking_options("claude-opus-4-8", XHigh).unwrap()["effort"]
+        );
+        assert_ne!(
+            claude_thinking_options("claude-opus-4-8", High).unwrap()["effort"],
+            claude_thinking_options("claude-opus-4-8", Max).unwrap()["effort"]
+        );
+    }
+
+    #[test]
+    fn claude_legacy_effort_matrix_uses_manual_budgets() {
+        use buzz_core::reasoning::ThinkingEffort::*;
+        for (effort, budget) in [
+            (Low, 1_024),
+            (Medium, 8_192),
+            (High, 32_768),
+            (XHigh, 32_768),
+            (Max, 32_768),
+        ] {
+            let options = claude_thinking_options("claude-opus-4-5", effort).unwrap();
+            assert_eq!(options["thinking"]["type"], "enabled");
+            assert_eq!(options["thinking"]["budgetTokens"], budget);
+            assert!(options.get("effort").is_none());
+        }
+    }
+
+    #[test]
+    fn claude_unknown_model_and_non_anthropic_levels_omit_options() {
+        use buzz_core::reasoning::ThinkingEffort::{Max, Minimal, None as NoEffort};
+        assert_eq!(claude_thinking_options("claude-future-9", Max), None);
+        assert_eq!(claude_thinking_options("claude-opus-4-8", NoEffort), None);
+        assert_eq!(claude_thinking_options("claude-opus-4-8", Minimal), None);
+    }
+
+    #[test]
+    fn claude_context_suffixes_produce_named_adaptive_effort() {
+        use buzz_core::reasoning::ThinkingEffort::Medium;
+        for model in [
+            "claude-fable-5[1m]",
+            "claude-opus-5[1m]",
+            "goose-claude-fable-5[1m]",
+        ] {
+            let options = claude_thinking_options(model, Medium).unwrap();
+            assert_eq!(options["thinking"]["type"], "adaptive", "model: {model}");
+            assert_eq!(options["effort"], "medium", "model: {model}");
+        }
+    }
+
+    #[test]
+    fn unresolved_claude_alias_omits_options_with_actionable_message() {
+        use buzz_core::reasoning::ThinkingEffort::Medium;
+        for alias in ["opus", "opus[1m]", "sonnet", "haiku"] {
+            assert_eq!(
+                claude_thinking_options(alias, Medium),
+                None,
+                "alias: {alias}"
+            );
+        }
+        assert!(CLAUDE_UNRESOLVED_MODEL_MESSAGE.contains("versioned Claude family"));
+        assert!(CLAUDE_UNRESOLVED_MODEL_MESSAGE.contains("Custom model..."));
+        assert!(CLAUDE_UNRESOLVED_MODEL_MESSAGE.contains("claude-opus-5[1m]"));
+    }
+
+    #[test]
+    fn thinking_effort_absent_or_blank_preserves_current_behavior() {
+        assert_eq!(
+            resolve_thinking_effort(None, "codex-acp", Some("gpt-5")).expect("unset is valid"),
+            None
+        );
+        assert_eq!(
+            resolve_thinking_effort(Some("  "), "claude-agent-acp", Some("claude-opus-4-8"))
+                .expect("blank is valid"),
+            None
+        );
+    }
+
+    #[test]
+    fn thinking_effort_invalid_value_lists_every_accepted_value() {
+        let error = resolve_thinking_effort(Some("ultra"), "codex-acp", Some("gpt-5"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("BUZZ_AGENT_THINKING_EFFORT=ultra is invalid"));
+        assert!(error.contains("none|minimal|low|medium|high|xhigh|max"));
+    }
+
+    #[test]
+    fn opencode_refuses_configured_effort_without_writing_a_config_file() {
+        let error = resolve_thinking_effort(Some("max"), "opencode", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("OPENCODE_CONFIG is a file path"));
+        assert!(error.contains("will not create or rewrite user config files"));
     }
 }

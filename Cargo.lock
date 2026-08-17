@@ -892,6 +892,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "buzz-core",
  "dirs",
  "getrandom 0.4.3",
  "hex",
