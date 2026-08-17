@@ -1,7 +1,7 @@
 //! Platform wake notification boundary for same-day schedule catch-up.
 
 #[cfg(any(target_os = "macos", test))]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) type WakeEventHandler = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -17,6 +17,23 @@ pub(crate) trait WakeEventSource {
         &self,
         handler: WakeEventHandler,
     ) -> Result<Box<dyn WakeSubscription>, &'static str>;
+}
+
+/// Stop the owned wake source before process teardown.
+///
+/// The macOS release build exits with `_exit` after shutting down the embedded
+/// model runtime, so process-level Rust destructors do not run. Taking the
+/// subscription explicitly ensures its helper child is terminated first.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn clear_wake_subscription(
+    subscription: &Mutex<Option<Box<dyn WakeSubscription>>>,
+) -> Result<(), &'static str> {
+    let owned = subscription
+        .lock()
+        .map_err(|_| "wake_source_unavailable")?
+        .take();
+    drop(owned);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

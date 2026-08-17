@@ -18,6 +18,12 @@ pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::a
         .shutdown_started
         .store(true, Ordering::SeqCst);
     if !shutdown_done.swap(true, Ordering::SeqCst) {
+        #[cfg(target_os = "macos")]
+        if let Err(error) = crate::command_brief::wake::clear_wake_subscription(
+            &app.state::<AppState>().command_brief_wake_subscription,
+        ) {
+            eprintln!("buzz-desktop: failed to stop workspace wake source: {error}");
+        }
         prevent_sleep::release(&app.state::<AppState>().prevent_sleep);
         app.state::<crate::terminal_runtime::TerminalSessions>()
             .shutdown_all();
@@ -42,6 +48,10 @@ pub(crate) fn install_signal_handler(
             .shutdown_started
             .store(true, Ordering::SeqCst);
         if !shutdown_done.swap(true, Ordering::SeqCst) {
+            #[cfg(target_os = "macos")]
+            let _ = crate::command_brief::wake::clear_wake_subscription(
+                &app.state::<AppState>().command_brief_wake_subscription,
+            );
             app.state::<crate::terminal_runtime::TerminalSessions>()
                 .shutdown_all();
             let _ = shutdown_managed_agents(&app);

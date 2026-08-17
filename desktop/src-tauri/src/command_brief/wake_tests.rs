@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -9,7 +10,7 @@ use super::super::schedule::{
     ScheduledStartError,
 };
 use super::super::store::migrate_command_brief_store;
-use super::{WakeEventHandler, WakeEventSource, WakeSubscription};
+use super::{clear_wake_subscription, WakeEventHandler, WakeEventSource, WakeSubscription};
 
 #[derive(Default)]
 struct FakeWakeSource {
@@ -19,6 +20,29 @@ struct FakeWakeSource {
 struct FakeSubscription;
 
 impl WakeSubscription for FakeSubscription {}
+
+struct DropObservedSubscription(Arc<AtomicBool>);
+
+impl WakeSubscription for DropObservedSubscription {}
+
+impl Drop for DropObservedSubscription {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn clearing_wake_subscription_drops_owned_source() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let subscription: Mutex<Option<Box<dyn WakeSubscription>>> = Mutex::new(Some(Box::new(
+        DropObservedSubscription(Arc::clone(&dropped)),
+    )));
+
+    clear_wake_subscription(&subscription).expect("clear wake subscription");
+
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(subscription.lock().expect("subscription").is_none());
+}
 
 impl WakeEventSource for FakeWakeSource {
     fn subscribe(

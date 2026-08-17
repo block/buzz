@@ -28,11 +28,15 @@ the default learner registry is:
 ~/Library/Application Support/xyz.block.buzz.app/experience-outbox/<agent-pubkey>.skills.sqlite3
 ```
 
-The verified active projection is under:
+The verified active projection is under the selected agent nest. For the
+installed Command Adviser profile, that is:
 
 ```text
-~/.agents/skills/learned-<12 lowercase hex>/
+~/.buzz/.agents/skills/learned-<12 lowercase hex>/
 ```
+
+Development instances use their configured nest (normally `~/.buzz-dev`) in
+the same way. Do not assume a home-level `~/.agents` directory.
 
 Each managed directory contains `SKILL.md` and `.skill-version.json`. Ordinary user-authored skill directories are never replaced or deleted. A malformed managed-looking directory is preserved on disk but ignored by the agent loader.
 
@@ -53,3 +57,33 @@ On startup, durable pending work is retried before rebuild. When no publication 
 5. Back up the test profile, remove its derived registry and managed projection, restart with the relay available, and verify the rebuilt `SKILL.md` hash matches the pre-removal hash.
 
 Never remove the installed application, workspace database, Keychain item, or user-authored skill directories during this recovery test.
+
+## Installed relay compatibility
+
+The Mac-local relay is a separate LaunchAgent binary at:
+
+```text
+~/Library/Application Support/Command Adviser/relay/buzz-relay
+```
+
+An application-only install does not replace it. A release that introduces a
+new signed event kind must also build and atomically replace this relay binary,
+retain a rollback copy, restart `xyz.block.command-adviser.relay`, and verify
+`/health` before running the live promotion canary. Otherwise publication fails
+closed with `restricted: unknown event kind` even though the new app is valid.
+
+## Live acceptance — 17 August 2026
+
+- Two matching Chief of Staff turns queued `learned-7e7658179e34`.
+- The old installed relay rejected kind `30180`; the Phase 4 relay replaced it
+  with a rollback copy retained and accepted kinds `30180` then `30181`.
+- Publication reached `materialized`, and `SKILL.md` plus
+  `.skill-version.json` appeared under the installed `~/.buzz` nest.
+- After restart, the next matching observation recorded the active version it
+  started with and promoted a deterministic child version, proving between-turn
+  reload and continued learning.
+- The application was signed with the stable Developer ID identity. Two
+  controlled restarts produced no Keychain prompt.
+- Shutdown now explicitly drops the Apple workspace-wake subscription before
+  the release build's `_exit`; the second restart retained exactly one watcher
+  and nine managed ACP processes.
