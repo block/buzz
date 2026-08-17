@@ -117,6 +117,12 @@ fn reconcile_inbound_persona_event_blocking(
     if let Some(managed_agent) = &inbound_managed_agent {
         validate_inbound_managed_agent_definition(managed_agent)?;
     }
+    let inbound_team = (kind == KIND_TEAM)
+        .then(|| team_content_from_event(&event))
+        .transpose()?;
+    if let Some(team) = &inbound_team {
+        validate_inbound_team_definition(team)?;
+    }
     let d_tag = match &inbound_persona {
         Some(persona) => persona_d_tag(persona),
         None => event_d_tag(&event)?,
@@ -168,7 +174,11 @@ fn reconcile_inbound_persona_event_blocking(
         }
         KIND_TEAM => {
             let mut teams = load_teams(&app)?;
-            apply_inbound_team(&mut teams, d_tag, team_content_from_event(&event)?);
+            // Parsed and validated above, before retention. Mirrors the
+            // managed-agent branch below rather than asserting the invariant.
+            let team = inbound_team
+                .ok_or_else(|| "team content was not parsed before retention".to_string())?;
+            apply_inbound_team(&mut teams, d_tag, team);
             save_teams(&app, &teams)?;
         }
         KIND_MANAGED_AGENT => {
@@ -196,6 +206,19 @@ fn validate_inbound_persona_definition(persona: &AgentDefinition) -> Result<(), 
         &persona.system_prompt,
     )
     .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))
+}
+
+/// Team `instructions` are runtime-layered into every member deployment, so an
+/// inbound team carries executable text under the same review contract as a
+/// persona. The wire type is a double option: absent means "publisher predates
+/// always-publish, preserve local" and `null` means "explicitly cleared" --
+/// neither delivers text to validate.
+fn validate_inbound_team_definition(team: &TeamEventContent) -> Result<(), String> {
+    crate::managed_agents::validate_team_definition_text(
+        &team.name,
+        team.instructions.clone().flatten().as_deref(),
+    )
+    .map_err(|error| format!("Inbound team definition is unsafe: {error}"))
 }
 
 fn validate_inbound_managed_agent_definition(
