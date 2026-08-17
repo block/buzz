@@ -537,3 +537,74 @@ Escalation path if 30024 persists for hours: collect at least three
 
 This also demotes Toll-Free Verification from the critical path to a redundant
 second route. It remains `IN_REVIEW`.
+
+---
+
+## 2026-08-17: three bugs fixed and deployed; reconciling an edited migration
+
+A real handset through the loop surfaced three defects, all now live on
+`buzz-relay-sms` (deployment `8cd009fd`, commit `70a5477`).
+
+**The reported symptom was misread at first.** The sender got "your number
+isn't linked to a project yet" and reasonably heard it as an allow-list
+rejection. It was not — the allow-list passed, and the agent would never have
+woken otherwise. That was the persona's own wording for a NULL
+`default_project`. Worth remembering when triaging: the inbound handler is
+deliberately non-oracular and never tells a sender *why* it refused, so any
+explanatory text reaching a handset came from the agent, not the gate.
+
+### What the fixes were
+
+1. `sms_sink` had **no kind filter**, gating only on inbox-channel membership
+   plus an `e` tag resolving to something with `sms_from`. The harness's own
+   bookkeeping reactions (kind:7 `👀` on pickup, `💬` while working) satisfy
+   both, so each was texted to the sender — three messages per inbound, two of
+   them emoji. The harness deletes those reactions seconds later (kind:5), but
+   an SMS cannot be recalled.
+2. Nothing wrote `sms_identities.default_project`. Added `kind:9046`,
+   executed-not-stored like the 9040-series, plus `buzz sms set-route`.
+3. The webhook answered `application/json`; Twilio logged **12300 Invalid
+   Content-Type** against every inbound. Now `204`.
+
+### Verified live, not assumed
+
+A genuinely Twilio-signed webhook against the deployed relay returned
+**`HTTP 204` with a zero-byte body** (fix 3 confirmed). The event landed as
+kind:9, the harness reacted `👀` and `💬` — and **zero outbound texts were
+sent** (fix 1 confirmed: those same two reactions produced two SMS on the
+previous build).
+
+### Reconciling an already-applied migration
+
+Correcting `0032` in place broke the next deploy outright:
+`migration 32 was previously applied but has been modified`. sqlx stores a
+**SHA-384 of the migration file's bytes** and re-checks every boot.
+
+Rather than drop the table, the fix was an in-place `ALTER` plus a checksum
+update — no data loss. The method was verified before being trusted: SHA-384
+of the *old* file (from git, LF endings as the Linux build sees them)
+reproduced the checksum already stored in the database exactly, which proves
+the algorithm before relying on it for the new value.
+
+```
+old file sha384 == stored checksum   e59e3a71…ede33   (verified match)
+new file sha384                      8898ef2c…d178a   (installed)
+```
+
+Script kept at `C:/Users/mfeth/sms-postgres-backups/reconcile_migration_0032.sh`.
+
+**Why 0032 needed correcting at all:** `phone_number` alone as the primary key
+violated the repo's tenant-scoping guard *and* made a phone number globally
+unique across the entire relay — one community registering a number would
+have silently denied it to every other. The key now leads with `community_id`.
+Because the inbound webhook resolves a number *before* it knows the community,
+`get_sms_identity` keeps its phone-only lookup but now pins the winner
+explicitly (oldest registration) instead of leaving it to the planner.
+
+### Open: the harness went quiet
+
+In the same test the agent reacted but **never posted a reply**. The relay is
+not implicated — `sms_sink` logged nothing at all, which is the correct
+silence for "no reply event existed". The harness process had been up ~36
+hours and still held the pre-edit persona, so it needs restarting regardless;
+whether the silence is staleness or an agent-subprocess failure is unproven.
