@@ -187,7 +187,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     }}
                     title={
                       isAddressLocked
-                        ? "Address locked — click to make one-shot"
+                        ? "Address locked — click to stop keeping addressed"
                         : "Keep addressed after sending"
                     }
                     type="button"

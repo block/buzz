@@ -40,6 +40,7 @@ import {
   getErrorMessage,
   isManagedAgentRunning,
   isProviderBackedAgent,
+  mergeMentionRecipients,
   MENTION_REFERENCE_TAG,
   mergeOutgoingTagsWithReferenceMentions,
   type PendingNonMemberMentionSend,
@@ -70,10 +71,7 @@ type UseMentionSendFlowOptions = {
       forceRest?: boolean,
     ) => Promise<void>
   >;
-  richText: Pick<
-    UseRichTextEditorResult,
-    "clearContent" | "setContent" | "restorePlainTextAndFocusEnd"
-  >;
+  richText: Pick<UseRichTextEditorResult, "clearContent" | "setContent">;
   setContent: (content: string) => void;
   setIsEmojiPickerOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setPendingImeta: (pendingImeta: ImetaMedia[]) => void;
@@ -83,7 +81,6 @@ type UseMentionSendFlowOptions = {
   setSpoileredAttachmentUrls?: React.Dispatch<
     React.SetStateAction<Set<string>>
   >;
-  resolvePostSendContent?: () => string;
 };
 export function useMentionSendFlow({
   channelId,
@@ -104,7 +101,6 @@ export function useMentionSendFlow({
   clearQueuedAttachments,
   restoreQueuedAttachments,
   setSpoileredAttachmentUrls,
-  resolvePostSendContent,
 }: UseMentionSendFlowOptions) {
   const [pendingNonMemberSend, setPendingNonMemberSend] =
     React.useState<PendingNonMemberMentionSend | null>(null);
@@ -312,39 +308,31 @@ export function useMentionSendFlow({
     ],
   );
 
-  const clearComposer = React.useCallback(
-    (postSendContent = "") => {
-      setPendingNonMemberSend(null);
-      setNonMemberPromptError(null);
-      setContent(postSendContent);
-      contentRef.current = postSendContent;
-      if (postSendContent) {
-        richText.restorePlainTextAndFocusEnd(postSendContent);
-        mentions.cancelMentionAutocomplete();
-      } else richText.clearContent();
-      setPendingImeta([]);
-      clearQueuedAttachments();
-      setSpoileredAttachmentUrls?.(new Set());
-      if (!postSendContent) mentions.clearMentions();
-      channelLinks.clearChannels();
-      emojiAutocomplete.clearEmojis();
-      setIsEmojiPickerOpen(false);
-    },
-    [
-      channelLinks.clearChannels,
-      contentRef,
-      emojiAutocomplete.clearEmojis,
-      mentions.cancelMentionAutocomplete,
-      mentions.clearMentions,
-      richText.clearContent,
-      richText.restorePlainTextAndFocusEnd,
-      setContent,
-      setIsEmojiPickerOpen,
-      setPendingImeta,
-      clearQueuedAttachments,
-      setSpoileredAttachmentUrls,
-    ],
-  );
+  const clearComposer = React.useCallback(() => {
+    setPendingNonMemberSend(null);
+    setNonMemberPromptError(null);
+    setContent("");
+    contentRef.current = "";
+    richText.clearContent();
+    setPendingImeta([]);
+    clearQueuedAttachments();
+    setSpoileredAttachmentUrls?.(new Set());
+    mentions.clearMentions();
+    channelLinks.clearChannels();
+    emojiAutocomplete.clearEmojis();
+    setIsEmojiPickerOpen(false);
+  }, [
+    channelLinks.clearChannels,
+    contentRef,
+    emojiAutocomplete.clearEmojis,
+    mentions.clearMentions,
+    richText.clearContent,
+    setContent,
+    setIsEmojiPickerOpen,
+    setPendingImeta,
+    clearQueuedAttachments,
+    setSpoileredAttachmentUrls,
+  ]);
 
   React.useEffect(() => {
     if (previousChannelIdRef.current === channelId) {
@@ -605,7 +593,7 @@ export function useMentionSendFlow({
           draft.capturedChannelId === channelIdRef.current ||
           channelIdRef.current === null
         ) {
-          clearComposer(resolvePostSendContent?.());
+          clearComposer();
         }
 
         if (!preparedUpload) {
@@ -637,7 +625,6 @@ export function useMentionSendFlow({
       mentions.revalidateMentionPubkeys,
       onPrepareSendChannel,
       onSendRef,
-      resolvePostSendContent,
       richText.setContent,
       setContent,
       setPendingImeta,
@@ -650,6 +637,7 @@ export function useMentionSendFlow({
   );
   const sendMessageWithMentionFlow = React.useCallback(
     async ({
+      addressedAgentPubkeys = [],
       capturedChannelId,
       capturedThreadContext = null,
       pendingImeta,
@@ -680,7 +668,11 @@ export function useMentionSendFlow({
           isThreadReply: capturedThreadContext != null,
           channelType,
           extractMentionPersonas: mentions.extractMentionPersonas,
-          extractMentionPubkeys: mentions.extractMentionPubkeys,
+          extractMentionPubkeys: (text) =>
+            mergeMentionRecipients(
+              mentions.extractMentionPubkeys(text),
+              addressedAgentPubkeys,
+            ),
           isAgentPubkey: mentions.isAgentPubkey,
           hasResolvedMembers: mentions.hasResolvedMembers,
           memberPubkeys: mentions.memberPubkeys,
@@ -725,7 +717,10 @@ export function useMentionSendFlow({
           ...mentions.extractMentionPubkeys(trimmed),
           ...createdPersonaAgentPubkeys,
         ]);
-        const pubkeys = explicitMentionPubkeys;
+        const pubkeys = mergeMentionRecipients(
+          explicitMentionPubkeys,
+          addressedAgentPubkeys,
+        );
         const outgoingTags = [
           ...buildCustomEmojiTags(trimmed, customEmoji),
           ...linkPreviewTags,

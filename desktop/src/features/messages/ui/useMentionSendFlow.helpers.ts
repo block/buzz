@@ -34,6 +34,7 @@ export type PendingNonMemberMentionSend = {
 };
 
 export type SendMessageWithMentionFlowInput = {
+  addressedAgentPubkeys?: readonly string[];
   capturedChannelId: string | null;
   capturedThreadContext?: PendingNonMemberMentionSend["capturedThreadContext"];
   pendingImeta: ImetaMedia[];
@@ -82,6 +83,16 @@ export function getErrorMessage(error: unknown, fallback: string) {
 
 export function uniqueNormalizedPubkeys(pubkeys: Iterable<string>) {
   return [...new Set([...pubkeys].map(normalizePubkey))].filter(Boolean);
+}
+
+export function mergeMentionRecipients(
+  explicitMentionPubkeys: Iterable<string>,
+  addressedAgentPubkeys: Iterable<string>,
+) {
+  return uniqueNormalizedPubkeys([
+    ...explicitMentionPubkeys,
+    ...addressedAgentPubkeys,
+  ]);
 }
 
 export function isManagedAgentRunning(agent: ManagedAgent) {

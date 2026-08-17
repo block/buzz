@@ -24,7 +24,10 @@ import {
   useBackgroundMediaUpload,
 } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
+import {
+  getPersistentAgentAudienceScope,
+  usePersistentAgentAudience,
+} from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   hasMentionClipboardHtml,
@@ -42,6 +45,7 @@ import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
+import { ComposerAddressLocks } from "./ComposerAddressLocks";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
@@ -53,7 +57,6 @@ import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
-import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
@@ -276,7 +279,6 @@ function MessageComposerImpl({
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
-      persistentMentionHydrationRef.current?.reconcile(text);
       if (text.trim().length > 0) {
         notifyTyping();
       }
@@ -292,18 +294,7 @@ function MessageComposerImpl({
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
   onLinkShortcutRef.current = linkEditor.openFromShortcut;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
-  const persistentMentionHydration = usePersistentAgentMentionHydration({
-    audienceScope,
-    hydrationKey: effectiveDraftKey,
-    isEditing: editTarget != null,
-    mentions,
-    richText,
-  });
-  const persistentAudience = persistentMentionHydration.audience;
-  const persistentMentionHydrationRef = React.useRef(
-    persistentMentionHydration,
-  );
-  persistentMentionHydrationRef.current = persistentMentionHydration;
+  const persistentAudience = usePersistentAgentAudience(audienceScope);
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -325,7 +316,6 @@ function MessageComposerImpl({
     clearQueuedAttachments: media.clearQueuedAttachments,
     restoreQueuedAttachments: media.restoreQueuedAttachments,
     setSpoileredAttachmentUrls,
-    resolvePostSendContent: persistentMentionHydration.resolvePostSendContent,
   });
   React.useEffect(() => {
     onDeferredEditPendingChange?.(isDeferredEditPending);
@@ -391,7 +381,6 @@ function MessageComposerImpl({
     if (!replyTarget || composerDisabled) return;
     richText.focusPreserve();
   }, [composerDisabled, replyTarget, richText.focusPreserve]);
-  // ── Autofocus on mount / channel switch ─────────────────────────────
   useComposerAutofocus(richText.focus, effectiveDraftKey, composerDisabled);
   // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
   // applies it as a single ProseMirror transaction (no markdown round-trip).
@@ -417,12 +406,13 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
-  const { lockedAgentPubkeys, toggleAgentAddressLock } =
+  const { lockedAgents, lockedAgentPubkeys, toggleAgentAddressLock } =
     useAgentAddressLockPicker({
       applyAutocompleteEdit,
       audience: persistentAudience,
       audienceScope,
       mentions,
+      profiles,
       richText,
     });
   const applyChannelInsert = React.useCallback(
@@ -573,7 +563,6 @@ function MessageComposerImpl({
     }
     isSubmitLockedRef.current = true;
     onPreparingMentionSendChange?.(true);
-    persistentMentionHydration.beginSubmit();
     try {
       const preparedLinkPreviews = getReadyLinkPreviewTags().some(
         (tag) => tag[1] === "none",
@@ -581,6 +570,7 @@ function MessageComposerImpl({
         ? null
         : prepareBackgroundLinkPreviews(getLiveLinkPreviewCandidates());
       await mentionSendFlow.sendMessageWithMentionFlow({
+        addressedAgentPubkeys: persistentAudience.pubkeys,
         capturedChannelId: channelId,
         capturedThreadContext,
         pendingImeta: currentPendingImeta,
@@ -597,7 +587,6 @@ function MessageComposerImpl({
       });
     } finally {
       isSubmitLockedRef.current = false;
-      persistentMentionHydration.endSubmit();
       onPreparingMentionSendChange?.(false);
     }
   }, [
@@ -624,7 +613,7 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
-    persistentMentionHydration,
+    persistentAudience.pubkeys,
     isEditSubmissionLocked,
     effectiveDraftKey,
     mentions.getDraftMentionRefs,
@@ -933,26 +922,37 @@ function MessageComposerImpl({
             ) : null}
 
             {composerLinkPreviews}
-            {(media.pendingImeta.length > 0 ||
+            {((lockedAgents.length > 0 && editTarget == null) ||
+              media.pendingImeta.length > 0 ||
               media.queuedAttachments.length > 0 ||
               media.isUploading) && (
-              <div className="mb-2 flex items-center gap-2">
-                <ComposerAttachments
-                  attachments={media.pendingImeta}
-                  isUploading={media.isUploading}
-                  onCancelUpload={media.cancelUpload}
-                  onRemoveQueued={media.removeQueuedAttachment}
-                  onToggleQueuedSpoiler={media.toggleQueuedAttachmentSpoiler}
-                  queuedPreviews={media.queuedPreviews}
-                  uploadingCount={media.uploadingCount}
-                  uploadingPreviews={media.uploadingPreviews}
-                  onEditSave={handleAttachmentEditSave}
-                  onRemove={handleRemoveAttachment}
-                  onRevert={handleAttachmentRevert}
-                  originalUrlByUrl={media.originalUrlByUrl}
-                  onToggleSpoiler={handleToggleAttachmentSpoiler}
-                  spoileredUrls={spoileredAttachmentUrls}
-                />
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                {lockedAgents.length > 0 && editTarget == null ? (
+                  <ComposerAddressLocks
+                    agents={lockedAgents}
+                    onRemove={persistentAudience.removePubkey}
+                  />
+                ) : null}
+                {media.pendingImeta.length > 0 ||
+                media.queuedAttachments.length > 0 ||
+                media.isUploading ? (
+                  <ComposerAttachments
+                    attachments={media.pendingImeta}
+                    isUploading={media.isUploading}
+                    onCancelUpload={media.cancelUpload}
+                    onRemoveQueued={media.removeQueuedAttachment}
+                    onToggleQueuedSpoiler={media.toggleQueuedAttachmentSpoiler}
+                    queuedPreviews={media.queuedPreviews}
+                    uploadingCount={media.uploadingCount}
+                    uploadingPreviews={media.uploadingPreviews}
+                    onEditSave={handleAttachmentEditSave}
+                    onRemove={handleRemoveAttachment}
+                    onRevert={handleAttachmentRevert}
+                    originalUrlByUrl={media.originalUrlByUrl}
+                    onToggleSpoiler={handleToggleAttachmentSpoiler}
+                    spoileredUrls={spoileredAttachmentUrls}
+                  />
+                ) : null}
               </div>
             )}
 

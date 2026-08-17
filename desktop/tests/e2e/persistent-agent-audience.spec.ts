@@ -48,6 +48,51 @@ function threadComposer(page: Page) {
   return page.getByTestId("thread-composer-overlay");
 }
 
+async function readOutgoingMentionPubkeys(page: Page, content: string) {
+  return page.evaluate((expectedContent) => {
+    const signedEvent = window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) => event.content === expectedContent,
+    );
+    if (signedEvent) {
+      return (signedEvent.tags ?? [])
+        .filter((tag) => tag[0] === "p" && tag[1])
+        .map((tag) => tag[1]);
+    }
+
+    for (const entry of window.__BUZZ_E2E_COMMAND_LOG__ ?? []) {
+      if (entry.command === "send_channel_message") {
+        const payload = entry.payload as
+          | { content?: string; mentionPubkeys?: string[] }
+          | undefined;
+        if (payload?.content === expectedContent) {
+          return payload.mentionPubkeys ?? [];
+        }
+      }
+
+      if (entry.command !== "plugin:websocket|send") continue;
+      const data = (
+        entry.payload as { message?: { data?: string } } | undefined
+      )?.message?.data;
+      if (!data) continue;
+
+      try {
+        const frame = JSON.parse(data) as [
+          string,
+          { content?: string; tags?: string[][] },
+        ];
+        if (frame[0] !== "EVENT" || frame[1]?.content !== expectedContent) {
+          continue;
+        }
+        return (frame[1].tags ?? [])
+          .filter((tag) => tag[0] === "p" && tag[1])
+          .map((tag) => tag[1]);
+      } catch {}
+    }
+
+    return null;
+  }, content);
+}
+
 async function installAudienceFixtures(
   page: Page,
   options: { sendMessageDelayMs?: number } = {},
@@ -102,8 +147,14 @@ test("locks multiple agents from the mention picker without closing it", async (
 
   await expect(menu).toBeVisible();
   await expect(vogueLock).toHaveAttribute("aria-pressed", "true");
-  await expect(input).toHaveText("@Morgarita @Vogue ");
-  await expect(input.locator(".agent-mention-highlight")).toHaveCount(2);
+  await expect(input).toHaveText("");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+  await expect(
+    composer.getByRole("button", { name: "Always mention Morgarita" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    composer.getByRole("button", { name: "Always mention Vogue" }),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect
     .poll(() =>
       page.evaluate(
@@ -119,7 +170,7 @@ test("locks multiple agents from the mention picker without closing it", async (
     .toEqual([AGENT_A, AGENT_B]);
 });
 
-test("locked agents transition atomically before Enter-send resolves", async ({
+test("locked agents remain in the tray while Enter-send resolves", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -129,61 +180,20 @@ test("locked agents transition atomically before Enter-send resolves", async ({
   const composer = threadComposer(page);
   const input = composer.getByTestId("message-input");
   const send = composer.getByTestId("send-message");
-  await input.fill("@Morgarita hello");
+  await input.fill("hello");
   await input.press("Enter");
 
-  // The network send is still pending, so this is the first observable
-  // post-submit editor state rather than the later success hydration pass.
-  await expect(input).toHaveText("@Morgarita ", { timeout: 500 });
-  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1, {
-    timeout: 500,
-  });
+  await expect(input).toHaveText("", { timeout: 500 });
+  await expect(
+    composer.getByRole("button", { name: "Always mention Morgarita" }),
+  ).toBeVisible();
   await expect(input).toBeFocused();
-  await page.waitForTimeout(200);
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
 
-  await expect(send).toBeEnabled();
+  await expect(send).toBeDisabled();
   await expect
-    .poll(() =>
-      input.evaluate((element) => {
-        const selection = window.getSelection();
-        const viewDesc = (
-          element as HTMLElement & {
-            pmViewDesc?: {
-              posFromDOM: (node: Node, offset: number, bias: number) => number;
-              size: number;
-            };
-          }
-        ).pmViewDesc;
-        if (!selection?.anchorNode || !viewDesc) return null;
-        const position = viewDesc.posFromDOM(
-          selection.anchorNode,
-          selection.anchorOffset,
-          1,
-        );
-        // The root view desc includes the document's two boundary tokens,
-        // while posFromDOM is relative to the editable root. Converting both
-        // to ProseMirror coordinates proves selection.from/to === doc.content.size.
-        return {
-          empty: selection.isCollapsed,
-          text: element.textContent,
-          endsWithSpace: element.textContent?.endsWith(" ") ?? false,
-          atDocumentEnd: position + 1 === viewDesc.size - 2,
-        };
-      }),
-    )
-    .toEqual({
-      empty: true,
-      text: "@Morgarita ",
-      endsWithSpace: true,
-      atDocumentEnd: true,
-    });
-
-  // Exercise the reported contract, not just its selection prerequisites:
-  // immediate typing after restoration must remain outside the mention chip.
-  await input.pressSequentially("testing");
-  await expect(input).toHaveText("@Morgarita testing");
-  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+    .poll(() => readOutgoingMentionPubkeys(page, "hello"))
+    .toContain(AGENT_A);
 });
 
 test("ordinary agent mentions remain one-shot and return to the placeholder", async ({
@@ -225,7 +235,7 @@ test("ordinary agent mentions remain one-shot and return to the placeholder", as
     .toEqual({ collapsed: true, inside: true });
 });
 
-test("locked agents restore through the native inline mention UI", async ({
+test("locked agents restore in the tray and can be removed independently", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_B, AGENT_A]);
@@ -234,11 +244,16 @@ test("locked agents restore through the native inline mention UI", async ({
 
   const composer = threadComposer(page);
   const input = composer.getByTestId("message-input");
-  await expect(input).toHaveText("@Vogue @Morgarita ");
-  await expect(page.getByText("Talking to", { exact: true })).toHaveCount(0);
-  await expect(input.locator(".agent-mention-highlight")).toHaveCount(2);
+  await expect(input).toHaveText("");
+  await expect(composer.getByTestId("composer-address-locks")).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Always mention Vogue" }),
+  ).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Always mention Morgarita" }),
+  ).toBeVisible();
 
-  await input.fill("@Morgarita hello");
+  await composer.getByRole("button", { name: "Always mention Vogue" }).click();
   await expect
     .poll(() =>
       page.evaluate(
@@ -253,16 +268,22 @@ test("locked agents restore through the native inline mention UI", async ({
     )
     .toEqual([AGENT_A]);
 
+  await input.fill("hello");
   await composer.getByTestId("send-message").click();
-  await expect(input).toContainText("@Morgarita");
-  await expect(input).not.toContainText("@Vogue");
-  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByRole("button", { name: "Always mention Morgarita" }),
+  ).toBeVisible();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "hello"))
+    .toContain(AGENT_A);
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "hello"))
+    .not.toContain(AGENT_B);
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {
-  test(`captures native address-locked mentions in ${theme}`, async ({
-    page,
-  }) => {
+  test(`captures the address-lock tray in ${theme}`, async ({ page }) => {
     await seedAudience(page, [AGENT_A, AGENT_B], theme);
     await installAudienceFixtures(page);
     await openThread(page);
@@ -271,23 +292,25 @@ for (const theme of ["buzz", "buzz-dark"]) {
     await overlay.getByTestId("message-input").focus();
     await waitForAnimations(page);
     await composer.screenshot({
-      path: `${SHOTS}/${theme}-native-mentions.png`,
+      path: `${SHOTS}/${theme}-address-lock-tray.png`,
     });
   });
 }
 
-test("native address-locked mentions fit the narrow composer", async ({
-  page,
-}) => {
+test("the address-lock tray fits the narrow composer", async ({ page }) => {
   await page.setViewportSize({ width: 700, height: 760 });
   await seedAudience(page, [AGENT_A, AGENT_B]);
   await installAudienceFixtures(page);
   await openThread(page);
   const overlay = threadComposer(page);
   const composer = overlay.getByTestId("message-composer");
-  await expect(overlay.getByTestId("message-input")).toContainText(
-    "@Morgarita",
-  );
+  await expect(overlay.getByTestId("composer-address-locks")).toBeVisible();
+  await expect(
+    overlay.getByRole("button", { name: "Always mention Morgarita" }),
+  ).toBeVisible();
+  await expect(
+    overlay.getByRole("button", { name: "Always mention Vogue" }),
+  ).toBeVisible();
   await waitForAnimations(page);
-  await composer.screenshot({ path: `${SHOTS}/narrow-native-mentions.png` });
+  await composer.screenshot({ path: `${SHOTS}/narrow-address-lock-tray.png` });
 });
