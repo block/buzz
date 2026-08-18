@@ -66,8 +66,9 @@ artifacts) available for analysis.
 
 The local `datasets/buzz-native` suite scores Buzz product behavior alongside
 task correctness. It currently covers direct thread replies, callback user
-mentions, and exact channel creation/membership. Run one task with the
-production base prompt from the checked-out source build:
+mentions, targeted reads of user-named paths outside the workspace, and exact
+channel creation/membership. Run one task with the production base prompt from
+the checked-out source build:
 
 ```bash
 just benchmark \
