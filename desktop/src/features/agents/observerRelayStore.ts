@@ -243,11 +243,26 @@ function appendAgentEvents(
     : events;
   if (admissible.length === 0) return null;
 
-  const seen = new Set(
-    current.map(
-      (event) => `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
-    ),
-  );
+  // Ordinary live path: the harness publishes frames in order once per
+  // second, so the whole batch lands strictly after the retained tail. In
+  // that case no admissible event can collide with a retained one (the
+  // journal is sorted), so dedup only needs to look inside the batch and the
+  // merged journal is a plain concat — no Set over the full journal and no
+  // whole-journal re-sort (whose comparator Date.parses per comparison).
+  // Out-of-order or replayed arrivals take the full dedup + re-sort path.
+  const currentLast = current.at(-1);
+  const allAtEnd =
+    !currentLast ||
+    admissible.every((event) => isObserverEventAfter(event, currentLast));
+
+  const seen = allAtEnd
+    ? new Set<string>()
+    : new Set(
+        current.map(
+          (event) =>
+            `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
+        ),
+      );
   const added: ObserverEvent[] = [];
   for (const event of admissible) {
     const eventKey = `${event.timestamp.length}:${event.timestamp}:${event.seq}`;
@@ -258,7 +273,9 @@ function appendAgentEvents(
   if (added.length === 0) return null;
 
   const sortedAdded = added.sort(compareObserverEvents);
-  const sorted = [...current, ...sortedAdded].sort(compareObserverEvents);
+  const sorted = allAtEnd
+    ? [...current, ...sortedAdded]
+    : [...current, ...sortedAdded].sort(compareObserverEvents);
   const trimmed = sorted.length > MAX_OBSERVER_EVENTS;
   const final = trimmed
     ? sorted.slice(sorted.length - OBSERVER_EVENTS_LOW_WATER)
@@ -276,14 +293,11 @@ function appendAgentEvents(
     });
   }
 
-  // The common live path appends a sorted batch after the retained window. Fold
+  // The common live path appends a sorted batch after the retained window
+  // (the same `allAtEnd` that authorized the concat fast-path above). Fold
   // that batch through the transcript state once without rebuilding history.
   // Out-of-order arrivals and cap eviction rebuild from the final window so
   // stateful tool/permission relationships remain correct.
-  const currentLast = current.at(-1);
-  const allAtEnd =
-    !currentLast ||
-    sortedAdded.every((event) => compareObserverEvents(event, currentLast) > 0);
   if (allAtEnd && !trimmed) {
     let transcriptState =
       transcriptByAgent.get(key) ?? createEmptyTranscriptState();

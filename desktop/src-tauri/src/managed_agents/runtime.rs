@@ -133,6 +133,7 @@ pub fn build_managed_agent_summary(
     record: &ManagedAgentRecord,
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     personas: &[crate::managed_agents::types::AgentDefinition],
+    teams: &[crate::managed_agents::TeamRecord],
     global_config: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<ManagedAgentSummary, String> {
     use crate::managed_agents::BackendKind;
@@ -195,12 +196,10 @@ pub fn build_managed_agent_summary(
 
     let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
 
-    let global_for_summary =
-        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let effective_cfg = crate::managed_agents::effective_config::resolve_effective_config(
         record,
         personas,
-        &global_for_summary,
+        global_config,
     );
     let (effective_model, effective_provider, effective_prompt, model_source) = match effective_cfg
     {
@@ -242,14 +241,13 @@ pub fn build_managed_agent_summary(
     // env layering below — the caller loads it once and passes it in, so
     // list-style callers pay one disk read per call rather than one per record.
 
-    // The prospective side is computed only for a tracked pair: it costs a
-    // teams-store read, and an unstamped agent has nothing to compare against.
+    // The prospective side is computed only for a tracked pair: an unstamped
+    // agent has nothing to compare against.
     let tracked_spawn = pair_key.as_ref().zip(pair_runtime).map(|(key, runtime)| {
-        let teams = crate::managed_agents::load_teams(app).unwrap_or_default();
         let current = crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
             record,
             personas,
-            &teams,
+            teams,
             &key.relay_url,
             global_config,
             super::owner_only_access_build(),
