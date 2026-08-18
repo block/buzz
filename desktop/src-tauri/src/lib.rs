@@ -84,7 +84,6 @@ use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 #[cfg(target_os = "macos")]
 use tauri::Listener;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
-use tauri_plugin_window_state::StateFlags;
 #[cfg(target_os = "macos")]
 use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -119,8 +118,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             // Focus the existing window when a duplicate instance launches.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
+            if let Some(window) = app.get_webview_window("main") {
+                focus_existing_window(&window);
             }
             // Forward any deep link URLs from the duplicate launch.
             for arg in &argv {
@@ -131,15 +130,11 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_opener::init())
-        .plugin(
-            tauri_plugin_window_state::Builder::default()
-                // Visibility is excluded: the native reveal plugin below
-                // shows the window after saved geometry has been restored.
-                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
-                .build(),
-        )
-        .plugin(
+        .plugin(tauri_plugin_opener::init());
+
+    let builder = install_window_state(builder);
+
+    let builder = builder.plugin(
             tauri::plugin::Builder::<_, ()>::new("initial-window-reveal")
                 .on_webview_ready(|webview| {
                     if webview.label() != "main" {
@@ -153,7 +148,16 @@ pub fn run() {
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
                     // commit the startup surface before revealing it.
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let window = webview.window();
+
+                    #[cfg(target_os = "linux")]
+                    match webview.window().gtk_window() {
+                        Ok(window) => reveal_linux_window(&window),
+                        Err(error) => {
+                            eprintln!("buzz-desktop: failed to access native GTK window: {error}");
+                        }
+                    }
 
                     #[cfg(target_os = "macos")]
                     {
@@ -186,7 +190,7 @@ pub fn run() {
                         });
                     }
 
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(target_os = "windows")]
                     {
                         reveal_initial_window(&window);
                     }
@@ -630,6 +634,7 @@ pub fn run() {
             unarchive_builderlab_community,
             transfer_builderlab_community,
             title_bar_double_click,
+            minimize_window,
             get_identity,
             get_nsec,
             generate_backup_passphrase,

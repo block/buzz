@@ -2,11 +2,16 @@ import * as React from "react";
 import {
   ChevronLeft,
   ChevronRight,
+  Minus,
   PanelLeftClose,
   PanelLeftOpen,
+  Square,
+  X,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import { isMacPlatform } from "@/shared/lib/platform";
+import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
@@ -29,6 +34,8 @@ const TOP_CHROME_ICON_BUTTON_CLASS =
   "h-[28px] w-[28px] rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[16px]";
 const HISTORY_ICON_BUTTON_CLASS =
   "h-[28px] w-[24px] rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[16px]";
+const WINDOW_CONTROL_BUTTON_CLASS =
+  "h-[28px] w-[36px] rounded-[4px] text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-[14px]";
 
 function preventTopChromeWheel(event: WheelEvent) {
   event.preventDefault();
@@ -53,6 +60,54 @@ function TopChromeSidebarTrigger() {
       {sidebar?.open ? <PanelLeftClose /> : <PanelLeftOpen />}
       <span className="sr-only">Toggle Sidebar</span>
     </Button>
+  );
+}
+
+function LinuxWindowControls() {
+  if (!isLinuxPlatform()) {
+    return null;
+  }
+
+  const appWindow = getCurrentWindow();
+  return (
+    <div
+      className="ml-auto flex items-center gap-0.5"
+      data-testid="linux-window-controls"
+    >
+      <Button
+        aria-label="Minimize window"
+        className={WINDOW_CONTROL_BUTTON_CLASS}
+        onClick={() => void invoke("minimize_window")}
+        size="icon"
+        type="button"
+        variant="ghost"
+      >
+        <Minus />
+      </Button>
+      <Button
+        aria-label="Maximize or restore window"
+        className={WINDOW_CONTROL_BUTTON_CLASS}
+        onClick={() => void appWindow.toggleMaximize()}
+        size="icon"
+        type="button"
+        variant="ghost"
+      >
+        <Square />
+      </Button>
+      <Button
+        aria-label="Close window"
+        className={cn(
+          WINDOW_CONTROL_BUTTON_CLASS,
+          "hover:bg-destructive hover:text-destructive-foreground",
+        )}
+        onClick={() => void appWindow.close()}
+        size="icon"
+        type="button"
+        variant="ghost"
+      >
+        <X />
+      </Button>
+    </div>
   );
 }
 
@@ -131,6 +186,7 @@ export function AppTopChrome({
           <ChevronRight />
         </Button>
       </div>
+      <LinuxWindowControls />
     </div>
   );
 }

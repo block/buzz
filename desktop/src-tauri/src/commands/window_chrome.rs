@@ -15,6 +15,28 @@ pub fn perform_sidebar_default_haptic() {
     }
 }
 
+/// Minimizes the main window through the native GTK path on Linux.
+/// Mutter ignores the generic Tauri request for Buzz's frameless window on
+/// affected GNOME/X11 systems.
+#[tauri::command]
+pub fn minimize_window(window: tauri::Window) {
+    #[cfg(target_os = "linux")]
+    match window.gtk_window() {
+        Ok(gtk_window) => {
+            use gtk::prelude::GtkWindowExt;
+            gtk_window.iconify();
+        }
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to access GTK window for minimize: {error}");
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window.minimize();
+    }
+}
+
 /// Performs the window action matching the macOS "double-click a window's
 /// title bar to" preference (`AppleActionOnDoubleClick`).
 ///
