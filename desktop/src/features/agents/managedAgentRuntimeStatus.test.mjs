@@ -123,6 +123,17 @@ test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
   assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://127.0.0.1:3000");
   assert.equal(canonicalRelayUrl("https://relay.example"), null);
   assert.equal(canonicalRelayUrl("not a url"), null);
+  assert.equal(canonicalRelayUrl("wss://alice@relay.example"), null);
+  assert.equal(canonicalRelayUrl("wss://relay.example#east"), null);
+  assert.equal(canonicalRelayUrl("wss://relay.example#"), null);
+  assert.equal(
+    canonicalRelayUrl("wss://@relay.example"),
+    "wss://relay.example",
+  );
+  assert.equal(
+    canonicalRelayUrl("wss://:@relay.example"),
+    "wss://relay.example",
+  );
 });
 
 test("matches a stored community URL against canonical backend rows", () => {
@@ -277,5 +288,36 @@ test("invalid connection targets keep exact-string fallback instead of aliasing"
   assert.equal(
     connectionTargetsMatch("ws://localhost:3000", "ws://127.0.0.1:3000"),
     false,
+  );
+  assert.equal(
+    connectionTargetUrl("wss://@relay.example"),
+    "wss://relay.example",
+  );
+  assert.equal(connectionTargetUrl("wss://relay.example#"), null);
+  assert.equal(
+    connectionTargetsMatch("wss://@relay.example", "wss://relay.example"),
+    true,
+  );
+  assert.equal(
+    connectionTargetsMatch("wss://relay.example#", "wss://relay.example"),
+    false,
+  );
+});
+
+test("legacy rows without requestedRelayUrl reject fragment and credential aliases", () => {
+  const runtimes = [runtime({ relayUrl: "wss://relay.example" })];
+  assert.ok(findManagedAgentRuntime(runtimes, "aa", "wss://relay.example"));
+  assert.ok(findManagedAgentRuntime(runtimes, "aa", "wss://@relay.example"));
+  assert.equal(
+    findManagedAgentRuntime(runtimes, "aa", "wss://alice@relay.example"),
+    undefined,
+  );
+  assert.equal(
+    findManagedAgentRuntime(runtimes, "aa", "wss://relay.example#east"),
+    undefined,
+  );
+  assert.equal(
+    findManagedAgentRuntime(runtimes, "aa", "wss://relay.example#"),
+    undefined,
   );
 });

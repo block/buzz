@@ -69,22 +69,30 @@ export const MANAGED_AGENT_PAIR_ACTION_LABELS: Record<
   restart: "Restart Agent",
 };
 
+function hasExplicitFragment(raw: string): boolean {
+  return raw.includes("#");
+}
+
 /**
  * Canonicalize a relay URL the way the backend keys runtime pairs, so a
  * stored community URL (e.g. `ws://localhost:3000`) matches backend rows
  * (`ws://127.0.0.1:3000`). Mirrors buzz-core's `normalize_relay_url`
  * (`crates/buzz-core/src/relay.rs`): lowercase host, loopback hosts folded
  * to 127.0.0.1, default ports and root-path trailing slash stripped.
- * Returns null when the URL cannot be parsed as ws/wss.
+ * Returns null when the URL cannot be parsed as ws/wss, or when it carries
+ * credentials or an explicit fragment. Empty userinfo (`wss://@host`) is
+ * treated as no credentials, matching the backend normalizer.
  */
 export function canonicalRelayUrl(raw: string): string | null {
+  const trimmed = raw.trim();
   let url: URL;
   try {
-    url = new URL(raw.trim());
+    url = new URL(trimmed);
   } catch {
     return null;
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  if (url.username || url.password || hasExplicitFragment(trimmed)) return null;
   let host = url.hostname.toLowerCase();
   if (host === "localhost" || host === "[::1]" || host.startsWith("127.")) {
     host = "127.0.0.1";
@@ -105,17 +113,19 @@ export function canonicalRelayUrl(raw: string): string | null {
  * default port and the FQDN root dot, fold the root-path slash - WITHOUT
  * folding loopback spellings, which are distinct tenants on a host-scoped
  * relay. Returns null when the URL cannot be parsed as ws/wss, or when it
- * carries userinfo or a fragment; callers then fall back to exact comparison.
+ * carries credentials or an explicit fragment; callers then fall back to
+ * exact comparison. Empty userinfo is treated as no credentials.
  */
 export function connectionTargetUrl(raw: string): string | null {
+  const trimmed = raw.trim();
   let url: URL;
   try {
-    url = new URL(raw.trim());
+    url = new URL(trimmed);
   } catch {
     return null;
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
-  if (url.username || url.password || url.hash) return null;
+  if (url.username || url.password || hasExplicitFragment(trimmed)) return null;
   const host = url.hostname.toLowerCase().replace(/\.$/, "");
   const defaultPort = url.protocol === "ws:" ? "80" : "443";
   const port = url.port && url.port !== defaultPort ? `:${url.port}` : "";
