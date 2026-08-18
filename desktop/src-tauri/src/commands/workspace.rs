@@ -274,9 +274,14 @@ pub async fn apply_workspace(
             }
             crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
             if restore_pending {
-                if let Err(error) =
-                    restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-                {
+                let restore_result = crate::command_adviser_lifecycle::after_refresh(
+                    crate::command_services::policy::status::refresh_knowledge_admissions(
+                        app.clone(),
+                    ),
+                    || restore_managed_agents_on_launch(&app, &state.shutdown_started),
+                )
+                .await;
+                if let Err(error) = restore_result {
                     eprintln!("buzz-desktop: failed to restore managed agents: {error}");
                 }
             }
@@ -288,9 +293,12 @@ pub async fn apply_workspace(
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
-            if let Err(error) =
-                restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-            {
+            let restore_result = crate::command_adviser_lifecycle::after_refresh(
+                crate::command_services::policy::status::refresh_knowledge_admissions(app.clone()),
+                || restore_managed_agents_on_launch(&app, &state.shutdown_started),
+            )
+            .await;
+            if let Err(error) = restore_result {
                 eprintln!("buzz-desktop: failed to restore managed agents: {error}");
             }
         });

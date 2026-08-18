@@ -275,10 +275,15 @@ pub async fn set_model_routing_preference(
     let _owner = require_active_owner(&state).map_err(str::to_string)?;
     save_routing_preference(&trusted_lan_config_path(&app)?, preference)
         .map_err(|_| command_error())?;
-    let restart_app = app.clone();
-    tokio::task::spawn_blocking(move || restart_live_managed_agents(&restart_app))
-        .await
-        .map_err(|_| command_error())?;
+    crate::command_adviser_lifecycle::after_refresh(
+        crate::command_services::policy::status::refresh_knowledge_admissions(app.clone()),
+        || {
+            let restart_app = app.clone();
+            tokio::task::spawn_blocking(move || restart_live_managed_agents(&restart_app))
+        },
+    )
+    .await
+    .map_err(|_| command_error())?;
     Ok(ModelRoutingPreferenceView { preference })
 }
 
