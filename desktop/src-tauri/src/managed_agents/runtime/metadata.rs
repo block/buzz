@@ -24,6 +24,18 @@ pub(crate) fn runtime_metadata_env_vars<'a>(
     vars
 }
 
+/// Bridge Buzz's persisted, harness-neutral effort key to the runtime's
+/// spawn-time application key. The source remains stable across harness
+/// changes; `KnownAcpRuntime::thinking_env_var` owns the destination fact.
+pub(crate) fn runtime_metadata_effort_env_var<'a>(
+    thinking_env_var: Option<&'a str>,
+    effective_env: &'a std::collections::BTreeMap<String, String>,
+) -> Option<(&'a str, &'a str)> {
+    let destination = thinking_env_var?;
+    let effort = effective_env.get("BUZZ_AGENT_THINKING_EFFORT")?.trim();
+    (!effort.is_empty()).then_some((destination, effort))
+}
+
 /// Env var carrying the session title to the harness. Shared with
 /// `spawn_snapshot` so the restart badge records the same key the spawn writes.
 pub(crate) const SESSION_TITLE_ENV_VAR: &str = "BUZZ_ACP_SESSION_TITLE";

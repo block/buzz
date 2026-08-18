@@ -22,8 +22,8 @@ pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondT
 
 mod metadata;
 pub(crate) use metadata::{
-    apply_agent_display_env, resolve_session_title, runtime_metadata_env_vars,
-    DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
+    apply_agent_display_env, resolve_session_title, runtime_metadata_effort_env_var,
+    runtime_metadata_env_vars, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -819,6 +819,12 @@ pub fn spawn_agent_child(
     // written above — reserved keys were already stripped from descriptor.env so they
     // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
     for (key, value) in &descriptor.env {
+        command.env(key, value);
+    }
+    if let Some((key, value)) = runtime_metadata_effort_env_var(
+        runtime_meta.and_then(|meta| meta.thinking_env_var),
+        &descriptor.env,
+    ) {
         command.env(key, value);
     }
     configure_runtime_cli(&mut command, runtime_meta);

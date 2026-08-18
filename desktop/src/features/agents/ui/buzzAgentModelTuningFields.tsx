@@ -298,6 +298,8 @@ export function BuzzAgentModelTuningFields({
   model,
   onEnvVarChange,
   provider,
+  effortPersistenceKey = BUZZ_AGENT_THINKING_EFFORT,
+  heading = "Model tuning",
 }: {
   envVars: EnvVarsValue;
   inheritedEnvVars: EnvVarsValue;
@@ -306,22 +308,26 @@ export function BuzzAgentModelTuningFields({
   onEnvVarChange: (key: string, value: string) => void;
   /** Active LLM provider id (optional) — used for effort filtering + default labels. */
   provider?: string;
+  /** Descriptor-provided key holding the per-agent effort override. */
+  effortPersistenceKey?: string;
+  /** Harness-neutral section heading used by shared config surfaces. */
+  heading?: string;
 }) {
   const effortConfig = getProviderEffortConfig(provider ?? "", model);
   const { validValues: effortValid, defaultValue: effortDefault } =
     effortConfig;
 
-  const currentEffort = envVars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  const currentEffort = envVars[effortPersistenceKey] ?? "";
   useEffortAutoClear({
     currentEffort,
     effortValid,
-    onClear: () => onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, ""),
+    onClear: () => onEnvVarChange(effortPersistenceKey, ""),
   });
 
   return (
     <div className="space-y-4">
       <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-        buzz-agent model tuning
+        {heading}
       </p>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -332,12 +338,10 @@ export function BuzzAgentModelTuningFields({
             effortDefault={effortDefault}
             effortValid={effortValid}
             htmlFor="ba-thinking-effort"
-            inheritedEffort={inheritedEnvVars[BUZZ_AGENT_THINKING_EFFORT]}
+            inheritedEffort={inheritedEnvVars[effortPersistenceKey]}
             inheritFallbackLabel="Inherit (agent default)"
             label="Thinking / Effort"
-            onChange={(value) =>
-              onEnvVarChange(BUZZ_AGENT_THINKING_EFFORT, value)
-            }
+            onChange={(value) => onEnvVarChange(effortPersistenceKey, value)}
             testId="ba-thinking-effort-select"
           />
           <p

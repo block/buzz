@@ -587,6 +587,8 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Native ACP effort value to apply after every fresh session.
+    pub effort: Option<String>,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -908,6 +910,8 @@ const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for native effort requests (`session/set_config_option`, configId `effort`).
+const EFFORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Placeholder [`fetch_channel_info`] substitutes when a channel's metadata
 /// event carries no `name` tag. Not a real channel name — consumers that need
@@ -1004,7 +1008,7 @@ async fn create_session_and_apply_model(
         ctx.session_title.as_deref(),
     );
 
-    let resp = agent
+    let mut resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
@@ -1079,6 +1083,24 @@ async fn create_session_and_apply_model(
     } else {
         false
     };
+
+    // A session rotation resets adapter-native configuration. Reapply the
+    // persisted effort on every fresh session, but only when the adapter
+    // advertises both the option and selected value. Update the captured
+    // session snapshot only after the wire request succeeds so the desktop's
+    // ACP tier reflects the setting actually in force.
+    if let Some(effort) = ctx.effort.as_deref() {
+        if agent_supports_config_option_value(&resp.raw, "effort", effort) {
+            if apply_effort(&mut agent.acp, &resp.session_id, effort).await? {
+                set_config_option_selected_value(&mut resp.raw, "effort", effort);
+            }
+        } else {
+            tracing::warn!(
+                target: "pool::effort",
+                "configured effort {effort:?} is not advertised by this ACP session; using adapter default"
+            );
+        }
+    }
 
     // Emit session config for desktop consumption (config bridge tier 1b).
     // Emitted AFTER desired_model resolution so the desktop caches the
@@ -1232,6 +1254,85 @@ fn agent_supports_mode(session_new_result: &serde_json::Value, mode_wire: &str) 
                 .any(|m| m.get("id").and_then(|v| v.as_str()) == Some(mode_wire))
         })
         .unwrap_or(false)
+}
+
+fn agent_supports_config_option_value(
+    session_new_result: &serde_json::Value,
+    config_id: &str,
+    desired: &str,
+) -> bool {
+    session_new_result
+        .get("configOptions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|options| {
+            options.iter().any(|option| {
+                option
+                    .get("configId")
+                    .or_else(|| option.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(config_id)
+                    && option
+                        .get("options")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|values| {
+                            values.iter().any(|value| {
+                                value.get("value").and_then(serde_json::Value::as_str)
+                                    == Some(desired)
+                            })
+                        })
+            })
+        })
+}
+
+fn set_config_option_selected_value(
+    session_new_result: &mut serde_json::Value,
+    config_id: &str,
+    selected: &str,
+) {
+    let Some(options) = session_new_result
+        .get_mut("configOptions")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    if let Some(option) = options.iter_mut().find(|option| {
+        option
+            .get("configId")
+            .or_else(|| option.get("id"))
+            .and_then(serde_json::Value::as_str)
+            == Some(config_id)
+    }) {
+        option["value"] = serde_json::Value::String(selected.to_string());
+        option["currentValue"] = serde_json::Value::String(selected.to_string());
+    }
+}
+
+async fn apply_effort(
+    acp: &mut AcpClient,
+    session_id: &str,
+    effort: &str,
+) -> Result<bool, AcpError> {
+    match tokio::time::timeout(
+        EFFORT_TIMEOUT,
+        acp.session_set_config_option(session_id, "effort", effort),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            tracing::info!(target: "pool::effort", "applied effort {effort:?} on session {session_id}");
+            Ok(true)
+        }
+        Ok(Err(e @ AcpError::Io(_)))
+        | Ok(Err(e @ AcpError::WriteTimeout(_)))
+        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Protocol(_)))
+        | Ok(Err(e @ AcpError::AgentExited)) => Err(e),
+        Ok(Err(error)) => {
+            tracing::warn!(target: "pool::effort", "failed to apply effort {effort:?}: {error}; using adapter default");
+            Ok(false)
+        }
+        Err(_) => Err(AcpError::Timeout(EFFORT_TIMEOUT)),
+    }
 }
 
 /// per-tool auto-approval in `handle_permission_request`.
@@ -7552,6 +7653,56 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         make_prompt_context_impl(&agent_keys, None)
     }
 
+    #[test]
+    fn effort_support_accepts_claude_id_key_and_selected_value() {
+        let response = serde_json::json!({
+            "configOptions": [{
+                "id": "effort",
+                "category": "thought_level",
+                "options": [
+                    { "value": "low", "displayName": "Low" },
+                    { "value": "medium", "displayName": "Medium" },
+                    { "value": "high", "displayName": "High" }
+                ]
+            }]
+        });
+        assert!(agent_supports_config_option_value(
+            &response, "effort", "medium"
+        ));
+        assert!(!agent_supports_config_option_value(
+            &response, "effort", "xhigh"
+        ));
+    }
+
+    #[test]
+    fn effort_support_accepts_spec_config_id_and_rejects_other_option() {
+        let response = serde_json::json!({
+            "configOptions": [{
+                "configId": "mode",
+                "options": [{ "value": "medium" }]
+            }]
+        });
+        assert!(!agent_supports_config_option_value(
+            &response, "effort", "medium"
+        ));
+    }
+
+    #[test]
+    fn selected_effort_updates_captured_session_snapshot() {
+        let mut response = serde_json::json!({
+            "configOptions": [{
+                "id": "effort",
+                "category": "thought_level",
+                "value": "high",
+                "currentValue": "high",
+                "options": [{ "value": "medium" }, { "value": "high" }]
+            }]
+        });
+        set_config_option_selected_value(&mut response, "effort", "medium");
+        assert_eq!(response["configOptions"][0]["value"], "medium");
+        assert_eq!(response["configOptions"][0]["currentValue"], "medium");
+    }
+
     fn make_prompt_context_with_owner(
         agent_keys: &nostr::Keys,
         owner_pubkey: nostr::PublicKey,
@@ -7595,6 +7746,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
+            effort: None,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,

@@ -50,7 +50,10 @@ with a TypeScript lookup table or an id comparison in a component.
    Goose/Claude — do not "fix" one to match the other without doing the
    migration work.
 3. **Field absence has a named reason, not a boolean.** Codex effort is
-   `ownedByModelId`; Claude effort is `deferredUntilNativeOptionsAvailable`.
+   `ownedByModelId`. Claude effort is rendered and persisted under the shared
+   `BUZZ_AGENT_THINKING_EFFORT` key; runtime metadata maps it to
+   `BUZZ_ACP_EFFORT`, and buzz-acp applies ACP config option `effort` after
+   every fresh session.
    New absences get new named reasons in `AgentConfigOmission` /
    `render` — never a `showX` prop.
 4. **The clearing policy is the named types.** `onContextChange:

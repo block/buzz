@@ -501,7 +501,37 @@ fn non_persona_agent_never_drifts() {
     assert!(!orphaned);
 }
 
-use super::runtime_metadata_env_vars;
+use super::{runtime_metadata_effort_env_var, runtime_metadata_env_vars};
+
+#[test]
+fn runtime_metadata_effort_bridges_persisted_key_to_claude_acp() {
+    let env = std::collections::BTreeMap::from([(
+        "BUZZ_AGENT_THINKING_EFFORT".to_string(),
+        "medium".to_string(),
+    )]);
+    assert_eq!(
+        runtime_metadata_effort_env_var(Some("BUZZ_ACP_EFFORT"), &env),
+        Some(("BUZZ_ACP_EFFORT", "medium"))
+    );
+}
+
+#[test]
+fn runtime_metadata_effort_skips_absent_or_blank_values() {
+    let absent = std::collections::BTreeMap::new();
+    let blank = std::collections::BTreeMap::from([(
+        "BUZZ_AGENT_THINKING_EFFORT".to_string(),
+        "   ".to_string(),
+    )]);
+    assert_eq!(
+        runtime_metadata_effort_env_var(Some("BUZZ_ACP_EFFORT"), &absent),
+        None
+    );
+    assert_eq!(
+        runtime_metadata_effort_env_var(Some("BUZZ_ACP_EFFORT"), &blank),
+        None
+    );
+    assert_eq!(runtime_metadata_effort_env_var(None, &blank), None);
+}
 
 #[test]
 fn runtime_metadata_env_vars_injects_model_and_provider() {

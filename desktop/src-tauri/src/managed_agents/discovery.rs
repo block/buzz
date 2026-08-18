@@ -136,7 +136,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: Some("~/.claude/settings.json"),
         config_file_format: Some("json"),
         supports_acp_native_config: false,
-        thinking_env_var: None,
+        // Buzz persists effort under the shared BUZZ_AGENT_THINKING_EFFORT key.
+        // At spawn the desktop bridges that value to buzz-acp, which applies
+        // Claude's native ACP `effort` config option after every session/new.
+        thinking_env_var: Some("BUZZ_ACP_EFFORT"),
         max_tokens_env_var: None,
         context_limit_env_var: None,
         max_rounds_env_var: None,
