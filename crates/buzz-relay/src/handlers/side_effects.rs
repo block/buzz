@@ -3120,34 +3120,50 @@ pub async fn reconcile_channel_events(
 /// hold one publisher after it has read canonical archive state and before it
 /// replaces the head, making the stale-read/late-write race deterministic.
 /// Compiled only under `cfg(test)`; the production call site is `#[cfg(test)]`.
+///
+/// The gate is scoped to a `CommunityId`: only a publisher whose tenant matches
+/// the armed community is held. Publishers from other tenants — the rapid
+/// archive/unarchive or owner-archive regressions running in parallel under the
+/// Rust test runner — pass straight through and never consume the gate armed
+/// for the concurrent-publisher test's unique tenant.
 #[cfg(test)]
 pub(crate) mod publish_test_hooks {
+    use buzz_core::tenant::CommunityId;
     use std::sync::{Arc, Mutex};
     use tokio::sync::{oneshot, Notify};
 
     struct Gate {
+        community: CommunityId,
         arrived: oneshot::Sender<()>,
         release: Arc<Notify>,
     }
 
     static GATE: Mutex<Option<Gate>> = Mutex::new(None);
 
-    /// Arm a one-shot barrier. Await the returned receiver to learn when the
-    /// held publisher has reached the hook (i.e. has read canonical state);
-    /// call `notify_one` on the returned handle to let it proceed. Only the
-    /// first publisher to reach the hook after arming is held; all others pass.
-    pub(crate) fn arm() -> (oneshot::Receiver<()>, Arc<Notify>) {
+    /// Arm a one-shot barrier for `community`. Await the returned receiver to
+    /// learn when the held publisher has reached the hook (i.e. has read
+    /// canonical state); call `notify_one` on the returned handle to let it
+    /// proceed. Only the first publisher of the matching community to reach the
+    /// hook after arming is held; every other publisher passes.
+    pub(crate) fn arm(community: CommunityId) -> (oneshot::Receiver<()>, Arc<Notify>) {
         let (tx, rx) = oneshot::channel();
         let release = Arc::new(Notify::new());
         *GATE.lock().unwrap() = Some(Gate {
+            community,
             arrived: tx,
             release: release.clone(),
         });
         (rx, release)
     }
 
-    pub(super) async fn after_list_archived() {
-        let gate = GATE.lock().unwrap().take();
+    pub(super) async fn after_list_archived(community: CommunityId) {
+        let gate = {
+            let mut slot = GATE.lock().unwrap();
+            match slot.as_ref() {
+                Some(gate) if gate.community == community => slot.take(),
+                _ => None,
+            }
+        };
         if let Some(gate) = gate {
             let _ = gate.arrived.send(());
             gate.release.notified().await;
@@ -3177,7 +3193,7 @@ pub async fn publish_nipia_archival_list(
         // stale-read/late-write ordering the drift check must catch is
         // deterministic, not scheduler-dependent. Inert in production.
         #[cfg(test)]
-        publish_test_hooks::after_list_archived().await;
+        publish_test_hooks::after_list_archived(tenant.community()).await;
         let mut tags: Vec<Tag> = Vec::with_capacity(archived.len() + 1);
         tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
 

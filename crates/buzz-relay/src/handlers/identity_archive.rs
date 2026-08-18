@@ -645,7 +645,8 @@ mod tests {
 
         // Arm the barrier, then spawn the stale publisher. It reads the
         // `{target}` view, reaches the hook, and blocks until released.
-        let (reached_hook, release) = crate::handlers::side_effects::publish_test_hooks::arm();
+        let (reached_hook, release) =
+            crate::handlers::side_effects::publish_test_hooks::arm(tenant.community());
         let stale_tenant = tenant.clone();
         let stale_state = state.clone();
         let stale_publisher =
