@@ -44,7 +44,7 @@ function AddressMentionBadge({
     <motion.span
       animate={controls}
       aria-hidden="true"
-      className="absolute bottom-0 right-0 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm ring-2 ring-background"
+      className="absolute -bottom-0.5 -left-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm ring-2 ring-background"
       data-pulse-version={pulseVersion}
       data-testid={`composer-address-lock-mention-badge-${pubkey}`}
       initial={false}
@@ -82,36 +82,29 @@ export function ComposerAddressLocks({
             layout
             transition={{ type: "spring", stiffness: 500, damping: 30 }}
           >
-            <Tooltip disableHoverableContent>
-              <TooltipTrigger asChild>
-                <button
-                  aria-label={`Open profile for ${agent.displayName}`}
-                  className="relative h-9 w-9 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                  onClick={() => openProfilePanel?.(agent.pubkey)}
-                  type="button"
-                >
-                  <UserAvatar
-                    avatarUrl={agent.avatarUrl}
-                    className="h-8 w-8 ring-1 ring-border/70"
-                    displayName={agent.displayName}
-                    size="md"
-                    testId="composer-address-lock-avatar"
-                  />
-                  <AddressMentionBadge
-                    pubkey={agent.pubkey}
-                    pulseVersion={pulseVersionByPubkey[agent.pubkey] ?? 0}
-                  />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent className="select-none">
-                Always mentioning {agent.displayName}
-              </TooltipContent>
-            </Tooltip>
+            <button
+              aria-label={`Open profile for ${agent.displayName}`}
+              className="relative h-9 w-9 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              onClick={() => openProfilePanel?.(agent.pubkey)}
+              type="button"
+            >
+              <UserAvatar
+                avatarUrl={agent.avatarUrl}
+                className="h-8 w-8 ring-1 ring-border/70"
+                displayName={agent.displayName}
+                size="md"
+                testId="composer-address-lock-avatar"
+              />
+              <AddressMentionBadge
+                pubkey={agent.pubkey}
+                pulseVersion={pulseVersionByPubkey[agent.pubkey] ?? 0}
+              />
+            </button>
             <Tooltip disableHoverableContent>
               <TooltipTrigger asChild>
                 <button
                   aria-label={`Stop always mentioning ${agent.displayName}`}
-                  className="pointer-events-none absolute right-0 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background opacity-0 ring-2 ring-background transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
+                  className="pointer-events-none absolute -right-0.5 -top-0.5 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background opacity-0 ring-2 ring-background transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
                   data-testid={`composer-address-lock-remove-${agent.pubkey}`}
                   onClick={() => onRemove(agent.pubkey)}
                   type="button"
@@ -119,7 +112,7 @@ export function ComposerAddressLocks({
                   <X className="h-2.5 w-2.5" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>
+              <TooltipContent align="start" alignOffset={-22}>
                 Stop always mentioning {agent.displayName}
               </TooltipContent>
             </Tooltip>
