@@ -571,6 +571,32 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn format_uploaded_attachment(desc: &crate::client::BlobDescriptor) -> String {
+    if desc.mime_type.starts_with("video/") {
+        return format!("\n![video]({})", desc.url);
+    }
+    if desc.mime_type.starts_with("image/") {
+        return format!("\n![image]({})", desc.url);
+    }
+
+    // Generic files must be links, not image syntax. The matching imeta tag
+    // carries the original filename even when an older relay stores opaque
+    // content under a `.bin` URL.
+    let raw_label = desc
+        .filename
+        .as_deref()
+        .or_else(|| desc.url.rsplit('/').next())
+        .unwrap_or("file");
+    let mut label = String::with_capacity(raw_label.len());
+    for character in raw_label.chars() {
+        if matches!(character, '\\' | '[' | ']') {
+            label.push('\\');
+        }
+        label.push(character);
+    }
+    format!("\n[{label}]({})", desc.url)
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -619,13 +645,7 @@ pub async fn cmd_send_message(
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
         media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        media_content.push_str(&format_uploaded_attachment(&desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -993,9 +1013,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, format_uploaded_attachment,
+        match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1005,6 +1025,52 @@ mod tests {
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn attachment(
+        mime_type: &str,
+        filename: Option<&str>,
+        url: &str,
+    ) -> crate::client::BlobDescriptor {
+        crate::client::BlobDescriptor {
+            url: url.to_string(),
+            sha256: "a".repeat(64),
+            size: 12,
+            mime_type: mime_type.to_string(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: filename.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn generic_attachment_uses_filename_link_even_for_bin_url() {
+        let descriptor = attachment(
+            "application/octet-stream",
+            Some("release-notes.md"),
+            "https://relay.test/media/aaaaaaaa.bin",
+        );
+        assert_eq!(
+            format_uploaded_attachment(&descriptor),
+            "\n[release-notes.md](https://relay.test/media/aaaaaaaa.bin)"
+        );
+    }
+
+    #[test]
+    fn media_attachments_keep_inline_markdown() {
+        let image = attachment("image/png", Some("plot.png"), "https://relay.test/a.png");
+        let video = attachment("video/mp4", Some("clip.mp4"), "https://relay.test/a.mp4");
+        assert_eq!(
+            format_uploaded_attachment(&image),
+            "\n![image](https://relay.test/a.png)"
+        );
+        assert_eq!(
+            format_uploaded_attachment(&video),
+            "\n![video](https://relay.test/a.mp4)"
+        );
+    }
 
     // Three real pubkeys (lowercase 64-char hex) used by parse_member_pubkeys tests.
     // See the test's own comment on what `PublicKey::from_hex` actually validates.
