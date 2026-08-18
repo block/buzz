@@ -124,6 +124,21 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(
     prTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Pull request · relay-tools");
+  const tooltipSemanticColors = await prTooltip.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "hsl(var(--secondary))";
+    probe.style.color = "hsl(var(--secondary-foreground))";
+    document.body.append(probe);
+    const semanticStyles = getComputedStyle(probe);
+    const result = {
+      actual: [styles.backgroundColor, styles.color],
+      expected: [semanticStyles.backgroundColor, semanticStyles.color],
+    };
+    probe.remove();
+    return result;
+  });
+  expect(tooltipSemanticColors.actual).toEqual(tooltipSemanticColors.expected);
   await expect(prChip).toContainText(`relay-tools · ${PR_SUBJECT}`);
 
   const issueChip = row.getByRole("button", {
@@ -422,10 +437,28 @@ test("definitively deleted message links open their channel and remain copyable"
     })
     .toBe(true);
   await expect(deletedLink).toHaveJSProperty("tagName", "BUTTON");
-  const deletedColors = await deletedLink.evaluate((element) => {
+  const deletedSemanticColors = await deletedLink.evaluate((element) => {
     const styles = getComputedStyle(element);
-    return [styles.backgroundColor, styles.color];
+    const rootStyles = getComputedStyle(document.documentElement);
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "hsl(var(--disabled))";
+    probe.style.color = "hsl(var(--disabled-foreground))";
+    document.body.append(probe);
+    const semanticStyles = getComputedStyle(probe);
+    const result = {
+      actual: [styles.backgroundColor, styles.color],
+      expected: [semanticStyles.backgroundColor, semanticStyles.color],
+      tokens: [
+        rootStyles.getPropertyValue("--disabled").trim(),
+        rootStyles.getPropertyValue("--disabled-foreground").trim(),
+      ],
+    };
+    probe.remove();
+    return result;
   });
+  expect(deletedSemanticColors.actual).toEqual(deletedSemanticColors.expected);
+  expect(deletedSemanticColors.tokens.every(Boolean)).toBe(true);
+  const deletedColors = deletedSemanticColors.actual;
   await deletedLink.hover();
   await expect
     .poll(() =>

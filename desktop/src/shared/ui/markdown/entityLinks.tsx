@@ -66,7 +66,7 @@ function EntityMetadataTooltip({
             {metadata?.description ? ` · ${metadata.description}` : null}
           </span>
           <span
-            className="mt-1 block text-2xs text-primary-foreground/70"
+            className="mt-1 block text-2xs text-secondary-foreground/70"
             data-buzz-tooltip-metadata-type=""
           >
             {footer}
