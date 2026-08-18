@@ -24,10 +24,22 @@ async function createWorkflow(
   name: string,
 ) {
   await page.getByRole("button", { name: "Create Workflow" }).click();
-  const dialog = page.getByRole("dialog");
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel("Workflow name").fill(name);
-  await dialog.getByRole("button", { name: "Add step" }).click();
+
+  const channelList = page.getByTestId("channel-combobox-list");
+  await expect(channelList).toBeVisible();
+  await channelList
+    .getByRole("button", { name: "agents", exact: true })
+    .click();
+
+  await dialog.getByRole("button", { name: "Edit workflow name" }).click();
+  await dialog.getByRole("textbox", { name: "Workflow name" }).fill(name);
+  await dialog.getByRole("button", { name: "Save workflow name" }).click();
+
+  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Send Message" }).click();
+  await dialog.getByLabel("Message text").fill("Workflow notification");
   await dialog.getByRole("button", { name: "Create" }).click();
   await expect(dialog).not.toBeVisible();
 }
@@ -105,7 +117,7 @@ test.fixme("direct forum thread links close back to the forum route", async ({
   ).toBeVisible();
 });
 
-test("direct workflow detail links close back to workflows", async ({
+test("direct workflow editor links close back to workflows", async ({
   page,
 }) => {
   const workflowName = `workflow_nav_${Date.now()}`;
@@ -124,8 +136,10 @@ test("direct workflow detail links close back to workflows", async ({
 
   await page.goto(`/#/workflows/${workflowId}`);
 
-  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
-  await page.getByRole("button", { name: "Close detail panel" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit workflow" });
+  await expect(dialog).toContainText(workflowName);
+  await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
   await expect(page).toHaveURL(/#\/workflows$/);
   await expect(page.getByTestId("workflows-view")).toBeVisible();
