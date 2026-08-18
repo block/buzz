@@ -67,6 +67,7 @@ const ALLOWED_MIMES: &[&str] = &[
     "image/gif",
     "image/webp",
     "video/mp4",
+    "application/pdf",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -74,6 +75,38 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic attachments (100 MB).
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+fn max_upload_bytes(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        MAX_VIDEO_BYTES
+    } else if mime.starts_with("image/") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_FILE_BYTES
+    }
+}
+
+#[cfg(test)]
+mod upload_policy_tests {
+    use super::{
+        max_upload_bytes, ALLOWED_MIMES, MAX_FILE_BYTES, MAX_IMAGE_BYTES, MAX_VIDEO_BYTES,
+    };
+
+    #[test]
+    fn pdf_is_allowed_as_a_generic_attachment() {
+        assert!(ALLOWED_MIMES.contains(&"application/pdf"));
+        assert_eq!(max_upload_bytes("application/pdf"), MAX_FILE_BYTES);
+    }
+
+    #[test]
+    fn existing_media_size_limits_are_unchanged() {
+        assert_eq!(max_upload_bytes("image/png"), MAX_IMAGE_BYTES);
+        assert_eq!(max_upload_bytes("video/mp4"), MAX_VIDEO_BYTES);
+    }
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1139,11 +1172,7 @@ impl BuzzClient {
         }
 
         // 3. Size check
-        let max = if mime.starts_with("video/") {
-            MAX_VIDEO_BYTES
-        } else {
-            MAX_IMAGE_BYTES
-        };
+        let max = max_upload_bytes(&mime);
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
                 "file too large: {} bytes (max {})",

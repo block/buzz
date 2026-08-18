@@ -608,6 +608,40 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn safe_attachment_filename(file_path: &str) -> String {
+    let basename = std::path::Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let mut safe = String::new();
+    let mut bytes = 0;
+    for ch in basename.chars().filter(|ch| !ch.is_control()) {
+        let width = ch.len_utf8();
+        if bytes + width > 255 {
+            break;
+        }
+        safe.push(ch);
+        bytes += width;
+    }
+    let trimmed = safe.trim();
+    if trimmed.is_empty() {
+        "file".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn escape_markdown_label(label: &str) -> String {
+    let mut escaped = String::with_capacity(label.len());
+    for ch in label.chars() {
+        if matches!(ch, '\\' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -655,14 +689,25 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
+        let filename = safe_attachment_filename(file_path);
+        let mut imeta = crate::client::build_imeta_tag(&desc);
+        imeta.push(format!("filename {filename}"));
+        media_tags.push(imeta);
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
-        } else {
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else if desc.mime_type.starts_with("image/") {
             media_content.push_str("\n![image](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else {
+            media_content.push_str("\n[");
+            media_content.push_str(&escape_markdown_label(&filename));
+            media_content.push_str("](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
         }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1056,11 +1101,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        channel_id_from_event, cmd_get_thread, escape_markdown_label, event_mention_pubkeys,
+        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, safe_attachment_filename,
+        thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1188,6 +1233,23 @@ mod tests {
             )
             .unwrap(),
             ID_A
+        );
+    }
+
+    #[test]
+    fn attachment_filename_uses_a_safe_basename() {
+        assert_eq!(
+            safe_attachment_filename("/tmp/reports/closing\nstatement.pdf"),
+            "closingstatement.pdf"
+        );
+        assert_eq!(safe_attachment_filename("/tmp/   "), "file");
+    }
+
+    #[test]
+    fn attachment_filename_is_safe_as_a_markdown_label() {
+        assert_eq!(
+            escape_markdown_label(r"report[final]\\copy.pdf"),
+            r"report\[final\]\\\\copy.pdf"
         );
     }
 
