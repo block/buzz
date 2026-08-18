@@ -14,6 +14,10 @@ import {
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
 
+// Radix Popover has no hover timing API: controlled hover popovers must use this
+// shared dwell default themselves. Keep click and keyboard opens immediate.
+export const DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS = 500;
+
 const Popover = PopoverPrimitive.Root;
 
 const PopoverTrigger = PopoverPrimitive.Trigger;
