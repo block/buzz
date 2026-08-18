@@ -2287,7 +2287,9 @@ test("people sharing blocks a timeout before encoding or upload", async ({
   });
 
   await page.getByTestId("persona-share-send").click();
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible();
+  await expect(
+    page.getByText("You are currently timed out and cannot send messages."),
+  ).toBeVisible();
 
   const commands = await readAgentShareCommands(page);
   expect(
@@ -2332,7 +2334,11 @@ test("people sharing rechecks destination eligibility after encoding", async ({
     return testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   });
 
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible({
+  await expect(
+    page.getByText(
+      "The selected destination is no longer available. Please pick another.",
+    ),
+  ).toBeVisible({
     timeout: 5_000,
   });
   const commands = await readAgentShareCommands(page);
