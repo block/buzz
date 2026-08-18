@@ -904,6 +904,59 @@ void main() {
       },
     );
 
+    testWidgets('hides Add members while the authoritative roster is loading', (
+      tester,
+    ) async {
+      final members = Completer<List<ChannelMember>>();
+      await tester.pumpWidget(
+        _buildTestable(messages: const [], loadMembers: () => members.future),
+      );
+      await tester.pump();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(
+        find.byKey(const ValueKey('channel-details-add-members-row')),
+        findsNothing,
+      );
+
+      members.complete([
+        ChannelMember(pubkey: 'self', role: 'owner', joinedAt: DateTime(2025)),
+      ]);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('channel-details-add-members-row')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('hides Add members when the authoritative roster fails', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          loadMembers: () => Future<List<ChannelMember>>.error('failed'),
+        ),
+      );
+      await tester.pump();
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-details-add-members-row')),
+        findsNothing,
+      );
+      expect(find.text('Members unavailable'), findsOneWidget);
+    });
+
     testWidgets('one-member channel shows Add first without a See all row', (
       tester,
     ) async {

@@ -244,6 +244,49 @@ void main() {
     });
   });
 
+  test(
+    'stale channel actions cannot publish after a community switch',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final staleActions = container.read(channelActionsProvider);
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other-community.example', nsec: null);
+
+      final operations = <Future<void> Function()>[
+        () =>
+            staleActions.updateChannel(channelId: _channelId, name: 'renamed'),
+        () => staleActions.archiveChannel(_channelId),
+        () => staleActions.unarchiveChannel(_channelId),
+        () => staleActions.deleteChannel(_channelId),
+        () => staleActions.setCanvas(channelId: _channelId, content: 'canvas'),
+        () => staleActions.changeMemberRole(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+          role: 'admin',
+        ),
+        () => staleActions.removeMember(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+        ),
+        () => staleActions.leaveChannel(_channelId),
+      ];
+
+      for (final operation in operations) {
+        await expectLater(operation(), throwsA(isA<StateError>()));
+      }
+    },
+  );
+
   group('channelMembersProvider', () {
     test('waits for the relay connection before fetching members', () async {
       final session = _ConnectionAwareRelaySession();
@@ -468,6 +511,17 @@ void main() {
 const _channelId = '11111111-1111-4111-8111-111111111111';
 const _memberPubkey =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+class _FixedRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://first-community.example', nsec: null);
+
+  @override
+  void update({required String baseUrl, String? nsec}) {
+    state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
+  }
+}
 
 class _ConnectionAwareRelaySession extends RelaySessionNotifier {
   int historyQueryCount = 0;

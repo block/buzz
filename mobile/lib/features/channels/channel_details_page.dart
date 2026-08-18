@@ -90,6 +90,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
         !resolvedChannel.isArchived &&
         !resolvedChannel.isMember;
     final canAddMembers =
+        membersAsync.hasValue &&
+        !membersAsync.isLoading &&
+        !membersAsync.hasError &&
         !resolvedChannel.isArchived &&
         resolvedChannel.canAddMembers(currentMember?.role);
     final canArchive = !resolvedChannel.isArchived && canManageLifecycle;
