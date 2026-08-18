@@ -46,10 +46,10 @@ class EvidenceBundleTests(unittest.TestCase):
             )
             receipt = {
                 "status": "failed",
-                "failure": "journey failed",
+                "failure": "Authorization: Bearer failure-secret",
                 "provenance": {"head_sha": "abc123", "dirty": False},
                 "artifacts": {"video": "video.mp4", "log": "flutter.log"},
-                "cleanup": {"status": "passed"},
+                "cleanup": {"status": "passed", "errors": [{"token": "nested-secret"}]},
                 "isolation": {"secret_path": "/private/path"},
             }
             receipt_path = root / "receipt.json"
@@ -70,10 +70,34 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertNotIn("deadbeef", excerpt)
             self.assertNotIn("unrelated", excerpt)
             self.assertNotIn("isolation", json.loads((output / "receipt.json").read_text()))
+            bundle_receipt = json.loads((output / "receipt.json").read_text())
+            self.assertNotIn("failure-secret", json.dumps(bundle_receipt))
+            self.assertNotIn("nested-secret", json.dumps(bundle_receipt))
+            self.assertEqual(bundle_receipt["failure"], "Authorization: Bearer [REDACTED]")
+            self.assertEqual(bundle_receipt["cleanup"]["errors"][0]["token"], "[REDACTED]")
             self.assertEqual(manifest["head_sha"], "abc123")
             self.assertEqual(manifest["status"], "failed")
             self.assertEqual(manifest["cleanup"], "passed")
             self.assertEqual(set(manifest["files"]), {"finding.mp4", "receipt.json", "log-excerpt.txt"})
+
+    def test_redacts_header_and_json_secret_forms(self):
+        source = 'Authorization: Bearer abc123\n{"token": "json-secret", "safe": "visible"}'
+        redacted = evidence.redact_log(source)
+        self.assertEqual(
+            redacted,
+            'Authorization: Bearer [REDACTED]\n{"token": "[REDACTED]", "safe": "visible"}',
+        )
+
+    def test_non_finite_clip_bounds_fail_before_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "source.mp4"
+            source.write_bytes(b"video")
+            for start, duration in ((float("nan"), None), (float("inf"), None), (None, float("nan"))):
+                with self.subTest(start=start, duration=duration), \
+                     mock.patch.object(evidence.shutil, "which") as which:
+                    with self.assertRaisesRegex(evidence.EvidenceError, "finite"):
+                        evidence.relay_safe_video(source, source.with_name("out.mp4"), start=start, duration=duration)
+                    which.assert_not_called()
 
     def test_bundle_refuses_missing_match_and_removes_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:

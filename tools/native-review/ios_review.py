@@ -115,19 +115,33 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
     if not test.is_file() or ROOT not in test.resolve().parents:
         raise ReviewError(f"test must be a repository integration test: {test}")
     prov = provenance()
+    started = dt.datetime.now(dt.timezone.utc).isoformat()
     run_id = f"ios-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
-    run_dir = output_root / git("rev-parse", "--short=12", "HEAD") / "ios_pairing" / run_id
+    flow = f"ios_{test.stem}"
+    run_dir = output_root / git("rev-parse", "--short=12", "HEAD") / flow / run_id
     run_dir.mkdir(parents=True)
-    receipt: dict[str, Any] = {"schema_version": 1, "run_id": run_id, "status": "failed", "failure": None,
-                              "provenance": prov, "artifacts": {}, "cleanup": {"status": "not_started"}}
+    receipt: dict[str, Any] = {
+        "schema_version": 1, "run_id": run_id, "flow": flow, "status": "failed",
+        "started_at": started, "finished_at": started, "failure": None,
+        "provenance": prov,
+        "isolation": {"kind": "disposable_ios_simulator", "owned": True},
+        "artifacts": {}, "steps": [], "measurements": {},
+        "performance": {"machine": {
+            "system": sys.platform, "release": "ios-simulator",
+            "machine": os.uname().machine, "cpu": os.uname().machine,
+        }},
+        "cleanup": {"status": "not_started"},
+    }
     device: dict[str, Any] | None = None
     udid: str | None = None
     recorder: subprocess.Popen[str] | None = None
     try:
         device = create_review_device(device_name, run_id)
         udid = device["udid"]
-        receipt["device"] = {"name": device["name"], "device_type": device_name, "udid": udid,
-                             "runtime": device["runtimeIdentifier"], "owned": True}
+        receipt["isolation"]["simulator"] = {
+            "name": device["name"], "device_type": device_name, "udid": udid,
+            "runtime": device["runtimeIdentifier"], "owned": True,
+        }
         run(["xcrun", "simctl", "boot", udid])
         run(["xcrun", "simctl", "bootstatus", udid, "-b"], capture=False)
         video = run_dir / "video.mp4"
@@ -178,7 +192,8 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
         receipt["cleanup"] = {"status": "failed" if errors else "passed", "errors": errors}
         if errors:
             receipt["status"] = "failed"
-        (run_dir / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        receipt["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        (run_dir / "receipt.json").write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
     print(run_dir)
     if receipt["status"] != "passed":
         raise ReviewError(receipt["failure"] or "iOS journey or cleanup failed")

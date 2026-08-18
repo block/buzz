@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import re
 import shutil
@@ -10,9 +11,12 @@ import subprocess
 from typing import Any
 
 MAX_VIDEO_EDGE = 2160
+SECRET_KEY = re.compile(r"(?i)(?:auth(?:orization)?|token|secret|password|private[_-]?key|cookie|api[_-]?key)")
 SECRET_VALUE = re.compile(
-    r"(?i)(?P<name>(?:auth|token|secret|password|private[_-]?key|cookie)[A-Z0-9_.-]*)"
-    r"(?P<sep>\s*[:=]\s*)(?P<value>[^\s,;]+)"
+    r"(?i)(?P<prefix>\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+)"
+    r"(?P<header>[^\s,;]+)|"
+    r"(?P<name>[\"']?(?:auth|token|secret|password|private[_-]?key|cookie|api[_-]?key)[A-Z0-9_.-]*[\"']?)"
+    r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>[^\s,;\"'}]+)(?P=quote)"
 )
 
 
@@ -31,6 +35,10 @@ def sha256(path: pathlib.Path) -> str:
 def relay_safe_video(source: pathlib.Path, destination: pathlib.Path, *, start: float | None = None,
                      duration: float | None = None) -> pathlib.Path:
     """Transcode a recording to Buzz's canonical, metadata-free MP4 profile."""
+    if start is not None and (isinstance(start, bool) or not math.isfinite(start) or start < 0):
+        raise EvidenceError("clip start must be finite and non-negative")
+    if duration is not None and (isinstance(duration, bool) or not math.isfinite(duration) or duration <= 0):
+        raise EvidenceError("clip duration must be finite and positive")
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise EvidenceError("ffmpeg is required to finalize shareable evidence")
@@ -38,10 +46,6 @@ def relay_safe_video(source: pathlib.Path, destination: pathlib.Path, *, start: 
         raise EvidenceError(f"recording does not exist: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp.mp4")
-    if start is not None and start < 0:
-        raise EvidenceError("clip start cannot be negative")
-    if duration is not None and duration <= 0:
-        raise EvidenceError("clip duration must be positive")
     command = [ffmpeg, "-y"]
     if start is not None:
         command.extend(["-ss", str(start)])
@@ -66,7 +70,26 @@ def relay_safe_video(source: pathlib.Path, destination: pathlib.Path, *, start: 
 
 
 def redact_log(text: str) -> str:
-    return SECRET_VALUE.sub(lambda match: f"{match.group('name')}{match.group('sep')}[REDACTED]", text)
+    def replacement(match: re.Match[str]) -> str:
+        if match.group("prefix") is not None:
+            return f"{match.group('prefix')}[REDACTED]"
+        quote = match.group("quote") or ""
+        return f"{match.group('name')}{match.group('sep')}{quote}[REDACTED]{quote}"
+    return SECRET_VALUE.sub(replacement, text)
+
+
+def redact_value(value: Any) -> Any:
+    """Recursively redact credential-shaped keys and strings copied into bundles."""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if isinstance(key, str) and SECRET_KEY.search(key) else redact_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_log(value)
+    return value
 
 
 def focused_log(text: str, match: str | None, context: int) -> str:
@@ -119,8 +142,8 @@ def finding_bundle(receipt_path: pathlib.Path, output: pathlib.Path, *, match: s
         log_text = artifact(log_name).read_text(errors="replace")
         (output / "log-excerpt.txt").write_text(focused_log(log_text, match, context))
         provenance = receipt.get("provenance", {})
-        device = receipt.get("device", {})
-        receipt_copy = {
+        device = receipt.get("isolation", {}).get("simulator", receipt.get("device", {}))
+        receipt_copy = redact_value({
             "schema_version": receipt.get("schema_version"),
             "run_id": receipt.get("run_id"),
             "flow": receipt.get("flow"),
@@ -131,7 +154,7 @@ def finding_bundle(receipt_path: pathlib.Path, output: pathlib.Path, *, match: s
             "measurements": receipt.get("measurements"),
             "performance": receipt.get("performance"),
             "cleanup": receipt.get("cleanup"),
-        }
+        })
         (output / "receipt.json").write_text(json.dumps(receipt_copy, indent=2) + "\n")
         manifest = {
             "schema_version": 1,

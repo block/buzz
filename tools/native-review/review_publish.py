@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 import shutil
 import subprocess
@@ -59,8 +60,8 @@ def _video_duration(video: pathlib.Path) -> float:
         duration = float(result.stdout.strip())
     except ValueError as exc:
         raise PublishError("ffprobe returned an invalid video duration") from exc
-    if duration <= 0:
-        raise PublishError("share video has no positive duration")
+    if not math.isfinite(duration) or duration <= 0:
+        raise PublishError("share video has no finite positive duration")
     return duration
 
 
@@ -79,7 +80,7 @@ def _load_highlights(path: pathlib.Path | None, duration: float) -> list[dict[st
             raise PublishError(f"highlight {index} requires exactly seconds and text")
         seconds, text = item["seconds"], item["text"]
         if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
-                or seconds < 0 or seconds > duration):
+                or not math.isfinite(seconds) or seconds < 0 or seconds > duration):
             raise PublishError(f"highlight {index} seconds must be within the video (0..{duration:.3f})")
         if not isinstance(text, str) or not text.strip():
             raise PublishError(f"highlight {index} text must be non-empty")

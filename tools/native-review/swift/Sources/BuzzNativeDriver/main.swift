@@ -334,6 +334,7 @@ final class WindowRecorder: @unchecked Sendable {
             let start = ContinuousClock.now
             var frame: Int64 = 0
             while !Task.isCancelled {
+                frame += 1
                 autoreleasepool {
                     guard writerInput.isReadyForMoreMediaData,
                           let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
@@ -350,11 +351,10 @@ final class WindowRecorder: @unchecked Sendable {
                                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
                     context.interpolationQuality = .high
                     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-                    let time = CMTime(value: frame, timescale: 15)
+                    let time = CMTime(value: frame - 1, timescale: 15)
                     if !pixelAdaptor.append(buffer, withPresentationTime: time) {
                         self.captureError = assetWriter.error ?? DriverError.message("failed to append window video frame")
                     }
-                    frame += 1
                 }
                 let target = start.advanced(by: .milliseconds(Int(frame * 1000 / 15)))
                 try? await Task.sleep(until: target)
@@ -527,13 +527,6 @@ struct BuzzNativeDriver {
                             try postKey(action["key"] as? String ?? "", modifiers: action["modifiers"] as? [String] ?? [])
                         } else if type == "type_text" {
                             try postText(action["text"] as? String ?? "")
-                        } else if type == "scroll" {
-                            let deltaY = Int32(action["delta_y"] as? Int ?? 0)
-                            guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
-                                                      wheel1: deltaY, wheel2: 0, wheel3: 0) else {
-                                throw DriverError.message("could not create scroll event")
-                            }
-                            event.post(tap: .cghidEventTap)
                         } else {
                             guard let (_, used) = selected else {
                                 throw DriverError.message("action requires a freshly selected element with current bounds")
@@ -568,6 +561,14 @@ struct BuzzNativeDriver {
                                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                                 CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                                 CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                            } else if type == "scroll" {
+                                let deltaY = Int32(action["delta_y"] as? Int ?? 0)
+                                guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                                          wheel1: deltaY, wheel2: 0, wheel3: 0) else {
+                                    throw DriverError.message("could not create scroll event")
+                                }
+                                event.location = point
+                                event.post(tap: .cghidEventTap)
                             } else { throw DriverError.message("unsupported action: \(type)") }
                         }
                         response(["ok": true])

@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import http.server
 import json
+import math
 import os
 import pathlib
 import platform
@@ -45,6 +46,14 @@ SECRET_NAME = re.compile(r"(AUTH|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|COOKIE)", re.
 ALLOWED_TOP = {"schema_version", "flow", "platforms", "fixture", "record", "steps", "cleanup"}
 ALLOWED_STEP = {"name", "locate", "act", "expect", "expect_for", "timeout_ms", "measure"}
 PERFORMANCE_SAMPLE_MINIMUM = 3
+
+
+def is_finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 class HarnessError(RuntimeError):
@@ -156,8 +165,8 @@ def validate_expectation(expectation: Any, where: str) -> None:
     if "value" in expectation and not isinstance(expectation["value"], str):
         raise HarnessError(f"{where}.value must be a string")
     for key in ("scroll_y_greater_than", "scroll_y_less_than"):
-        if key in expectation and not isinstance(expectation[key], (int, float)):
-            raise HarnessError(f"{where}.{key} must be numeric")
+        if key in expectation and not is_finite_number(expectation[key]):
+            raise HarnessError(f"{where}.{key} must be a finite number")
 
 
 def load_journey(path: pathlib.Path) -> dict[str, Any]:
@@ -200,7 +209,7 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
             raise HarnessError(f"{where}.act has unsupported type")
         if set(action) - {"type", "duration_ms", "key", "modifiers", "text", "delta_y"}:
             raise HarnessError(f"{where}.act contains an unsupported field")
-        if action_type in {"click", "move_pointer"} and locators is None:
+        if action_type in {"click", "move_pointer", "scroll"} and locators is None:
             raise HarnessError(f"{where}: {action_type} requires locate")
         if action_type == "press":
             if not isinstance(action.get("key"), str) or not action["key"]:
@@ -210,16 +219,20 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
                 raise HarnessError(f"{where}: press modifiers must be strings")
         if action_type == "type_text" and not isinstance(action.get("text"), str):
             raise HarnessError(f"{where}: type_text requires text")
-        if action_type == "scroll" and not isinstance(action.get("delta_y"), int):
+        if action_type == "scroll" and not is_int(action.get("delta_y")):
             raise HarnessError(f"{where}: scroll requires integer delta_y")
+        if "duration_ms" in action and (not is_int(action["duration_ms"]) or action["duration_ms"] < 0):
+            raise HarnessError(f"{where}.act.duration_ms must be a non-negative integer")
         validate_expectation(step["expect"], f"{where}.expect")
         if "expect_for" in step:
             sustained = step["expect_for"]
             if not isinstance(sustained, dict) or set(sustained) != {"duration_ms", "condition"}:
                 raise HarnessError(f"{where}.expect_for requires duration_ms and condition")
+            if not is_int(sustained["duration_ms"]) or sustained["duration_ms"] < 0:
+                raise HarnessError(f"{where}.expect_for.duration_ms must be a non-negative integer")
             validate_expectation(sustained["condition"], f"{where}.expect_for.condition")
         timeout = step.get("timeout_ms", 5000)
-        if not isinstance(timeout, int) or not 0 < timeout <= 60000:
+        if not is_int(timeout) or not 0 < timeout <= 60000:
             raise HarnessError(f"{where}.timeout_ms must be 1..60000")
         if "measure" in step:
             measurement = step["measure"]
@@ -705,7 +718,10 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
 
 
 def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]:
+    if len({path.resolve() for path in paths}) != len(paths):
+        raise HarnessError(f"{label} cohort contains duplicate receipt paths")
     receipts = []
+    run_ids: set[str] = set()
     for path in paths:
         try:
             receipt = json.loads(path.read_text())
@@ -715,6 +731,10 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
             raise HarnessError(f"{label} receipt is not a clean pass: {path}")
         if receipt.get("provenance", {}).get("dirty"):
             raise HarnessError(f"{label} receipt was captured from a dirty tree: {path}")
+        run_id = receipt.get("run_id")
+        if not isinstance(run_id, str) or not run_id or run_id in run_ids:
+            raise HarnessError(f"{label} cohort contains a missing or duplicate run_id: {run_id}")
+        run_ids.add(run_id)
         receipts.append(receipt)
     return receipts
 
@@ -724,8 +744,8 @@ def metric_value(receipt: dict[str, Any], metric: str) -> float:
         value = receipt.get("performance", {}).get("process", {}).get(metric.removeprefix("process."))
     else:
         value = receipt.get("measurements", {}).get(metric, {}).get("value")
-    if not isinstance(value, (int, float)):
-        raise HarnessError(f"receipt {receipt.get('run_id')} has no numeric metric {metric}")
+    if not is_finite_number(value):
+        raise HarnessError(f"receipt {receipt.get('run_id')} has no finite numeric metric {metric}")
     return float(value)
 
 
@@ -757,7 +777,7 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     if budget["schema_version"] != 1 or not isinstance(budget["flow"], str):
         raise HarnessError("unsupported performance budget schema")
     minimum = budget["minimum_samples"]
-    if not isinstance(minimum, int) or minimum < PERFORMANCE_SAMPLE_MINIMUM:
+    if not is_int(minimum) or minimum < PERFORMANCE_SAMPLE_MINIMUM:
         raise HarnessError(f"minimum_samples must be at least {PERFORMANCE_SAMPLE_MINIMUM}")
     metrics = budget["metrics"]
     if not isinstance(metrics, dict) or not metrics:
@@ -766,7 +786,7 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     for name, limits in metrics.items():
         if (not isinstance(name, str) or not name or not isinstance(limits, dict) or not limits
                 or set(limits) - allowed_limits
-                or not all(isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 for value in limits.values())):
+                or not all(is_finite_number(value) and value >= 0 for value in limits.values())):
             raise HarnessError(f"invalid limits for performance metric {name}")
 
     baseline = load_receipts(baseline_paths, "baseline")
@@ -873,7 +893,7 @@ def main() -> int:
                                     start=args.start, duration=args.duration)
             print(json.dumps({"output": str(args.output.resolve()), "manifest": result}, indent=2)); return 0
         if args.command == "benchmark":
-            if args.runs < PERFORMANCE_SAMPLE_MINIMUM:
+            if not is_int(args.runs) or args.runs < PERFORMANCE_SAMPLE_MINIMUM:
                 raise HarnessError(f"benchmark requires at least {PERFORMANCE_SAMPLE_MINIMUM} runs")
             receipts = [run_journey(args.journey, args.relay, args.output) / "receipt.json" for _ in range(args.runs)]
             print(json.dumps({"receipts": [str(path) for path in receipts]}, indent=2)); return 0
