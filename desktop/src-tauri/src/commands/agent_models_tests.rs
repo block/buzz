@@ -12,18 +12,35 @@ fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
         &[],
         RespondTo::OwnerOnly,
         &[],
+        false,
     ));
     assert!(managed_agent_access_policy_changed(
         RespondTo::Allowlist,
         &allowlist_a,
         RespondTo::Allowlist,
         &allowlist_b,
+        false,
     ));
     assert!(!managed_agent_access_policy_changed(
         RespondTo::OwnerOnly,
         &allowlist_a,
         RespondTo::OwnerOnly,
         &allowlist_b,
+        false,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+        true,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+        true,
     ));
 }
 
