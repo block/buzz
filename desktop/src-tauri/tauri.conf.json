@@ -85,6 +85,11 @@
           "y": 330
         }
       }
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
     }
   }
 }
