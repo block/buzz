@@ -409,6 +409,17 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
+    /// Publish the agent's plain reply text when it ends a turn without calling
+    /// `send_message`.
+    ///
+    /// Off by default: capable models always publish their own replies, and
+    /// posting streamed text unconditionally would double-post. Small local
+    /// models served over shared compute reliably finish multi-step turns by
+    /// writing the answer as prose instead, so the desktop shared-compute
+    /// preset opts in.
+    #[arg(long, env = "BUZZ_ACP_DELIVER_PLAIN_REPLIES")]
+    pub deliver_plain_replies: bool,
+
     /// Path to a custom base prompt file. Overrides the compiled-in default.
     /// Mutually exclusive with --no-base-prompt.
     #[arg(
@@ -579,6 +590,9 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Publish the agent's plain reply text when a turn ends without a
+    /// `send_message` call. Opt-in; see the CLI flag for rationale.
+    pub deliver_plain_replies: bool,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -1122,6 +1136,7 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            deliver_plain_replies: args.deliver_plain_replies,
         };
 
         Ok(config)
@@ -1493,6 +1508,7 @@ mod tests {
             idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
+            deliver_plain_replies: false,
             base_prompt_content: None,
         }
     }

@@ -599,6 +599,11 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Whether to publish the agent's plain reply text when a turn ends without
+    /// a `send_message` call. Off by default; the desktop shared-compute preset
+    /// opts in because small local models routinely finish a multi-step turn by
+    /// writing the answer as prose instead of calling the tool.
+    pub deliver_plain_replies: bool,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
@@ -1503,6 +1508,14 @@ pub async fn run_prompt_task(
         .as_ref()
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
+    // Capture the reply target now: `batch` is moved into the requeue/outcome
+    // arms below, but the plain-reply fallback runs after the turn completes.
+    // Heartbeats have no batch and therefore no fallback target.
+    let plain_reply_target = if ctx.deliver_plain_replies {
+        batch.as_ref().and_then(plain_reply_target_for)
+    } else {
+        None
+    };
     agent.acp.observe(
         "turn_started",
         serde_json::json!({
@@ -2404,6 +2417,31 @@ pub async fn run_prompt_task(
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
                 agent.state.invalidate(&source);
+            }
+
+            // Deliver the turn's plain text when the agent ended the turn
+            // without publishing a reply itself. Gated on EndTurn only:
+            // MaxTokens / MaxTurnRequests mean the turn was truncated, so the
+            // text is not a deliberate answer. `take_*` clears the buffer, so
+            // this can never post the same text twice.
+            if matches!(stop_reason, StopReason::EndTurn) {
+                if let Some(target) = plain_reply_target.as_ref() {
+                    if let Some(text) = agent.acp.take_undelivered_turn_text() {
+                        tracing::warn!(
+                            target: "pool::prompt",
+                            channel = %target.channel_id,
+                            "agent ended turn without publishing; delivering its plain text as a channel reply"
+                        );
+                        post_threaded_message(
+                            &ctx.rest_client,
+                            target.channel_id,
+                            &target.thread_tags,
+                            &text,
+                            "plain-reply delivery",
+                        )
+                        .await;
+                    }
+                }
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -4237,6 +4275,34 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
+/// Where a plain-reply fallback should post, captured before `batch` is moved.
+#[derive(Debug, Clone)]
+pub(crate) struct PlainReplyTarget {
+    channel_id: Uuid,
+    thread_tags: ThreadTags,
+}
+
+/// Derive the plain-reply target from the batch's triggering event.
+///
+/// Anchors to the trigger's own thread when it is itself a reply; otherwise the
+/// trigger becomes the thread root, so the fallback reply lands in the same
+/// place the agent's own `send_message` would have.
+pub(crate) fn plain_reply_target_for(batch: &FlushBatch) -> Option<PlainReplyTarget> {
+    let last = batch.events.last()?;
+    let parsed = crate::queue::parse_thread_tags(&last.event);
+    let trigger_hex = last.event.id.to_hex();
+    let root = parsed.root_event_id.clone().unwrap_or(trigger_hex.clone());
+    let parent = parsed.parent_event_id.clone().unwrap_or(trigger_hex);
+    Some(PlainReplyTarget {
+        channel_id: batch.channel_id,
+        thread_tags: ThreadTags {
+            root_event_id: Some(root),
+            parent_event_id: Some(parent),
+            mentioned_pubkeys: Vec::new(),
+        },
+    })
+}
+
 /// Best-effort: post a visible failure notice (kind:9) to a channel after a
 /// batch is dead-lettered. Replies into the thread of `thread_tags` when the
 /// triggering event was threaded. Errors are logged and swallowed — the
@@ -4246,6 +4312,21 @@ pub(crate) async fn post_failure_notice(
     channel_id: Uuid,
     thread_tags: &ThreadTags,
     content: &str,
+) {
+    post_threaded_message(rest, channel_id, thread_tags, content, "failure notice").await;
+}
+
+/// Best-effort: post a threaded kind:9 message to a channel.
+///
+/// Shared by the dead-letter failure notice and the plain-reply delivery
+/// fallback; `what` only labels the log lines so the two are distinguishable.
+/// Errors are logged and swallowed — publishing must never take down the loop.
+async fn post_threaded_message(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+    what: &str,
 ) {
     let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
         let root_id = nostr::EventId::from_hex(root).ok()?;
@@ -4263,21 +4344,21 @@ pub(crate) async fn post_failure_notice(
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                tracing::warn!(channel = %channel_id, "{what}: build failed: {e}");
                 return;
             }
         };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            tracing::warn!(channel = %channel_id, "{what}: sign failed: {e}");
             return;
         }
     };
     match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "{what} failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "{what} timed out"),
     }
 }
 
@@ -7598,6 +7679,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
+            deliver_plain_replies: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
