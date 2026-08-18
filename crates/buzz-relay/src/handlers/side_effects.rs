@@ -116,20 +116,24 @@ async fn evict_conn_channel_subscriptions(
 
     if let Some(subscriptions) = state.conn_manager.subscriptions_for(conn_id) {
         let mut conn_subscriptions = subscriptions.lock().await;
-        for (sub_id, _) in &removed {
-            conn_subscriptions.remove(sub_id);
+        for update in &removed {
+            if update.removed {
+                conn_subscriptions.remove(&update.sub_id);
+            }
         }
     }
 
-    for (sub_id, removed_scope) in removed {
+    for update in removed {
         state
             .pubsub
-            .release_topic(tenant, topic_for_subscription(removed_scope.channel_id))
+            .release_topic(tenant, buzz_pubsub::EventTopic::Channel(channel_id))
             .await;
-        let _ = state.conn_manager.send_to(
-            conn_id,
-            RelayMessage::closed(&sub_id, "restricted: channel access revoked"),
-        );
+        if update.removed {
+            let _ = state.conn_manager.send_to(
+                conn_id,
+                RelayMessage::closed(&update.sub_id, "restricted: channel access revoked"),
+            );
+        }
     }
 }
 
@@ -355,27 +359,26 @@ pub async fn validate_admin_event(
                 .iter()
                 .find(|m| m.pubkey == actor_bytes)
                 .and_then(|m| m.role.parse().ok());
+            let target_pubkey =
+                extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
             // PUT_USER: open channels allow any authenticated user; private channels
-            // require the actor to be an existing member (any role can invite).
+            // require the actor to be an existing active member. Any active member may
+            // add an ordinary member, guest, or bot, but only owners/admins may grant
+            // an elevated role.
             if channel.visibility == "private" {
                 if actor_role.is_none() {
                     return Err(anyhow::anyhow!("actor not authorized"));
                 }
 
-                // Only owners/admins may grant elevated roles.
-                if requested_role.is_some_and(|r| r.is_elevated())
-                    && !actor_role.is_some_and(|r| r.is_elevated())
+                if requested_role.is_some_and(|role| role.is_elevated())
+                    && !actor_role.is_some_and(|role| role.is_elevated())
                 {
                     return Err(anyhow::anyhow!(
                         "only owners/admins may grant elevated roles"
                     ));
                 }
             }
-
-            // Extract target pubkey from p tag
-            let target_pubkey =
-                extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
 
             // Changing an ACTIVE existing member's role is privileged in both
             // directions, on every visibility. `get_members` filters
@@ -1034,6 +1037,18 @@ async fn emit_addressable_discovery_event(
     Ok(())
 }
 
+fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Result<Vec<Tag>> {
+    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
+    tags.push(Tag::parse(["d", group_id])?);
+    for member in members {
+        let pubkey_hex = hex::encode(&member.pubkey);
+        // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
+        // because the canonical relay is implicit (this event is signed by it).
+        tags.push(Tag::parse(["p", &pubkey_hex, "", &member.role])?);
+    }
+    Ok(tags)
+}
+
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
 /// Called after group creation, metadata changes, or membership changes.
 /// Events are stored channel-scoped (`channel_id = Some(...)`) so that existing
@@ -1137,13 +1152,7 @@ pub async fn emit_group_discovery_events(
     }
 
     {
-        let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-        for m in &members {
-            let pubkey_hex = hex::encode(&m.pubkey);
-            // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
-            // because the canonical relay is implicit (this event is signed by it).
-            tags.push(Tag::parse(["p", &pubkey_hex, "", &m.role])?);
-        }
+        let tags = group_members_tags(&group_id, &members)?;
         emit_addressable_discovery_event(
             tenant,
             state,
@@ -3362,16 +3371,36 @@ pub async fn publish_nipia_unarchived(
     .await
 }
 
-fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
-    match channel_id {
-        Some(channel_id) => EventTopic::Channel(channel_id),
-        None => EventTopic::Global,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_members_snapshot_keeps_members_past_one_thousand() {
+        let channel_id = Uuid::new_v4();
+        let members: Vec<MemberRecord> = (0_u16..1_501)
+            .map(|index| MemberRecord {
+                channel_id,
+                pubkey: vec![(index >> 8) as u8, index as u8],
+                role: if index == 1_500 { "owner" } else { "member" }.to_string(),
+                joined_at: chrono::Utc::now(),
+                invited_by: None,
+                removed_at: None,
+            })
+            .collect();
+
+        let tags = group_members_tags(&channel_id.to_string(), &members).expect("build tags");
+        assert_eq!(tags.len(), 1_502, "d tag plus every member p tag");
+
+        let late_pubkey = hex::encode(&members[1_500].pubkey);
+        assert!(tags.iter().any(|tag| {
+            let fields = tag.as_slice();
+            fields.len() == 4
+                && fields[0] == "p"
+                && fields[1] == late_pubkey
+                && fields[3] == "owner"
+        }));
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {

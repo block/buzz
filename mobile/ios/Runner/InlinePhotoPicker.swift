@@ -3,14 +3,6 @@ import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
 
-enum EmbeddedPhotoPickerLayout {
-  static func applyPreferredScale(_ zoomIn: () -> Void) {
-    UIView.performWithoutAnimation {
-      zoomIn()
-    }
-  }
-}
-
 final class InlinePhotoPickerFactory: NSObject, FlutterPlatformViewFactory {
   private let messenger: FlutterBinaryMessenger
   private weak var parentViewController: UIViewController?
@@ -130,9 +122,6 @@ final class InlinePhotoPickerPlatformView: NSObject, FlutterPlatformView {
     }
     pickerViewController = picker
     containerView.layoutIfNeeded()
-    EmbeddedPhotoPickerLayout.applyPreferredScale {
-      picker.zoomIn()
-    }
   }
 
   private func exportPickerResult(_ result: PHPickerResult) async throws -> String {

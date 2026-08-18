@@ -255,6 +255,7 @@ fn record_with(
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -315,8 +316,6 @@ fn record_agent_command_bare_record_defaults() {
     let record = record_with(None, None, None);
     assert_eq!(record_agent_command(&record, &[]), default_agent_command());
 }
-
-// ── try_record_agent_command ─────────────────────────────────────────────────
 
 /// When the record carries a dangling (unknown) runtime id, `try_record_agent_command`
 /// must return `Err` containing "DANGLING_HARNESS_ID" — NEVER the buzz-agent default.

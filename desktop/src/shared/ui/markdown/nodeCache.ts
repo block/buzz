@@ -3,8 +3,11 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
+import remarkChannelDeepLinks from "@/features/messages/lib/remarkChannelDeepLinks";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
+import remarkEntityLinks from "@/features/messages/lib/remarkEntityLinks";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
+import rehypeLeadingInlineContent from "@/shared/lib/rehypeLeadingInlineContent";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
 import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
 import remarkCustomEmoji, {
@@ -13,7 +16,7 @@ import remarkCustomEmoji, {
 import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 
-import { messageLinkUrlTransform } from "./utils";
+import { buzzDeepLinkUrlTransform } from "./utils";
 
 /**
  * Parsed-markdown element cache.
@@ -65,6 +68,8 @@ export type MarkdownParseInputs = {
   components: Components;
   content: string;
   customEmoji?: CustomEmoji[];
+  /** Inserts the runtime-provided leading content marker during parsing. */
+  leadingInlineContent?: boolean;
   mentionNames?: string[];
   searchQuery?: string;
   variant: string;
@@ -84,6 +89,9 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   markdownParseCount += 1;
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
   const rehypePlugins: any[] = [rehypeImageGallery];
+  if (input.leadingInlineContent) {
+    rehypePlugins.push(rehypeLeadingInlineContent);
+  }
   if (input.searchQuery && input.searchQuery.trim().length >= 2) {
     rehypePlugins.push([rehypeSearchHighlight, { query: input.searchQuery }]);
   }
@@ -98,14 +106,16 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
       remarkGfm,
       remarkBreaks,
       remarkSpoilers,
+      remarkChannelDeepLinks,
       remarkMessageLinks,
+      remarkEntityLinks,
       [remarkMentions, { mentionNames: input.mentionNames }],
       [remarkChannelLinks, { channelNames: input.channelNames }],
       [remarkCustomEmoji, { customEmoji: input.customEmoji }],
       // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
     ] as any[],
     rehypePlugins,
-    urlTransform: messageLinkUrlTransform,
+    urlTransform: buzzDeepLinkUrlTransform,
   });
 }
 
@@ -131,6 +141,7 @@ export function renderCachedMarkdown(
   // before it is self-delimiting.
   const key =
     segment(input.variant) +
+    segment(input.leadingInlineContent ? "leading" : "") +
     listSegment(input.mentionNames) +
     listSegment(input.channelNames) +
     listSegment(

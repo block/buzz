@@ -224,7 +224,92 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
 
+        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
+
         Ok(GitAuth { pubkey, tenant })
+    }
+}
+
+/// Deny banned principals on every Git HTTP request.
+///
+/// Git runs outside the WebSocket authentication path, so a valid NIP-98
+/// credential and channel membership are not enough — neither reflects a
+/// moderation ban. Git credentials are also deliberately reused across a
+/// session (see the replay notes above), so no session expiry would close the
+/// gap on its own. Re-read the durable ban per request instead.
+///
+/// Cascades to the proven NIP-OA owner, matching the NIP-42 gate in
+/// `handlers::auth`: banning a human must also revoke their agents, or the ban
+/// is bypassable by cloning and pushing through an agent key.
+async fn deny_banned_git_principal(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+    auth_tag: Option<&str>,
+) -> Result<(), Response> {
+    let agent = git_restriction_state(db, community, pubkey).await?;
+
+    // Skip the owner read when the agent is already banned: the denial is
+    // identical either way. Mirrors the WebSocket cascade's short-circuit.
+    let owner = if agent.banned {
+        None
+    } else {
+        crate::api::relay_members::extract_nip_oa_owner(pubkey.as_bytes(), auth_tag)
+    };
+    let owner_state = match owner {
+        Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
+        None => None,
+    };
+
+    enforce_git_ban_cascade(&agent, owner_state.as_ref()).map_err(|status| {
+        warn!(
+            pubkey = %pubkey.to_hex(),
+            owner = ?owner.map(|owner| owner.to_hex()),
+            "git: community ban denied request"
+        );
+        (status, "blocked: banned from this community").into_response()
+    })
+}
+
+/// One restriction read, failing closed with 503.
+///
+/// A restriction-store outage must not be reported to the client as a
+/// permission decision — 503 says "retry", 403 would claim a ban that was
+/// never read.
+async fn git_restriction_state(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    pubkey: &nostr::PublicKey,
+) -> Result<buzz_db::moderation::RestrictionState, Response> {
+    db.moderation_restriction_state(community, pubkey.as_bytes())
+        .await
+        .map_err(|error| {
+            warn!(pubkey = %pubkey.to_hex(), error = %error, "git: ban lookup failed closed");
+            (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response()
+        })
+}
+
+fn enforce_git_ban(restriction: &buzz_db::moderation::RestrictionState) -> Result<(), StatusCode> {
+    if restriction.banned {
+        Err(StatusCode::FORBIDDEN)
+    } else {
+        Ok(())
+    }
+}
+
+/// Either principal's ban denies the request; `None` owner means no attested
+/// owner to inherit from.
+///
+/// Split from the DB reads so agent→owner precedence stays unit-testable
+/// without Postgres.
+fn enforce_git_ban_cascade(
+    agent: &buzz_db::moderation::RestrictionState,
+    owner: Option<&buzz_db::moderation::RestrictionState>,
+) -> Result<(), StatusCode> {
+    enforce_git_ban(agent)?;
+    match owner {
+        Some(owner) => enforce_git_ban(owner),
+        None => Ok(()),
     }
 }
 
@@ -1064,7 +1149,7 @@ pub async fn receive_pack(
         state.config.bind_addr.port()
     );
     let hooks_dir = repo.path().join("hooks").display().to_string();
-    let hook_env = vec![
+    let mut hook_env = vec![
         ("BUZZ_HOOK_URL", hook_url),
         (
             "BUZZ_HOOK_SECRET",
@@ -1077,13 +1162,8 @@ pub async fn receive_pack(
             auth.tenant.community().as_uuid().to_string(),
         ),
         ("BUZZ_PUSHER_PUBKEY", pusher_hex.clone()),
-        // Override any repo-local core.hooksPath setting; defense in
-        // depth even though the hydrated workspace has no inherited
-        // config.
-        ("GIT_CONFIG_COUNT", "1".to_string()),
-        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
-        ("GIT_CONFIG_VALUE_0", hooks_dir),
     ];
+    hook_env.extend(receive_pack_git_config(hooks_dir));
 
     // Run receive-pack against the tempdir. Returns the *owned* subprocess
     // output (PackOutput) — crucially NOT a Response, so the post-push
@@ -1109,6 +1189,23 @@ pub async fn receive_pack(
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
+}
+
+/// Per-process git configuration for the hydrated receive-pack workspace.
+fn receive_pack_git_config(hooks_dir: String) -> Vec<(&'static str, String)> {
+    vec![
+        // Override any repo-local core.hooksPath setting; defense in depth
+        // even though the hydrated workspace has no inherited config.
+        ("GIT_CONFIG_COUNT", "2".to_string()),
+        ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
+        ("GIT_CONFIG_VALUE_0", hooks_dir),
+        // A bare repository rejects deletion of its symbolic HEAD branch by
+        // default. Hydrated repositories are ephemeral, and cas_publish
+        // selects a surviving branch for the next manifest HEAD, so allow
+        // receive-pack to apply the deletion before that selection runs.
+        ("GIT_CONFIG_KEY_1", "receive.denyDeleteCurrent".to_string()),
+        ("GIT_CONFIG_VALUE_1", "ignore".to_string()),
+    ]
 }
 
 /// Buffered output of a `git --stateless-rpc` subprocess.
@@ -1686,6 +1783,21 @@ pub(crate) struct PushContext {
     pub repo_handle: HydratedRepo,
 }
 
+#[derive(Default)]
+struct FinalizePushHooks {
+    #[cfg(test)]
+    post_cas_gate: Option<Arc<PostCasGate>>,
+    #[cfg(test)]
+    fail_ref_state_insert: bool,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct PostCasGate {
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
 /// Finalize a push request: CAS-commit the new state into the object
 /// store, derive kind:30618 from the committed manifest, and only then
 /// build the success response.
@@ -1696,6 +1808,17 @@ pub(crate) struct PushContext {
 /// constructor of a push 2xx, so the seam is structural (not by
 /// convention).
 async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
+    finalize_push_inner(state, ctx, &FinalizePushHooks::default()).await
+}
+
+async fn finalize_push_inner(
+    state: &Arc<AppState>,
+    ctx: PushContext,
+    hooks: &FinalizePushHooks,
+) -> Response {
+    #[cfg(not(test))]
+    let _ = hooks;
+
     // The push fence, part 0 — **a rejected push publishes nothing.**
     //
     // `ctx.pack.ok` is false when git aborted the ref updates: either the
@@ -1726,10 +1849,41 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         return response;
     }
 
+    // An already-running receive-pack may cross the durable fence after
+    // request admission. Revalidate immediately before object-store CAS; DB
+    // trigger fencing alone cannot roll back an S3 pointer mutation.
+    let serving_write = match buzz_deletion::acquire_serving_write(
+        &state.db,
+        ctx.tenant.community(),
+        "git_publish",
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push rejected by community deletion fence");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "community writes are fenced",
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(error) = serving_write.verify().await {
+        warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push lost community serving lease");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community write lease lost",
+        )
+            .into_response();
+    }
+
     // Step 7 (CAS). The PushContext binds `parent_state` (observed at
     // hydrate) to the CAS predicate here — no re-reading of the pointer
-    // between hydrate and CAS.
-    let success = match cas_publish(
+    // between hydrate and CAS. Observe serving-lease loss throughout the
+    // potentially long upload/CAS operation, not only at its boundaries.
+    let publish = cas_publish(
         &state.git_store,
         &ctx.tenant,
         ctx.repo_handle.path(),
@@ -1741,71 +1895,86 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
             max_pack_bytes: state.config.git_max_pack_bytes,
             max_repo_bytes: state.config.git_max_repo_bytes,
         },
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(CasError::Conflict {
-            winner_manifest_key,
-            ..
-        }) => {
-            warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                winner = %winner_manifest_key,
-                "push lost CAS race; tempdir dropped, returning 409"
-            );
+    );
+    let success = match serving_write.protect(publish).await {
+        Ok(result) => match result {
+            Ok(s) => s,
+            Err(CasError::Conflict {
+                winner_manifest_key,
+                ..
+            }) => {
+                warn!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo,
+                    winner = %winner_manifest_key,
+                    "push lost CAS race; tempdir dropped, returning 409"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    "push superseded by a concurrent writer; pull and retry",
+                )
+                    .into_response();
+            }
+            Err(CasError::ManifestInvalid(e)) => {
+                // 4xx-class: the workspace produced refs/HEAD/oids the
+                // manifest validator rejects (unsafe refname, malformed oid,
+                // empty head, malformed parent). Pre-CAS — no pointer was
+                // written.
+                warn!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo,
+                    error = %e,
+                    "push rejected: manifest validation failed"
+                );
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "push produced invalid manifest state",
+                )
+                    .into_response();
+            }
+            Err(CasError::ResourceLimit(e)) => {
+                warn!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo,
+                    error = %e,
+                    "push rejected: repo exceeds relay resource limits"
+                );
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "repository exceeds relay resource limits",
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                // 5xx-class: ManifestReadFailed (parent corruption),
+                // Backend, PackCapture. The tempdir drops on scope exit; no
+                // pointer was written (or, on rare ManifestReadFailed during
+                // winner-fetch, the winner is already installed and the
+                // loser's data is unrelated).
+                error!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo,
+                    error = %e,
+                    "push failed pre-response"
+                );
+                return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
+            }
+        },
+        Err(error) => {
+            warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push lost community serving lease during CAS publish");
             return (
-                StatusCode::CONFLICT,
-                "push superseded by a concurrent writer; pull and retry",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "community write lease lost",
             )
                 .into_response();
-        }
-        Err(CasError::ManifestInvalid(e)) => {
-            // 4xx-class: the workspace produced refs/HEAD/oids the
-            // manifest validator rejects (unsafe refname, malformed oid,
-            // empty head, malformed parent). Pre-CAS — no pointer was
-            // written.
-            warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                error = %e,
-                "push rejected: manifest validation failed"
-            );
-            return (
-                StatusCode::BAD_REQUEST,
-                "push produced invalid manifest state",
-            )
-                .into_response();
-        }
-        Err(CasError::ResourceLimit(e)) => {
-            warn!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                error = %e,
-                "push rejected: repo exceeds relay resource limits"
-            );
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "repository exceeds relay resource limits",
-            )
-                .into_response();
-        }
-        Err(e) => {
-            // 5xx-class: ManifestReadFailed (parent corruption),
-            // Backend, PackCapture. The tempdir drops on scope exit; no
-            // pointer was written (or, on rare ManifestReadFailed during
-            // winner-fetch, the winner is already installed and the
-            // loser's data is unrelated).
-            error!(
-                owner = %ctx.owner,
-                repo = %ctx.repo,
-                error = %e,
-                "push failed pre-response"
-            );
-            return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
         }
     };
+
+    #[cfg(test)]
+    if let Some(gate) = &hooks.post_cas_gate {
+        gate.reached.notify_one();
+        gate.resume.notified().await;
+    }
 
     // Derived after CAS: kind:30618 ref-state event over the *committed*
     // manifest's refs/head. Spec §Implementation Correspondence:
@@ -1830,7 +1999,7 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         (Some(before), Some(after)) => before != after,
         _ => true, // first push (parent None) or impossible-shape after key → publish
     };
-    if manifest_changed {
+    let publication_result: Result<(), String> = if manifest_changed {
         let inputs = RefStateInputs {
             repo_id: &ctx.repo_id,
             head: &success.manifest.head,
@@ -1841,11 +2010,23 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
             Ok(event) => {
                 // Relay-signed kind:30618 belongs to the same server-resolved
                 // tenant as the git request that committed the pointer.
-                match state
+                #[cfg(test)]
+                let insert_result = if hooks.fail_ref_state_insert {
+                    Err(buzz_db::DbError::InvalidData(
+                        "injected kind:30618 insert failure".to_string(),
+                    ))
+                } else {
+                    state
+                        .db
+                        .insert_event_with_serving_write_guard(serving_write.lease(), &event, None)
+                        .await
+                };
+                #[cfg(not(test))]
+                let insert_result = state
                     .db
-                    .insert_event(ctx.tenant.community(), &event, None)
-                    .await
-                {
+                    .insert_event_with_serving_write_guard(serving_write.lease(), &event, None)
+                    .await;
+                match insert_result {
                     Ok((stored, true)) => {
                         // Routed through the guarded send path for uniformity;
                         // the access gate no-ops for this globally-scoped
@@ -1862,6 +2043,7 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
                             manifest = %success.manifest_key,
                             "kind:30618 published (derived after CAS)"
                         );
+                        Ok(())
                     }
                     Ok((_, false)) => {
                         info!(
@@ -1869,26 +2051,41 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
                             repo = %ctx.repo_id,
                             "kind:30618 deduplicated by relay db"
                         );
+                        Ok(())
                     }
-                    Err(e) => {
-                        warn!(
-                            owner = %ctx.owner,
-                            repo = %ctx.repo_id,
-                            error = %e,
-                            "kind:30618 insert failed; push remains durable in object store"
-                        );
-                    }
+                    Err(error) => Err(format!("kind:30618 insert failed: {error}")),
                 }
             }
-            Err(e) => {
-                warn!(
-                    owner = %ctx.owner,
-                    repo = %ctx.repo_id,
-                    error = %e,
-                    "kind:30618 build failed; push remains durable in object store"
-                );
-            }
+            Err(error) => Err(format!("kind:30618 build failed: {error}")),
         }
+    } else {
+        Ok(())
+    };
+
+    // The admitted serving write spans the complete publication attempt. Fence
+    // acquisition cannot overtake the pointer CAS, durable 30618 insert, or
+    // local fan-out attempt; only now may the lease be released.
+    if let Err(error) = serving_write.finish().await {
+        warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "failed to release community serving lease after push publication");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "community write lease lost during publication",
+        )
+            .into_response();
+    }
+    if let Err(error) = publication_result {
+        error!(
+            owner = %ctx.owner,
+            repo = %ctx.repo_id,
+            manifest = %success.manifest_key,
+            %error,
+            "push pointer committed but kind:30618 publication failed"
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "push committed but ref-state publication failed; retry",
+        )
+            .into_response();
     }
 
     // Only now — after CAS commit and (optional) 30618 emission — build
@@ -1917,13 +2114,449 @@ pub fn git_router(state: Arc<AppState>) -> Router {
 #[cfg(test)]
 mod track_c_tests {
     use super::*;
+    use crate::api::git::hydrate::{hydrate_for_write, HydrationOptions};
     use crate::api::git::manifest::Manifest;
     use buzz_core::CommunityId;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::collections::BTreeMap;
+    use std::io::Write;
+    use std::process::Output;
+    use tempfile::TempDir;
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
+    }
+
+    fn run_test_git(cwd: &Path, args: &[&str], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("run git")
+    }
+
+    fn run_test_receive_pack(repo: &Path, request: &[u8], extra_env: &[(&str, String)]) -> Output {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("receive-pack")
+            .arg("--stateless-rpc")
+            .arg(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("spawn receive-pack");
+        child
+            .stdin
+            .take()
+            .expect("receive-pack stdin")
+            .write_all(request)
+            .expect("write receive-pack request");
+        child.wait_with_output().expect("wait for receive-pack")
+    }
+
+    fn assert_git_success(output: Output, operation: &str) {
+        assert!(
+            output.status.success(),
+            "{operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn receive_pack_config_allows_deleting_current_branch() {
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let remote_arg = remote.to_str().expect("utf-8 remote path");
+        let source_arg = source.to_str().expect("utf-8 source path");
+
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--bare", "--initial-branch=main", remote_arg],
+                &[],
+            ),
+            "initialize bare remote",
+        );
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--initial-branch=main", source_arg],
+                &[],
+            ),
+            "initialize source repository",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["config", "user.name", "Buzz Test"], &[]),
+            "configure user name",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["config", "user.email", "buzz-test@example.com"],
+                &[],
+            ),
+            "configure user email",
+        );
+        std::fs::write(source.join("README.md"), "test\n").expect("write fixture");
+        assert_git_success(
+            run_test_git(source.as_path(), &["add", "README.md"], &[]),
+            "stage fixture",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["commit", "-m", "fixture"], &[]),
+            "commit fixture",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["push", remote_arg, "main:main", "main:master"],
+                &[],
+            ),
+            "seed main and master",
+        );
+
+        let oid_output = run_test_git(remote.as_path(), &["rev-parse", "refs/heads/main"], &[]);
+        assert!(oid_output.status.success());
+        let old_oid = String::from_utf8(oid_output.stdout)
+            .expect("utf-8 oid")
+            .trim()
+            .to_string();
+        let command = format!(
+            "{old_oid} {} refs/heads/main\0report-status\n",
+            "0".repeat(40)
+        );
+        let mut request = format!("{:04x}", command.len() + 4).into_bytes();
+        request.extend_from_slice(command.as_bytes());
+        request.extend_from_slice(b"0000");
+
+        let git_config = receive_pack_git_config(remote.join("hooks").display().to_string());
+        let output = run_test_receive_pack(remote.as_path(), &request, &git_config);
+        assert!(
+            output.status.success(),
+            "receive-pack failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !receive_pack_report_rejected(&output.stdout),
+            "receive-pack rejected the deletion: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        assert!(!remote.join("refs/heads/main").exists());
+        assert!(remote.join("refs/heads/master").exists());
+    }
+
+    async fn run_finalize_git(repo: &Path, args: &[&str]) -> std::process::Output {
+        let mut command = Command::new("git");
+        command.current_dir(repo).args(args);
+        harden_git_env(&mut command);
+        let output = command.output().await.expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    async fn finalize_test_state() -> (Arc<AppState>, sqlx::PgPool) {
+        const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&config.database_url)
+            .await
+            .expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        db.migrate().await.expect("migrate test DB");
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        (Arc::new(state), pool)
+    }
+
+    async fn approved_deletion(
+        state: &AppState,
+        host: &str,
+    ) -> (
+        buzz_db::deletion::DeletionRequest,
+        buzz_db::deletion::ClaimedDeletion,
+    ) {
+        use buzz_db::deletion::{
+            FrozenInventory, KeyStreamDigest, PrefixManifest, StorageManifest,
+            DEFAULT_LEASE_DURATION,
+        };
+
+        let store = state.db.deletion_store();
+        let request = store
+            .submit(host, "git-finalize-test", Some("post-CAS lease regression"))
+            .await
+            .expect("submit deletion");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(request.community_id)
+                .await
+                .expect("schema inventory"),
+            storage: StorageManifest {
+                version: 4,
+                prefixes: buzz_media::tenant_prefixes(*request.community_id.as_uuid())
+                    .into_iter()
+                    .map(|prefix| PrefixManifest {
+                        prefix,
+                        object_count: 0,
+                        total_bytes: 0,
+                        keys_digest: KeyStreamDigest::new().finish().0,
+                    })
+                    .collect(),
+            },
+        };
+        store
+            .freeze_inventory(request.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "git-finalize-test", None)
+            .await
+            .expect("approve deletion");
+        let claim = store
+            .claim_specific(request.id, "git-finalize-test", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim deletion")
+            .expect("won deletion claim");
+        (request, claim)
+    }
+
+    async fn pushed_context(
+        state: &AppState,
+        community: CommunityId,
+        host: &str,
+        owner: String,
+        repo: String,
+        pusher: nostr::PublicKey,
+        scratch: &Path,
+    ) -> PushContext {
+        let tenant = TenantContext::resolved(community, host);
+        let (hydrated, parent_state) = hydrate_for_write(
+            &state.git_store,
+            &tenant,
+            &owner,
+            &repo,
+            HydrationOptions {
+                pack_cache: &state.git_pack_cache,
+                scratch_dir: scratch,
+                max_pack_bytes: 1024 * 1024,
+                max_repo_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("hydrate empty test repo");
+        let source = scratch.join("source");
+        tokio::fs::create_dir(&source)
+            .await
+            .expect("source directory");
+        run_finalize_git(&source, &["init", "--quiet", "--initial-branch=main"]).await;
+        run_finalize_git(&source, &["config", "user.email", "finalize@test"]).await;
+        run_finalize_git(&source, &["config", "user.name", "finalize"]).await;
+        tokio::fs::write(source.join("file.txt"), b"committed\n")
+            .await
+            .expect("write source file");
+        run_finalize_git(&source, &["add", "file.txt"]).await;
+        run_finalize_git(&source, &["commit", "--quiet", "-m", "committed"]).await;
+        let remote = hydrated.path().to_str().expect("hydrated path utf8");
+        run_finalize_git(&source, &["push", "--quiet", remote, "main"]).await;
+
+        PushContext {
+            pack: PackOutput {
+                stdout: b"push-ok".to_vec(),
+                ok: true,
+            },
+            parent_state,
+            owner,
+            repo: repo.clone(),
+            repo_id: repo,
+            pusher,
+            tenant,
+            repo_handle: hydrated,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and MinIO"]
+    async fn finalize_push_holds_serving_lease_through_post_cas_publication() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!("git-finalize-{}.example", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let (request, claim) = approved_deletion(&state, &host).await;
+        let scratch = TempDir::new().expect("scratch");
+        let owner = format!("owner-{}", uuid::Uuid::new_v4().simple());
+        let repo = format!("repo-{}", uuid::Uuid::new_v4().simple());
+        let ctx = pushed_context(
+            &state,
+            community,
+            &host,
+            owner,
+            repo.clone(),
+            Keys::generate().public_key(),
+            scratch.path(),
+        )
+        .await;
+        let gate = Arc::new(PostCasGate::default());
+        let hooks = FinalizePushHooks {
+            post_cas_gate: Some(Arc::clone(&gate)),
+            fail_ref_state_insert: false,
+        };
+        let finalize_state = Arc::clone(&state);
+        let finalize =
+            tokio::spawn(async move { finalize_push_inner(&finalize_state, ctx, &hooks).await });
+
+        gate.reached.notified().await;
+        state
+            .db
+            .deletion_store()
+            .begin_quiescing(&claim.lease)
+            .await
+            .expect("quiesce after CAS");
+        let error = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect_err("post-CAS serving lease must block fence");
+        assert!(matches!(
+            error,
+            buzz_db::DbError::ServingWritesNotDrained { .. }
+        ));
+        assert!(!state
+            .db
+            .deletion_store()
+            .is_serving_active(community)
+            .await
+            .expect("quiescing rejects new serving work"));
+
+        gate.resume.notify_one();
+        let response = finalize.await.expect("finalize task");
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut query = buzz_db::event::EventQuery::for_community(community);
+        query.kinds = Some(vec![30_618]);
+        query.d_tag = Some(repo);
+        let events = state.db.query_events(&query).await.expect("query 30618");
+        assert_eq!(events.len(), 1, "kind:30618 must be durable before release");
+        assert!(state
+            .db
+            .deletion_store()
+            .serving_writes_drained(community)
+            .await
+            .expect("serving lease released"));
+        let generation = state
+            .db
+            .deletion_store()
+            .fence(&claim.lease)
+            .await
+            .expect("fence after publication");
+        assert_eq!(generation, 1);
+        assert_eq!(
+            state
+                .db
+                .deletion_store()
+                .get(request.id)
+                .await
+                .expect("fenced request")
+                .stage,
+            buzz_db::deletion::DeletionStage::Fenced
+        );
+        drop(state);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and MinIO"]
+    async fn finalize_push_db_failure_after_cas_is_not_success_and_releases_lease() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-finalize-fail-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let scratch = TempDir::new().expect("scratch");
+        let ctx = pushed_context(
+            &state,
+            community,
+            &host,
+            format!("owner-{}", uuid::Uuid::new_v4().simple()),
+            format!("repo-{}", uuid::Uuid::new_v4().simple()),
+            Keys::generate().public_key(),
+            scratch.path(),
+        )
+        .await;
+        let hooks = FinalizePushHooks {
+            post_cas_gate: None,
+            fail_ref_state_insert: true,
+        };
+
+        let response = finalize_push_inner(&state, ctx, &hooks).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state
+            .db
+            .deletion_store()
+            .serving_writes_drained(community)
+            .await
+            .expect("serving lease released on failure"));
+        drop(state);
+        pool.close().await;
     }
 
     /// A gzip-encoded request body is transparently inflated before it
@@ -2461,6 +3094,76 @@ mod sec005_read_gate_tests {
         assert!(!read_role_allows(Some("")), "empty role must deny");
     }
 
+    #[test]
+    fn durable_ban_denies_git_even_with_otherwise_valid_auth() {
+        let restriction = buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        };
+
+        assert_eq!(enforce_git_ban(&restriction), Err(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn timeout_without_ban_does_not_revoke_git_access() {
+        let restriction = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(chrono::Utc::now()),
+        };
+
+        assert_eq!(enforce_git_ban(&restriction), Ok(()));
+    }
+
+    fn restriction(banned: bool) -> buzz_db::moderation::RestrictionState {
+        buzz_db::moderation::RestrictionState {
+            banned,
+            muted_until: None,
+        }
+    }
+
+    // ── Agent → owner ban cascade ────────────────────────────────────────
+    //
+    // Git accepts NIP-OA attestations on the signed NIP-98 token, so an agent
+    // key can act for its owner (`deny_banned_git_principal`). The NIP-42 gate
+    // in `handlers::auth` cascades the ban check to the proven owner for that
+    // reason, and Git must agree: if only the presented key were checked, a
+    // banned human would keep clone and push access through any agent key.
+
+    #[test]
+    fn banned_owner_denies_git_for_an_otherwise_clear_agent() {
+        assert_eq!(
+            enforce_git_ban_cascade(&restriction(false), Some(&restriction(true))),
+            Err(StatusCode::FORBIDDEN),
+            "an agent must inherit its proven owner's ban"
+        );
+    }
+
+    #[test]
+    fn banned_agent_denies_git_whatever_the_owner_state() {
+        for owner in [None, Some(restriction(false)), Some(restriction(true))] {
+            assert_eq!(
+                enforce_git_ban_cascade(&restriction(true), owner.as_ref()),
+                Err(StatusCode::FORBIDDEN),
+                "a directly banned agent must be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn clear_agent_and_clear_owner_allow_git() {
+        assert_eq!(
+            enforce_git_ban_cascade(&restriction(false), Some(&restriction(false))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn clear_agent_without_attested_owner_allows_git() {
+        // No NIP-OA tag on the request: nothing to inherit, so the agent's own
+        // state decides. A missing owner must not read as a ban.
+        assert_eq!(enforce_git_ban_cascade(&restriction(false), None), Ok(()));
+    }
+
     fn announcement(keys: &Keys, tags: Vec<Tag>) -> nostr::Event {
         EventBuilder::new(Kind::Custom(30617), "")
             .tags(tags)
@@ -2815,5 +3518,130 @@ mod sec005_read_gate_tests {
                 .is_err(),
             "deleted announcement must deny reads even for channel members"
         );
+    }
+
+    // ── Ban gate wiring (requires Postgres) ──────────────────────────────
+    //
+    // The pure tests above fix the decision table; these prove the gate is
+    // actually wired to the durable store — that it reads the real ban row,
+    // resolves the NIP-OA owner from a live attestation, and fails closed when
+    // the store is unreachable. `deny_banned_git_principal` runs inside the
+    // `GitAuth` extractor, which every Git route (`info/refs`, `git-upload-pack`,
+    // `git-receive-pack`) goes through, so advertise, fetch and push all
+    // inherit these outcomes.
+
+    /// Community + a ban actor, without the channel/repo fixture the read-gate
+    /// tests need — the ban gate runs before any repo is resolved.
+    async fn setup_ban_community() -> (buzz_db::Db, buzz_core::CommunityId, Vec<u8>) {
+        let db = setup_db().await;
+        let host = format!("ban-git-{}.example", uuid::Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let actor = Keys::generate().public_key().to_bytes().to_vec();
+        db.ensure_user(community, &actor).await.expect("actor");
+        (db, community, actor)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_denies_banned_member_and_allows_clear_member() {
+        let (db, community, actor) = setup_ban_community().await;
+        let member = Keys::generate();
+        let member_pk = member.public_key().to_bytes().to_vec();
+        db.ensure_user(community, &member_pk).await.expect("member");
+
+        assert!(
+            deny_banned_git_principal(&db, community, &member.public_key(), None)
+                .await
+                .is_ok(),
+            "precondition: an unbanned member passes the git ban gate"
+        );
+
+        db.ban_community_member(community, &member_pk, &actor, Some("test"), None)
+            .await
+            .expect("ban");
+
+        let (status, body) = denial_parts(
+            deny_banned_git_principal(&db, community, &member.public_key(), None).await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "blocked: banned from this community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_cascades_to_a_banned_nip_oa_owner() {
+        let (db, community, actor) = setup_ban_community().await;
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let owner_pk = owner.public_key().to_bytes().to_vec();
+        let agent_pk = agent.public_key().to_bytes().to_vec();
+        db.ensure_user(community, &owner_pk).await.expect("owner");
+        db.ensure_user(community, &agent_pk).await.expect("agent");
+
+        // A real attestation: the gate must verify it, not trust a claim.
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=9")
+            .expect("auth tag");
+
+        assert!(
+            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag))
+                .await
+                .is_ok(),
+            "precondition: neither agent nor owner is banned"
+        );
+
+        // Ban the human only. The agent's own row stays clear.
+        db.ban_community_member(community, &owner_pk, &actor, Some("test"), None)
+            .await
+            .expect("ban owner");
+
+        let (status, _) = denial_parts(
+            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag)).await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "banning the owner must revoke its agent's git access"
+        );
+
+        // An unattested request from the same agent key is unaffected: the
+        // cascade must follow a verified owner, not punish every agent.
+        assert!(
+            deny_banned_git_principal(&db, community, &agent.public_key(), None)
+                .await
+                .is_ok(),
+            "without an attestation there is no owner to inherit from"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ban_gate_fails_closed_with_503_when_the_store_is_unreachable() {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+
+        // Closing the pool is the cheapest faithful stand-in for the
+        // restriction store being unavailable mid-request.
+        pool.close().await;
+
+        let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
+        let (status, body) = denial_parts(
+            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None).await,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a store outage must deny as retryable, never allow and never claim a 403"
+        );
+        assert_eq!(body, "authorization unavailable");
     }
 }

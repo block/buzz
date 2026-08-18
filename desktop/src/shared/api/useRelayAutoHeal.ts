@@ -2,12 +2,12 @@ import * as React from "react";
 
 import { useQueryClient } from "@tanstack/react-query";
 
-import type { ConnectionState } from "@/shared/api/relayClientShared";
-import { isRelayDependentQuery } from "@/shared/api/relayQueryInvalidation";
+import { relayClient } from "@/shared/api/relayClient";
 import {
   isRelayConnectionDegraded,
-  useRelayConnection,
-} from "@/shared/api/useRelayConnection";
+  type ConnectionState,
+} from "@/shared/api/relayClientShared";
+import { isRelayDependentQuery } from "@/shared/api/relayQueryInvalidation";
 import {
   isRateLimited,
   waitForRateLimit,
@@ -100,8 +100,6 @@ export class RelayAutoHealScheduler {
  */
 export function useRelayAutoHeal(): void {
   const queryClient = useQueryClient();
-  const connectionState = useRelayConnection();
-  const prevConnectionStateRef = React.useRef(connectionState);
   const schedulerRef = React.useRef<RelayAutoHealScheduler | null>(null);
 
   if (schedulerRef.current === null) {
@@ -129,14 +127,22 @@ export function useRelayAutoHeal(): void {
   }
 
   React.useEffect(() => {
+    // Observe the RAW connection-state emitter, not the 2s-debounced
+    // useRelayConnection() hook. A sub-2s flap never surfaces through the
+    // debounced hook (its degraded report is cancelled by the recovery), yet
+    // resetConnection() already rejected every in-flight query — the heal
+    // must still fire or errored panes persist until a manual reconnect.
+    let prev: ConnectionState | null = null;
+    const unsubscribe = relayClient.subscribeToConnectionState((next) => {
+      if (prev !== null) {
+        schedulerRef.current?.onTransition(prev, next);
+      }
+      prev = next;
+    });
+
     return () => {
+      unsubscribe();
       schedulerRef.current?.dispose();
     };
   }, []);
-
-  React.useEffect(() => {
-    const prev = prevConnectionStateRef.current;
-    prevConnectionStateRef.current = connectionState;
-    schedulerRef.current?.onTransition(prev, connectionState);
-  }, [connectionState]);
 }

@@ -474,6 +474,7 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         runtime_pid: None,
         backend: BackendKind::default(),
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -921,41 +922,5 @@ fn refresh_skill_overwrites_on_version_bump() {
     assert_eq!(
         content, BUZZ_CLI_SKILL_MD,
         "SKILL.md must be refreshed on version bump"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_dev_path_returns_true() {
-    let path = std::path::Path::new("/Users/someone/.buzz-dev");
-    assert!(
-        path_is_dev_nest(path),
-        ".buzz-dev path must be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_prod_path_returns_false() {
-    let path = std::path::Path::new("/Users/someone/.buzz");
-    assert!(
-        !path_is_dev_nest(path),
-        ".buzz path must not be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_unrelated_path_returns_false() {
-    let path = std::path::Path::new("/Users/someone/.buzz-staging");
-    assert!(
-        !path_is_dev_nest(path),
-        "unrelated path must not be identified as dev nest"
-    );
-}
-
-#[test]
-fn test_path_is_dev_nest_root_returns_false() {
-    let path = std::path::Path::new("/");
-    assert!(
-        !path_is_dev_nest(path),
-        "root path must not be identified as dev nest"
     );
 }

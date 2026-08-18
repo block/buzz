@@ -5,41 +5,161 @@ class _MessageList extends HookConsumerWidget {
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final Set<String> initialOrdinaryUnreadMessageIds;
+  final String? initialOldestOrdinaryUnreadMessageId;
+  final Set<String> initialForcedUnreadMessageIds;
+  final bool hasInitialUnread;
   final String channelId;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
   final double appBarTitleContentHeight;
+  final double composerBottomInset;
 
   const _MessageList({
     required this.entries,
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
+    required this.initialOrdinaryUnreadMessageIds,
+    required this.initialOldestOrdinaryUnreadMessageId,
+    required this.initialForcedUnreadMessageIds,
+    required this.hasInitialUnread,
     required this.channelId,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
     required this.appBarTitleContentHeight,
+    required this.composerBottomInset,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final appView = View.of(context);
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final isLoadingOlder = useState(false);
     final isAtLatest = useState(true);
+    final settledImeBottomInset = useState(
+      usesFixedAndroidImeViewport
+          ? appView.viewInsets.bottom / appView.devicePixelRatio
+          : 0.0,
+    );
     final hasUserScrolled = useState(false);
-    final followsLatest = useRef(
+    final followsLatest = useState(
       initialMessageId == null && initialThreadRootId == null,
     );
     final isAutoScrolling = useRef(false);
-    final autoScrollScheduled = useRef(false);
+    final latestNavigationRequest = useState(0);
+    final latestRealignmentQueued = useRef(false);
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
     final didOpenInitialThread = useRef(false);
     final didJumpToInitialMessage = useRef(false);
+    final isUnreadNavigationDismissed = useState(false);
+    final detachedWhileUnreadShown = useRef(false);
+    final oldestUnreadMessageId = useState<String?>(null);
+    final unreadBoundaryLoadFailed = useState(false);
+    final unreadBoundaryFetchCount = useRef(0);
+    final hasUnreadDeepLink =
+        initialMessageId != null || initialThreadRootId != null;
+    final notifier = ref.read(channelMessagesProvider(channelId).notifier);
+    final settledImeLift = usesFixedAndroidImeViewport
+        ? (settledImeBottomInset.value -
+                  MediaQuery.viewPaddingOf(context).bottom)
+              .clamp(0.0, double.infinity)
+              .toDouble()
+        : settledImeBottomInset.value;
+    final timelineBottomInset =
+        composerBottomInset + (followsLatest.value ? settledImeLift : 0);
+    final navigationBottomInset = composerBottomInset + settledImeLift;
+
+    useEffect(
+      () {
+        if (!hasInitialUnread ||
+            hasUnreadDeepLink ||
+            oldestUnreadMessageId.value != null ||
+            unreadBoundaryLoadFailed.value ||
+            entries.isEmpty) {
+          return null;
+        }
+
+        final hasLoadedOrdinaryTarget =
+            initialOldestOrdinaryUnreadMessageId != null &&
+            entries.any(
+              (entry) =>
+                  entry.message.id == initialOldestOrdinaryUnreadMessageId,
+            );
+        final hasLoadedForcedTarget = entries.any(
+          (entry) => initialForcedUnreadMessageIds.contains(entry.message.id),
+        );
+        final hasKnownTarget =
+            initialOldestOrdinaryUnreadMessageId != null ||
+            initialForcedUnreadMessageIds.isNotEmpty;
+        final hasLoadedFetchTarget =
+            initialOldestOrdinaryUnreadMessageId != null
+            ? hasLoadedOrdinaryTarget
+            : hasLoadedForcedTarget;
+        final canFetchTarget =
+            hasKnownTarget &&
+            !hasLoadedFetchTarget &&
+            !notifier.reachedOldest &&
+            unreadBoundaryFetchCount.value < 4;
+        if (canFetchTarget) {
+          unreadBoundaryFetchCount.value += 1;
+          var cancelled = false;
+          unawaited(
+            Future<void>(() async {
+              final loaded = await notifier.fetchOlder();
+              if (!cancelled && !loaded && !notifier.reachedOldest) {
+                unreadBoundaryLoadFailed.value = true;
+              }
+            }),
+          );
+          return () => cancelled = true;
+        }
+
+        if (hasKnownTarget &&
+            !hasLoadedFetchTarget &&
+            !notifier.reachedOldest) {
+          unreadBoundaryLoadFailed.value = true;
+        }
+
+        final ordinaryUnread = entries
+            .where(
+              (entry) =>
+                  initialOrdinaryUnreadMessageIds.contains(entry.message.id),
+            )
+            .map((entry) => entry.message)
+            .firstOrNull;
+        final forcedUnread = entries
+            .where(
+              (entry) =>
+                  initialForcedUnreadMessageIds.contains(entry.message.id),
+            )
+            .map((entry) => entry.message)
+            .firstOrNull;
+        final candidates = [ordinaryUnread, forcedUnread].nonNulls.toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        oldestUnreadMessageId.value = candidates.firstOrNull?.id;
+        return null;
+      },
+      [
+        hasInitialUnread,
+        hasUnreadDeepLink,
+        initialOrdinaryUnreadMessageIds,
+        initialOldestOrdinaryUnreadMessageId,
+        initialForcedUnreadMessageIds,
+        entries.length,
+        notifier.reachedOldest,
+        unreadBoundaryLoadFailed.value,
+      ],
+    );
+
+    final showUnreadNavigation =
+        !isUnreadNavigationDismissed.value &&
+        oldestUnreadMessageId.value != null;
 
     int? reversedIndexOf(String? messageId) {
       if (messageId == null) return null;
@@ -51,14 +171,22 @@ class _MessageList extends HookConsumerWidget {
           : displayEntries.length - 1 - chronologicalIndex;
     }
 
-    Future<void> scrollToLatest() async {
-      if (!itemScrollController.isAttached || isAutoScrolling.value) return;
-      followsLatest.value = true;
-      hasUserScrolled.value = false;
-      isAutoScrolling.value = true;
+    double latestAlignment() {
+      final viewportHeight = context.size?.height ?? 0;
+      return viewportHeight > 0
+          ? (timelineBottomInset / viewportHeight).clamp(0.0, 1.0).toDouble()
+          : 0.0;
+    }
+
+    Future<void> performLatestNavigation() async {
+      if (!context.mounted || !itemScrollController.isAttached) {
+        isAutoScrolling.value = false;
+        return;
+      }
       try {
         await itemScrollController.scrollTo(
           index: 0,
+          alignment: latestAlignment(),
           duration: const Duration(milliseconds: 220),
           curve: Curves.easeOutCubic,
         );
@@ -70,26 +198,86 @@ class _MessageList extends HookConsumerWidget {
       }
     }
 
-    void scheduleAutoScrollToLatest() {
-      if (autoScrollScheduled.value || isAutoScrolling.value) return;
-      autoScrollScheduled.value = true;
+    void scrollToLatest() {
+      if (!itemScrollController.isAttached || isAutoScrolling.value) return;
+      isAutoScrolling.value = true;
+      followsLatest.value = true;
+      hasUserScrolled.value = false;
+      latestNavigationRequest.value += 1;
+    }
+
+    useEffect(() {
+      if (latestNavigationRequest.value == 0) return null;
+      var cancelled = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        autoScrollScheduled.value = false;
-        if (!context.mounted || !followsLatest.value || hasUserScrolled.value) {
-          return;
-        }
-        scrollToLatest();
+        if (cancelled) return;
+        unawaited(performLatestNavigation());
       });
+      return () => cancelled = true;
+    }, [latestNavigationRequest.value]);
+
+    Future<void> scrollToOldestUnread() async {
+      final targetIndex = reversedIndexOf(oldestUnreadMessageId.value);
+      if (targetIndex == null ||
+          !itemScrollController.isAttached ||
+          isAutoScrolling.value) {
+        return;
+      }
+      isUnreadNavigationDismissed.value = true;
+      followsLatest.value = false;
+      hasUserScrolled.value = false;
+      isAtLatest.value = false;
+      isAutoScrolling.value = true;
+      try {
+        await itemScrollController.scrollTo(
+          index: targetIndex,
+          alignment: 0.35,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        );
+      } finally {
+        isAutoScrolling.value = false;
+      }
     }
 
     bool latestIsAtBoundary() {
-      // In this reversed list, item 0's leading edge is the bottom boundary.
-      // Being merely visible is not enough: a user who has pulled a tall
-      // newest row away from the boundary must not snap back on live updates.
+      // In this reversed list, item 0's leading edge is the visible bottom
+      // boundary above the composer. Being merely visible is not enough: a
+      // user who has pulled a tall newest row away from that boundary must not
+      // snap back on live updates.
+      final boundary = latestAlignment();
       return itemPositionsListener.itemPositions.value.any(
         (position) =>
-            position.index == 0 && position.itemLeadingEdge.abs() < 0.01,
+            position.index == 0 &&
+            (position.itemLeadingEdge - boundary).abs() < 0.01,
       );
+    }
+
+    void realignLatestAfterLayoutChange() {
+      if (latestRealignmentQueued.value ||
+          isAutoScrolling.value ||
+          !followsLatest.value ||
+          hasUserScrolled.value) {
+        return;
+      }
+      latestRealignmentQueued.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        latestRealignmentQueued.value = false;
+        if (!context.mounted ||
+            !itemScrollController.isAttached ||
+            isAutoScrolling.value ||
+            !followsLatest.value ||
+            hasUserScrolled.value ||
+            latestIsAtBoundary()) {
+          return;
+        }
+        // A dock or keyboard resize is a layout correction, not a navigation
+        // action. Keeping it instant avoids restarting a smooth scroll for
+        // every position report while the viewport settles. The rebuilt list
+        // padding already owns the composer/IME offset; the default alignment
+        // also keeps short timelines flush with that padding.
+        itemScrollController.jumpTo(index: 0);
+      });
     }
 
     useEffect(() {
@@ -97,14 +285,14 @@ class _MessageList extends HookConsumerWidget {
         final positions = itemPositionsListener.itemPositions.value;
         if (positions.isEmpty) return;
         final nextIsAtLatest = latestIsAtBoundary();
+        if (showUnreadNavigation &&
+            nextIsAtLatest &&
+            detachedWhileUnreadShown.value) {
+          isUnreadNavigationDismissed.value = true;
+        }
         if (nextIsAtLatest) {
           if (!isAtLatest.value) isAtLatest.value = true;
-        } else if (followsLatest.value && !hasUserScrolled.value) {
-          // The viewport can shrink when the composer or keyboard opens.
-          // Preserve auto-follow until the user scrolls the timeline.
-          if (!isAtLatest.value) isAtLatest.value = true;
-          scheduleAutoScrollToLatest();
-        } else if (isAtLatest.value) {
+        } else if (!followsLatest.value && isAtLatest.value) {
           isAtLatest.value = false;
         }
 
@@ -127,6 +315,35 @@ class _MessageList extends HookConsumerWidget {
         onPositionsChanged,
       );
     }, [channelId, entries.length, itemPositionsListener]);
+
+    // Composer size changes and keyboard metrics changes arrive in separate
+    // layout passes. Preserve the latest-message anchor for both, but only
+    // while the user has not deliberately left the tail.
+    useEffect(() {
+      realignLatestAfterLayoutChange();
+      return null;
+    }, [timelineBottomInset]);
+
+    useEffect(() {
+      final observer = ImeMetricsSettleObserver(
+        onMetricsSettled: () {
+          if (!usesFixedAndroidImeViewport) {
+            realignLatestAfterLayoutChange();
+            return;
+          }
+          final nextInset =
+              appView.viewInsets.bottom / appView.devicePixelRatio;
+          if ((settledImeBottomInset.value - nextInset).abs() >= 0.5) {
+            settledImeBottomInset.value = nextInset;
+          }
+        },
+      );
+      WidgetsBinding.instance.addObserver(observer);
+      return () {
+        WidgetsBinding.instance.removeObserver(observer);
+        observer.dispose();
+      };
+    }, [appView, itemScrollController]);
 
     useEffect(() {
       if (initialThreadRootId == null || didOpenInitialThread.value) {
@@ -235,6 +452,9 @@ class _MessageList extends HookConsumerWidget {
                 notification.direction != ScrollDirection.idle) {
               hasUserScrolled.value = true;
               followsLatest.value = false;
+              if (showUnreadNavigation) {
+                detachedWhileUnreadShown.value = true;
+              }
             } else if (notification is ScrollEndNotification &&
                 hasUserScrolled.value) {
               WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -259,7 +479,7 @@ class _MessageList extends HookConsumerWidget {
                   context,
                   titleContentHeight: appBarTitleContentHeight,
                 ),
-                bottom: 0,
+                bottom: timelineBottomInset,
               ),
               itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
               itemBuilder: (context, index) {
@@ -352,25 +572,39 @@ class _MessageList extends HookConsumerWidget {
             ),
           ),
         ),
-        if (!isAtLatest.value)
+        if (showUnreadNavigation)
           Positioned(
             left: 0,
             right: 0,
-            bottom: Grid.xs,
+            top:
+                frostedAppBarHeight(
+                  context,
+                  titleContentHeight: appBarTitleContentHeight,
+                ) +
+                Grid.xs,
             child: Center(
-              child: FilledButton.icon(
-                key: const ValueKey('channel-jump-to-latest'),
-                onPressed: scrollToLatest,
-                style: FilledButton.styleFrom(
+              child: IconButton.filled(
+                key: const ValueKey('channel-jump-to-oldest-unread'),
+                onPressed: scrollToOldestUnread,
+                tooltip: 'Jump to oldest unread message',
+                style: IconButton.styleFrom(
                   backgroundColor: context.colors.primaryContainer,
                   foregroundColor: context.colors.onPrimaryContainer,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.gutter,
-                    vertical: Grid.xxs,
-                  ),
                 ),
-                icon: const Icon(LucideIcons.arrowDown, size: 16),
-                label: const Text('Latest'),
+                icon: const Icon(LucideIcons.chevronUp, size: 20),
+              ),
+            ),
+          )
+        else if (!isAtLatest.value)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: navigationBottomInset + Grid.xs,
+            child: Center(
+              child: LatestMessageButton(
+                key: const ValueKey('channel-jump-to-latest'),
+                surfaceKey: const ValueKey('channel-jump-to-latest-surface'),
+                onPressed: scrollToLatest,
               ),
             ),
           ),

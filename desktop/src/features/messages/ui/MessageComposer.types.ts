@@ -1,9 +1,26 @@
 import type { ReactNode } from "react";
 
+import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+
+export type MessageComposerEditTarget = {
+  author: string;
+  body: string;
+  id: string;
+  /**
+   * NIP-92 imeta attachments on the original event, in tag order. Loaded
+   * into the composer's pending-imeta state on edit-open so the user sees
+   * them as removable thumbnails (just like the send path) and can add
+   * more. The submit path emits a fresh full imeta tag set on the edit
+   * event; the receiver overlays it.
+   */
+  imetaMedia?: ImetaMedia[];
+  mentionRefs?: DraftMentionRef[];
+  unresolvedMentionPubkeys?: string[];
+};
 
 export type MessageComposerProps = {
   audienceContext?: {
@@ -36,21 +53,10 @@ export type MessageComposerProps = {
   autoSubmitDraftKey?: string | null;
   /** Called when the auto-submit fires so the parent can clear the trigger. */
   onAutoSubmitComplete?: () => void;
-  editTarget?: {
-    author: string;
-    body: string;
-    id: string;
-    /**
-     * NIP-92 imeta attachments on the original event, in tag order. Loaded
-     * into the composer's pending-imeta state on edit-open so the user sees
-     * them as removable thumbnails (just like the send path) and can add
-     * more. The submit path emits a fresh full imeta tag set on the edit
-     * event; the receiver overlays it.
-     */
-    imetaMedia?: ImetaMedia[];
-  } | null;
+  editTarget?: MessageComposerEditTarget | null;
   isSending?: boolean;
   mediaController?: MediaUploadController;
+  onDeferredEditPendingChange?: (isPending: boolean) => void;
   onCancelEdit?: () => void;
   onCancelReply?: () => void;
   /**
@@ -66,6 +72,8 @@ export type MessageComposerProps = {
     content: string,
     mediaTags?: string[][],
     mentionPubkeys?: string[],
+    /** Target captured when the edit was submitted; avoids a later ref swap. */
+    eventId?: string,
   ) => Promise<void>;
   /** Captures send context synchronously before awaits can change navigation. */
   onCaptureSendContext?: () => {
@@ -83,6 +91,8 @@ export type MessageComposerProps = {
       parentEventId: string | null;
       threadHeadId: string | null;
     } | null,
+    /** Route through the REST publisher even when best-effort enrichment settled empty. */
+    forceRest?: boolean,
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
@@ -92,6 +102,8 @@ export type MessageComposerProps = {
     id: string;
   } | null;
   showTopBorder?: boolean;
+  /** Render the app-wide upload queue above this composer dock. */
+  showBackgroundUploadProgress?: boolean;
   toolbarExtraActions?: ReactNode;
   typingParentEventId?: string | null;
   typingRootEventId?: string | null;

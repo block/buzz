@@ -1,7 +1,10 @@
+import * as React from "react";
+
 import type {
   AcpRuntimeCatalogEntry,
   AgentPersona,
   CreatePersonaInput,
+  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { AgentCardMintDialog } from "@/features/agents/ui/AgentCardMintDialog";
@@ -17,6 +20,30 @@ export type CardMintTarget = {
   canLock: boolean;
 };
 
+/**
+ * Card-mint dialog state plus the callback that opens it. `create` is
+ * undefined when no persona resolves; owner gating is the caller's job.
+ */
+export function useCardMint(
+  persona: AgentPersona | undefined,
+  managedAgent: ManagedAgent | undefined,
+) {
+  const [target, setTarget] = React.useState<CardMintTarget | null>(null);
+  const close = React.useCallback(() => setTarget(null), []);
+  const create = persona
+    ? () =>
+        setTarget({
+          // Prefer the live instance pubkey; fall back to the
+          // persona/definition id (same resolution as export).
+          id: managedAgent?.pubkey ?? persona.id,
+          name: persona.displayName,
+          // Locking needs an instance keypair to encrypt to.
+          canLock: Boolean(managedAgent?.pubkey),
+        })
+    : undefined;
+  return { close, create, target };
+}
+
 export function UserProfilePersonaDialogs({
   cardMintTarget,
   createError,
@@ -29,6 +56,7 @@ export function UserProfilePersonaDialogs({
   resolvedPersona,
   runtimes,
   runtimesLoading,
+  runtimesError = false,
   updateError,
   onCloseCardMint,
   onCloseDelete,
@@ -50,6 +78,7 @@ export function UserProfilePersonaDialogs({
   resolvedPersona: AgentPersona | undefined;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading: boolean;
+  runtimesError?: boolean;
   updateError: Error | null;
   onCloseCardMint: () => void;
   onCloseDelete: () => void;
@@ -59,6 +88,11 @@ export function UserProfilePersonaDialogs({
   onExportSnapshot: (persona: AgentPersona) => void;
   onSubmit: (input: CreatePersonaInput | UpdatePersonaInput) => Promise<void>;
 }) {
+  const runtimeCatalogStatus = runtimesLoading
+    ? "loading"
+    : runtimesError
+      ? "error"
+      : ("ready" as const);
   return (
     <>
       <AgentDialog
@@ -68,7 +102,7 @@ export function UserProfilePersonaDialogs({
         isPending={isPending}
         mode="definition-edit"
         runtimes={runtimes}
-        runtimesLoading={runtimesLoading}
+        runtimeCatalogStatus={runtimeCatalogStatus}
         onOpenChange={(open) => {
           if (!open) {
             onCloseDialog();

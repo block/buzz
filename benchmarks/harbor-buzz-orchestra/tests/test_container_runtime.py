@@ -247,7 +247,7 @@ async def test_forwarder_bridges_the_canonical_relay_address(tmp_path):
         rt._ws_authority("http://relay")
 
 
-@pytest.mark.parametrize(("configured", "expected"), [(None, "32"), (7, "7")])
+@pytest.mark.parametrize(("configured", "expected"), [(None, "0"), (7, "7")])
 async def test_launch_wires_the_desktop_environment(tmp_path, configured, expected):
     manifest = write_manifest(tmp_path)
     agent_class = manifest.roster[0]
@@ -290,9 +290,12 @@ async def test_launch_wires_the_desktop_environment(tmp_path, configured, expect
     )
 
 
-def test_runtime_rejects_unbounded_agent_rounds(tmp_path):
-    with pytest.raises(ValueError, match="positive"):
-        runtime(tmp_path, max_agent_rounds=0)
+def test_runtime_validates_construction_bounds(tmp_path):
+    # 0 is legal and means unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial
+    # budget is the clock. Only negatives are rejected.
+    runtime(tmp_path, max_agent_rounds=0)
+    with pytest.raises(ValueError, match="unbounded"):
+        runtime(tmp_path, max_agent_rounds=-1)
     with pytest.raises(ValueError, match="positive"):
         runtime(tmp_path, readiness_timeout_seconds=0)
 
@@ -370,6 +373,37 @@ async def test_m1_output_probe_matches_grader_and_is_condition_scoped(
         await runtime(tmp_path)._verify_m1_output(environment, manifest)
     probed = [cmd for cmd, _ in environment.commands if "hello.txt" in cmd]
     assert bool(probed) == (condition == "M1-hello-world")
+
+
+async def test_send_mentions_by_pubkey_so_task_text_stays_inert(
+    tmp_path, monkeypatch
+):
+    """Task text is untrusted payload: `:%normal! @a` in a task statement must
+    not be fed to member-name resolution (it would fail and kill the trial).
+    An explicit --mention pins delivery to the orchestrator's pubkey."""
+    rt = runtime(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    calls = []
+
+    async def buzz_json(credential, trial, *args):
+        calls.append(args)
+        return {}
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+
+    await rt._send(
+        trial.user,
+        trial,
+        "@orch-1 run `:%normal! @a` on the file",
+        mention=orch.nostr_pubkey,
+    )
+    assert calls[-1][-2:] == ("--mention", "pubkey-orch-1")
+
+    # Without an explicit mention the send is unchanged (name resolution).
+    await rt._send(trial.user, trial, "plain content")
+    assert "--mention" not in calls[-1]
+    assert calls[-1][-2:] == ("--content", "plain content")
 
 
 async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypatch):

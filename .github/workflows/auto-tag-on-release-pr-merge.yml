@@ -45,7 +45,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
@@ -91,7 +91,7 @@ jobs:
             echo "enabled=true"
             echo "tag=${TAG_PREFIX}${VERSION}"
             if [[ "$TAG_PREFIX" == desktop-v ]]; then
-              echo "target_sha=${{ github.event.pull_request.merge_commit_sha }}"
+              echo "target_sha=${{ github.event.pull_request.head.sha }}"
               echo "desktop=true"
             else
               echo "target_sha=$GITHUB_SHA"
@@ -112,6 +112,7 @@ jobs:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
         run: |
           VERSION="${VERSION#desktop-v}"
           export VERSION
@@ -146,7 +147,17 @@ jobs:
               exit 1
             fi
           fi
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
             -f ref="refs/tags/$TAG" \
             -f sha="$TARGET_SHA" \
-            --silent
+            --silent; then
+            # Ref creation is atomic. A concurrent retry may have won the race;
+            # accept that only when it created the exact immutable ref.
+            EXISTING_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)"
+            if [ "$EXISTING_SHA" = "$TARGET_SHA" ]; then
+              echo "Tag $TAG was concurrently created at $TARGET_SHA"
+              exit 0
+            fi
+            echo "::error::Tag creation failed and $TAG resolves to $EXISTING_SHA (expected $TARGET_SHA)"
+            exit 1
+          fi

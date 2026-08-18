@@ -125,6 +125,7 @@ impl AgentDefinition {
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -196,6 +197,8 @@ impl ManagedAgentRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayAgentInfo {
     pub pubkey: String,
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
     pub name: String,
     pub agent_type: String,
     pub channels: Vec<String>,
@@ -245,13 +248,9 @@ pub struct ManagedAgentRecord {
     pub avatar_url: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
-    /// Explicit per-instance harness pin. `None` (the default) means inherit
-    /// the harness from the linked persona's `runtime`, so persona harness
-    /// edits propagate on the next spawn — mirroring the opt-in `model`
-    /// override. `Some` is set only when the user deliberately picks a harness
-    /// that diverges from the persona. Resolved via `effective_agent_command`;
-    /// `agent_command` above is the create-time snapshot kept for avatar/legacy
-    /// derivations and is not authoritative for spawn.
+    /// Explicit per-instance harness pin; `None` inherits the persona runtime.
+    /// The effective command is resolved at spawn; `agent_command` is a legacy
+    /// create-time snapshot.
     #[serde(default)]
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
@@ -320,6 +319,8 @@ pub struct ManagedAgentRecord {
     pub backend: BackendKind,
     #[serde(default)]
     pub backend_agent_id: Option<String>,
+    #[serde(default)]
+    pub provider_policy_pending: bool,
     #[serde(default)]
     pub provider_binary_path: Option<String>,
     /// Installed team directory path (absolute). Set when agent was created from a team persona.
@@ -462,13 +463,12 @@ pub struct RelayMeshConfig {
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
-    /// Digest of the effective spawn config at launch (see
-    /// `spawn_hash::spawn_config_hash`). Runtime-only — never persisted. The
-    /// summary builder recomputes the hash from current disk state and flags
-    /// `needs_restart` on mismatch. Agents adopted via a persisted
-    /// `runtime_pid` have no `ManagedAgentProcess` entry, so their spawn
-    /// config is unknown and the badge stays off.
-    pub spawn_config_hash: u64,
+    /// The effective spawn config this process was launched with (see
+    /// `spawn_snapshot::SpawnConfigSnapshot`). Runtime-only — never persisted.
+    /// The summary builder recomputes a prospective snapshot and reports
+    /// differing fields via `ManagedAgentSummary::restart_diff`. Agents
+    /// adopted via `runtime_pid` have none; their config is unknown.
+    pub spawn_config: super::spawn_snapshot::SpawnConfigSnapshot,
     /// Whether this process was spawned in setup-listener mode (i.e.
     /// `BUZZ_ACP_SETUP_PAYLOAD` was set at launch because the agent was
     /// `NotReady`). Runtime-only — never persisted. Used by
@@ -541,13 +541,14 @@ pub struct ManagedAgentSummary {
     /// `OrphanedInstance` arm via `require_resolved`) — so the UI
     /// should surface that it's stuck, not merely stale.
     pub persona_orphaned: bool,
-    /// `true` when the running process was spawned with a config that no
-    /// longer matches what a spawn would use today — a plain restart would
-    /// change what runs. Complements `persona_out_of_date`: the badge means
-    /// "a restart would change what runs"; out-of-date means "a respawn
-    /// would." Always `false` for stopped agents and for processes adopted
-    /// via a persisted `runtime_pid` (their spawn config is unknown).
+    /// `true` when the running process's spawn config no longer matches
+    /// what a spawn would use today. Derived from `restart_diff` — lit
+    /// exactly when there is something to show. Always `false` for stopped,
+    /// orphaned, or `runtime_pid`-adopted agents.
     pub needs_restart: bool,
+    /// Fields that drifted since launch, redacted for display.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart_diff: Vec<super::spawn_snapshot::RestartDiffEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
@@ -594,10 +595,8 @@ pub enum AcpAvailabilityStatus {
     NotInstalled,
 }
 
-/// Authentication/login status for a CLI-based ACP runtime.
-///
-/// Serializes as a tagged union `{ status: "...", diagnostic?: "..." }` so
-/// the TypeScript side can exhaustively switch on `status`.
+/// Authentication/login status for a CLI-based ACP runtime. Serializes as a tagged union
+/// `{ status: "...", diagnostic?: "..." }` so the TypeScript side can exhaustively switch on `status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum AuthStatus {
@@ -616,8 +615,7 @@ pub enum AuthStatus {
     Unknown,
 }
 
-/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string
-/// so the TypeScript consumer can switch on it without numeric comparisons.
+/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string so the TypeScript consumer can switch on it without numeric comparisons.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessSource {
@@ -645,6 +643,9 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
+    pub max_tokens_env_var: Option<String>,
+    pub context_limit_env_var: Option<String>,
+    pub max_rounds_env_var: Option<String>,
     pub install_hint: String,
     pub install_instructions_url: String,
     /// true when at least one automated install step is available
@@ -663,16 +664,14 @@ pub struct AcpRuntimeCatalogEntry {
     /// Whether this entry came from the compiled-in catalog or a user-supplied
     /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
     pub source: HarnessSource,
-    /// Definition-level environment variables for `source: custom` entries.
-    ///
-    /// Populated from `HarnessDefinition.env` so the edit form can read them
-    /// back and the user doesn't silently lose env vars when saving.  Always
-    /// empty for `builtin` and `preset` entries (those env values come from the
-    /// runtime metadata path, not user-editable JSON).
-    ///
-    /// Skipped in serialization when empty to keep the catalog payload compact.
+    /// Definition-level env vars for `source: custom` entries; populated from
+    /// `HarnessDefinition.env` so saves don't silently erase existing vars.
+    /// Absent for builtin/preset entries. Skipped when empty in serialization.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub definition_env: BTreeMap<String, String>,
+    /// Spawn-time parallelism cap; absent for uncapped harnesses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_parallelism: Option<u32>,
 }
 
 /// Result of a single install step (CLI or adapter).

@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/tappable_flapping_bee.dart';
@@ -25,12 +27,18 @@ class PairingPage extends HookConsumerWidget {
   /// When true, the pairing page is being used to add a new community
   /// (user is already authenticated with at least one community).
   final bool addingCommunity;
+  final bool identityRecoveryOnly;
 
-  const PairingPage({super.key, this.addingCommunity = false});
+  const PairingPage({
+    super.key,
+    this.addingCommunity = false,
+    this.identityRecoveryOnly = false,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pairingState = ref.watch(pairingProvider);
+    final enrolledBiometrics = ref.watch(enrolledBiometricsProvider);
     final codeController = useTextEditingController();
     final fallbackScannerVisible = useState(false);
     final pairingCodeExpanded = useState(false);
@@ -51,6 +59,13 @@ class PairingPage extends HookConsumerWidget {
 
     Future<void> handleScannerResult(String? code) async {
       if (code != null && context.mounted) {
+        if (identityRecoveryOnly &&
+            Uri.tryParse(code)?.queryParameters['mode'] != 'recover') {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Scan a desktop recovery code.')),
+          );
+          return;
+        }
         await ref.read(pairingProvider.notifier).pair(code);
       }
     }
@@ -91,7 +106,7 @@ class PairingPage extends HookConsumerWidget {
               onPressed: () => Navigator.of(context).pop(),
             ),
             title: Text(
-              'Add Community',
+              identityRecoveryOnly ? 'Send to Desktop' : 'Add Community',
               style: isVerifyingSas
                   ? null
                   : context.textTheme.titleMedium?.copyWith(
@@ -114,6 +129,17 @@ class PairingPage extends HookConsumerWidget {
                   child: _SasVerificationView(
                     sasCode: pairingState.sasCode ?? '------',
                     confirmed: pairingState.userConfirmedSas,
+                    sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
+                    protectSensitiveActions:
+                        pairingState.protectSensitiveActions,
+                    biometricLabel: biometricProtectionLabel(
+                      defaultTargetPlatform,
+                      enrolledBiometrics.value ?? const [],
+                    ),
+                    errorMessage: pairingState.errorMessage,
+                    onProtectionChanged: (value) => ref
+                        .read(pairingProvider.notifier)
+                        .setProtectSensitiveActions(value),
                     onConfirm: () =>
                         ref.read(pairingProvider.notifier).confirmSas(),
                     onDeny: () => ref.read(pairingProvider.notifier).denySas(),
@@ -146,7 +172,7 @@ class PairingPage extends HookConsumerWidget {
                     onConnect: () {
                       final code = codeController.text.trim();
                       if (code.isNotEmpty) {
-                        ref.read(pairingProvider.notifier).pair(code);
+                        unawaited(handleScannerResult(code));
                       }
                     },
                   ),
@@ -182,12 +208,22 @@ class PairingPage extends HookConsumerWidget {
 class _SasVerificationView extends StatelessWidget {
   final String sasCode;
   final bool confirmed;
+  final bool sendsIdentityToDesktop;
+  final bool protectSensitiveActions;
+  final String biometricLabel;
+  final String? errorMessage;
+  final ValueChanged<bool> onProtectionChanged;
   final VoidCallback onConfirm;
   final VoidCallback onDeny;
 
   const _SasVerificationView({
     required this.sasCode,
     required this.confirmed,
+    required this.sendsIdentityToDesktop,
+    required this.protectSensitiveActions,
+    required this.biometricLabel,
+    required this.errorMessage,
+    required this.onProtectionChanged,
     required this.onConfirm,
     required this.onDeny,
   });
@@ -242,12 +278,40 @@ class _SasVerificationView extends StatelessWidget {
         const SizedBox(height: Grid.lg),
 
         Text(
-          'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
+          sendsIdentityToDesktop
+              ? 'This sends your full Buzz identity to the desktop\nand grants it permanent access. Only confirm a\ndesktop you trust and a recovery you started.'
+              : 'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
           textAlign: TextAlign.center,
           style: context.textTheme.bodySmall?.copyWith(
             color: context.colors.onSurfaceVariant,
           ),
         ),
+
+        const SizedBox(height: Grid.sm),
+
+        if (!sendsIdentityToDesktop)
+          CheckboxListTile(
+            key: const Key('protect-sensitive-actions-checkbox'),
+            value: protectSensitiveActions,
+            onChanged: confirmed
+                ? null
+                : (value) => onProtectionChanged(value ?? false),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            title: Text(biometricLabel),
+            subtitle: const Text('For secure actions'),
+          ),
+
+        if (errorMessage != null) ...[
+          const SizedBox(height: Grid.xs),
+          Text(
+            errorMessage!,
+            textAlign: TextAlign.center,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.error,
+            ),
+          ),
+        ],
 
         const SizedBox(height: Grid.lg),
 

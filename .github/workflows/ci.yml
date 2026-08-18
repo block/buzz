@@ -28,10 +28,10 @@ jobs:
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 2
-      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           token: ''
@@ -46,10 +46,14 @@ jobs:
               - 'deny.toml'
               - '.github/workflows/ci.yml'
               - 'scripts/run-tests.sh'
+              - 'scripts/model-capabilities.json'
+              - 'scripts/normative-corpus.json'
               - 'justfile'
             desktop:
               - 'scripts/check-file-sizes-core.mjs'
               - 'scripts/check-file-sizes-core.test.mjs'
+              - 'scripts/model-capabilities.json'
+              - 'scripts/normative-corpus.json'
               - 'desktop/**'
               - '!desktop/src-tauri/**'
               - 'pnpm-lock.yaml'
@@ -78,6 +82,10 @@ jobs:
         run: scripts/test-release-ref-contract.sh
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
+      - name: OSS desktop promotion contract
+        run: |
+          scripts/test-oss-desktop-promotion.sh
+          scripts/test-oss-desktop-promotion-behavior.sh
       - name: Mobile release contract
         run: |
           scripts/test-mobile-release-contract.sh
@@ -96,7 +104,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -117,7 +125,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -139,7 +147,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
@@ -235,7 +243,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Get pnpm store directory
         id: pnpm-cache
@@ -317,8 +325,11 @@ jobs:
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.number == 5224)) && 'READ_WRITE' || 'READ_ONLY' }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       # Reuse the relay binaries and backend test archive when none of their
       # inputs changed (desktop-only PRs hit this every time). The key covers
@@ -341,6 +352,13 @@ jobs:
             .
             desktop/src-tauri
           save-if: ${{ github.event_name != 'pull_request' }}
+      # Cache rustc outputs for unchanged workspace crates. Trusted pushes write;
+      # the bounded PR 5224 trial writes only to its isolated merge-ref scope.
+      - name: Set up sccache
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11 # zizmor: ignore[cache-poisoning] Bounded trial: only PR 5224 writes to its isolated merge-ref scope; trusted pushes retain production writes.
+        with:
+          version: v0.16.0
       - name: Install cargo-nextest
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -348,6 +366,8 @@ jobs:
           tool: cargo-nextest@0.9.136
       - name: Build relay artifacts
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        env:
+          RUSTC_WRAPPER: sccache
         run: |
           cargo build --profile ci -p buzz-relay -p git-credential-nostr
           cargo nextest archive \
@@ -359,7 +379,9 @@ jobs:
             --test e2e_event_reminder \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Save relay artifacts cache
-        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true'
+        # PR-scoped exact-source entries cannot warm main or other PRs and churn
+        # the shared cache pool. sccache provides read-only PR reuse instead.
+        if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
@@ -391,7 +413,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Start integration services
         run: |
@@ -580,7 +602,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Install cargo-nextest
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
@@ -692,6 +714,18 @@ jobs:
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Workspace profile (kind:9033) gate tests
+        # Call-site integration for the 9033 authorization gate: open relay
+        # rosterless/steward transitions and the closed-relay admin/owner rule,
+        # against real Postgres. #[ignore]d in the default suite, selected
+        # explicitly here — see handlers::relay_admin::tests.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/handlers::relay_admin::tests/)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: NIP-ER reminder e2e
         # Feature e2e for NIP-ER (Event Reminders, kind:30300): write-path
         # validation, author-only read filtering, and scheduler delivery against
@@ -732,7 +766,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -756,6 +790,19 @@ jobs:
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
+      - name: Media read-auth e2e
+        # Reads require kind:24242 `t=get` auth, so these binaries are the only
+        # coverage that a real relay rejects bare reads and honours host- and
+        # hash-scoped tokens. They were #[ignore]d and selected by no CI job, so
+        # the lane never ran; select it here, where MinIO and the seeded
+        # 'localhost:3000' community already exist.
+        # --no-fail-fast: without it cargo stops after the first failing binary,
+        # so one broken case hides every later binary's result.
+        run: |
+          cargo test -p buzz-test-client --no-fail-fast --test e2e_media --test e2e_media_extended --test e2e_media_video -- --ignored --nocapture
+        env:
+          RELAY_URL: ws://localhost:3000
+          RELAY_HTTP_URL: http://localhost:3000
       - name: Upload relay logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -773,7 +820,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
@@ -808,7 +855,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 2
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
@@ -869,7 +916,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Dependency policy
         run: cargo-deny check
@@ -881,7 +928,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Check for dead API token references in client code
         run: |
           # Fail if dead API token patterns reappear in desktop, mobile, docs, or config.
@@ -910,7 +957,7 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -947,7 +994,7 @@ jobs:
     env:
       TARGET: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       # MSVC needs windows.h (aws-lc-sys et al.), so this runs on a real Windows
       # runner — hermit, used by the Linux jobs, does not provide MSVC. The
       # toolchain (1.95.0 + clippy via profile = default) comes from the
@@ -1011,7 +1058,7 @@ jobs:
           git log -1 --format=%s | grep -qx smoke
           echo "Host bash resolved and functional; git commit round-trip passed"
       - name: Check (Tauri crate)
-        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --workspace --all-targets --target $env:TARGET
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Test (Tauri crate)
@@ -1028,7 +1075,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -1042,6 +1089,7 @@ jobs:
           mkdir -p desktop/src-tauri/binaries
           touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+          touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
           touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-$TARGET"
