@@ -1,0 +1,373 @@
+import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+
+const IMAGE_SHA = "c".repeat(64);
+const IMAGE_URL = "http://127.0.0.1:4173/buzz.svg";
+const IMAGE_DESCRIPTOR = {
+  url: IMAGE_URL,
+  sha256: IMAGE_SHA,
+  size: 646,
+  type: "image/svg+xml",
+  uploaded: Math.floor(Date.now() / 1000),
+  thumb: IMAGE_URL,
+  dim: "64x64",
+  filename: "buzz.svg",
+};
+const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+
+type MockFeedItem = {
+  id: string;
+  kind: number;
+  pubkey: string;
+  content: string;
+  created_at: number;
+  channel_id: string | null;
+  channel_name: string;
+  tags: string[][];
+  category: "mention" | "needs_action" | "activity" | "agent_activity";
+};
+
+type MockFeedWindow = Window &
+  typeof globalThis & {
+    __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: MockFeedItem) => MockFeedItem;
+  };
+
+async function installSpoilerBridge(
+  page: Page,
+  mock: Parameters<typeof installMockBridge>[1] = {},
+) {
+  await installMockBridge(page, {
+    ...mock,
+    uploadDescriptors: [IMAGE_DESCRIPTOR],
+  });
+}
+
+test("no-selection spoiler applies to every composer paragraph", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:4173",
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  const paragraphs = [
+    "First hidden paragraph",
+    "Second hidden paragraph",
+    "Third hidden paragraph",
+  ];
+
+  await page.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    paragraphs.join("\n\n"),
+  );
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+V");
+  await expect(input.locator("p")).toHaveCount(paragraphs.length);
+
+  await page.getByRole("button", { name: "Toggle formatting" }).click();
+  await page.getByRole("button", { name: "Spoiler", exact: true }).click();
+
+  await expect
+    .poll(() =>
+      input.evaluate(() =>
+        Array.from(
+          document.querySelectorAll(
+            '[data-testid="message-input"] .buzz-spoiler[data-spoiler]',
+          ),
+          (node) => node.textContent,
+        ),
+      ),
+    )
+    .toEqual(paragraphs);
+});
+
+test("image attachments can be marked and sent as hidden spoilers", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByRole("button", { name: "Attach file" }).click();
+
+  const composer = page.getByTestId("message-composer");
+  await expect(composer.getByAltText("Attachment cccc")).toBeVisible();
+
+  // Media spoilers are toggled per-attachment from the lightbox.
+  await composer.getByTestId("composer-media-attachment").hover();
+  await page.getByTestId("composer-attachment-annotate").click();
+  await page.getByTestId("composer-attachment-spoiler").click();
+  await page.keyboard.press("Escape");
+  await expect(composer.locator("[data-composer-media-spoiler]")).toBeVisible();
+
+  await page.getByTestId("send-message").click();
+
+  const lastMessage = page.getByTestId("message-row").last();
+  const spoilerBlock = lastMessage.locator(".buzz-spoiler--block");
+  await expect(spoilerBlock).toBeVisible();
+  await expect(spoilerBlock).toHaveAttribute("data-revealed", "false");
+  await expect(spoilerBlock.locator("[data-block-media] img")).toHaveAttribute(
+    "src",
+    IMAGE_URL,
+  );
+
+  await spoilerBlock.click();
+  await expect(spoilerBlock).toHaveAttribute("data-revealed", "true");
+  await expect(page.getByRole("dialog", { name: "image" })).toHaveCount(0);
+});
+
+test("text spoiler stays usable while attachment upload is pending", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page, { uploadDelayMs: 1_000 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("pending secret");
+
+  // Kick off the (delayed) upload first — the attach button lives in the
+  // passive toolbar, which is replaced while formatting is expanded.
+  await page.getByRole("button", { name: "Attach file" }).click();
+
+  await page.getByRole("button", { name: "Toggle formatting" }).click();
+  const spoilerButton = page.getByRole("button", {
+    name: "Spoiler",
+    exact: true,
+  });
+
+  // Text spoilers are independent of media uploads, so the button stays
+  // enabled and works while the upload is still in flight.
+  await expect(spoilerButton).toBeEnabled();
+  await spoilerButton.click();
+  await expect(input.locator(".buzz-spoiler[data-spoiler]")).toContainText(
+    "pending secret",
+  );
+
+  await expect(
+    page.getByTestId("message-composer").getByAltText("Attachment cccc"),
+  ).toBeVisible();
+});
+
+test("hidden spoiler links reveal without opening on the first click", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("||[secret](https://example.com)||");
+  await page.getByTestId("send-message").click();
+
+  const lastMessage = page.getByTestId("message-row").last();
+  const spoiler = lastMessage.locator(".buzz-spoiler").first();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+
+  // The freshly sent row can still be settling layout; a forced click
+  // computed from a pre-shift bounding box lands on the wrong element
+  // (force skips Playwright's stability check). Wait until the link's
+  // position is identical across two animation frames before clicking.
+  const secretLink = spoiler.getByRole("link", { name: "secret" });
+  await secretLink.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        let last = -1;
+        const tick = () =>
+          requestAnimationFrame(() => {
+            const { y } = el.getBoundingClientRect();
+            if (y === last) resolve();
+            else {
+              last = y;
+              tick();
+            }
+          });
+        tick();
+      }),
+  );
+
+  const popupPromise = page
+    .waitForEvent("popup", { timeout: 500 })
+    .catch(() => null);
+  await secretLink.click({ force: true });
+
+  const popup = await popupPromise;
+  await popup?.close();
+  expect(popup).toBeNull();
+  await expect(spoiler).toHaveAttribute("data-revealed", "true");
+});
+
+test("hidden spoilers stay masked on hover and focus until reveal", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("||secret hover focus note||");
+  await page.getByTestId("send-message").click();
+
+  const lastMessage = page.getByTestId("message-row").last();
+  const spoiler = lastMessage.locator(".buzz-spoiler").first();
+  const content = spoiler.locator(".buzz-spoiler__content");
+  const particles = spoiler.locator(".buzz-spoiler__particles");
+
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+  await expect(content).toHaveCSS("opacity", "0");
+  await expect(particles).toHaveCSS("opacity", "1");
+
+  await spoiler.hover();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+  await expect(content).toHaveCSS("opacity", "0");
+  await expect(particles).toHaveCSS("opacity", "1");
+
+  await page.mouse.move(0, 0);
+  await spoiler.focus();
+  await expect(spoiler).toBeFocused();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+  await expect(content).toHaveCSS("opacity", "0");
+  await expect(particles).toHaveCSS("opacity", "1");
+
+  await page.keyboard.press("Enter");
+  await expect(spoiler).toHaveAttribute("data-revealed", "true");
+  await expect(content).toHaveCSS("opacity", "1");
+  await expect(particles).toHaveCSS("opacity", "0");
+});
+
+test("masked link inside a hidden spoiler does not leak its URL until revealed", async ({
+  page,
+}) => {
+  const SECRET_URL = "https://private.example/leak-path";
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type(`||[secret](${SECRET_URL})||`);
+  await page.getByTestId("send-message").click();
+
+  const lastMessage = page.getByTestId("message-row").last();
+  const spoiler = lastMessage.locator(".buzz-spoiler").first();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+
+  const secretLink = spoiler.getByRole("link", { name: "secret" });
+
+  // Neither hovering nor focusing the still-hidden link may open the URL
+  // tooltip — that would leak the destination before the spoiler is revealed.
+  await secretLink.hover({ force: true });
+  await page.waitForTimeout(500); // exceed the tooltip open delay
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  await page.mouse.move(0, 0);
+  await secretLink.focus();
+  await page.waitForTimeout(500);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByText(SECRET_URL)).toHaveCount(0);
+  await secretLink.blur();
+
+  // Reveal the spoiler (first click reveals; it must not open the link).
+  await page.mouse.move(0, 0);
+  await secretLink.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        let last = -1;
+        const tick = () =>
+          requestAnimationFrame(() => {
+            const { y } = el.getBoundingClientRect();
+            if (y === last) resolve();
+            else {
+              last = y;
+              tick();
+            }
+          });
+        tick();
+      }),
+  );
+  await secretLink.click({ force: true });
+  await expect(spoiler).toHaveAttribute("data-revealed", "true");
+
+  // Now revealed, hovering the link reveals the URL tooltip as normal.
+  await secretLink.hover();
+  await expect(page.getByRole("tooltip")).toContainText(SECRET_URL);
+});
+
+test("non-interactive inbox preview spoilers let row clicks pass through", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ ===
+      "function",
+  );
+
+  await page.evaluate(
+    ({ channelId, createdAt, currentPubkey, senderPubkey }) => {
+      const pushFeedItem = (window as MockFeedWindow)
+        .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) {
+        throw new Error("Mock feed injection helper is not installed.");
+      }
+
+      pushFeedItem({
+        id: "mock-feed-spoiler-preview",
+        kind: 9,
+        pubkey: senderPubkey,
+        content: "Preview contains ||hidden launch note|| for review.",
+        created_at: createdAt,
+        channel_id: channelId,
+        channel_name: "general",
+        tags: [
+          ["e", channelId],
+          ["p", currentPubkey],
+        ],
+        category: "mention",
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      createdAt: Math.floor(Date.now() / 1000),
+      currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const item = page.getByTestId("home-inbox-item-mock-feed-spoiler-preview");
+  await expect(item).toContainText("Preview contains");
+
+  const spoiler = item.locator(".buzz-spoiler").first();
+  await expect(spoiler).toBeVisible();
+  await expect(spoiler).not.toHaveAttribute("role", "button");
+  await expect(spoiler).not.toHaveAttribute("tabindex", "0");
+  await expect(spoiler).toHaveCSS("pointer-events", "none");
+
+  const box = await spoiler.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) {
+    throw new Error("Expected inbox preview spoiler to have a bounding box.");
+  }
+
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.getByTestId("home-inbox-detail")).toContainText(
+    "Preview contains",
+  );
+});

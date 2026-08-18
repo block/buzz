@@ -1,0 +1,111 @@
+name: Mesh Lifecycle
+# Relay-driven mesh lifecycle smoke: membership → signed discovery notes →
+# relay-derived allowlist → join → CPU inference over QUIC → stranger denied
+# (relay membership rejection + no routed inference, with a differential
+# trusted-inference health proof so a dead serve node can't fake a denial).
+# Runs the full Buzz "shared compute" join story with three real mesh-llm
+# node processes on one runner, using the Buzz relay as the control plane
+# (no hand-carried invite tokens). Mirrors the shape mesh-llm's own CI uses
+# for its two-node smokes (tiny CPU model, one runner, real QUIC mesh).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/buzz-relay/examples/mesh_*.rs'
+      - 'crates/buzz-relay/Cargo.toml'
+      - 'crates/buzz-admin/**'
+      - 'crates/buzz-test-client/**'
+      - 'crates/buzz-ws-client/**'
+      - 'Cargo.lock'
+      - 'desktop/src-tauri/src/mesh_llm/**'
+      - 'scripts/ci-mesh-lifecycle-smoke.sh'
+      - 'scripts/start-relay-for-tests.sh'
+      - '.github/workflows/mesh-lifecycle.yml'
+  pull_request:
+    paths:
+      - 'crates/buzz-relay/examples/mesh_*.rs'
+      - 'crates/buzz-relay/Cargo.toml'
+      - 'crates/buzz-admin/**'
+      - 'crates/buzz-test-client/**'
+      - 'crates/buzz-ws-client/**'
+      - 'Cargo.lock'
+      - 'desktop/src-tauri/src/mesh_llm/**'
+      - 'scripts/ci-mesh-lifecycle-smoke.sh'
+      - 'scripts/start-relay-for-tests.sh'
+      - '.github/workflows/mesh-lifecycle.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: mesh-lifecycle-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lifecycle-smoke:
+    name: Relay-Driven Mesh Lifecycle Smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      # The mesh-llm SDK downloads a signed native runtime (llama.cpp CPU
+      # build) on first init, and the serve node downloads the smoke model
+      # from HuggingFace on first run. Key on the lockfile so a mesh pin bump
+      # rolls the runtime cache; the model ref is stable.
+      - name: Restore mesh runtime + model caches
+        id: mesh-caches
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cache/mesh-llm/native-runtimes
+            ~/.cache/huggingface/hub
+          key: mesh-lifecycle-${{ runner.os }}-smollm2-135m-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            mesh-lifecycle-${{ runner.os }}-smollm2-135m-
+
+      - name: Start integration services
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose up -d postgres redis minio minio-init; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "docker compose up failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
+            sleep $((attempt * 5))
+          done
+
+      - name: Run relay-driven mesh lifecycle smoke
+        run: ./scripts/ci-mesh-lifecycle-smoke.sh 2>&1 | tee /tmp/mesh-lifecycle-harness.log
+
+      - name: Save mesh runtime + model caches
+        if: github.ref == 'refs/heads/main' && steps.mesh-caches.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cache/mesh-llm/native-runtimes
+            ~/.cache/huggingface/hub
+          key: mesh-lifecycle-${{ runner.os }}-smollm2-135m-${{ hashFiles('Cargo.lock') }}
+
+      - name: Upload relay + harness logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mesh-lifecycle-logs
+          path: |
+            /tmp/buzz-relay.log
+            /tmp/mesh-lifecycle-harness.log
+          if-no-files-found: ignore

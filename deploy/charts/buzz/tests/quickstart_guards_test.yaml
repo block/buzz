@@ -1,0 +1,17 @@
+suite: quickstart guards
+# Quickstart autogenerates MinIO creds in the chart-managed Secret,
+# so it is mutually exclusive with secrets.existingSecret. Isolated single-
+# template suites so the fail-guard is the only document under assertion.
+tests:
+  - it: minio.enabled is incompatible with existingSecret
+    templates:
+      - templates/quickstart-minio.yaml
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      minio.enabled: true
+      secrets.existingSecret: "buzz-secrets"
+    asserts:
+      - failedTemplate:
+          errorPattern: "incompatible with secrets.existingSecret"
