@@ -1233,7 +1233,7 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
 
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
