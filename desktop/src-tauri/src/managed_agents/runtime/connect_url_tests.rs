@@ -304,3 +304,35 @@ fn pair_reuse_keeps_tenancy_significant_differences_conflicting() {
         );
     }
 }
+
+#[test]
+fn invalid_connection_targets_do_not_alias_after_parse() {
+    assert!(!super::connection_targets_match(
+        "wss://alice@relay.example",
+        "wss://bob@relay.example",
+    ));
+    assert!(!super::connection_targets_match(
+        "wss://alice@relay.example",
+        "wss://relay.example",
+    ));
+    assert!(!super::connection_targets_match(
+        "wss://relay.example#east",
+        "wss://relay.example#west",
+    ));
+    assert!(!super::connection_targets_match(
+        "wss://relay.example#east",
+        "wss://relay.example",
+    ));
+    assert!(!super::connection_targets_match(
+        "https://relay.example",
+        "https://RELAY.example/",
+    ));
+    assert!(super::connection_targets_match(
+        "wss://alice@relay.example",
+        "wss://alice@relay.example",
+    ));
+    assert!(super::connection_targets_match(
+        " wss://relay.example#east ",
+        "wss://relay.example#east",
+    ));
+}

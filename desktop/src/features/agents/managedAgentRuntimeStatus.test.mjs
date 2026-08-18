@@ -230,3 +230,52 @@ test("connectionTargetUrl folds formatting but preserves tenant hosts", () => {
   );
   assert.equal(connectionTargetsMatch(" invalid ", "invalid"), true);
 });
+
+test("invalid connection targets keep exact-string fallback instead of aliasing", () => {
+  assert.equal(connectionTargetUrl("wss://alice@relay.example"), null);
+  assert.equal(connectionTargetUrl("wss://relay.example#east"), null);
+  assert.equal(
+    connectionTargetsMatch(
+      "wss://alice@relay.example",
+      "wss://bob@relay.example",
+    ),
+    false,
+  );
+  assert.equal(
+    connectionTargetsMatch("wss://alice@relay.example", "wss://relay.example"),
+    false,
+  );
+  assert.equal(
+    connectionTargetsMatch(
+      "wss://relay.example#east",
+      "wss://relay.example#west",
+    ),
+    false,
+  );
+  assert.equal(
+    connectionTargetsMatch("wss://relay.example#east", "wss://relay.example"),
+    false,
+  );
+  assert.equal(
+    connectionTargetsMatch(
+      "wss://alice@relay.example",
+      "wss://alice@relay.example",
+    ),
+    true,
+  );
+  assert.equal(
+    connectionTargetsMatch(
+      " wss://relay.example#east ",
+      "wss://relay.example#east",
+    ),
+    true,
+  );
+  assert.equal(
+    connectionTargetsMatch("ws://LOCALHOST:80/", "ws://localhost"),
+    true,
+  );
+  assert.equal(
+    connectionTargetsMatch("ws://localhost:3000", "ws://127.0.0.1:3000"),
+    false,
+  );
+});

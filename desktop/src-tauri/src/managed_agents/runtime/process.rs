@@ -550,17 +550,24 @@ pub(crate) fn connection_relay_url(configured_relay_url: &str) -> String {
 /// tenancy-significant differences: `localhost`, `127.0.0.1`, and `[::1]`
 /// stay three distinct hosts, and `ws` vs `wss`, non-default ports (including
 /// the OTHER scheme's default), paths, and query strings stay distinct.
-/// `None` for unparsable URLs - the caller falls back to exact comparison.
+/// `None` for unparsable URLs, non-`ws(s)` schemes, userinfo, or fragments —
+/// the caller falls back to exact comparison.
 fn connection_target(raw: &str) -> Option<ConnectionTarget> {
     let url = url::Url::parse(raw.trim()).ok()?;
     let scheme = url.scheme().to_ascii_lowercase();
+    if scheme != "ws" && scheme != "wss" {
+        return None;
+    }
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return None;
+    }
     let host = {
         let host = url.host_str()?.to_ascii_lowercase();
         host.strip_suffix('.').map(str::to_string).unwrap_or(host)
     };
     let default_port = match scheme.as_str() {
-        "ws" | "http" => Some(80),
-        "wss" | "https" => Some(443),
+        "ws" => Some(80),
+        "wss" => Some(443),
         _ => None,
     };
     let port = url
