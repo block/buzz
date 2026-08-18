@@ -10,6 +10,7 @@ import UserNotifications
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
+  private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
   private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
 
   override func application(
@@ -115,6 +116,13 @@ import UserNotifications
       parentViewController: nativeAttachmentRegistrar?.viewController
     )
 
+    let nativeEmojiPickerRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeEmojiPicker"
+    )
+    nativeEmojiPickerCoordinator = NativeEmojiPickerCoordinator(
+      messenger: messenger,
+      parentViewController: nativeEmojiPickerRegistrar?.viewController
+    )
     if #available(iOS 16.0, *),
       let nativeMessageActionsRegistrar = engineBridge.pluginRegistry.registrar(
         forPlugin: "BuzzNativeMessageActionSurface"

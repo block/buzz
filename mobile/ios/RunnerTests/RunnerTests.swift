@@ -403,6 +403,173 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  func testCategoryTrackerHighlightsLastHeaderAtOrAboveTop() {
+    let order = ["people", "nature", "flags"]
+    let offsets: [String: CGFloat] = [
+      "people": -320,
+      "nature": -12,
+      "flags": 200,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerFollowsScrollPastEachHeader() {
+    let order = ["people", "nature", "flags"]
+
+    // Scrolled to the very top: the first section is highlighted.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 400, "flags": 800],
+        viewportTop: 0
+      ),
+      "people"
+    )
+
+    // Scrolled far enough that Flags has reached the top.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": -800, "nature": -400, "flags": 0],
+        viewportTop: 0
+      ),
+      "flags"
+    )
+  }
+
+  func testCategoryTrackerFallsBackToFirstSectionBeforeAnyHeaderReachesTop() {
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: ["people", "nature"],
+        offsets: ["people": 40, "nature": 400],
+        viewportTop: 0
+      ),
+      "people"
+    )
+  }
+
+  func testCategoryTrackerSelectsShortFinalSectionAtClampedBottom() {
+    // The list has overflowed (People scrolled above the top) and its end is on
+    // screen, but the short Custom section's header sits below the top because
+    // the content clamps before it can reach it. The rail must still highlight
+    // Custom rather than leaving Nature — its predecessor — selected.
+    let order = ["people", "nature", "custom"]
+    let offsets: [String: CGFloat] = [
+      "people": -900,
+      "nature": -420,
+      "custom": 360,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 500
+      ),
+      "custom"
+    )
+  }
+
+  func testCategoryTrackerKeepsHeaderRuleWhenContentEndIsOffscreen() {
+    // The same short-final geometry, but the content end is still below the
+    // viewport (the user has not reached the bottom), so the ordinary
+    // header-at-top rule applies and Nature stays selected.
+    let order = ["people", "nature", "custom"]
+    let offsets: [String: CGFloat] = [
+      "people": -900,
+      "nature": -420,
+      "custom": 360,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 900
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerDoesNotForceLastSectionForAShortList() {
+    // A list that fits without scrolling has its content end on screen too, but
+    // its first header is still at the top — so the bottom rule must not fire
+    // and steal the highlight to the final section.
+    let order = ["people", "nature"]
+    let offsets: [String: CGFloat] = ["people": 0, "nature": 120]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 240
+      ),
+      "people"
+    )
+  }
+
+  func testRemoteEmojiLoaderLimitsConcurrentDownloads() async throws {
+    let maximumConcurrentDownloads = 3
+    let taskCount = 8
+    let probe = NativeEmojiDownloadProbe()
+    let tasksAttemptedAdmission = XCTestExpectation(
+      description: "all download tasks attempted admission"
+    )
+    tasksAttemptedAdmission.expectedFulfillmentCount = taskCount
+    let loader = NativeEmojiRemoteImageLoader(
+      maximumConcurrentDownloads: maximumConcurrentDownloads,
+      cacheByteLimit: 0,
+      admissionAttemptForTesting: { tasksAttemptedAdmission.fulfill() },
+      downloader: { _ in
+        await probe.holdDownload()
+        return UIImage()
+      }
+    )
+    let tasks = (0..<taskCount).map { index in
+      Task {
+        try await loader.image(
+          for: URLRequest(
+            url: try XCTUnwrap(URL(string: "https://example.com/\(index).png"))
+          )
+        )
+      }
+    }
+
+    await fulfillment(of: [tasksAttemptedAdmission], timeout: 2)
+    await probe.waitUntilStarted(maximumConcurrentDownloads)
+    var snapshot = await probe.snapshot()
+    XCTAssertEqual(snapshot.started, maximumConcurrentDownloads)
+    XCTAssertEqual(snapshot.peakActive, maximumConcurrentDownloads)
+
+    for expectedStarted in (maximumConcurrentDownloads + 1)...tasks.count {
+      await probe.releaseOne()
+      await probe.waitUntilStarted(expectedStarted)
+    }
+    await probe.releaseAll()
+    for task in tasks {
+      _ = try await task.value
+    }
+
+    snapshot = await probe.snapshot()
+    XCTAssertEqual(snapshot.started, tasks.count)
+    XCTAssertEqual(snapshot.peakActive, maximumConcurrentDownloads)
+    XCTAssertEqual(snapshot.active, 0)
+  }
+
   func testNativeMessageActionsPreserveRequestedGroupsAndHeight() throws {
     let actionArguments: [[String: Any]] = [
       [
@@ -780,4 +947,62 @@ private func readUInt32BigEndian(_ data: Data, at offset: Int) throws -> UInt32 
   guard data.count - offset >= 4 else { throw RelayImagePolicyError.invalidPng }
   return UInt32(data[offset]) << 24 | UInt32(data[offset + 1]) << 16
     | UInt32(data[offset + 2]) << 8 | UInt32(data[offset + 3])
+}
+
+private actor NativeEmojiDownloadProbe {
+  private struct MilestoneWaiter {
+    let count: Int
+    let continuation: CheckedContinuation<Void, Never>
+  }
+
+  private var active = 0
+  private var peakActive = 0
+  private var started = 0
+  private var releaseContinuations: [CheckedContinuation<Void, Never>] = []
+  private var milestoneWaiters: [MilestoneWaiter] = []
+
+  func holdDownload() async {
+    active += 1
+    started += 1
+    peakActive = max(peakActive, active)
+    resumeReachedMilestones()
+    await withCheckedContinuation { continuation in
+      releaseContinuations.append(continuation)
+    }
+    active -= 1
+  }
+
+  func waitUntilStarted(_ count: Int) async {
+    guard started < count else { return }
+    await withCheckedContinuation { continuation in
+      milestoneWaiters.append(
+        MilestoneWaiter(count: count, continuation: continuation)
+      )
+    }
+  }
+
+  func releaseOne() {
+    guard !releaseContinuations.isEmpty else { return }
+    releaseContinuations.removeFirst().resume()
+  }
+
+  func releaseAll() {
+    let continuations = releaseContinuations
+    releaseContinuations.removeAll()
+    for continuation in continuations {
+      continuation.resume()
+    }
+  }
+
+  func snapshot() -> (active: Int, peakActive: Int, started: Int) {
+    (active, peakActive, started)
+  }
+
+  private func resumeReachedMilestones() {
+    let reached = milestoneWaiters.filter { $0.count <= started }
+    milestoneWaiters.removeAll { $0.count <= started }
+    for waiter in reached {
+      waiter.continuation.resume()
+    }
+  }
 }
