@@ -9,6 +9,7 @@ import {
   KIND_PERSONA,
   KIND_TEAM,
 } from "@/shared/constants/kinds";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 // Persona/team/managed-agent projections (upserts) plus kind:5 NIP-09
 // deletions, so a tombstone published by another device also removes the
@@ -47,7 +48,7 @@ export function coalesceManagedAgentBackfill(
     if (event.kind !== KIND_MANAGED_AGENT) continue;
     const dTag = eventDTag(event);
     if (!dTag) continue;
-    const coordinate = `${event.pubkey.toLowerCase()}:${dTag.toLowerCase()}`;
+    const coordinate = `${normalizePubkey(event.pubkey)}:${dTag.toLowerCase()}`;
     const current = heads.get(coordinate);
     if (!current || eventIsNewer(event, current)) heads.set(coordinate, event);
   }
@@ -57,7 +58,8 @@ export function coalesceManagedAgentBackfill(
     const dTag = eventDTag(event);
     if (!dTag) return true;
     return (
-      heads.get(`${event.pubkey.toLowerCase()}:${dTag.toLowerCase()}`) === event
+      heads.get(`${normalizePubkey(event.pubkey)}:${dTag.toLowerCase()}`) ===
+      event
     );
   });
 }

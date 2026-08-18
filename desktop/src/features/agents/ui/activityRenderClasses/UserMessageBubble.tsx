@@ -13,6 +13,7 @@ import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptConte
 import type { TranscriptItem } from "../agentSessionTypes";
 import { MessageLinkHoverCue } from "./MessageLinkHoverCue";
 import { useTranscriptBubbleOverflow } from "./useTranscriptBubbleOverflow";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export function UserMessageBubble({
   bubbleClassName,
@@ -42,7 +43,7 @@ export function UserMessageBubble({
       ? { channelId: item.channelId, messageId: item.messageId }
       : null;
   const authorProfile = item.authorPubkey
-    ? profiles?.[item.authorPubkey.toLowerCase()]
+    ? profiles?.[normalizePubkey(item.authorPubkey)]
     : null;
   const authorLabel = item.authorPubkey
     ? resolveUserLabel({
