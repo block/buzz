@@ -296,10 +296,87 @@ test.describe("community rail", () => {
     expect(communityBox?.y).toBeLessThan(feedbackBox?.y ?? 0);
     expect(feedbackBox?.y).toBeLessThan(settingsBox?.y ?? 0);
 
-    await page.getByTestId("community-switcher").click();
-
     const menu = page.getByRole("menu", { name: "Community actions" });
+    await communityTrigger.evaluate((trigger) => {
+      trigger.addEventListener(
+        "mouseenter",
+        () => {
+          trigger.dataset.hoverStartedAt = String(performance.now());
+        },
+        { once: true },
+      );
+      trigger.addEventListener("mouseleave", () => {
+        trigger.dataset.leftAt = String(performance.now());
+      });
+      const observer = new MutationObserver((records) => {
+        if (
+          trigger.getAttribute("aria-expanded") === "true" &&
+          !trigger.dataset.expandedAt
+        ) {
+          trigger.dataset.expandedAt = String(performance.now());
+        }
+        if (
+          records.some(
+            (record) =>
+              record.attributeName === "aria-expanded" &&
+              record.oldValue === "true",
+          )
+        ) {
+          trigger.dataset.closedAfterOpening = "true";
+        }
+      });
+      observer.observe(trigger, {
+        attributeFilter: ["aria-expanded"],
+        attributeOldValue: true,
+        attributes: true,
+      });
+    });
+    await communityTrigger.hover();
+    await expect(menu).toBeVisible({ timeout: 700 });
+    const openDelayMs = await communityTrigger.evaluate((trigger) => {
+      const hoverStartedAt = Number(trigger.dataset.hoverStartedAt);
+      const expandedAt = Number(trigger.dataset.expandedAt);
+      if (!Number.isFinite(hoverStartedAt) || !Number.isFinite(expandedAt)) {
+        throw new Error("Community actions open timing was not recorded");
+      }
+      return expandedAt - hoverStartedAt;
+    });
+    expect(openDelayMs).toBeGreaterThanOrEqual(40);
+    expect(openDelayMs).toBeLessThan(300);
+
+    const openTriggerBox = await communityTrigger.boundingBox();
+    const menuBox = await menu.boundingBox();
+    expect(openTriggerBox).not.toBeNull();
+    expect(menuBox).not.toBeNull();
+    if (!openTriggerBox || !menuBox) {
+      throw new Error("Community actions geometry unavailable");
+    }
+    const triggerExitX = openTriggerBox.x + openTriggerBox.width - 1;
+    const triggerExitY = Math.min(
+      openTriggerBox.y + openTriggerBox.height - 4,
+      menuBox.y + menuBox.height - 4,
+    );
+    await page.mouse.move(triggerExitX, triggerExitY);
+    await page.mouse.move(menuBox.x + 8, menuBox.y - 8);
+    await page.waitForTimeout(80);
+    await page.mouse.move(menuBox.x + 8, menuBox.y + 8);
+    const bridgeDurationMs = await communityTrigger.evaluate((trigger) => {
+      const leftAt = Number(trigger.dataset.leftAt);
+      if (!Number.isFinite(leftAt)) {
+        throw new Error(
+          "Community actions trigger exit timing was not recorded",
+        );
+      }
+      return performance.now() - leftAt;
+    });
+    expect(bridgeDurationMs).toBeGreaterThanOrEqual(60);
+    expect(bridgeDurationMs).toBeLessThan(140);
+    await page.waitForTimeout(180);
     await expect(menu).toBeVisible();
+    await expect(communityTrigger).not.toHaveAttribute(
+      "data-closed-after-opening",
+      "true",
+    );
     await expect(
       menu.getByRole("menuitem", { name: "Copy community URL" }),
     ).toBeVisible();
