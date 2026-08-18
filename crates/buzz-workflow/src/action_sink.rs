@@ -40,7 +40,16 @@ pub enum ActionSinkError {
 
 impl From<ActionSinkError> for crate::WorkflowError {
     fn from(e: ActionSinkError) -> Self {
-        crate::WorkflowError::WebhookError(e.to_string())
+        match e {
+            // Keep a database failure classified as one. An operator triaging
+            // a failed run has to be able to tell "the database was down"
+            // from "the assignee was removed from the channel"; both landing
+            // on `webhook_failed` made that impossible.
+            ActionSinkError::Database(msg) => crate::WorkflowError::Database(msg),
+            // Everything else is a genuine action failure. `webhook_failed`
+            // was always a misnomer here — none of these actions is a webhook.
+            other => crate::WorkflowError::ActionFailed(other.to_string()),
+        }
     }
 }
 
@@ -76,20 +85,30 @@ pub trait ActionSink: Send + Sync {
 
     /// Dispatch a task to exactly one agent by immutable pubkey.
     ///
-    /// The relay-side implementation emits exactly two `p` tags on the
-    /// resulting `kind:9` message: `author_pubkey` (owner attribution) and
-    /// `agent_pubkey` (wake). The `text` is **not** scanned for `@Name`
-    /// mentions — that reverse-parse is the failure mode `assign_agent`
-    /// exists to avoid.
+    /// The relay-side implementation emits two `p` tags on the resulting
+    /// `kind:9` message — `author_pubkey` (owner attribution) and
+    /// `agent_pubkey` (wake) — collapsing to one when the owner *is* the
+    /// assignee. It also emits `buzz:workflow-owner`, which is what the
+    /// harness's inbound author gate actually reads; the event is signed by
+    /// the relay keypair, so without that tag it is gated on the relay's own
+    /// pubkey and dropped under `owner-only`. The `text` is **not** scanned
+    /// for `@Name` mentions — that reverse-parse is the failure mode
+    /// `assign_agent` exists to avoid.
     ///
     /// Fails with [`ActionSinkError::AssigneeNotMember`] if `agent_pubkey`
     /// is not a current member of `channel_id`. Adding them silently would
     /// let a workflow escalate beyond the owner's saved authority.
     ///
     /// - `agent_pubkey`: hex-encoded pubkey of the sole assignee.
-    /// - `task_id`: optional caller-supplied correlation UUID emitted as a
-    ///   `task` tag. Preserved verbatim; not validated as a UUID here — the
-    ///   executor performs shape validation before calling.
+    /// - `task_id`: optional caller-supplied correlation id emitted as a
+    ///   `task` tag, trimmed, and omitted entirely when empty after trimming.
+    ///
+    ///   It is **not** guaranteed to be a UUID at this boundary. Definition
+    ///   validation requires one, but the executor re-validates only
+    ///   `agent_pubkey` before calling, and this is a public trait any caller
+    ///   can implement against — so an implementation must not assume the
+    ///   shape. (The previous wording claimed "the executor performs shape
+    ///   validation before calling", which was not true of `task_id`.)
     ///
     /// Returns the event ID hex string on success.
     ///
