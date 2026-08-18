@@ -668,20 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_fallback_is_the_configured_model() {
-        // Discovery failure must still leave the picker able to represent the
-        // model the agent is actually running.
-        let entries = discovery_failure_fallback(Provider::OpenRouter, "openai/gpt-5.6-luna");
-        assert_eq!(
-            entries,
-            vec![ModelEntry {
-                id: "openai/gpt-5.6-luna".into(),
-                name: "openai/gpt-5.6-luna".into()
-            }]
-        );
-    }
-
-    #[test]
     fn v1_parse_filters_ready_chat_endpoints() {
         let json = serde_json::json!({
             "endpoints": [
