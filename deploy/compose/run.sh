@@ -60,7 +60,7 @@ case "${1:-help}" in
     ;;
   restart)
     require_env
-    compose up -d --wait --force-recreate relay
+    compose up -d --wait --force-recreate relay pairing-relay gateway
     ;;
   pull)
     require_env
@@ -102,7 +102,7 @@ Usage: ./run.sh <command>
 Commands:
   start         Start Buzz with docker compose up -d --wait
   stop          Stop containers without deleting volumes
-  restart       Recreate the relay after env/image changes
+  restart       Recreate the relay, pairing relay, and gateway after changes
   pull          Pull configured images
   upgrade       Pull and restart, then print backup reminders
   logs [svc]    Follow logs (default: relay)
