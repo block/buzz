@@ -68,6 +68,19 @@ def test_mint_user_is_attested_and_not_an_agent():
     assert tag[:3] == ["auth", owner_pubkey.format().hex(), ""]
 
 
+def test_user_mention_task_gets_stable_three_word_user_identity():
+    provisioner = BuzzTrialProvisioner(config(user_secret_key="7" * 64))
+
+    first = provisioner._mint_user("user-mention")
+    second = provisioner._mint_user("user-mention")
+
+    assert first.agent_id == "John Vincent Doe"
+    assert len(first.agent_id.split()) == 3
+    assert first.nostr_secret_key == second.nostr_secret_key
+    assert first.nostr_secret_key != "7" * 64
+    assert first.role == "user"
+
+
 def test_pinned_user_secret_reuses_one_identity():
     pinned = "7" * 64
     provisioner = BuzzTrialProvisioner(config(user_secret_key=pinned))

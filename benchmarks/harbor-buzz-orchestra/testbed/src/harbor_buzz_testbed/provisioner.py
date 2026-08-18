@@ -153,7 +153,7 @@ class BuzzTrialProvisioner:
         task_name: str | None,
     ) -> TrialHandle:
         credentials = self._mint_credentials(manifest)
-        user = self._mint_user()
+        user = self._mint_user(task_name)
         # The user identity creates the channel and invites the agents —
         # mirroring production Buzz, where a human owns the channel their
         # agents work in.
@@ -214,17 +214,23 @@ class BuzzTrialProvisioner:
 
     def _directory_credential(self, name: str, role: str) -> AgentCredential:
         """Derive one community-stable benchmark identity without storing its key."""
+        return self._stable_credential(name, name, role)
+
+    def _stable_credential(
+        self, identity_id: str, display_name: str, role: str
+    ) -> AgentCredential:
+        """Derive an owner-scoped stable identity for reusable task fixtures."""
         order = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
         digest = hashlib.sha256(
             b"buzz-benchmark-directory-v1\0"
             + bytes.fromhex(self._config.owner_secret_key)
             + b"\0"
-            + name.encode()
+            + identity_id.encode()
         ).digest()
         secret = ((int.from_bytes(digest, "big") % (order - 1)) + 1).to_bytes(32, "big")
         keypair = keypair_from_secret(secret.hex())
         return AgentCredential(
-            agent_id=name,
+            agent_id=display_name,
             role=role,
             nostr_secret_key=keypair.secret_key,
             nostr_pubkey=keypair.pubkey,
@@ -263,13 +269,21 @@ class BuzzTrialProvisioner:
                 )
         return tuple(credentials)
 
-    def _mint_user(self) -> AgentCredential:
+    def _mint_user(self, task_name: str | None = None) -> AgentCredential:
         """Mint the trial's user identity — the human analogue, not an agent.
 
+        A task may declare a dedicated stable identity when its user-facing
+        profile is part of what the benchmark measures. This avoids profile
+        races with the pinned GUI user when different tasks run concurrently.
         With a pinned ``user_secret_key`` the same identity fronts every
         trial, like one human running many teams; otherwise each trial gets
         a fresh user key.
         """
+        display_name = fixture_for(task_name).user_display_name
+        if display_name is not None:
+            return self._stable_credential(
+                f"task-user:{task_name}", display_name, "user"
+            )
         keypair = (
             keypair_from_secret(self._config.user_secret_key)
             if self._config.user_secret_key
