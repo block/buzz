@@ -4,6 +4,7 @@ import { installMockBridge } from "../helpers/bridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 
 const RELAY_URL = "ws://localhost:3000";
+const THEME_STORAGE_KEY = "buzz-theme";
 const OWNER_PUBKEY = "deadbeef".repeat(8);
 
 function snapshotKey(relayUrl: string) {
@@ -22,6 +23,25 @@ const COMMUNITY_B = {
   relayUrl: "ws://localhost:3001",
   addedAt: "2026-01-02T00:00:00.000Z",
 };
+
+async function expectContentSurfaceHorizontalGutters(
+  page: import("@playwright/test").Page,
+  expectedLeftGutter = 1,
+) {
+  const [mainInsetBox, contentBox] = await Promise.all([
+    page.locator("[data-buzz-glass-inset]").boundingBox(),
+    page.locator("[data-buzz-content-surface]").first().boundingBox(),
+  ]);
+  expect(mainInsetBox).not.toBeNull();
+  expect(contentBox).not.toBeNull();
+  const leftGutter = (contentBox?.x ?? 0) - (mainInsetBox?.x ?? 0);
+  const rightGutter =
+    (mainInsetBox?.x ?? 0) +
+    (mainInsetBox?.width ?? 0) -
+    ((contentBox?.x ?? 0) + (contentBox?.width ?? 0));
+  expect(Math.abs(leftGutter - expectedLeftGutter)).toBeLessThan(0.5);
+  expect(Math.abs(rightGutter - 8)).toBeLessThan(0.5);
+}
 
 async function seedCommunities(
   page: import("@playwright/test").Page,
@@ -64,7 +84,7 @@ test.describe("community rail", () => {
       "overflow",
       "visible",
     );
-    await expect(rail).toHaveCSS("z-index", "0");
+    await expect(rail).toHaveCSS("z-index", "20");
 
     const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
     const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
@@ -137,6 +157,7 @@ test.describe("community rail", () => {
 
     // The add-community affordance lives at the bottom of the rail.
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expectContentSurfaceHorizontalGutters(page);
   });
 
   test("restores pointer events after dismissing community settings", async ({
@@ -1133,7 +1154,36 @@ test.describe("community rail", () => {
     ).toBeVisible();
   });
 
+  test("keeps the gutter when the mobile sidebar closes without a rail", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 740, height: 516 });
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await expect(
+      page.locator('[data-sidebar="sidebar"][data-mobile="true"]'),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    await expect(
+      page.locator('[data-sidebar="sidebar"][data-mobile="true"]'),
+    ).toBeHidden();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "width",
+      "8px",
+    );
+    await expectContentSurfaceHorizontalGutters(page, 9);
+  });
+
   test("hides the rail with a single community", async ({ page }) => {
+    await page.addInitScript((themeStorageKey) => {
+      window.localStorage.setItem(themeStorageKey, "buzz-dark");
+    }, THEME_STORAGE_KEY);
     await installMockBridge(page, undefined, { skipCommunitySeed: true });
     await seedCommunities(page, [COMMUNITY_A], COMMUNITY_A.id);
     await page.goto("/");
@@ -1142,6 +1192,25 @@ test.describe("community rail", () => {
     // adds nothing).
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
     await expect(page.getByTestId("community-rail")).toHaveCount(0);
+
+    await page
+      .getByRole("button", { name: "Toggle Sidebar", exact: true })
+      .click();
+    await expect(
+      page.locator('[data-side="left"][data-state="collapsed"]'),
+    ).toBeVisible();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "width",
+      "8px",
+    );
+    const sidebarBackground = await page
+      .locator("[data-buzz-glass-inset]")
+      .evaluate((element) => getComputedStyle(element).backgroundColor);
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCSS(
+      "background-color",
+      sidebarBackground,
+    );
+    await expectContentSurfaceHorizontalGutters(page, 9);
   });
 
   test("keeps the rail visible when the sidebar is collapsed", async ({
@@ -1174,6 +1243,10 @@ test.describe("community rail", () => {
       page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
     ).toBeVisible();
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
+    await expect(page.locator("[data-collapsed-content-gutter]")).toHaveCount(
+      0,
+    );
+    await expectContentSurfaceHorizontalGutters(page);
   });
 
   test("clears the macOS traffic lights", async ({ page }) => {
