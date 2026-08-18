@@ -7,8 +7,8 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_version, record_agent_command, refresh_login_shell_path,
-    try_record_agent_command, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    try_record_agent_command, ANTIGRAVITY_AVATAR_URL, BUZZ_AGENT_AVATAR_URL,
+    CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -79,6 +79,38 @@ fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
         Some(BUZZ_AGENT_AVATAR_URL.to_string())
+    );
+}
+
+#[test]
+fn resolves_antigravity_avatar() {
+    assert_eq!(
+        managed_agent_avatar_url("buzz-antigravity-acp"),
+        Some(ANTIGRAVITY_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("antigravity-acp"),
+        Some(ANTIGRAVITY_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("Google Antigravity"),
+        Some(ANTIGRAVITY_AVATAR_URL.to_string())
+    );
+}
+
+#[test]
+fn normalizes_antigravity_args_to_empty() {
+    assert_eq!(
+        normalize_agent_args("buzz-antigravity-acp", Vec::new()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        normalize_agent_args("buzz-antigravity-acp", vec!["acp".into()]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        normalize_agent_args("antigravity-acp", vec!["acp".into()]),
+        Vec::<String>::new()
     );
 }
 
@@ -1190,6 +1222,7 @@ fn test_command_basenames_dotted_name_no_extra_candidates() {
 fn test_claude_and_codex_have_cli_install_commands() {
     let claude = super::known_acp_runtime_exact("claude").unwrap();
     let codex = super::known_acp_runtime_exact("codex").unwrap();
+    let antigravity = super::known_acp_runtime_exact("antigravity").unwrap();
     assert!(
         !claude.cli_install_commands.is_empty(),
         "claude must have cli install commands"
@@ -1198,6 +1231,12 @@ fn test_claude_and_codex_have_cli_install_commands() {
         !codex.cli_install_commands.is_empty(),
         "codex must have cli install commands"
     );
+    assert!(
+        !antigravity.cli_install_commands.is_empty(),
+        "antigravity must have cli install commands"
+    );
+    assert_eq!(antigravity.label, "Google Antigravity");
+    assert_eq!(antigravity.underlying_cli, Some("antigravity"));
 }
 
 /// cli_install_commands_for_os returns a non-empty slice for claude and codex.
