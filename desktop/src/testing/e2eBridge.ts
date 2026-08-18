@@ -1817,6 +1817,12 @@ function buildMockConfigSurface(pubkey: string): {
   sources: Record<string, unknown>;
 } {
   // Goose running — mixed origins, override on model
+  // The `writeVia` payloads below are camelCase because that is what the
+  // backend emits — pinned by `wire_format_matches_typescript_contract` in
+  // `desktop/src-tauri/src/managed_agents/config_bridge/types.rs`. This mock
+  // agreed with `api/types.ts` while the real serializer emitted `env_key` /
+  // `config_id` / `config_key`, so a test against it certified a contract
+  // nothing produced. Change these only alongside that Rust test.
   const gooseSurface = {
     runtimeId: "goose",
     runtimeLabel: "Goose",
