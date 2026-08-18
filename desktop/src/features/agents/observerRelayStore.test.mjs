@@ -124,10 +124,8 @@ test("newest-first replay does not regress ready to stale waking", async () => {
   globalThis.__TAURI_INTERNALS__ = tauriInternals;
   globalThis.window = { __TAURI_INTERNALS__: tauriInternals };
 
-  await _testProcessLiveObserverEvents(AGENT, [
-    lifecycleEvent(2, "ready"),
-    lifecycleEvent(1, "waking"),
-  ]);
+  await _testProcessLiveObserverEvents(AGENT, [lifecycleEvent(2, "ready")]);
+  await _testProcessLiveObserverEvents(AGENT, [lifecycleEvent(1, "waking")]);
 
   assert.deepEqual(started, ["ready"]);
 });
@@ -145,6 +143,8 @@ test("a new startNonce restarts the lifecycle sequence domain", async () => {
 
   await _testProcessLiveObserverEvents(AGENT, [
     lifecycleEvent(2, "ready", "gen-1"),
+  ]);
+  await _testProcessLiveObserverEvents(AGENT, [
     lifecycleEvent(1, "waking", "gen-2"),
   ]);
 
