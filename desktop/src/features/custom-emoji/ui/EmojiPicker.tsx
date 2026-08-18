@@ -1,5 +1,6 @@
 import data from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
+import { init } from "emoji-mart";
 import * as React from "react";
 
 import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
@@ -17,6 +18,25 @@ try {
 } catch {
   // emoji-mart also tolerates unavailable storage; picker selection still works.
 }
+
+// emoji-mart synchronously builds its search index inside `init`. Preserve the
+// idle prewarm so the first picker open does not pay that cost. Normalizing the
+// poisoned persisted state above ensures this initialization cannot remove the
+// module-global Frequent category.
+let warmStarted = false;
+function warmEmojiIndex() {
+  if (warmStarted) {
+    return;
+  }
+  warmStarted = true;
+  const warm = () => void init({ data });
+  if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+    window.requestIdleCallback(warm, { timeout: 1_500 });
+  } else {
+    globalThis.setTimeout(warm, 250);
+  }
+}
+warmEmojiIndex();
 
 /**
  * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
