@@ -62,6 +62,33 @@ rather than deletes that channel, leaving the relay/Postgres event timeline
 and the per-agent acp/agent logs (downloaded into the trial's `buzz/`
 artifacts) available for analysis.
 
+### Buzz-native tasks
+
+The local `datasets/buzz-native` suite scores Buzz product behavior alongside
+task correctness. It currently covers direct thread replies and exact channel
+creation/membership. Run one task with the production base prompt from the
+checked-out source build:
+
+```bash
+just benchmark \
+  --path benchmarks/harbor-buzz-orchestra/datasets/buzz-native/reply-to-thread \
+  --attempts 1 \
+  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-sonnet.yaml \
+  --n-concurrent 1
+```
+
+Replace the path with
+`benchmarks/harbor-buzz-orchestra/datasets/buzz-native/create-channel-invite-users`
+to run the channel task. Its provisioner seeds a stable directory of 50 users
+and 10 bots, while the verifier checks the created channel's TTL and exact
+membership through post-agent CLI evidence.
+
+After the agent stops, the runtime snapshots public relay state (source
+messages plus any task-declared channels and members) to
+`/logs/artifacts/buzz-evidence.json`. The task verifier reads that post-agent
+artifact; relay credentials and database access are never exposed to the model
+or verifier.
+
 ## Leaderboard runs
 
 `just benchmark` is the one-command path: it stands up a dedicated Docker

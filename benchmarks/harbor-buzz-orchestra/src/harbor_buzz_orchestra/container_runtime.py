@@ -20,16 +20,21 @@ from typing import Any
 
 from harbor.environments.base import BaseEnvironment
 
+from .evidence import build_buzz_evidence
 from .manifest import AgentClass, ExperimentManifest
 from .provisioning import AgentCredential, TrialHandle
 from .runtime import RuntimeResult
+from .task_fixtures import fixture_for
 
-DEFAULT_MAX_AGENT_ROUNDS = 0  # 0 = unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial budget is the clock
+DEFAULT_MAX_AGENT_ROUNDS = (
+    0  # 0 = unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial budget is the clock
+)
 # Container-side layout for the uploaded Buzz stack.
 REMOTE_ROOT = "/opt/buzz"
 REMOTE_BIN = f"{REMOTE_ROOT}/bin"
 REMOTE_PROMPTS = f"{REMOTE_ROOT}/prompts"
 REMOTE_LOGS = f"{REMOTE_ROOT}/logs"
+REMOTE_EVIDENCE = "/logs/artifacts/buzz-evidence.json"
 # The relay is host-header tenant-bound (its community row is the authority
 # of its own RELAY_URL), so agents must present that exact Host. When the
 # relay actually lives outside the container, this forwarder listens on the
@@ -38,6 +43,14 @@ FORWARDER = f"{REMOTE_BIN}/relay-forwarder"
 FORWARDER_LOG = f"{REMOTE_LOGS}/relay-forwarder.log"
 # How many done-poll iterations between in-container liveness probes.
 LIVENESS_EVERY = 10
+TRANSCRIPT_LIMIT = 1000
+TURN_ENDED_MARKERS = (
+    "turn complete for",
+    "turn cancelled for",
+    "turn hit max_tokens for",
+    "turn hit max_turn_requests for",
+    "turn refused for",
+)
 
 
 class RuntimeLaunchError(RuntimeError):
@@ -113,14 +126,14 @@ class BuzzContainerRuntime:
     ) -> RuntimeResult:
         classes = self._classes_by_agent_id(manifest, trial.credentials)
         orchestrator = next(c for c in trial.credentials if c.role == "orchestrator")
-        workers = [c for c in trial.credentials if c.agent_id != orchestrator.agent_id]
-        if not workers:
-            raise RuntimeLaunchError("Buzz orchestration requires at least one worker")
         trial_dir = self.logs_dir / "buzz"
         trial_dir.mkdir(parents=True, exist_ok=True)
 
         agents: list[_Agent] = []
         infra: list[_Agent] = []
+        task_event_id: str | None = None
+        final_message: dict[str, Any] | None = None
+        evidence_exported = False
         try:
             await self._install_stack(environment)
             forwarder = await self._start_forwarder(environment, trial)
@@ -163,25 +176,49 @@ class BuzzContainerRuntime:
             # fail member resolution and kill the trial before the agent
             # ever saw the task. An explicit --mention demotes unresolved
             # @-tokens in the text to presentation-only.
-            await self._send(
+            task_event = await self._send(
                 trial.user,
                 trial,
                 f"@{orchestrator.agent_id} {instruction}",
                 mention=orchestrator.nostr_pubkey,
             )
+            if isinstance(task_event, dict) and isinstance(
+                task_event.get("event_id"), str
+            ):
+                task_event_id = task_event["event_id"]
             final_message = await asyncio.wait_for(
-                self._wait_for_done(environment, orchestrator, trial, agents + infra),
+                self._wait_for_done(
+                    environment,
+                    orchestrator,
+                    trial,
+                    agents + infra,
+                    solo=agents[0] if len(agents) == 1 else None,
+                ),
                 timeout=manifest.trial_budget.timeout_seconds,
             )
             await self._verify_m1_output(environment, manifest)
         finally:
             await self._stop_agents(environment, agents + infra)
             await self._collect_logs(environment, trial_dir)
+            evidence_exported = await self._collect_evidence(
+                environment=environment,
+                trial=trial,
+                trial_dir=trial_dir,
+                task_event_id=task_event_id,
+                completion_message_id=(
+                    final_message.get("id") if final_message is not None else None
+                ),
+            )
 
         return RuntimeResult(
             metadata={
-                "completion_message_id": final_message["id"],
-                "completion_message": final_message["content"],
+                "completion_message_id": (
+                    final_message.get("id") if final_message is not None else None
+                ),
+                "completion_message": (
+                    final_message.get("content") if final_message is not None else None
+                ),
+                "buzz_evidence_exported": evidence_exported,
                 "agent_runtime": "in-container",
                 "agent_hints_enabled": False,
                 "task_seed": "user-identity-prompt",
@@ -359,6 +396,7 @@ class BuzzContainerRuntime:
         """The desktop-launch environment: real acp/agent/dev-mcp wiring."""
         return {
             **endpoint.env,
+            "RUST_LOG": self._rust_log(endpoint.env.get("RUST_LOG")),
             "BUZZ_RELAY_URL": trial.relay_ws_url,
             "BUZZ_PRIVATE_KEY": credential.nostr_secret_key,
             # Desktop parity: the GUI also sets NOSTR_PRIVATE_KEY on buzz-acp
@@ -389,6 +427,15 @@ class BuzzContainerRuntime:
             "BUZZ_AGENT_NO_HINTS": "1",
             endpoint.api_key_env: credential.llm_api_key,
         }
+
+    @staticmethod
+    def _rust_log(configured: str | None) -> str:
+        # ``buzz_acp=info`` carries the subscription-readiness line; the turn
+        # target lets a solo trial stop when its only turn ends. Keep both:
+        # replacing the former with only the latter makes a healthy process
+        # look permanently unready.
+        required = "buzz_acp=info,pool::prompt=info"
+        return f"{configured},{required}" if configured else required
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -427,11 +474,13 @@ class BuzzContainerRuntime:
         orchestrator: AgentCredential,
         trial: TrialHandle,
         agents: list[_Agent],
-    ) -> dict[str, Any]:
-        """Observe the channel as the trial user until the orchestrator posts DONE.
+        solo: _Agent | None = None,
+    ) -> dict[str, Any] | None:
+        """Observe until a team posts DONE or a solo agent finishes its one turn.
 
         Observation only: the harness never speaks as any agent. If the team
-        stalls, the trial times out and the stall is the measured result.
+        stalls, the trial times out and the stall is the measured result. A solo
+        agent cannot be woken by a teammate, so its logged turn end is final.
         """
         polls = 0
         while True:
@@ -453,7 +502,17 @@ class BuzzContainerRuntime:
                     message.get("content", "")
                 ).startswith("DONE:"):
                     return message
+            if solo is not None and await self._turn_ended(environment, solo):
+                return None
             await asyncio.sleep(self.poll_seconds)
+
+    @staticmethod
+    async def _turn_ended(environment: BaseEnvironment, agent: _Agent) -> bool:
+        result = await environment.exec(
+            f"cat {shlex.quote(agent.stdout_log)} "
+            f"{shlex.quote(agent.stderr_log)} 2>/dev/null"
+        )
+        return any(marker in (result.stdout or "") for marker in TURN_ENDED_MARKERS)
 
     async def _raise_for_dead_agents(
         self, environment: BaseEnvironment, agents: list[_Agent]
@@ -503,6 +562,107 @@ class BuzzContainerRuntime:
         except Exception:  # noqa: S110, BLE001 — best effort; env may be torn down
             pass
 
+    async def _collect_evidence(
+        self,
+        *,
+        environment: BaseEnvironment,
+        trial: TrialHandle,
+        trial_dir: Path,
+        task_event_id: str | None,
+        completion_message_id: str | None,
+    ) -> bool:
+        """Snapshot public relay state for the verifier before trial teardown."""
+        try:
+            messages = await self._buzz_json(
+                trial.user,
+                trial,
+                "messages",
+                "get",
+                "--channel",
+                trial.channel_id,
+                "--limit",
+                str(TRANSCRIPT_LIMIT),
+            )
+            observed_channels = await self._collect_observed_channels(trial)
+            evidence = build_buzz_evidence(
+                trial=trial,
+                messages=messages,
+                task_event_id=task_event_id,
+                completion_message_id=completion_message_id,
+                transcript_limit=TRANSCRIPT_LIMIT,
+                observed_channels=observed_channels,
+            )
+            evidence_path = trial_dir / "buzz-evidence.json"
+            evidence_path.write_text(
+                json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            transcript = {
+                "channel_id": trial.channel_id,
+                "message_count": evidence["message_count"],
+                "truncated": evidence["truncated"],
+                "messages": evidence["messages"],
+            }
+            (trial_dir / "transcript.json").write_text(
+                json.dumps(transcript, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            result = await environment.exec("mkdir -p /logs/artifacts")
+            if result.return_code != 0:
+                return False
+            await environment.upload_file(evidence_path, REMOTE_EVIDENCE)
+            return True
+        except Exception:  # noqa: BLE001 — absence becomes verifier reward 0
+            return False
+
+    async def _collect_observed_channels(
+        self, trial: TrialHandle
+    ) -> list[dict[str, Any]]:
+        """Read task-declared channel state through the production CLI."""
+        names = fixture_for(trial.task_name).observe_channel_names
+        if not names:
+            return []
+        orchestrator = next(
+            credential
+            for credential in trial.credentials
+            if credential.role == "orchestrator"
+        )
+        observed: list[dict[str, Any]] = []
+        for name in names:
+            matches = await self._buzz_json(
+                orchestrator,
+                trial,
+                "channels",
+                "search",
+                "--query",
+                name,
+                "--exact",
+                "--include-archived",
+            )
+            if not isinstance(matches, list):
+                continue
+            for match in matches:
+                if not isinstance(match, dict):
+                    continue
+                channel_id = match.get("channel_id")
+                if not isinstance(channel_id, str) or not channel_id:
+                    continue
+                members = await self._buzz_json(
+                    orchestrator,
+                    trial,
+                    "channels",
+                    "members",
+                    "--channel",
+                    channel_id,
+                )
+                observed.append(
+                    {
+                        **match,
+                        "members": members if isinstance(members, list) else [],
+                    }
+                )
+        return observed
+
     # -- Buzz CLI as the trial user / provisioning identities -------------------
 
     @staticmethod
@@ -533,7 +693,7 @@ class BuzzContainerRuntime:
         content: str,
         *,
         mention: str | None = None,
-    ) -> None:
+    ) -> Any:
         args = [
             "messages",
             "send",
@@ -544,7 +704,7 @@ class BuzzContainerRuntime:
         ]
         if mention is not None:
             args += ["--mention", mention]
-        await self._buzz_json(credential, trial, *args)
+        return await self._buzz_json(credential, trial, *args)
 
     async def _buzz_json(
         self, credential: AgentCredential, trial: TrialHandle, *args: str

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from harbor.environments.base import ExecResult
 
 from harbor_buzz_orchestra.container_runtime import (
     REMOTE_BIN,
+    REMOTE_EVIDENCE,
     REMOTE_LOGS,
     BuzzContainerRuntime,
     EndpointLaunchConfig,
@@ -173,6 +175,51 @@ def test_user_relay_url_prefers_host_view(tmp_path):
     )
     # pre-v1.2 handles fall back to deriving http from the agents' ws view.
     assert rt._user_relay_url(trial_handle(())) == "http://host.docker.internal:3600"
+
+
+async def test_collects_task_declared_channel_membership(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    trial = replace(
+        trial_handle((credential("orch-1", "orchestrator", "orch-model"),)),
+        task_name="create-channel-invite-users",
+    )
+    calls = []
+
+    async def buzz_json(credential_arg, trial_arg, *args):
+        calls.append((credential_arg, trial_arg, args))
+        if args[:2] == ("channels", "search"):
+            return [
+                {
+                    "channel_id": "created-channel",
+                    "name": "fix-pr-1234",
+                    "channel_type": "stream",
+                    "visibility": "private",
+                    "archived": False,
+                    "ttl_seconds": 3600,
+                }
+            ]
+        return [{"pubkey": "member", "role": "member"}]
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+
+    observed = await rt._collect_observed_channels(trial)
+
+    assert observed[0]["members"] == [{"pubkey": "member", "role": "member"}]
+    assert calls[0][0].agent_id == "orch-1"
+    assert calls[0][2] == (
+        "channels",
+        "search",
+        "--query",
+        "fix-pr-1234",
+        "--exact",
+        "--include-archived",
+    )
+    assert calls[1][2] == (
+        "channels",
+        "members",
+        "--channel",
+        "created-channel",
+    )
     with pytest.raises(RuntimeLaunchError, match="ws://"):
         rt._cli_relay_url("http://relay")
 
@@ -375,9 +422,7 @@ async def test_m1_output_probe_matches_grader_and_is_condition_scoped(
     assert bool(probed) == (condition == "M1-hello-world")
 
 
-async def test_send_mentions_by_pubkey_so_task_text_stays_inert(
-    tmp_path, monkeypatch
-):
+async def test_send_mentions_by_pubkey_so_task_text_stays_inert(tmp_path, monkeypatch):
     """Task text is untrusted payload: `:%normal! @a` in a task statement must
     not be fed to member-name resolution (it would fail and kill the trial).
     An explicit --mention pins delivery to the orchestrator's pubkey."""
@@ -427,6 +472,84 @@ async def test_wait_for_done_requires_orchestrator_authorship(tmp_path, monkeypa
     assert json.dumps(result).find("real") > 0
     # observation happens as the trial user, never as an agent identity
     assert set(observers) == {"user"}
+
+
+async def test_solo_turn_end_completes_without_done_message(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    environment = Environment(
+        responses={
+            "cat ": ExecResult(
+                stdout="turn complete for channel: end_turn\n",
+                stderr="",
+                return_code=0,
+            )
+        }
+    )
+
+    async def buzz_json(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    assert await rt._wait_for_done(environment, orch, trial, [], solo=solo) is None
+
+
+async def test_collect_evidence_uploads_verifier_artifact(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    root_id = "root-event"
+    reply_id = "reply-event"
+    messages = [
+        {
+            "id": root_id,
+            "kind": 9,
+            "created_at": 1,
+            "pubkey": trial.user.nostr_pubkey,
+            "content": "question",
+            "tags": [["h", trial.channel_id], ["p", orch.nostr_pubkey]],
+        },
+        {
+            "id": reply_id,
+            "kind": 9,
+            "created_at": 2,
+            "pubkey": orch.nostr_pubkey,
+            "content": "answer",
+            "tags": [["h", trial.channel_id], ["e", root_id, "", "reply"]],
+        },
+    ]
+
+    async def buzz_json(*args, **kwargs):
+        return messages
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    environment = Environment()
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+
+    assert await rt._collect_evidence(
+        environment=environment,
+        trial=trial,
+        trial_dir=trial_dir,
+        task_event_id=root_id,
+        completion_message_id=reply_id,
+    )
+    assert environment.uploads[-1][1] == REMOTE_EVIDENCE
+    evidence = json.loads((trial_dir / "buzz-evidence.json").read_text())
+    assert evidence["messages"][-1]["reply_to_event_id"] == root_id
+    assert (trial_dir / "transcript.json").is_file()
+
+
+def test_runtime_logging_keeps_readiness_and_turn_completion_signals(tmp_path):
+    rt = runtime(tmp_path)
+    assert rt._rust_log(None) == "buzz_acp=info,pool::prompt=info"
+    assert rt._rust_log("custom=debug") == (
+        "custom=debug,buzz_acp=info,pool::prompt=info"
+    )
 
 
 def test_composed_system_prompt_carries_persona_and_team_roster(tmp_path):
