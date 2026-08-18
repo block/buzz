@@ -99,16 +99,21 @@ test("cancel sends only the bounded run identity and schedule update sends only 
   ]);
 });
 
-test("model routing exposes only the two fixed preference choices", async () => {
+test("model routing exposes the three fixed app-wide choices", async () => {
   calls.length = 0;
   routing = { preference: "cloud_first" };
   assert.equal(await getModelRoutingPreference(), "cloud_first");
   assert.equal(await setModelRoutingPreference("local_first"), "local_first");
+  assert.equal(await setModelRoutingPreference("local_only"), "local_only");
   assert.deepEqual(calls, [
     { command: "get_model_routing_preference", args: {} },
     {
       command: "set_model_routing_preference",
       args: { preference: "local_first" },
+    },
+    {
+      command: "set_model_routing_preference",
+      args: { preference: "local_only" },
     },
   ]);
 

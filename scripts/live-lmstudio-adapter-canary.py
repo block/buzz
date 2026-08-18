@@ -22,6 +22,7 @@ def validate_catalog() -> None:
     loaded = [
         instance
         for model in catalog["models"]
+        if model.get("type") == "llm"
         for instance in model.get("loaded_instances", [])
     ]
     if (
@@ -30,7 +31,7 @@ def validate_catalog() -> None:
         or loaded[0].get("config", {}).get("context_length") != 65536
         or loaded[0].get("config", {}).get("parallel") != 1
     ):
-        raise RuntimeError("adapter canary requires exactly one admitted instance")
+        raise RuntimeError("adapter canary requires exactly one admitted LLM instance")
 
 
 def main() -> int:

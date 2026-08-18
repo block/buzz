@@ -354,6 +354,11 @@ impl RunCtx<'_> {
                 "LM Studio native runtime is missing validated egress policy".into(),
             )
         })?;
+        let native_input = tokio::select! {
+            biased;
+            _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
+            input = crate::trusted_lan_prefetch::augment_from_env(&user_text, native_input) => input,
+        };
         let mut request = LmStudioChatRequest::new(
             self.effective_model,
             native_input,

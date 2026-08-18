@@ -127,14 +127,16 @@ pub(crate) fn resolve_effective_harness_descriptor(
     personas: &[crate::managed_agents::types::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<EffectiveHarnessDescriptor, String> {
-    let effective_command = if record.agent_command_override.is_none()
-        && record.runtime.is_none()
-        && record
-            .persona_id
-            .as_deref()
-            .and_then(|pid| personas.iter().find(|persona| persona.id == pid))
-            .and_then(|persona| persona.runtime.as_deref())
-            .is_none()
+    let global_runtime_route = global.preferred_runtime.as_deref().is_some();
+    let effective_command = if global_runtime_route
+        || (record.agent_command_override.is_none()
+            && record.runtime.is_none()
+            && record
+                .persona_id
+                .as_deref()
+                .and_then(|pid| personas.iter().find(|persona| persona.id == pid))
+                .and_then(|persona| persona.runtime.as_deref())
+                .is_none())
     {
         crate::managed_agents::record_agent_command_with_preferred_runtime(
             record,
@@ -248,8 +250,13 @@ fn resolve_effective_agent_env_with_def(
     // Layer 1: baked build defaults (floor — internal builds only; OSS = empty).
     let mut env = baked_build_env();
 
-    let (effective_model, effective_provider) =
+    let (mut effective_model, effective_provider) =
         super::global_config::resolve_effective_model_provider(record, personas, global);
+    if let Some(model) =
+        super::runtime::qualified_local_model(record.persona_id.as_deref(), runtime)
+    {
+        effective_model = Some(model.to_string());
+    }
 
     if let Some(rt) = runtime {
         for (key, value) in super::runtime::runtime_metadata_env_vars(

@@ -474,6 +474,10 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Publish native ACP message output into the triggering Buzz conversation.
+    #[arg(long, env = "BUZZ_ACP_PUBLISH_AGENT_OUTPUT", default_value_t = false)]
+    pub publish_agent_output: bool,
+
     /// Exit after this many seconds with no dispatched events and no turn in flight.
     /// 0 disables inactivity self-termination.
     #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
@@ -555,6 +559,9 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Publish ACP `agent_message_chunk` text back into the triggering Buzz
+    /// conversation. Intended for native local runtimes without Buzz tools.
+    pub publish_agent_output: bool,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
     pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
@@ -1105,6 +1112,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            publish_agent_output: args.publish_agent_output,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
@@ -1476,6 +1484,7 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            publish_agent_output: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             agent_owner: None,

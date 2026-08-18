@@ -24,7 +24,10 @@ export type CommandBriefScheduleUpdate = {
   readonly concurrency: 1 | 2;
 };
 
-export type ModelRoutingPreference = "cloud_first" | "local_first";
+export type ModelRoutingPreference =
+  | "cloud_first"
+  | "local_first"
+  | "local_only";
 
 export type WorldMonitorConnection = {
   readonly endpoint: string;
@@ -89,7 +92,9 @@ function parseModelRoutingPreference(value: unknown): ModelRoutingPreference {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, ["preference"]) ||
-    (value.preference !== "cloud_first" && value.preference !== "local_first")
+    (value.preference !== "cloud_first" &&
+      value.preference !== "local_first" &&
+      value.preference !== "local_only")
   ) {
     return invalidResponse();
   }

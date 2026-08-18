@@ -8,18 +8,32 @@ pub(crate) enum ProviderAttempt {
     Cloud(CloudProvider),
 }
 
-pub(crate) const fn provider_attempts(preference: ModelRoutingPreference) -> [ProviderAttempt; 3] {
+pub(crate) fn provider_attempts(preference: ModelRoutingPreference) -> Vec<ProviderAttempt> {
     match preference {
-        ModelRoutingPreference::CloudFirst => [
+        ModelRoutingPreference::CloudFirst => vec![
             ProviderAttempt::Cloud(CloudProvider::LiteLlm),
             ProviderAttempt::Cloud(CloudProvider::OpenAi),
             ProviderAttempt::Local,
         ],
-        ModelRoutingPreference::LocalFirst => [
+        ModelRoutingPreference::LocalFirst => vec![
             ProviderAttempt::Local,
             ProviderAttempt::Cloud(CloudProvider::LiteLlm),
             ProviderAttempt::Cloud(CloudProvider::OpenAi),
         ],
+        ModelRoutingPreference::LocalOnly => vec![ProviderAttempt::Local],
+    }
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    #[test]
+    fn local_only_has_no_cloud_fallback_attempt() {
+        assert_eq!(
+            provider_attempts(ModelRoutingPreference::LocalOnly),
+            [ProviderAttempt::Local]
+        );
     }
 }
 

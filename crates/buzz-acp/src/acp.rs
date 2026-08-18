@@ -206,6 +206,10 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
+    /// Text emitted by `agent_message_chunk` updates during the current turn.
+    /// Most ACP adapters publish through Buzz tools, so this is only consumed
+    /// when the harness explicitly enables native-output publishing.
+    agent_message_output: String,
     /// Usage tracker — accumulates cumulative token counts from
     /// `_goose/unstable/session/update` notifications and computes per-turn
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
@@ -549,6 +553,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
+            agent_message_output: String::new(),
             goose_usage: UsageTracker::default(),
         })
     }
@@ -768,6 +773,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.agent_message_output.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1732,6 +1738,7 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    self.agent_message_output.push_str(text);
                 }
                 false
             }
@@ -1823,6 +1830,12 @@ impl AcpClient {
                 false
             }
         }
+    }
+
+    /// Take the text emitted through ACP message chunks during the last turn.
+    pub(crate) fn take_agent_message_output(&mut self) -> Option<String> {
+        let output = std::mem::take(&mut self.agent_message_output);
+        (!output.trim().is_empty()).then_some(output)
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
@@ -3044,6 +3057,29 @@ mod tests {
         assert!(elapsed >= std::time::Duration::from_millis(400));
         assert!(elapsed < std::time::Duration::from_secs(3));
         assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
+    }
+
+    #[tokio::test]
+    async fn captures_agent_message_chunks_for_explicit_harness_publish() {
+        let mut client = spawn_script("sleep 10").await;
+        client.handle_session_update(&serde_json::json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"text": "LOCAL NAV "}
+            }}
+        }));
+        client.handle_session_update(&serde_json::json!({
+            "params": {"update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"text": "READY"}
+            }}
+        }));
+
+        assert_eq!(
+            client.take_agent_message_output().as_deref(),
+            Some("LOCAL NAV READY")
+        );
+        assert_eq!(client.take_agent_message_output(), None);
     }
 
     #[tokio::test]

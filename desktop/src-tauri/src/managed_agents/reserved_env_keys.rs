@@ -80,6 +80,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "COMMAND_ADVISER_WORLD_MONITOR_USAGE_PATH",
     "COMMAND_ADVISER_WORLD_MONITOR_OAUTH_PATH",
     "BUZZ_ACP_EXPERIENCE_OUTBOX",
+    "BUZZ_ACP_PUBLISH_AGENT_OUTPUT",
     // Desktop ownership markers: these brand every spawned harness with the
     // launching Desktop instance. A user-supplied override would let a
     // definition masquerade as a different instance or fake the nonce used

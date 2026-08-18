@@ -3,6 +3,36 @@ use super::super::{
 };
 
 #[test]
+fn local_native_runtime_enables_acp_output_publish_for_every_managed_agent() {
+    assert!(super::super::command_adviser::should_publish_agent_output(
+        Some("builtin:command-navigation"),
+        Some(
+            crate::managed_agents::known_acp_runtime_exact("buzz-lmstudio-agent")
+                .expect("LM Studio runtime")
+        )
+    ));
+    assert!(!super::super::command_adviser::should_publish_agent_output(
+        Some("builtin:command-navigation"),
+        crate::managed_agents::known_acp_runtime_exact("codex-acp")
+    ));
+    assert!(super::super::command_adviser::should_publish_agent_output(
+        Some("builtin:keeper"),
+        Some(
+            crate::managed_agents::known_acp_runtime_exact("buzz-lmstudio-agent")
+                .expect("LM Studio runtime")
+        )
+    ));
+
+    assert_eq!(
+        super::super::command_adviser::qualified_local_model(
+            Some("builtin:keeper"),
+            crate::managed_agents::known_acp_runtime_exact("buzz-lmstudio-agent")
+        ),
+        Some(crate::commands::QUALIFIED_INSTANCE_ID)
+    );
+}
+
+#[test]
 fn runtime_metadata_env_vars_injects_model_and_provider() {
     let vars = runtime_metadata_env_vars(
         Some("GOOSE_MODEL"),
