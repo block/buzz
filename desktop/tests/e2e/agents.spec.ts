@@ -747,6 +747,8 @@ test("moves agent actions into an overflow menu in a narrow view", async ({
   });
 
   await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  // The app-wide default renders text-base at 16px with Tailwind's 1.5
+  // line-height ratio, producing a 24px one-line scroll height.
   await expect(
     page.getByText("Set up and manage your agents.", { exact: true }),
   ).toHaveJSProperty("scrollHeight", 24);
