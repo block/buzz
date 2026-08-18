@@ -1049,6 +1049,26 @@ fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Resul
     Ok(tags)
 }
 
+async fn emit_group_members_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    members: &[MemberRecord],
+    relay_pubkey_hex: &str,
+) -> anyhow::Result<()> {
+    let group_id = channel_id.to_string();
+    let tags = group_members_tags(&group_id, members)?;
+    emit_addressable_discovery_event(
+        tenant,
+        state,
+        channel_id,
+        KIND_NIP29_GROUP_MEMBERS,
+        tags,
+        relay_pubkey_hex,
+    )
+    .await
+}
+
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
 /// Called after group creation, metadata changes, or membership changes.
 /// Events are stored channel-scoped (`channel_id = Some(...)`) so that existing
@@ -1151,18 +1171,7 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    {
-        let tags = group_members_tags(&group_id, &members)?;
-        emit_addressable_discovery_event(
-            tenant,
-            state,
-            channel_id,
-            KIND_NIP29_GROUP_MEMBERS,
-            tags,
-            &relay_pubkey_hex,
-        )
-        .await?;
-    }
+    emit_group_members_event(tenant, state, channel_id, &members, &relay_pubkey_hex).await?;
 
     Ok(())
 }
@@ -3050,6 +3059,65 @@ pub async fn publish_nip43_member_removed(
     target_pubkey_hex: &str,
 ) -> anyhow::Result<()> {
     publish_nip43_delta(tenant, state, 8001, target_pubkey_hex, "member-removed").await
+}
+
+/// Repair legacy kind:39002 snapshots truncated by the former 1,000-member
+/// database cap.
+///
+/// The scan is deliberately limited to canonical rosters above that boundary,
+/// so normal-sized channels and already-correct large snapshots incur no
+/// rewrites. Community identity travels with every candidate; a shared relay
+/// never resolves a channel against a neighboring tenant.
+pub async fn reconcile_large_channel_member_snapshots(
+    state: &Arc<AppState>,
+) -> anyhow::Result<usize> {
+    const LEGACY_ROSTER_LIMIT: i64 = 1_000;
+
+    let relay_pubkey = state.relay_keypair.public_key();
+    let candidates = state
+        .db
+        .list_large_channel_rosters_needing_reconciliation(
+            LEGACY_ROSTER_LIMIT,
+            &relay_pubkey.to_bytes(),
+        )
+        .await?;
+    let relay_pubkey_hex = relay_pubkey.to_hex();
+    let mut reconciled = 0usize;
+
+    for candidate in candidates {
+        let result = async {
+            let channel_id = candidate.channel_id;
+            // Re-read the canonical roster immediately before publication. A
+            // membership mutation may have landed after the candidate scan.
+            let members = state
+                .db
+                .get_members(candidate.community_id, channel_id)
+                .await?;
+            let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
+            emit_group_members_event(&tenant, state, channel_id, &members, &relay_pubkey_hex)
+                .await?;
+            Ok::<bool, anyhow::Error>(true)
+        }
+        .await;
+
+        match result {
+            Ok(true) => reconciled += 1,
+            Ok(false) => {}
+            Err(error) => {
+                metrics::counter!("buzz_channel_roster_reconciliation_failures_total").increment(1);
+                warn!(
+                    community_id = %candidate.community_id,
+                    host = %candidate.host,
+                    channel_id = %candidate.channel_id,
+                    %error,
+                    "large channel roster reconciliation failed"
+                );
+            }
+        }
+    }
+
+    metrics::counter!("buzz_channel_roster_reconciliations_total").increment(reconciled as u64);
+    Ok(reconciled)
 }
 
 /// Reconcile channels that exist in the DB but don't have kind:39000 events.

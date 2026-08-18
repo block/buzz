@@ -781,6 +781,81 @@ pub async fn get_accessible_channel_ids(
         .collect()
 }
 
+/// A large channel whose canonical active-member count may need its legacy
+/// discovery snapshot repaired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LargeChannelRoster {
+    /// Community that owns the channel.
+    pub community_id: CommunityId,
+    /// Canonical host for the owning community.
+    pub host: String,
+    /// Channel whose roster snapshot differs from canonical membership.
+    pub channel_id: Uuid,
+    /// Canonical active-member count.
+    pub member_count: i64,
+}
+
+/// Returns active channels whose canonical roster exceeds `minimum_members`.
+///
+/// This is an internal cross-community maintenance read. Callers must preserve
+/// the returned community id when reading or rewriting discovery state.
+pub async fn list_large_channel_rosters_needing_reconciliation(
+    pool: &PgPool,
+    minimum_members: i64,
+    relay_pubkey: &[u8],
+) -> Result<Vec<LargeChannelRoster>> {
+    let rows = sqlx::query(
+        r#"
+        WITH large_rosters AS (
+            SELECT cm.community_id, cm.channel_id, COUNT(*) AS member_count
+            FROM channel_members cm
+            JOIN channels ch
+              ON ch.community_id = cm.community_id
+             AND ch.id = cm.channel_id
+             AND ch.deleted_at IS NULL
+            WHERE cm.removed_at IS NULL
+            GROUP BY cm.community_id, cm.channel_id
+            HAVING COUNT(*) > $1
+        )
+        SELECT lr.community_id, community.host, lr.channel_id, lr.member_count
+        FROM large_rosters lr
+        JOIN communities community ON community.id = lr.community_id
+        JOIN LATERAL (
+            SELECT roster.tags
+            FROM events roster
+            WHERE roster.community_id = lr.community_id
+              AND roster.channel_id = lr.channel_id
+              AND roster.kind = 39002
+              AND roster.pubkey = $2
+              AND roster.deleted_at IS NULL
+            ORDER BY roster.created_at DESC, roster.id ASC
+            LIMIT 1
+        ) live_roster ON true
+        WHERE lr.member_count <> (
+            SELECT COUNT(*)
+            FROM jsonb_array_elements(live_roster.tags) tag
+            WHERE tag->>0 = 'p'
+        )
+        ORDER BY lr.community_id, lr.channel_id
+        "#,
+    )
+    .bind(minimum_members)
+    .bind(relay_pubkey)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(LargeChannelRoster {
+                community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                host: row.try_get("host")?,
+                channel_id: row.try_get("channel_id")?,
+                member_count: row.try_get("member_count")?,
+            })
+        })
+        .collect()
+}
+
 /// Lists channels in a community, optionally filtered by visibility string.
 pub async fn list_channels(
     pool: &PgPool,
@@ -2014,6 +2089,176 @@ mod tests {
             late.role, "owner",
             "role of a late-joining owner must resolve correctly"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn large_roster_reconciliation_candidates_respect_snapshot_count_and_signer() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let creator = random_pubkey();
+        let relay_pubkey = random_pubkey();
+        let other_relay_pubkey = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "stale-large-roster",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create test channel");
+
+        let extra_members = 1_500;
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at)
+            SELECT $1, $2, decode(lpad(to_hex(n), 64, '0'), 'hex'), 'member',
+                   NOW() + (n || ' seconds')::interval
+            FROM generate_series(1, $3) n
+            "#,
+        )
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(extra_members)
+        .execute(&pool)
+        .await
+        .expect("insert large roster");
+
+        let stale_tags: Vec<serde_json::Value> =
+            std::iter::once(serde_json::json!(["d", channel.id.to_string()]))
+                .chain((0..1_000).map(|n| serde_json::json!(["p", format!("{n:064x}")])))
+                .collect();
+        let complete_tags: Vec<serde_json::Value> =
+            std::iter::once(serde_json::json!(["d", channel.id.to_string()]))
+                .chain((0..1_501).map(|n| serde_json::json!(["p", format!("{n:064x}")])))
+                .collect();
+
+        // A historical duplicate live row can exist from earlier replacement
+        // bugs. Candidate selection must apply NIP-16 head ordering instead of
+        // producing one candidate per row or accepting this older complete row.
+        sqlx::query(
+            r#"
+            INSERT INTO events
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag)
+            VALUES
+                ($1, $2, $3, NOW() - INTERVAL '1 minute', 39002, $4, '', $5, $6, $7),
+                ($1, $8, $3, NOW(), 39002, $9, '', $5, $6, $7)
+            "#,
+        )
+        .bind(community_id)
+        .bind(random_pubkey())
+        .bind(&relay_pubkey)
+        .bind(serde_json::Value::Array(complete_tags.clone()))
+        .bind(vec![0u8; 64])
+        .bind(channel.id)
+        .bind(channel.id.to_string())
+        .bind(random_pubkey())
+        .bind(serde_json::Value::Array(stale_tags))
+        .execute(&pool)
+        .await
+        .expect("insert historical complete and live stale snapshots");
+
+        // The same channel UUID in another tenant is deliberately valid. A
+        // complete snapshot there must not mask this tenant's stale head.
+        let other_community_id = make_test_community(&pool).await;
+        sqlx::query(
+            r#"
+            INSERT INTO channels
+                (id, community_id, name, channel_type, visibility, created_by)
+            VALUES ($1, $2, 'same-id-complete-roster', 'stream', 'open', $3)
+            "#,
+        )
+        .bind(channel.id)
+        .bind(other_community_id)
+        .bind(&creator)
+        .execute(&pool)
+        .await
+        .expect("insert same channel id in other tenant");
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at)
+            SELECT $1, $2, decode(lpad(to_hex(n), 64, '0'), 'hex'), 'member',
+                   NOW() + (n || ' seconds')::interval
+            FROM generate_series(0, 1500) n
+            "#,
+        )
+        .bind(other_community_id)
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("insert complete other-tenant roster");
+        sqlx::query(
+            r#"
+            INSERT INTO events
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag)
+            VALUES ($1, $2, $3, NOW(), 39002, $4, '', $5, $6, $7)
+            "#,
+        )
+        .bind(other_community_id)
+        .bind(random_pubkey())
+        .bind(&relay_pubkey)
+        .bind(serde_json::Value::Array(complete_tags.clone()))
+        .bind(vec![0u8; 64])
+        .bind(channel.id)
+        .bind(channel.id.to_string())
+        .execute(&pool)
+        .await
+        .expect("insert complete other-tenant snapshot");
+
+        // Put the stale channel behind the 1,000 newest channels that the old
+        // list_channels-based sweep could see. This set-based scan has no such
+        // pagination ceiling.
+        sqlx::query(
+            r#"
+            INSERT INTO channels
+                (id, community_id, name, channel_type, visibility, created_by, created_at)
+            SELECT gen_random_uuid(), $1, 'newer-decoy-' || n, 'stream', 'open', $2,
+                   NOW() + (n || ' seconds')::interval
+            FROM generate_series(1, 1000) n
+            "#,
+        )
+        .bind(community_id)
+        .bind(&creator)
+        .execute(&pool)
+        .await
+        .expect("insert channels beyond old list ceiling");
+
+        let candidates =
+            list_large_channel_rosters_needing_reconciliation(&pool, 1_000, &relay_pubkey)
+                .await
+                .expect("find stale snapshot");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].community_id, community);
+        assert_eq!(candidates[0].channel_id, channel.id);
+        assert_eq!(candidates[0].member_count, 1_501);
+
+        let other_signer_candidates =
+            list_large_channel_rosters_needing_reconciliation(&pool, 1_000, &other_relay_pubkey)
+                .await
+                .expect("other signer is isolated from relay-authored snapshot");
+        assert!(other_signer_candidates.is_empty());
+
+        sqlx::query(
+            "UPDATE events SET tags = $1, created_at = NOW() + INTERVAL '1 minute' WHERE community_id = $2 AND channel_id = $3 AND kind = 39002 AND pubkey = $4 AND created_at = (SELECT MAX(created_at) FROM events WHERE community_id = $2 AND channel_id = $3 AND kind = 39002 AND pubkey = $4 AND deleted_at IS NULL)",
+        )
+        .bind(serde_json::Value::Array(complete_tags))
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(&relay_pubkey)
+        .execute(&pool)
+        .await
+        .expect("complete snapshot");
+
+        let converged =
+            list_large_channel_rosters_needing_reconciliation(&pool, 1_000, &relay_pubkey)
+                .await
+                .expect("check converged snapshot");
+        assert!(converged.is_empty());
     }
 
     /// A random non-admin, non-owner user cannot remove someone else's bot.

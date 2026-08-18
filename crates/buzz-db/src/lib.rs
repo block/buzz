@@ -2476,6 +2476,24 @@ impl Db {
         channel::get_accessible_channel_ids(&self.pool, community_id, pubkey).await
     }
 
+    /// Returns large active-channel rosters whose relay-authored snapshots differ.
+    #[datastore_span(
+        name = "list_large_channel_rosters_needing_reconciliation",
+        system = "postgresql"
+    )]
+    pub async fn list_large_channel_rosters_needing_reconciliation(
+        &self,
+        minimum_members: i64,
+        relay_pubkey: &[u8],
+    ) -> Result<Vec<channel::LargeChannelRoster>> {
+        channel::list_large_channel_rosters_needing_reconciliation(
+            &self.pool,
+            minimum_members,
+            relay_pubkey,
+        )
+        .await
+    }
+
     /// Lists channels, optionally filtered by visibility.
     #[datastore_span(name = "list_channels", system = "postgresql")]
     pub async fn list_channels(

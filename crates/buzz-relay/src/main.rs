@@ -534,6 +534,19 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Repair legacy NIP-29 channel rosters that were persisted while the
+    // canonical member query still truncated at 1,000 rows. This runs before
+    // listeners open, is tenant-preserving across shared deployments, and
+    // rewrites only mismatched large-channel snapshots.
+    match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
+    {
+        Ok(count) if count > 0 => info!(count, "large channel member snapshots repaired"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "large channel member snapshot startup reconciliation failed")
+        }
+    }
+
     // NIP-43: reconcile the event-backed roster for every provisioned
     // community before opening the listener. `relay_members` is canonical;
     // this repairs pre-snapshot communities and any publication that failed
