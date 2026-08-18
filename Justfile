@@ -170,6 +170,7 @@ _stage-debug-sidecars:
     export PATH="{{justfile_directory()}}/bin:$PATH"
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    TARGET_DIR="${TARGET_DIR//\\//}"
     SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
     EXE_SUFFIX=""
     if [[ "$TARGET" == *windows* ]]; then
@@ -180,7 +181,6 @@ _stage-debug-sidecars:
     mkdir -p desktop/src-tauri/binaries
     for bin in "${SIDECARS[@]}"; do
         source_path="${TARGET_DIR}/debug/${bin}${EXE_SUFFIX}"
-        destination_path="desktop/src-tauri/binaries/${bin}-${TARGET}${EXE_SUFFIX}"
         if [[ ! -f "$source_path" ]]; then
             echo "Error: expected debug sidecar is missing: $source_path" >&2
             exit 1
@@ -189,6 +189,10 @@ _stage-debug-sidecars:
             echo "Error: expected debug sidecar is empty: $source_path" >&2
             exit 1
         fi
+    done
+    for bin in "${SIDECARS[@]}"; do
+        source_path="${TARGET_DIR}/debug/${bin}${EXE_SUFFIX}"
+        destination_path="desktop/src-tauri/binaries/${bin}-${TARGET}${EXE_SUFFIX}"
         cp "$source_path" "$destination_path"
         if [[ "$TARGET" != *windows* ]]; then
             chmod +x "$destination_path"
