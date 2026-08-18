@@ -248,6 +248,53 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// Resolve the author a workflow-delivered event should be gated as.
+///
+/// Workflow messages are signed by the relay keypair, not by the
+/// person who created the workflow. Under the default `owner-only` gate that
+/// makes every scheduled message invisible to the agent: the event lands in the
+/// channel, a human reads it, and the agent's session never sees it. Measured
+/// on a live relay — the 05:30 workflow briefing drew no reply, and the same
+/// text pasted by hand at 07:13 drew one in two minutes. Same channel, same
+/// agent, same words; only the signer differed. Five installed workflows were
+/// firing into that silence.
+///
+/// `workflow_sink.rs` builds these events with the owner as the **first** `p`
+/// tag, and that ordering is the code's contract rather than an observation.
+/// So the owner can be recovered — but only when the event really came from the
+/// relay.
+///
+/// The signer check is not optional. The `buzz:workflow` tag is plain text any
+/// member could attach, so trusting the tag alone would let anyone who can post
+/// to a channel speak to the agent *as its owner*. The relay guards its own
+/// side the same way — `handlers/event.rs` pairs the tag with
+/// `pubkey == relay_keypair.public_key()` — and this mirrors it.
+///
+/// Fail-closed: with `BUZZ_ACP_WORKFLOW_SIGNER` unset, or set to anything other
+/// than this event's signer, the event is gated as its signer exactly as
+/// before. Turning the feature off is the default.
+fn workflow_author(event: &nostr::Event) -> Option<String> {
+    workflow_author_for_signer(event, std::env::var("BUZZ_ACP_WORKFLOW_SIGNER").ok().as_deref())
+}
+
+/// The decision itself, with the trusted signer passed in so it can be tested
+/// without touching process environment — a shared env var makes concurrent
+/// tests flaky, and the security-relevant half deserves a deterministic test.
+fn workflow_author_for_signer(event: &nostr::Event, signer: Option<&str>) -> Option<String> {
+    let signer = signer?.trim().to_ascii_lowercase();
+    if signer.is_empty() || event.pubkey.to_hex() != signer {
+        return None;
+    }
+    let mut tags = event.tags.iter().map(|t| t.as_slice());
+    if !tags.clone().any(|t| t.first().map(String::as_str) == Some("buzz:workflow")) {
+        return None;
+    }
+    tags.find_map(|t| match (t.first().map(String::as_str), t.get(1)) {
+        (Some("p"), Some(pubkey)) if !pubkey.is_empty() => Some(pubkey.to_ascii_lowercase()),
+        _ => None,
+    })
+}
+
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -2866,7 +2913,11 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
+                                // A relay-signed workflow message is
+                                // gated as the workflow's owner, not as the
+                                // relay. See `workflow_author`.
+                                let author = workflow_author(&buzz_event.event)
+                                    .unwrap_or_else(|| buzz_event.event.pubkey.to_hex());
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -5512,6 +5563,88 @@ mod author_gate_tests {
             .await,
             "respond_to=anyone must still drop non-owner authors inside a DM"
         );
+    }
+
+    // `workflow_author_for_signer` recovers the owner from a
+    // relay-signed workflow message. These lock the two halves that matter —
+    // that it works at all, and that it cannot be reached without the relay's
+    // signature.
+    mod workflow_author_tests {
+        use nostr::{EventBuilder, Keys, Tag};
+
+        fn owner_hex() -> String {
+            Keys::generate().public_key().to_hex()
+        }
+
+        /// Shaped like `workflow_sink.rs` produces: owner first `p` tag, then
+        /// the workflow marker.
+        fn event(keys: &Keys, owner_hex: &str, with_marker: bool) -> nostr::Event {
+            let mut tags = vec![Tag::parse(["p", owner_hex]).expect("p tag")];
+            if with_marker {
+                tags.push(Tag::parse(["buzz:workflow", "true"]).expect("workflow tag"));
+            }
+            EventBuilder::text_note("@agent — scheduled briefing")
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign")
+        }
+
+        #[test]
+        fn relay_signed_workflow_message_is_gated_as_its_owner() {
+            let relay = Keys::generate();
+            let owner = owner_hex();
+            let signer = relay.public_key().to_hex();
+            assert_eq!(
+                super::super::workflow_author_for_signer(&event(&relay, &owner, true), Some(&signer))
+                    .as_deref(),
+                Some(owner.as_str()),
+                "the owner must be recovered from the first p tag"
+            );
+        }
+
+        #[test]
+        fn a_member_cannot_forge_the_workflow_marker() {
+            // The whole point of pairing the tag with the signature. Without
+            // it, anyone who can post to a channel could address the agent as
+            // its owner by attaching two tags.
+            let relay = Keys::generate();
+            let impostor = Keys::generate();
+            let owner = owner_hex();
+            let signer = relay.public_key().to_hex();
+            assert_eq!(
+                super::super::workflow_author_for_signer(&event(&impostor, &owner, true), Some(&signer)),
+                None,
+                "a non-relay signer must never resolve to the owner"
+            );
+        }
+
+        #[test]
+        fn without_configuration_nothing_changes() {
+            // Fail-closed: unconfigured means the previous behaviour exactly.
+            let relay = Keys::generate();
+            let owner = owner_hex();
+            assert_eq!(
+                super::super::workflow_author_for_signer(&event(&relay, &owner, true), None),
+                None
+            );
+            assert_eq!(
+                super::super::workflow_author_for_signer(&event(&relay, &owner, true), Some("   ")),
+                None
+            );
+        }
+
+        #[test]
+        fn a_relay_signed_event_without_the_marker_is_left_alone() {
+            // The relay signs other things too; only workflow messages carry
+            // the marker, and only those may be re-attributed.
+            let relay = Keys::generate();
+            let owner = owner_hex();
+            let signer = relay.public_key().to_hex();
+            assert_eq!(
+                super::super::workflow_author_for_signer(&event(&relay, &owner, false), Some(&signer)),
+                None
+            );
+        }
     }
 
     #[tokio::test]
