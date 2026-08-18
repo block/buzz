@@ -24,7 +24,6 @@ use crate::state::{
     run_registered_community_connection, AppState, CommunityConnectionControl,
     CommunityDisconnectReason,
 };
-use buzz_pubsub::EventTopic;
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -287,10 +286,18 @@ async fn handle_active_connection(
     let _ = auth_timeout_task.await;
 
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
-        state
-            .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
-            .await;
+        if removed.scope.is_global() {
+            state
+                .pubsub
+                .release_topic(&conn.tenant, buzz_pubsub::EventTopic::Global)
+                .await;
+        }
+        for &channel_id in removed.scope.channel_ids() {
+            state
+                .pubsub
+                .release_topic(&conn.tenant, buzz_pubsub::EventTopic::Channel(channel_id))
+                .await;
+        }
     }
     state.conn_manager.deregister(conn.conn_id);
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
@@ -726,13 +733,6 @@ fn send_admission_result(
             ));
             false
         }
-    }
-}
-
-fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
-    match channel_id {
-        Some(channel_id) => EventTopic::Channel(channel_id),
-        None => EventTopic::Global,
     }
 }
 

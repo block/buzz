@@ -67,7 +67,12 @@ import {
   STALL_IDLE_TIMEOUT_MS,
 } from "@/shared/api/relayClientTimings";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
-import { AuthOkTracker } from "@/shared/api/relayAuthPolicy";
+import {
+  armRelayAuthentication,
+  AuthOkTracker,
+  type RelayAuthRequest,
+} from "@/shared/api/relayAuthPolicy";
+import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 export class RelayClient {
@@ -78,12 +83,7 @@ export class RelayClient {
   private reconnectWaiters = new RelayReconnectWaiters();
   private reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
   private keepAliveRequested = false;
-  private authRequest: {
-    pendingEventId: string;
-    resolve: () => void;
-    reject: (error: Error) => void;
-    timeout: number;
-  } | null = null;
+  private authRequest: RelayAuthRequest | null = null;
   private subscriptions = new Map<string, RelaySubscription>();
   private pendingEvents = new Map<string, PendingEvent>();
   private eventBuffer: Array<{ subId: string; event: RelayEvent }> = [];
@@ -96,7 +96,6 @@ export class RelayClient {
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
-
   private terminal = false;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
@@ -530,17 +529,19 @@ export class RelayClient {
     this.connectionStateEmitter.set(
       this.hasConnectedOnce ? "reconnecting" : "connecting",
     );
-
     const generation = ++this.connectionGeneration;
-    this.onMessageChannel = new Channel<unknown>((message) => {
-      void this.handleWsMessage(message, generation).catch((error) => {
+    const inbound = createRelayInboundBuffer(
+      (message) => this.handleWsMessage(message, generation),
+      (error) => {
         if (generation !== this.connectionGeneration) return;
         this.resetConnection(
           this.normalizeRelayError(error, "Relay connection errored."),
         );
-      });
-    });
-
+      },
+    );
+    this.onMessageChannel = new Channel<unknown>((message) =>
+      inbound.receive(message),
+    );
     try {
       if (!this.relayUrl) {
         this.relayUrl = await getRelayWsUrl();
@@ -556,22 +557,21 @@ export class RelayClient {
       }
       this.wsId = wsId;
 
-      await new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          const error = new Error("Relay authentication timed out.");
+      const authentication = armRelayAuthentication(
+        AUTH_TIMEOUT_MS,
+        (request) => {
+          this.authRequest = request;
+        },
+        (error) => {
           this.authRequest = null;
           this.resetConnection(error);
-          reject(error);
-        }, AUTH_TIMEOUT_MS);
+        },
+      );
 
-        this.authRequest = {
-          pendingEventId: "",
-          resolve,
-          reject,
-          timeout,
-        };
-      });
-
+      const drain = inbound.drain();
+      await Promise.race([drain, authentication, inbound.overflow]);
+      await drain;
+      await authentication;
       this.stabilityTimer = window.setTimeout(() => {
         this.stabilityTimer = null;
         this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;

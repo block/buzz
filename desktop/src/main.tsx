@@ -20,6 +20,8 @@ import { TooltipProvider } from "@/shared/ui/tooltip";
 import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuota";
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
 import { installNativeReviewSemanticProbe } from "@/testing/nativeReviewSemanticProbe";
+import { initializeConversationDensityPreference } from "@/shared/lib/conversationDensityPreference";
+import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -173,6 +175,8 @@ async function bootstrap() {
   configureNativeReviewFixtureFromUrl();
   configureDevE2eBridgeFromUrl();
   recoverLocalStorageQuotaOnStartup();
+  initializeConversationDensityPreference();
+  initializeFontSizePreference();
   startLocalStorageSweep();
   await installE2eBridgeIfConfigured();
   await migrateLegacyCommunityStorageBeforeRender();

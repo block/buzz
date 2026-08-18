@@ -23,7 +23,7 @@ const EXPECTED_NAV_CENTER_Y = 23;
 // The macOS traffic lights are native chrome: with `trafficLightPosition`
 // x:16 they occupy roughly x 16–68 regardless of the app's Cmd +/- text
 // zoom. The top-chrome nav row must clear that band in fixed px, so the
-// clearance cannot shrink when the root font size scales down.
+// clearance cannot change when text scales.
 const TRAFFIC_LIGHT_RIGHT_EDGE = 72;
 
 async function spoofMacPlatform(page: import("@playwright/test").Page) {
@@ -90,15 +90,24 @@ async function seedTextScale(
   }, scale);
 }
 
-async function expectRootFontSize(
+async function expectTextRemSize(
   page: import("@playwright/test").Page,
   fontSize: string,
 ) {
   await expect
     .poll(() =>
-      page.evaluate(() => getComputedStyle(document.documentElement).fontSize),
+      page.evaluate(() =>
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--buzz-type-rem")
+          .trim(),
+      ),
     )
     .toBe(fontSize);
+  await expect
+    .poll(() =>
+      page.evaluate(() => getComputedStyle(document.documentElement).fontSize),
+    )
+    .toBe("16px");
 }
 
 test.describe("top chrome macOS traffic-light clearance under text zoom", () => {
@@ -143,8 +152,8 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await installMockBridge(page);
     await page.goto("/");
 
-    // Confirm the zoomed-out scale actually applied to the root font size.
-    await expectRootFontSize(page, "12px");
+    // Confirm the zoomed-out text scale applied without changing the root.
+    await expectTextRemSize(page, "12px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,
@@ -161,7 +170,7 @@ test.describe("top chrome macOS traffic-light clearance under text zoom", () => 
     await installMockBridge(page);
     await page.goto("/");
 
-    await expectRootFontSize(page, "24px");
+    await expectTextRemSize(page, "24px");
 
     expect(await firstNavButtonX(page)).toBeGreaterThanOrEqual(
       TRAFFIC_LIGHT_RIGHT_EDGE,

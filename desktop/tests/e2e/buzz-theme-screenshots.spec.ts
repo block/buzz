@@ -8,6 +8,8 @@ const THEME_STORAGE_KEY = "buzz-theme";
 const GLASS_BACKGROUND_STORAGE_KEY = "buzz-glass-background";
 const GLASS_OPACITY_STORAGE_KEY = "buzz-glass-opacity";
 const PROMINENT_ACTIVE_TAB_STORAGE_KEY = "buzz-prominent-active-tab";
+const CONVERSATION_DENSITY_STORAGE_KEY = "buzz.appearance.conversationDensity";
+const FONT_SIZE_STORAGE_KEY = "buzz.appearance.fontSize";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -617,7 +619,7 @@ test("appearance groups theme and preferences into labeled rows", async ({
         (lightModeButtonBox.x + lightModeButtonBox.width / 2),
     ),
   ).toBeLessThanOrEqual(0.5);
-  await expect(colorModeIndicator).toHaveCSS("transition-duration", "0.25s");
+  await expect(colorModeIndicator).toHaveCSS("transition-duration", "0.2s");
 
   await themeCard.getByTestId("appearance-mode-dark").click();
   await waitForAnimations(page);
@@ -637,6 +639,512 @@ test("appearance groups theme and preferences into labeled rows", async ({
         (darkModeButtonBox.x + darkModeButtonBox.width / 2),
     ),
   ).toBeLessThanOrEqual(0.5);
+});
+
+test("app font size and conversation density apply independently", async ({
+  page,
+}) => {
+  await seedTheme(page, "buzz");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  const root = page.locator("html");
+  const densityControl = page.getByTestId("conversation-density-control");
+  const compact = page.getByTestId("conversation-density-compact");
+  const comfortable = page.getByTestId("conversation-density-comfortable");
+  const spacious = page.getByTestId("conversation-density-spacious");
+  const densityIndicator = page.getByTestId(
+    "conversation-density-control-indicator",
+  );
+  const fontSizeControl = page.getByTestId("font-size-control");
+  const smaller = page.getByTestId("font-size-smaller");
+  const defaultSize = page.getByTestId("font-size-default");
+  const larger = page.getByTestId("font-size-larger");
+  const fontSizeIndicator = page.getByTestId("font-size-control-indicator");
+  const preview = page.getByTestId("conversation-preview");
+  const previewSurface = page.getByTestId("conversation-preview-surface");
+  const previewContent = page.getByTestId("conversation-preview-content");
+  const previewChip = preview.getByText("Preview");
+  const firstPreviewMessage = previewSurface.locator("article").first();
+  const previewMessage = preview.getByText(
+    "The revised conversation layout is ready to review.",
+  );
+  const previewTimestamp = preview.getByText("9:41");
+  const densityDescription = page
+    .getByTestId("conversation-density-row")
+    .locator("[data-settings-subcopy]");
+  const fontSizeDescription = page
+    .getByTestId("font-size-row")
+    .locator("[data-settings-subcopy]");
+  const readScale = () =>
+    root.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      return {
+        authorLineHeight: Number.parseFloat(
+          style.getPropertyValue("--conversation-author-line-height"),
+        ),
+        bodyGap: Number.parseFloat(
+          style.getPropertyValue("--conversation-body-gap"),
+        ),
+        fontSize: style.getPropertyValue("--conversation-message-font-size"),
+        lineHeight: style.getPropertyValue(
+          "--conversation-message-line-height",
+        ),
+        paragraphGap: Number.parseFloat(
+          style.getPropertyValue("--conversation-paragraph-gap"),
+        ),
+        rowPadding: Number.parseFloat(
+          style.getPropertyValue("--conversation-row-padding-block"),
+        ),
+        timestampFontSize: style.getPropertyValue(
+          "--conversation-timestamp-font-size",
+        ),
+        timestampLineHeight: Number.parseFloat(
+          style.getPropertyValue("--conversation-timestamp-line-height"),
+        ),
+      };
+    });
+  const readSettingsScale = () =>
+    page.getByTestId("conversation-density-row").evaluate((element) => {
+      const rowStyle = window.getComputedStyle(element);
+      const label = element.querySelector("p");
+      if (!label) throw new Error("Conversation density label is missing");
+      const labelStyle = window.getComputedStyle(label);
+      return {
+        fontSize: labelStyle.fontSize,
+        lineHeight: labelStyle.lineHeight,
+        minHeight: rowStyle.minHeight,
+        paddingBlock: rowStyle.paddingTop,
+      };
+    });
+  const readPreviewTimestampScale = () =>
+    previewTimestamp.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      return [style.fontSize, style.lineHeight];
+    });
+  const readSettingsChromeScale = () =>
+    Promise.all([
+      page
+        .getByRole("heading", { name: "Appearance" })
+        .evaluate((element) => window.getComputedStyle(element).fontSize),
+      page
+        .getByTestId("settings-nav-appearance")
+        .evaluate((element) => window.getComputedStyle(element).fontSize),
+      page
+        .getByRole("heading", { name: "Preferences" })
+        .evaluate((element) => window.getComputedStyle(element).fontSize),
+    ]);
+
+  await expect(
+    page.getByRole("group", { name: "Conversation density" }),
+  ).toBeVisible();
+  await expect(page.getByRole("group", { name: "Font size" })).toBeVisible();
+  await expect(densityControl).toHaveAccessibleName("Conversation density");
+  await expect(fontSizeControl).toHaveAccessibleName("Font size");
+  await expect(comfortable).toHaveText("Comfy");
+  await expect(defaultSize).toHaveText("Default");
+  await expect(preview).toContainText("Preview");
+  await expect(preview).not.toContainText("Message #design");
+  await expect(comfortable).toHaveAttribute("aria-pressed", "true");
+  await expect(defaultSize).toHaveAttribute("aria-pressed", "true");
+  await expect(densityDescription).toHaveText(
+    "Spacing in conversations and Markdown content across Buzz",
+  );
+  await expect(fontSizeDescription).toHaveText(
+    "Applies across conversations and interface text",
+  );
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 16,
+    bodyGap: 0.125,
+    fontSize: "calc(16px * .875)",
+    lineHeight: "calc(16px * 1.25)",
+    paragraphGap: 0.5,
+    rowPadding: 0.25,
+    timestampFontSize: "calc(16px * .75)",
+    timestampLineHeight: 16,
+  });
+  await expect
+    .poll(() =>
+      Promise.all([
+        densityControl.evaluate(
+          (element) => element.getBoundingClientRect().width,
+        ),
+        fontSizeControl.evaluate(
+          (element) => element.getBoundingClientRect().width,
+        ),
+        page
+          .getByTestId("appearance-color-mode-control")
+          .evaluate((element) => element.getBoundingClientRect().width),
+      ]),
+    )
+    .toEqual([288, 288, 240]);
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["14px", "20px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "14px",
+    lineHeight: "20px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect.poll(readPreviewTimestampScale).toEqual(["12px", "16px"]);
+  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "14px"]);
+  await expect(densityIndicator).toHaveCSS("transition-duration", "0.2s");
+  await expect(densityIndicator).toHaveCSS("transition-property", /transform/);
+  await expect(fontSizeIndicator).toHaveCSS("transition-duration", "0.2s");
+  await expect(fontSizeIndicator).toHaveCSS("transition-property", /transform/);
+  await expect
+    .poll(async () => {
+      const [previewBackground, labelBackground, controlBackground] =
+        await Promise.all([
+          previewSurface.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+          previewChip.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+          densityControl.evaluate(
+            (element) => window.getComputedStyle(element).backgroundColor,
+          ),
+        ]);
+      return {
+        labelIsAnnotation: labelBackground !== controlBackground,
+        previewBackground,
+      };
+    })
+    .toEqual({
+      labelIsAnnotation: true,
+      previewBackground: "rgba(0, 0, 0, 0)",
+    });
+  const previewSurfaceBox = await previewSurface.boundingBox();
+  const previewChipBox = await previewChip.boundingBox();
+  const firstPreviewMessageBox = await firstPreviewMessage.boundingBox();
+  expect(previewSurfaceBox).not.toBeNull();
+  expect(previewChipBox).not.toBeNull();
+  expect(firstPreviewMessageBox).not.toBeNull();
+  if (!previewSurfaceBox || !previewChipBox || !firstPreviewMessageBox) {
+    throw new Error("Conversation preview geometry is missing");
+  }
+  const previewChipRightInset =
+    previewSurfaceBox.x +
+    previewSurfaceBox.width -
+    (previewChipBox.x + previewChipBox.width);
+  expect(previewChipRightInset).toBeGreaterThanOrEqual(13);
+  expect(previewChipRightInset).toBeLessThanOrEqual(15);
+  const previewChipTopInset = previewChipBox.y - previewSurfaceBox.y;
+  expect(previewChipTopInset).toBeGreaterThanOrEqual(13);
+  expect(previewChipTopInset).toBeLessThanOrEqual(15);
+  await expect(previewContent).toHaveCSS("padding-top", "16px");
+  await expect(previewContent).toHaveCSS("padding-right", "16px");
+  await expect(previewContent).toHaveCSS("padding-bottom", "16px");
+  await expect(previewContent).toHaveCSS("padding-left", "16px");
+  expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeGreaterThanOrEqual(
+    15,
+  );
+  expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeLessThanOrEqual(
+    17,
+  );
+  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeGreaterThanOrEqual(
+    15,
+  );
+  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeLessThanOrEqual(
+    17,
+  );
+  await densityIndicator.evaluate((element) => {
+    element.addEventListener(
+      "transitionrun",
+      () => element.setAttribute("data-transition-ran", "true"),
+      { once: true },
+    );
+  });
+
+  await compact.click();
+  await expect(densityIndicator).toHaveAttribute("data-transition-ran", "true");
+  await expect(root).toHaveAttribute("data-conversation-density", "compact");
+  await expect(root).toHaveAttribute("data-font-size", "default");
+  await expect(compact).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        CONVERSATION_DENSITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("compact");
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 16,
+    bodyGap: 0,
+    fontSize: "calc(16px * .875)",
+    lineHeight: "calc(16px * 1.25)",
+    paragraphGap: 0.375,
+    rowPadding: 0.25,
+    timestampFontSize: "calc(16px * .75)",
+    timestampLineHeight: 16,
+  });
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "14px",
+    lineHeight: "20px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect.poll(readPreviewTimestampScale).toEqual(["12px", "16px"]);
+  await expect.poll(readSettingsChromeScale).toEqual(["24px", "14px", "14px"]);
+
+  await larger.click();
+  await expect(root).toHaveAttribute("data-conversation-density", "compact");
+  await expect(root).toHaveAttribute("data-font-size", "larger");
+  await expect(larger).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("larger");
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 17.142857,
+    bodyGap: 0,
+    fontSize: "calc(17.142857px * .875)",
+    lineHeight: "calc(17.142857px * 1.25)",
+    paragraphGap: 0.375,
+    rowPadding: 0.25,
+    timestampFontSize: "calc(17.142857px * .75)",
+    timestampLineHeight: 17.142857,
+  });
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["15px", "21.4286px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "15px",
+    lineHeight: "21.4286px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["12.8571px", "17.1429px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "15px"]);
+  await waitForAnimations(page);
+  await page.getByTestId("appearance-preferences-card").screenshot({
+    path: `${SHOTS}/15-conversation-compact-larger.png`,
+  });
+
+  await spacious.click();
+  await expect(root).toHaveAttribute("data-conversation-density", "spacious");
+  await expect(root).toHaveAttribute("data-font-size", "larger");
+  await expect(spacious).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 17.142857,
+    bodyGap: 0.25,
+    fontSize: "calc(17.142857px * .875)",
+    lineHeight: "calc(17.142857px * 1.25)",
+    paragraphGap: 0.625,
+    rowPadding: 0.5,
+    timestampFontSize: "calc(17.142857px * .75)",
+    timestampLineHeight: 17.142857,
+  });
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "15px",
+    lineHeight: "21.4286px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["12.8571px", "17.1429px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "15px"]);
+
+  await smaller.click();
+  await expect(root).toHaveAttribute("data-conversation-density", "spacious");
+  await expect(root).toHaveAttribute("data-font-size", "smaller");
+  await expect(smaller).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 14.857143,
+    bodyGap: 0.25,
+    fontSize: "calc(14.857143px * .875)",
+    lineHeight: "calc(14.857143px * 1.25)",
+    paragraphGap: 0.625,
+    rowPadding: 0.5,
+    timestampFontSize: "calc(14.857143px * .75)",
+    timestampLineHeight: 14.857143,
+  });
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["13px", "18.5714px"]);
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "13px",
+    lineHeight: "18.5714px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await expect
+    .poll(readPreviewTimestampScale)
+    .toEqual(["11.1429px", "14.8571px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["22.2857px", "13px", "13px"]);
+  await waitForAnimations(page);
+  await page.getByTestId("appearance-preferences-card").screenshot({
+    path: `${SHOTS}/16-conversation-spacious-smaller.png`,
+  });
+
+  await comfortable.click();
+  await defaultSize.click();
+  await expect(root).toHaveAttribute(
+    "data-conversation-density",
+    "comfortable",
+  );
+  await expect(comfortable).toHaveAttribute("aria-pressed", "true");
+
+  const controlBox = await densityControl.boundingBox();
+  const compactBox = await compact.boundingBox();
+  const spaciousBox = await spacious.boundingBox();
+  expect(controlBox).not.toBeNull();
+  expect(compactBox).not.toBeNull();
+  expect(spaciousBox).not.toBeNull();
+  if (!controlBox || !compactBox || !spaciousBox) {
+    throw new Error("Conversation density control geometry is missing");
+  }
+  await page.mouse.move(
+    compactBox.x + compactBox.width / 2,
+    controlBox.y + controlBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    spaciousBox.x + spaciousBox.width / 2,
+    controlBox.y + controlBox.height / 2,
+  );
+  await expect(root).toHaveAttribute("data-conversation-density", "spacious");
+  await expect(root).toHaveAttribute("data-font-size", "default");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        CONVERSATION_DENSITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("comfortable");
+  await expect.poll(readScale).toEqual({
+    authorLineHeight: 16,
+    bodyGap: 0.25,
+    fontSize: "calc(16px * .875)",
+    lineHeight: "calc(16px * 1.25)",
+    paragraphGap: 0.625,
+    rowPadding: 0.5,
+    timestampFontSize: "calc(16px * .75)",
+    timestampLineHeight: 16,
+  });
+  await expect.poll(readSettingsScale).toEqual({
+    fontSize: "14px",
+    lineHeight: "20px",
+    minHeight: "64px",
+    paddingBlock: "12px",
+  });
+  await page.mouse.up();
+  await expect(spacious).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        CONVERSATION_DENSITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("spacious");
+  await comfortable.click();
+
+  const fontSizeControlBox = await fontSizeControl.boundingBox();
+  const smallerBox = await smaller.boundingBox();
+  const largerBox = await larger.boundingBox();
+  expect(fontSizeControlBox).not.toBeNull();
+  expect(smallerBox).not.toBeNull();
+  expect(largerBox).not.toBeNull();
+  if (!fontSizeControlBox || !smallerBox || !largerBox) {
+    throw new Error("Font size control geometry is missing");
+  }
+  await page.mouse.move(
+    smallerBox.x + smallerBox.width / 2,
+    fontSizeControlBox.y + fontSizeControlBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    largerBox.x + largerBox.width / 2,
+    fontSizeControlBox.y + fontSizeControlBox.height / 2,
+  );
+  await expect(root).toHaveAttribute("data-font-size", "larger");
+  await expect(root).toHaveAttribute(
+    "data-conversation-density",
+    "comfortable",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("default");
+  await expect
+    .poll(() =>
+      previewMessage.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return [style.fontSize, style.lineHeight];
+      }),
+    )
+    .toEqual(["15px", "21.4286px"]);
+  await expect
+    .poll(readSettingsChromeScale)
+    .toEqual(["25.7143px", "15px", "15px"]);
+
+  // Losing the window during a scrub cancels the temporary preview rather
+  // than leaving presentation and persisted selection out of sync.
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await expect(root).toHaveAttribute("data-font-size", "default");
+  await expect(defaultSize).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("default");
+
+  // Cancellation resets the gesture completely; the next selection persists.
+  await larger.click();
+  await expect(larger).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        FONT_SIZE_STORAGE_KEY,
+      ),
+    )
+    .toBe("larger");
+  await defaultSize.click();
+  await waitForAnimations(page);
+  await page.getByTestId("appearance-preferences-card").screenshot({
+    path: `${SHOTS}/14-conversation-preferences.png`,
+  });
 });
 
 test("appearance picker — system tab (Buzz follows OS)", async ({ page }) => {
@@ -1051,6 +1559,10 @@ test("glass background keeps the content panel solid", async ({ page }) => {
   const matchingRadiusControls = [
     page.getByTestId("appearance-color-mode-control"),
     page.getByTestId("appearance-color-mode-indicator"),
+    page.getByTestId("font-size-control"),
+    page.getByTestId("font-size-control-indicator"),
+    page.getByTestId("conversation-density-control"),
+    page.getByTestId("conversation-density-control-indicator"),
     page.getByTestId("theme-style-trigger"),
     page.getByTestId("link-preview-style-trigger"),
     page.getByTestId("thread-layout-trigger"),
