@@ -63,11 +63,14 @@ class JourneyTests(unittest.TestCase):
             with self.assertRaisesRegex(review_native.HarnessError, "scroll requires integer delta_y"):
                 review_native.load_journey(path)
 
-    def test_boolean_and_negative_durations_are_rejected(self):
+    def test_boolean_negative_and_vacuous_durations_are_rejected(self):
         source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
         mutations = (
-            ("duration_ms: 100", "duration_ms: true", "act.duration_ms"),
-            ("duration_ms: 800", "duration_ms: -1", "act.duration_ms"),
+            ("duration_ms: 100", "duration_ms: true", "wait requires positive"),
+            ("duration_ms: 800", "duration_ms: -1", "wait requires positive"),
+            ("duration_ms: 800", "duration_ms: 0", "wait requires positive"),
+            ("duration_ms: 800", "", "wait requires positive"),
+            ("    timeout_ms: 1000\n", "    expect_for:\n      duration_ms: 0\n      condition: {exists: {role: window}}\n    timeout_ms: 1000\n", "expect_for.duration_ms"),
             ("timeout_ms: 1000", "timeout_ms: true", "timeout_ms"),
         )
         for old, new, diagnostic in mutations:
@@ -339,6 +342,21 @@ metrics:
             duplicate["run_id"] = json.loads(baseline[0].read_text())["run_id"]
             baseline[1].write_text(json.dumps(duplicate))
             with self.assertRaisesRegex(review_native.HarnessError, "duplicate run_id"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_receipts_reused_across_cohorts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            with self.assertRaisesRegex(review_native.HarnessError, "independent receipt paths"):
+                review_native.compare_performance(baseline, baseline, self.budget(root / "budget.yaml"))
+
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            for source, destination in zip(baseline, candidate, strict=True):
+                payload = json.loads(destination.read_text())
+                payload["run_id"] = json.loads(source.read_text())["run_id"]
+                destination.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(review_native.HarnessError, "independent run_ids"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
 
     def test_comparison_rejects_boolean_and_non_finite_numbers(self):

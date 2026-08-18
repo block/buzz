@@ -221,15 +221,18 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
             raise HarnessError(f"{where}: type_text requires text")
         if action_type == "scroll" and not is_int(action.get("delta_y")):
             raise HarnessError(f"{where}: scroll requires integer delta_y")
-        if "duration_ms" in action and (not is_int(action["duration_ms"]) or action["duration_ms"] < 0):
+        if action_type == "wait" and (not is_int(action.get("duration_ms")) or action["duration_ms"] <= 0):
+            raise HarnessError(f"{where}: wait requires positive integer duration_ms")
+        if action_type != "wait" and "duration_ms" in action and (
+                not is_int(action["duration_ms"]) or action["duration_ms"] < 0):
             raise HarnessError(f"{where}.act.duration_ms must be a non-negative integer")
         validate_expectation(step["expect"], f"{where}.expect")
         if "expect_for" in step:
             sustained = step["expect_for"]
             if not isinstance(sustained, dict) or set(sustained) != {"duration_ms", "condition"}:
                 raise HarnessError(f"{where}.expect_for requires duration_ms and condition")
-            if not is_int(sustained["duration_ms"]) or sustained["duration_ms"] < 0:
-                raise HarnessError(f"{where}.expect_for.duration_ms must be a non-negative integer")
+            if not is_int(sustained["duration_ms"]) or sustained["duration_ms"] <= 0:
+                raise HarnessError(f"{where}.expect_for.duration_ms must be a positive integer")
             validate_expectation(sustained["condition"], f"{where}.expect_for.condition")
         timeout = step.get("timeout_ms", 5000)
         if not is_int(timeout) or not 0 < timeout <= 60000:
@@ -793,7 +796,13 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     candidate = load_receipts(candidate_paths, "candidate")
     if len(baseline) < minimum or len(candidate) < minimum:
         raise HarnessError(f"performance comparison requires at least {minimum} clean samples per cohort")
+    all_paths = baseline_paths + candidate_paths
+    if len({path.resolve() for path in all_paths}) != len(all_paths):
+        raise HarnessError("baseline and candidate cohorts must use independent receipt paths")
     all_receipts = baseline + candidate
+    all_run_ids = [receipt["run_id"] for receipt in all_receipts]
+    if len(set(all_run_ids)) != len(all_run_ids):
+        raise HarnessError("baseline and candidate cohorts must use independent run_ids")
     flows = {receipt.get("flow") for receipt in all_receipts}
     machines = {json.dumps(receipt.get("performance", {}).get("machine"), sort_keys=True) for receipt in all_receipts}
     if flows != {budget["flow"]}:

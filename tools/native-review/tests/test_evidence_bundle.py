@@ -81,12 +81,19 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(set(manifest["files"]), {"finding.mp4", "receipt.json", "log-excerpt.txt"})
 
     def test_redacts_header_and_json_secret_forms(self):
-        source = 'Authorization: Bearer abc123\n{"token": "json-secret", "safe": "visible"}'
-        redacted = evidence.redact_log(source)
-        self.assertEqual(
-            redacted,
-            'Authorization: Bearer [REDACTED]\n{"token": "[REDACTED]", "safe": "visible"}',
-        )
+        sources = {
+            'Authorization: Bearer abc123\n{"token": "json-secret", "safe": "visible"}':
+                'Authorization: Bearer [REDACTED]\n{"token": "[REDACTED]", "safe": "visible"}',
+            '{"authorization": "Bearer supersecret"}':
+                '{"authorization": "[REDACTED]"}',
+            "{'authorization': 'Bearer supersecret'}":
+                "{'authorization': '[REDACTED]'}",
+            "AUTHORIZATION=Bearer supersecret":
+                "AUTHORIZATION=[REDACTED]",
+        }
+        for source, expected in sources.items():
+            with self.subTest(source=source):
+                self.assertEqual(evidence.redact_log(source), expected)
 
     def test_non_finite_clip_bounds_fail_before_ffmpeg(self):
         with tempfile.TemporaryDirectory() as directory:

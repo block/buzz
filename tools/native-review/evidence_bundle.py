@@ -16,7 +16,8 @@ SECRET_VALUE = re.compile(
     r"(?i)(?P<prefix>\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+)"
     r"(?P<header>[^\s,;]+)|"
     r"(?P<name>[\"']?(?:auth|token|secret|password|private[_-]?key|cookie|api[_-]?key)[A-Z0-9_.-]*[\"']?)"
-    r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"']?)(?P<value>[^\s,;\"'}]+)(?P=quote)"
+    r"(?P<sep>\s*[:=]\s*)"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:bearer|basic)\s+[^\s,;]+|[^\s,;]+)"
 )
 
 
@@ -73,7 +74,8 @@ def redact_log(text: str) -> str:
     def replacement(match: re.Match[str]) -> str:
         if match.group("prefix") is not None:
             return f"{match.group('prefix')}[REDACTED]"
-        quote = match.group("quote") or ""
+        value = match.group("value")
+        quote = value[0] if value and value[0] in {"\"", "'"} else ""
         return f"{match.group('name')}{match.group('sep')}{quote}[REDACTED]{quote}"
     return SECRET_VALUE.sub(replacement, text)
 
