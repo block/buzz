@@ -32,7 +32,7 @@ pub struct AppState {
     /// validated relay origin.
     pub media_fetch_client: reqwest::Client,
     pub relay_url_override: Mutex<Option<String>>,
-    pub workspace_apply_lock: AsyncMutex<()>,
+    pub workspace_apply_lock: Arc<AsyncMutex<()>>,
     pub workspace_apply_generation: AtomicU64,
     /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
     pub managed_agent_restore_pending: AtomicBool,
@@ -203,7 +203,7 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
-        workspace_apply_lock: AsyncMutex::new(()),
+        workspace_apply_lock: Arc::new(AsyncMutex::new(())),
         workspace_apply_generation: AtomicU64::new(0),
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
