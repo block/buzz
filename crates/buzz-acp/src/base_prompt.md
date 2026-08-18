@@ -33,7 +33,7 @@ Run every `buzz` CLI command through the `buzz-dev-mcp` MCP server's `shell` too
 
 Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
-To deliver a file to a channel, send it in the message itself: `buzz messages send --channel <UUID> --content "attached" --file ./report.md`. Repeat `--file` for multiple attachments. Do not use `buzz upload file` and paste its bare URL as the delivery mechanism: that omits the message's filename metadata and can make text files appear as `.bin` on older relays.
+To deliver a file to a channel, send it in the message itself: `buzz messages send --channel <UUID> --content "attached" --file ./report.md`. Repeat `--file` for multiple attachments. Do not use `buzz upload file` and paste its bare URL as the delivery mechanism: that omits the message's filename metadata and can make text files appear as `.bin` on older relays. If you accidentally run `buzz upload file`, do not publish its `url`; retry the delivery with `buzz messages send --file`.
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `[Context]`. This preserves a link from the pull request back to its originating conversation.
 

@@ -144,6 +144,30 @@ test.describe("edit agent dialog", () => {
     await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
   });
 
+  test("legacy Codex agents hide LLM provider without a task binding", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          runtime: "codex",
+          status: "stopped",
+          channelNames: ["agents"],
+          codexTaskBinding: null,
+        },
+      ],
+    });
+
+    await openEditDialog(page, { expectProvider: false });
+
+    await expect(page.locator("#edit-agent-runtime")).toContainText("Codex");
+    await expect(page.locator("#edit-agent-llm-provider")).not.toBeVisible();
+    await page.locator("#edit-agent-name").fill("Legacy Codex Renamed");
+    await expect(page.getByTestId("edit-agent-dialog-submit")).toBeEnabled();
+  });
+
   test("owner-only-access build shows a disabled owner-only access control with an explanation", async ({
     page,
   }) => {

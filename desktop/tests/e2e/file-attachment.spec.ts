@@ -103,7 +103,7 @@ test("downloads an agent-posted relay file link inside Buzz", async ({
   const card = page.getByTestId("file-card").last();
   await expect(card).toBeVisible();
   await expect(card).toContainText("Markdown revision");
-  await card.click();
+  await card.getByTestId("file-download").click();
 
   await expect
     .poll(() =>
@@ -243,17 +243,16 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
   await page.getByTestId("send-message").click();
   await expect(page.getByText("Sending")).toHaveCount(0);
 
-  // A FileCard renders in the timeline: a button carrying the filename. It
-  // downloads via the native `download_file` command (HTTP inside the app's
-  // tunnel + save dialog), NOT a plain `<a download>` link — a bare link
-  // escapes the webview to the OS browser and hits a corporate CDN page.
+  // A FileCard renders in the timeline with separate preview and native
+  // download actions. A plain `<a download>` link would escape the webview to
+  // the OS browser and hit a corporate CDN page.
   const card = page.getByTestId("file-card").last();
   await expect(card).toBeVisible();
   await expectCornerRadiusPx(card, 16);
   await expectSmoothCorners(card);
   await expect(card).toContainText("quarterly-report.pdf");
 
-  await card.click();
+  await card.getByTestId("file-download").click();
   await expect
     .poll(() =>
       page.evaluate(
@@ -263,6 +262,95 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
       ),
     )
     .toContain("download_file");
+});
+
+test("previews Markdown with the Buzz renderer", async ({ page }) => {
+  const mediaUrl = `http://localhost:3000/media/${"d".repeat(64)}.md`;
+  await page.route(mediaUrl, async (route) => {
+    await route.fulfill({
+      body: "# Preview heading\n\n- first item\n- second item",
+      contentType: "text/markdown; charset=utf-8",
+    });
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(`[README.md](${mediaUrl})`);
+  await page.getByTestId("send-message").click();
+
+  await page.getByTestId("file-preview-open").last().click();
+  const dialog = page.getByTestId("file-preview-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByRole("heading", { name: "Preview heading" }),
+  ).toBeVisible();
+  await expect(dialog.getByText("first item")).toBeVisible();
+});
+
+test("previews data files as code and keeps binary files download-only", async ({
+  page,
+}) => {
+  const jsonUrl = `http://localhost:3000/media/${"e".repeat(64)}.json`;
+  const zipUrl = `http://localhost:3000/media/${"f".repeat(64)}.zip`;
+  await page.route(jsonUrl, async (route) => {
+    await route.fulfill({
+      body: '{"status":"ready","count":2}',
+      contentType: "application/json",
+    });
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(`[data.json](${jsonUrl})`);
+  await page.getByTestId("send-message").click();
+
+  const jsonCard = page
+    .getByTestId("file-card")
+    .filter({ hasText: "data.json" });
+  await jsonCard.getByTestId("file-preview-open").click();
+  const dialog = page.getByTestId("file-preview-dialog");
+  await expect(dialog).toContainText('"status"');
+  await expect(dialog).toContainText('"ready"');
+  await dialog.getByRole("button", { name: "Close" }).click();
+
+  await page.getByTestId("message-input").fill(`[archive.zip](${zipUrl})`);
+  await page.getByTestId("send-message").click();
+  const zipCard = page
+    .getByTestId("file-card")
+    .filter({ hasText: "archive.zip" });
+  await expect(zipCard.getByTestId("file-preview-open")).toHaveCount(0);
+  await zipCard.locator("button").first().click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("download_file");
+});
+
+test("opens PDFs in the built-in preview and keeps download available", async ({
+  page,
+}) => {
+  await page.route("https://mock.relay/media/**", async (route) => {
+    await route.fulfill({
+      body: Buffer.from("%PDF-1.4\n%%EOF"),
+      contentType: "application/pdf",
+    });
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await chooseQuarterlyReport(page);
+  await page.getByTestId("send-message").click();
+  await page.getByTestId("file-preview-open").last().click();
+
+  const dialog = page.getByTestId("file-preview-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("iframe")).toHaveAttribute("src", /^blob:/);
+  await expect(dialog.getByTestId("file-preview-download")).toBeVisible();
 });
 
 test("sends immediately and keeps upload progress across channels", async ({
@@ -625,14 +713,13 @@ test("forum posts emit a FileCard for generic attachments, not a broken image", 
   // Submit the (attachment-only) forum post.
   await page.getByTestId("send-message").click();
 
-  // The post renders through the shared Markdown component as a FileCard —
-  // a button carrying the filename that downloads via the native
-  // `download_file` command — NOT an inline image and NOT a bare link.
+  // The post renders through the shared Markdown component as a FileCard with
+  // preview and native-download actions — NOT an inline image or a bare link.
   const card = page.getByTestId("file-card");
   await expect(card).toBeVisible();
   await expect(card).toContainText("quarterly-report.pdf");
 
-  await card.click();
+  await card.getByTestId("file-download").click();
   await expect
     .poll(() =>
       page.evaluate(

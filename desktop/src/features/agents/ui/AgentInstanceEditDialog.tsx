@@ -116,6 +116,7 @@ export function AgentInstanceEditDialog({
   const updateMutation = useUpdateManagedAgentMutation();
   const startMutation = useStartManagedAgentMutation();
   const isCodexTaskBound = agent.codexTaskBinding != null;
+  const isCodexRuntime = agent.runtime?.trim() === "codex";
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
@@ -202,12 +203,15 @@ export function AgentInstanceEditDialog({
       setIsAvatarUploadPending(false);
       setIsAddHarnessOpen(false);
       runtimeTouched.current = false;
-      const matched = isCodexTaskBound
-        ? runtimes.find((r) => r.id === "codex")
-        : (runtimes.find(
-            (r) => r.command?.trim() === agent.agentCommand.trim(),
-          ) ?? runtimes.find((r) => r.id === agent.agentCommand.trim()));
-      setSelectedRuntimeId(matched ? matched.id : "custom");
+      const matched =
+        isCodexTaskBound || isCodexRuntime
+          ? runtimes.find((r) => r.id === "codex")
+          : (runtimes.find(
+              (r) => r.command?.trim() === agent.agentCommand.trim(),
+            ) ?? runtimes.find((r) => r.id === agent.agentCommand.trim()));
+      setSelectedRuntimeId(
+        matched ? matched.id : isCodexRuntime ? "codex" : "custom",
+      );
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
@@ -217,15 +221,16 @@ export function AgentInstanceEditDialog({
     if (!open || runtimeTouched.current || runtimes.length === 0) {
       return;
     }
-    const matched = isCodexTaskBound
-      ? runtimes.find((r) => r.id === "codex")
-      : (runtimes.find(
-          (r) => r.command?.trim() === agent.agentCommand.trim(),
-        ) ?? runtimes.find((r) => r.id === agent.agentCommand.trim()));
+    const matched =
+      isCodexTaskBound || isCodexRuntime
+        ? runtimes.find((r) => r.id === "codex")
+        : (runtimes.find(
+            (r) => r.command?.trim() === agent.agentCommand.trim(),
+          ) ?? runtimes.find((r) => r.id === agent.agentCommand.trim()));
     if (matched) {
       setSelectedRuntimeId(matched.id);
     }
-  }, [open, runtimes, agent.agentCommand, isCodexTaskBound]);
+  }, [open, runtimes, agent.agentCommand, isCodexTaskBound, isCodexRuntime]);
 
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
@@ -280,7 +285,14 @@ export function AgentInstanceEditDialog({
   const prospectiveRuntimeId = React.useMemo(() => {
     if (isCodexTaskBound) return "codex";
     if (!inheritHarness) {
-      return selectedRuntime?.id ?? selectedRuntimeId;
+      if (selectedRuntime?.id) return selectedRuntime.id;
+      // Older Codex-chat records can retain runtime=codex even when their
+      // desktop-local task binding is absent. Do not flash or require an LLM
+      // provider while the runtime catalog is still loading.
+      if (selectedRuntimeId === "custom" && agent.runtime?.trim() === "codex") {
+        return "codex";
+      }
+      return selectedRuntimeId;
     }
     const personaRuntimeId = linkedPersona?.runtime?.trim();
     if (personaRuntimeId) {
@@ -302,6 +314,7 @@ export function AgentInstanceEditDialog({
     linkedPersona?.runtime,
     runtimes,
     agent.agentCommand,
+    agent.runtime,
     selectedRuntime?.id,
     selectedRuntimeId,
     isCodexTaskBound,

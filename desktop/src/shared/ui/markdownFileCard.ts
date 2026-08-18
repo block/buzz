@@ -15,6 +15,7 @@ export type FileCardImetaEntry = {
 export type ResolvedFileCard = {
   href: string;
   filename: string;
+  mimeType?: string;
   size?: number;
 };
 
@@ -158,5 +159,10 @@ export function resolveFileCard(
 
   const filename =
     entry?.filename || childText.trim() || href.split("/").pop() || "file";
-  return { href: rewriteRelayUrl(href), filename, size: entry?.size };
+  return {
+    href: rewriteRelayUrl(href),
+    filename,
+    mimeType: entry?.m,
+    size: entry?.size,
+  };
 }

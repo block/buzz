@@ -1335,8 +1335,7 @@ function createMarkdownComponents(
       );
     }
 
-    // Generic file attachment: use imeta when available, while also accepting
-    // canonical same-relay media links posted by agents that cannot add imeta.
+    // Accept imeta attachments and canonical same-relay agent media links.
     const card = resolveFileCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1345,13 +1344,19 @@ function createMarkdownComponents(
     );
     if (card) {
       return (
-        <FileCard href={card.href} filename={card.filename} size={card.size} />
+        <FileCard
+          href={card.href}
+          filename={card.filename}
+          mimeType={card.mimeType}
+          renderMarkdown={(previewContent) => (
+            <Markdown content={previewContent} interactive={false} />
+          )}
+          size={card.size}
+        />
       );
     }
 
-    // Intercept `buzz://message?channel=…&id=…` links so a click navigates
-    // in-app instead of opening the URL in the OS browser. http(s) links
-    // continue to use the existing target="_blank" behavior.
+    // Keep message deep links in-app; http(s) links retain normal behavior.
     if (href) {
       const messageLinkTarget = resolveMessageLinkRenderTarget({
         href,

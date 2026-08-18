@@ -4315,6 +4315,15 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_requires_filename_aware_file_delivery() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("buzz messages send --channel <UUID>"));
+        assert!(prompt.contains("--file ./report.md"));
+        assert!(prompt.contains("do not publish its `url`"));
+        assert!(prompt.contains("retry the delivery with `buzz messages send --file`"));
+    }
+
+    #[test]
     fn shared_base_prompt_keeps_buzz_credentials_in_the_agent_mcp() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("`buzz-dev-mcp` MCP server's `shell` tool"));

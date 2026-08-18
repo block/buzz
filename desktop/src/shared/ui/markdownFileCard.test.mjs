@@ -19,6 +19,7 @@ test("resolveFileCard: same-relay media link needs no imeta entry", () => {
     {
       href: PDF_URL,
       filename: "Markdown revision",
+      mimeType: undefined,
       size: undefined,
     },
   );
@@ -83,6 +84,7 @@ test("resolveFileCard: builds a card for a generic file, preferring imeta filena
   assert.deepEqual(card, {
     href: PDF_URL,
     filename: "Q3-budget.pdf",
+    mimeType: "application/pdf",
     size: 2048,
   });
 });
