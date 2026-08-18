@@ -276,7 +276,8 @@ class PerformanceTests(unittest.TestCase):
             "schema_version": 1,
             "run_id": path.stem, "flow": flow, "status": "passed",
             "cleanup": {"status": "passed"},
-            "provenance": {"dirty": False, "head_sha": ("a" if artifact == "base" else "b") * 40,
+            "provenance": {"dirty": False, "dirty_state_sha256": None, "status": [],
+                           "head_sha": ("a" if artifact == "base" else "b") * 40,
                            "artifact_sha256": ("c" if artifact == "base" else "d") * 64},
             "measurements": {"tooltip_open_latency": {"value": timing, "unit": "ms", "step": "tooltip"}},
             "performance": {"machine": self.MACHINE, "process": {
@@ -334,6 +335,21 @@ metrics:
             with self.assertRaisesRegex(review_native.HarnessError, "at least 3"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
 
+
+    def test_comparison_requires_explicit_clean_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for dirty in ("missing", 0, None):
+                path = self.receipt(root / f"r-{dirty}.json", "base", 100)
+                payload = json.loads(path.read_text())
+                if dirty == "missing":
+                    del payload["provenance"]["dirty"]
+                else:
+                    payload["provenance"]["dirty"] = dirty
+                path.write_text(json.dumps(payload))
+                with self.subTest(dirty=dirty), self.assertRaisesRegex(
+                        review_native.HarnessError, "clean provenance"):
+                    review_native.load_receipts([path], "baseline")
 
     def test_comparison_rejects_nonfinite_bool_overlap_and_same_revision(self):
         with tempfile.TemporaryDirectory() as directory:

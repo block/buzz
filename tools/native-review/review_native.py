@@ -803,9 +803,11 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
             raise HarnessError(f"cannot read {label} receipt {path}: {exc}") from exc
         if receipt.get("status") != "passed" or receipt.get("cleanup", {}).get("status") != "passed":
             raise HarnessError(f"{label} receipt is not a clean pass: {path}")
-        if receipt.get("provenance", {}).get("dirty"):
-            raise HarnessError(f"{label} receipt was captured from a dirty tree: {path}")
         provenance = receipt.get("provenance")
+        if (not isinstance(provenance, dict) or provenance.get("dirty") is not False
+                or provenance.get("dirty_state_sha256") is not None
+                or provenance.get("status") != []):
+            raise HarnessError(f"{label} receipt lacks clean provenance: {path}")
         machine = receipt.get("performance", {}).get("machine")
         if (receipt.get("schema_version") != 1
                 or not isinstance(receipt.get("run_id"), str) or not receipt["run_id"]
