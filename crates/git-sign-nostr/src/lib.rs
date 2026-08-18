@@ -84,7 +84,7 @@ use chrono::DateTime;
 use nostr::hashes::sha256::Hash as Sha256Hash;
 use nostr::hashes::{Hash, HashEngine};
 use nostr::secp256k1::schnorr::Signature;
-use nostr::secp256k1::{Keypair, Message};
+use nostr::secp256k1::{Keypair, Message, XOnlyPublicKey};
 use nostr::{FromBech32, PublicKey, SecretKey, SECP256K1};
 use zeroize::Zeroize;
 
@@ -112,6 +112,23 @@ impl Drop for KeypairGuard {
 const DOMAIN_SEPARATOR: &str = "nostr:git:v1:";
 const ARMOR_BEGIN: &str = "-----BEGIN SIGNED MESSAGE-----";
 const ARMOR_END: &str = "-----END SIGNED MESSAGE-----";
+
+/// Parse a 64-character lowercase hex string into a BIP-340 x-only public key.
+///
+/// Returns an error if the input is not valid hex, not 64 chars, or does not
+/// represent a point on the secp256k1 curve.
+///
+/// Note: `nostr::PublicKey::from_hex` (0.44+) decodes hex without curve
+/// validation; the curve check moved to `xonly()`. This helper restores the
+/// 0.36 semantics so callers don't have to remember to chain both. Prior to
+/// the nostr 0.44 bump, every call site here silently relied on `from_hex` as
+/// a structural BIP-340 gate; that contract broke when `from_hex` became a
+/// plain hex decode.
+fn parse_bip340_pubkey_hex(hex: &str) -> Result<XOnlyPublicKey, String> {
+    PublicKey::from_hex(hex)
+        .and_then(|pk| pk.xonly())
+        .map_err(|e| format!("not a valid BIP-340 public key: {e}"))
+}
 
 /// Maximum payload size (git commit/tag objects). 100 MB matches the NIP-GS
 /// spec limit. Commits and tags are typically < 10 KB; this bound prevents
@@ -1016,8 +1033,10 @@ fn do_sign(key_id: &str, status: &mut StatusWriter) -> Result<(), Error> {
     // reject self-attestation, and verify the owner's signature.
     let oa = load_auth_tag()?;
     if let Some(ref oa_val) = oa {
-        // Owner pubkey must be a valid BIP-340 key
-        if PublicKey::from_hex(&oa_val.0).is_err() {
+        // Owner pubkey must be a valid BIP-340 key. Use the helper so an
+        // off-curve-but-well-formed hex (e.g. all-zeros) is rejected, not just
+        // a malformed hex string.
+        if parse_bip340_pubkey_hex(&oa_val.0).is_err() {
             return Err(Error::Fatal(
                 "auth tag owner (oa[0]) is not a valid BIP-340 public key".to_string(),
             ));
@@ -1187,8 +1206,9 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
         });
     }
 
-    // Validate pk is a valid BIP-340 x-only public key
-    let pk = PublicKey::from_hex(&envelope.pk).map_err(|e| {
+    // Validate pk is a valid BIP-340 x-only public key (hex decode AND
+    // curve check — `nostr::PublicKey::from_hex` does the former only).
+    let xonly = parse_bip340_pubkey_hex(&envelope.pk).map_err(|e| {
         write_errsig(status, Some(&envelope.pk));
         Error::VerifyFailed {
             pk: Some(envelope.pk.clone()),
@@ -1223,13 +1243,6 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
     })?;
 
     // Verify BIP-340 signature
-    let xonly = pk.xonly().map_err(|_| {
-        write_errsig(status, Some(&envelope.pk));
-        Error::VerifyFailed {
-            pk: Some(envelope.pk.clone()),
-            msg: "invalid public key xonly conversion".to_string(),
-        }
-    })?;
     if SECP256K1.verify_schnorr(&sig, &message, &xonly).is_err() {
         status.write_line("NEWSIG");
         status.write_line(&format!("BADSIG {} {}", envelope.pk, envelope.pk));
@@ -1242,8 +1255,10 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
     // Signature is valid — check NIP-OA if present and track result.
     let oa_result = if let Some(ref oa) = envelope.oa {
         // Validate oa[0] is a valid BIP-340 public key. Per NIP-GS spec,
-        // an invalid owner pubkey is a structural error → ERRSIG.
-        if PublicKey::from_hex(&oa.0).is_err() {
+        // an invalid owner pubkey is a structural error → ERRSIG. The helper
+        // chains hex decode AND curve check (the latter was lost when the
+        // nostr crate moved curve validation to `xonly()` in 0.44).
+        if parse_bip340_pubkey_hex(&oa.0).is_err() {
             write_errsig(status, Some(&envelope.pk));
             return Err(Error::VerifyFailed {
                 pk: Some(envelope.pk),
@@ -1419,8 +1434,12 @@ fn parse_envelope(json_str: &str) -> Result<Envelope, String> {
             );
         }
 
-        // Validate oa[0] is a valid BIP-340 x-only public key (not just hex)
-        PublicKey::from_hex(owner)
+        // Validate oa[0] is a valid BIP-340 x-only public key (hex decode AND
+        // curve check). Bare `PublicKey::from_hex` no longer validates the
+        // curve under nostr 0.44+ — it accepts an all-zeros hex string — so we
+        // must chain `xonly()` for the structural check the rest of the crate
+        // has always relied on.
+        parse_bip340_pubkey_hex(owner)
             .map_err(|e| format!("oa[0] is not a valid BIP-340 public key: {e}"))?;
 
         // Self-attestation is meaningless — owner must differ from signer
@@ -1500,9 +1519,12 @@ fn parse_armor(content: &str) -> Result<&str, String> {
 fn verify_oa(agent_pk_hex: &str, oa: &(String, String, String)) -> bool {
     let (owner_pk_hex, conditions, owner_sig_hex) = oa;
 
-    // Parse owner pubkey
-    let owner_pk = match PublicKey::from_hex(owner_pk_hex) {
-        Ok(p) => p,
+    // Parse owner pubkey — hex decode AND curve check in one step. Under nostr
+    // 0.44, `PublicKey::from_hex` is a plain hex decode; the curve lives in
+    // `xonly()`. Chain both here so an off-curve owner pubkey is rejected up
+    // front rather than silently falling through to a verify-time error.
+    let xonly = match parse_bip340_pubkey_hex(owner_pk_hex) {
+        Ok(x) => x,
         Err(_) => {
             eprintln!("warning: oa owner pubkey is not a valid BIP-340 key");
             return false;
@@ -1530,13 +1552,6 @@ fn verify_oa(agent_pk_hex: &str, oa: &(String, String, String)) -> bool {
         }
     };
 
-    let xonly = match owner_pk.xonly() {
-        Ok(x) => x,
-        Err(_) => {
-            eprintln!("warning: oa owner pubkey conversion to xonly failed");
-            return false;
-        }
-    };
     if SECP256K1.verify_schnorr(&sig, &message, &xonly).is_err() {
         eprintln!("warning: NIP-OA owner attestation signature verification failed");
         return false;
@@ -2039,12 +2054,12 @@ Initial commit"
         if reconstructed != json_str {
             return Err("non-canonical JSON".to_string());
         }
-        let pk = PublicKey::from_hex(&envelope.pk).map_err(|e| format!("invalid pk: {e}"))?;
+        let xonly =
+            parse_bip340_pubkey_hex(&envelope.pk).map_err(|e| format!("invalid pk: {e}"))?;
         let hash = compute_signing_hash(envelope.t, envelope.oa.as_ref(), payload);
         let message = Message::from_digest(hash);
         let sig_bytes = hex::decode(&envelope.sig).map_err(|_| "bad sig hex")?;
         let sig = Signature::from_slice(&sig_bytes).map_err(|_| "bad sig")?;
-        let xonly = pk.xonly().map_err(|_| "xonly conversion failed")?;
         SECP256K1
             .verify_schnorr(&sig, &message, &xonly)
             .map_err(|_| "signature verification failed")?;
@@ -2159,6 +2174,36 @@ Initial commit"
     }
 
     #[test]
+    fn test_parse_bip340_pubkey_hex_rejects_off_curve() {
+        // Well-formed hex (64 chars, lowercase) that does not lie on the
+        // secp256k1 curve. The all-zeros string is the canonical example;
+        // nostr::PublicKey::from_hex accepts it under 0.44+ but the curve
+        // check in xonly() must reject it. This regression pins the helper
+        // for the issue surfaced in #6175 — a deterministic test failure
+        // on main caused by the nostr 0.36→0.44 bump that turned `from_hex`
+        // from a curve parse into a plain hex decode.
+        let zero_pk = "0".repeat(64);
+        let result = parse_bip340_pubkey_hex(&zero_pk);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("BIP-340"));
+    }
+
+    #[test]
+    fn test_parse_bip340_pubkey_hex_accepts_valid_key() {
+        // Sanity check: a real key parses and the helper returns Ok.
+        assert!(parse_bip340_pubkey_hex(TEST_PK).is_ok());
+    }
+
+    #[test]
+    fn test_parse_bip340_pubkey_hex_rejects_bad_hex() {
+        // Not even valid hex (uppercase) must still be rejected.
+        let bad = "ABCDEF".repeat(11); // 66 chars
+        assert!(parse_bip340_pubkey_hex(&bad).is_err());
+        let short = "deadbeef";
+        assert!(parse_bip340_pubkey_hex(short).is_err());
+    }
+
+    #[test]
     fn test_extract_pk_best_effort_valid() {
         let json = format!(r#"{{"v":1,"pk":"{}","sig":"x","t":0}}"#, TEST_PK);
         assert_eq!(extract_pk_best_effort(&json), Some(TEST_PK.to_string()));
@@ -2261,7 +2306,7 @@ Initial commit"
         if !is_lower_hex(&owner, 64) {
             return Err("auth tag owner must be 64 lowercase hex chars".to_string());
         }
-        PublicKey::from_hex(&owner)
+        parse_bip340_pubkey_hex(&owner)
             .map_err(|e| format!("auth tag owner is not a valid BIP-340 key: {e}"))?;
         if !is_lower_hex(&sig, 128) {
             return Err("auth tag sig must be 128 lowercase hex chars".to_string());
