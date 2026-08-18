@@ -256,6 +256,64 @@ pub struct RestClient {
     pub auth_tag_json: Option<String>,
 }
 
+/// Cap on how much of a failing response body is echoed into the error.
+///
+/// The relay's refusals are short (`restricted: ...`); this only exists so a
+/// large or hostile body cannot flood the log through the error path.
+const ERROR_BODY_MAX: usize = 512;
+
+/// Format a failing response body as a suffix for an HTTP error message.
+///
+/// Returns the empty string when there is nothing useful to add, so callers can
+/// interpolate it unconditionally and a bodyless failure reads exactly as it did
+/// before. Consumes the response: the body can only be read once.
+///
+/// Without this the caller sees only a status code, and the relay's own
+/// explanation -- the thing that says *which* rule refused the request -- is
+/// discarded at the moment it arrives.
+async fn error_body_detail(mut resp: reqwest::Response) -> String {
+    // Bounded at READ time, not just at format time: `text()` would buffer the
+    // whole body, and this path is reached precisely when the peer is
+    // misbehaving. A failing request must not become a memory amplifier.
+    let mut buf = Vec::with_capacity(ERROR_BODY_MAX.min(256));
+    while buf.len() < ERROR_BODY_MAX {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            // Nothing more to read, or the body failed mid-stream: either way the
+            // status code still has to reach the caller, so never propagate here.
+            Ok(None) | Err(_) => break,
+        }
+    }
+    buf.truncate(ERROR_BODY_MAX);
+    format_error_body(&String::from_utf8_lossy(&buf))
+}
+
+/// The pure half of [`error_body_detail`], split out so it can be tested without
+/// standing up an HTTP server.
+fn format_error_body(body: &str) -> String {
+    // Newlines would break one log line into several and hand a caller the
+    // ability to forge log entries; collapse them.
+    let flat: String = body
+        .trim()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.trim();
+    if flat.is_empty() {
+        return String::new();
+    }
+    let mut cut = flat.len().min(ERROR_BODY_MAX);
+    // Never split a UTF-8 character.
+    while cut < flat.len() && !flat.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    if cut < flat.len() {
+        format!(": {}...", &flat[..cut])
+    } else {
+        format!(": {flat}")
+    }
+}
+
 /// Whether an HTTP status code is retriable (transient server/rate-limit errors).
 fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
@@ -358,16 +416,17 @@ impl RestClient {
                 Ok(resp) if resp.status().is_success() => return Ok(resp),
                 Ok(resp) if is_retriable_status(resp.status()) => {
                     let status = resp.status();
-                    tracing::warn!("{method} {path} returned retriable HTTP {status}");
+                    let detail = error_body_detail(resp).await;
+                    tracing::warn!("{method} {path} returned retriable HTTP {status}{detail}");
                     last_err = Some(RelayError::Http(format!(
-                        "{method} {path} returned HTTP {status}"
+                        "{method} {path} returned HTTP {status}{detail}"
                     )));
                 }
                 Ok(resp) => {
+                    let status = resp.status();
+                    let detail = error_body_detail(resp).await;
                     return Err(RelayError::Http(format!(
-                        "{method} {} returned HTTP {}",
-                        path,
-                        resp.status()
+                        "{method} {path} returned HTTP {status}{detail}"
                     )));
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {
@@ -4056,6 +4115,44 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_error_body_is_empty_for_an_empty_body() {
+        // A bodyless failure has to read exactly as it did before this change.
+        assert_eq!(format_error_body(""), "");
+        assert_eq!(format_error_body("   \n  "), "");
+    }
+
+    #[test]
+    fn format_error_body_carries_the_relay_reason() {
+        assert_eq!(
+            format_error_body("restricted: agent-turn-metric `p` tag must be the owner"),
+            ": restricted: agent-turn-metric `p` tag must be the owner"
+        );
+    }
+
+    #[test]
+    fn format_error_body_flattens_newlines() {
+        let out = format_error_body("first line\nsecond line");
+        assert!(!out.contains('\n'), "{out}");
+        assert!(out.contains("first line"), "{out}");
+        assert!(out.contains("second line"), "{out}");
+    }
+
+    #[test]
+    fn format_error_body_is_bounded() {
+        let out = format_error_body(&"x".repeat(ERROR_BODY_MAX * 4));
+        assert!(out.len() <= ERROR_BODY_MAX + 8, "len {}", out.len());
+        assert!(out.ends_with("..."), "{out}");
+    }
+
+    #[test]
+    fn format_error_body_never_splits_a_utf8_char() {
+        // A multi-byte char straddling the cap must not panic nor produce
+        // invalid UTF-8 -- the reason the cut walks back to a char boundary.
+        let out = format_error_body(&"\u{00e9}".repeat(ERROR_BODY_MAX));
+        assert!(out.ends_with("..."), "{out}");
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
