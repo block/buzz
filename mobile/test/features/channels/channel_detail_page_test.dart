@@ -1478,8 +1478,19 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('reaction-popover-tray')), findsNothing);
-      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('message-action-reaction-tray')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-preview')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-surface')),
+        findsOneWidget,
+      );
+      expect(find.byType(BottomSheet), findsNothing);
       expect(find.text('Copy text'), findsOneWidget);
     });
 
@@ -6214,7 +6225,9 @@ void main() {
           const ValueKey('thread-message-group-reply-29'),
         );
         final composer = find.byKey(const ValueKey('composer-surface'));
-        await tester.drag(list, const Offset(0, 24));
+        // Clear the gesture arena's touch slop so this represents a deliberate
+        // tail-detaching drag rather than a long-press hold with small motion.
+        await tester.drag(list, const Offset(0, 48));
         await tester.pumpAndSettle();
         expect(
           tester.getBottomLeft(latest).dy,
