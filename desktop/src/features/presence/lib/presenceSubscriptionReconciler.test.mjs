@@ -75,6 +75,41 @@ test("a stale async open is closed and never installed", async () => {
   reconciler.dispose();
 });
 
+test("default timers preserve their global receiver when scheduling retries", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = [];
+  const cleared = [];
+
+  globalThis.setTimeout = function (callback) {
+    assert.equal(this, globalThis);
+    timers.push(callback);
+    return timers.length;
+  };
+  globalThis.clearTimeout = function (timer) {
+    assert.equal(this, globalThis);
+    cleared.push(timer);
+  };
+
+  try {
+    const reconciler = new PresenceSubscriptionReconciler({
+      open: async () => {
+        throw new Error("relay unavailable");
+      },
+    });
+
+    reconciler.setAuthors([A]);
+    await Promise.resolve();
+    assert.equal(timers.length, 1);
+
+    reconciler.dispose();
+    assert.deepEqual(cleared, [1]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
 test("failed replacement preserves the previous subscription and retries", async () => {
   const timers = [];
   const actions = [];
