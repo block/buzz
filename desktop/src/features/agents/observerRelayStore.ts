@@ -25,6 +25,20 @@ import {
   createEmptyTranscriptState,
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
+import {
+  compareObserverEvents,
+  isObserverEventAfter,
+} from "./observerEventOrder";
+import {
+  recordAppliedLifecycleFrame,
+  resetAppliedLifecycleSeq,
+  shouldApplyLifecycleFrame,
+} from "./observerLifecycleSeq";
+
+export {
+  compareObserverEvents,
+  isObserverEventAfter,
+} from "./observerEventOrder";
 
 const MAX_OBSERVER_EVENTS = 3000;
 // Length the per-agent journal is evicted down to when it overflows
@@ -106,50 +120,6 @@ const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 type LatestLiveEntry = { sessionId: string; timestamp: string; seq: number };
 const latestLiveSessionByAgentChannel = new Map<string, LatestLiveEntry>();
 
-// Highest successfully applied observer sequence per runtime pair + startNonce.
-// Relay replay is newest-first, so delivery order can apply ready and then a
-// stale waking from the same generation. A new nonce starts a new domain.
-const appliedLifecycleSeqByPairNonce = new Map<string, number>();
-
-function lifecycleSequenceKey(
-  agentPubkey: string,
-  payload: unknown,
-): string | null {
-  if (payload === null || typeof payload !== "object") return null;
-  const record = payload as { relayUrl?: unknown; startNonce?: unknown };
-  if (
-    typeof record.relayUrl !== "string" ||
-    typeof record.startNonce !== "string"
-  ) {
-    return null;
-  }
-  return `${normalizePubkey(agentPubkey)}\0${record.relayUrl}\0${record.startNonce}`;
-}
-
-function shouldApplyLifecycleFrame(
-  agentPubkey: string,
-  event: ObserverEvent,
-): boolean {
-  const key = lifecycleSequenceKey(agentPubkey, event.payload);
-  if (key === null) return false;
-  const applied = appliedLifecycleSeqByPairNonce.get(key);
-  return applied === undefined || event.seq > applied;
-}
-
-function recordAppliedLifecycleFrame(
-  agentPubkey: string,
-  event: ObserverEvent,
-): void {
-  const key = lifecycleSequenceKey(agentPubkey, event.payload);
-  if (key === null) return;
-  appliedLifecycleSeqByPairNonce.set(key, event.seq);
-}
-
-function liveSessionKey(agentPubkey: string, channelId: string | null): string {
-  return `${normalizePubkey(agentPubkey)}:${channelId ?? ""}`;
-}
-
-/** Read the latest-live-session-id for a (agent, channel) pair. */
 export function getLatestLiveSessionId(
   agentPubkey: string | null | undefined,
   channelId: string | null | undefined,
@@ -437,42 +407,6 @@ export function getArchivedChannelEvents(
     archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ??
     EMPTY_EVENTS
   );
-}
-
-export function compareObserverEvents(
-  left: ObserverEvent,
-  right: ObserverEvent,
-) {
-  const leftTime = Date.parse(left.timestamp);
-  const rightTime = Date.parse(right.timestamp);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    const timeDiff = leftTime - rightTime;
-    if (timeDiff !== 0) {
-      return timeDiff;
-    }
-  }
-
-  return left.seq - right.seq;
-}
-
-/**
- * Returns true if `candidate` sorts strictly after `stored` using the same
- * two-key ordering as `compareObserverEvents`: later timestamp wins; equal
- * timestamp falls back to higher seq.  Extracted so latest-live advancement
- * cannot drift from transcript ordering.
- */
-export function isObserverEventAfter(
-  candidate: { timestamp: string; seq: number },
-  stored: { timestamp: string; seq: number },
-): boolean {
-  const candidateTime = Date.parse(candidate.timestamp);
-  const storedTime = Date.parse(stored.timestamp);
-  if (Number.isFinite(candidateTime) && Number.isFinite(storedTime)) {
-    if (candidateTime !== storedTime) {
-      return candidateTime > storedTime;
-    }
-  }
-  return candidate.seq > stored.seq;
 }
 
 // Observer event kind for a batch envelope wrapping multiple events. The ACP
@@ -968,7 +902,7 @@ export function resetAgentObserverStore() {
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
-  appliedLifecycleSeqByPairNonce.clear();
+  resetAppliedLifecycleSeq();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";
