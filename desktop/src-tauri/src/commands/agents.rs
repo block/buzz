@@ -336,7 +336,7 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
             relay_url.clone(),
             app.clone(),
         ) {
-            errors.push(format!("{relay_url}: {error}"));
+            errors.push(error);
         }
     }
     if !errors.is_empty() {

@@ -30,37 +30,37 @@ export function reconcileRetryDelayMs(failureCount: number): number | null {
 }
 
 /**
- * Canonicalize the configured community relays, dropping duplicates and
- * unparsable entries. Maps canonical URL -> the raw `relayUrl` to submit to the
- * backend (first occurrence wins), so the reconcile call still speaks the
- * community's stored spelling while all bookkeeping is keyed canonically.
+ * Group configured communities by connection-equivalent relay target, dropping
+ * duplicates and unparsable entries. Distinct loopback host spellings remain
+ * separate targets so the backend can return an explicit canonical-key conflict.
+ * Maps target -> raw stored `relayUrl` (first equivalent occurrence wins).
  */
-export function canonicalCommunityRelays(
+export function connectionTargetCommunityRelays(
   communities: readonly { relayUrl: string }[],
-  canonicalize: (url: string) => string | null,
+  connectionTarget: (url: string) => string | null,
 ): Map<string, string> {
-  const byCanonical = new Map<string, string>();
+  const byTarget = new Map<string, string>();
   for (const community of communities) {
-    const canonical = canonicalize(community.relayUrl);
-    if (canonical === null || byCanonical.has(canonical)) continue;
-    byCanonical.set(canonical, community.relayUrl);
+    const target = connectionTarget(community.relayUrl);
+    if (target === null || byTarget.has(target)) continue;
+    byTarget.set(target, community.relayUrl);
   }
-  return byCanonical;
+  return byTarget;
 }
 
 /**
  * Configured relays that still need a reconcile attempt: not yet reconciled
- * cleanly and not currently in flight. Returns canonical URLs.
+ * cleanly and not currently in flight. Returns connection-target URLs.
  */
 export function pendingReconcileRelays(
-  canonicalToRequested: ReadonlyMap<string, string>,
+  targetToRequested: ReadonlyMap<string, string>,
   reconciled: ReadonlySet<string>,
   inFlight: ReadonlySet<string>,
 ): string[] {
   const pending: string[] = [];
-  for (const canonical of canonicalToRequested.keys()) {
-    if (reconciled.has(canonical) || inFlight.has(canonical)) continue;
-    pending.push(canonical);
+  for (const target of targetToRequested.keys()) {
+    if (reconciled.has(target) || inFlight.has(target)) continue;
+    pending.push(target);
   }
   return pending;
 }
@@ -74,21 +74,21 @@ export function pendingReconcileRelays(
 export function classifyReconcileResult(
   attempted: readonly string[],
   rows: readonly ManagedAgentRuntimeStatus[] | null,
-  canonicalize: (url: string) => string | null,
+  connectionTarget: (url: string) => string | null,
 ): { succeeded: string[]; failed: string[] } {
   if (rows === null) {
     return { succeeded: [], failed: [...attempted] };
   }
-  const failedRelays = new Set<string>();
+  const failedTargets = new Set<string>();
   for (const row of rows) {
     if (row.lifecycle !== "failed") continue;
-    const canonical = canonicalize(row.requestedRelayUrl ?? row.relayUrl);
-    if (canonical !== null) failedRelays.add(canonical);
+    const target = connectionTarget(row.requestedRelayUrl ?? row.relayUrl);
+    if (target !== null) failedTargets.add(target);
   }
   const succeeded: string[] = [];
   const failed: string[] = [];
   for (const relay of attempted) {
-    if (failedRelays.has(relay)) failed.push(relay);
+    if (failedTargets.has(relay)) failed.push(relay);
     else succeeded.push(relay);
   }
   return { succeeded, failed };

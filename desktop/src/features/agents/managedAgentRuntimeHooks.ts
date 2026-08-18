@@ -17,7 +17,10 @@ import {
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
-import { canonicalRelayUrl } from "./managedAgentRuntimeStatus";
+import {
+  connectionTargetsMatch,
+  managedAgentRuntimeKey,
+} from "./managedAgentRuntimeStatus";
 
 export const managedAgentRuntimesQueryKey = ["managed-agent-runtimes"] as const;
 
@@ -27,14 +30,20 @@ export function mergeManagedAgentRuntimeStatuses(
   reconciled: readonly ManagedAgentRuntimeStatus[],
 ): ManagedAgentRuntimeStatus[] {
   const baselineByPair = new Map(
-    (baseline ?? []).map((runtime) => [runtimePairKey(runtime), runtime]),
+    (baseline ?? []).map((runtime) => [
+      managedAgentRuntimeKey(runtime),
+      runtime,
+    ]),
   );
   const currentByPair = new Map(
-    (current ?? []).map((runtime) => [runtimePairKey(runtime), runtime]),
+    (current ?? []).map((runtime) => [
+      managedAgentRuntimeKey(runtime),
+      runtime,
+    ]),
   );
   const reconciledPairs = new Set<string>();
   const merged = reconciled.map((runtime) => {
-    const key = runtimePairKey(runtime);
+    const key = managedAgentRuntimeKey(runtime);
     reconciledPairs.add(key);
     const currentRuntime = currentByPair.get(key);
     const baselineRuntime = baselineByPair.get(key);
@@ -47,13 +56,25 @@ export function mergeManagedAgentRuntimeStatuses(
   });
 
   for (const runtime of current ?? []) {
-    if (!reconciledPairs.has(runtimePairKey(runtime))) merged.push(runtime);
+    if (!reconciledPairs.has(managedAgentRuntimeKey(runtime))) {
+      merged.push(runtime);
+    }
   }
   return merged;
 }
 
-function runtimePairKey(runtime: ManagedAgentRuntimeStatus): string {
-  return JSON.stringify([runtime.pubkey, runtime.relayUrl]);
+export function replaceManagedAgentRuntimeStatus(
+  current: readonly ManagedAgentRuntimeStatus[],
+  runtime: ManagedAgentRuntimeStatus,
+): ManagedAgentRuntimeStatus[] {
+  const runtimeKey = managedAgentRuntimeKey(runtime);
+  const index = current.findIndex(
+    (candidate) => managedAgentRuntimeKey(candidate) === runtimeKey,
+  );
+  if (index === -1) return [...current, runtime];
+  return current.map((candidate, candidateIndex) =>
+    candidateIndex === index ? runtime : candidate,
+  );
 }
 
 export function cacheReconciledManagedAgentRuntimes(
@@ -131,12 +152,8 @@ export function clearActiveTurnsForAgentOnStop(
     // Pair-scoped: only clear when the stopped pair's relay matches the active
     // community.  A mismatch means the stop targets a different community's
     // store — leave it alone.
-    const activeCanonical = canonicalRelayUrl(activeCommunity.relayUrl);
-    const stoppedCanonical = canonicalRelayUrl(relayUrl);
     if (
-      activeCanonical === null ||
-      stoppedCanonical === null ||
-      activeCanonical !== stoppedCanonical
+      !stoppedPairMatchesActiveCommunity(activeCommunity.relayUrl, relayUrl)
     ) {
       return;
     }
@@ -145,6 +162,13 @@ export function clearActiveTurnsForAgentOnStop(
   // the stop affects the active pair among others — clear.
 
   clearActiveTurnsForAgent(pubkey);
+}
+
+export function stoppedPairMatchesActiveCommunity(
+  activeRelayUrl: string,
+  stoppedRelayUrl: string,
+): boolean {
+  return connectionTargetsMatch(activeRelayUrl, stoppedRelayUrl);
 }
 
 /**
@@ -206,22 +230,15 @@ export function useManagedAgentRuntimeAction() {
       // For stop-only: clear stale working badges immediately.  The restart
       // path already clears at the stop-success boundary inside mutationFn.
       if (action === "stop") {
-        clearActiveTurnsForAgentOnStop(runtime.pubkey, runtime.relayUrl);
+        clearActiveTurnsForAgentOnStop(
+          runtime.pubkey,
+          runtime.requestedRelayUrl ?? runtime.relayUrl,
+        );
       }
 
       queryClient.setQueryData<ManagedAgentRuntimeStatus[]>(
         managedAgentRuntimesQueryKey,
-        (current = []) => {
-          const index = current.findIndex(
-            (candidate) =>
-              candidate.pubkey === runtime.pubkey &&
-              candidate.relayUrl === runtime.relayUrl,
-          );
-          if (index === -1) return [...current, runtime];
-          return current.map((candidate, candidateIndex) =>
-            candidateIndex === index ? runtime : candidate,
-          );
-        },
+        (current = []) => replaceManagedAgentRuntimeStatus(current, runtime),
       );
     },
   });

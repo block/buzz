@@ -26,6 +26,25 @@ enum SpawnOutcome {
 }
 type AgentSpawnResult = (String, SpawnOutcome);
 
+/// Phase-A lookup for the exact requested workspace pair. A canonical-key hit
+/// is not enough because loopback spellings can name distinct tenants.
+fn phase_a_has_live_requested_pair<T>(
+    runtimes: &mut std::collections::HashMap<super::ManagedAgentRuntimeKey, T>,
+    pubkey: &str,
+    requested_relay_url: &str,
+    target_matches: impl Fn(&T, &str) -> bool,
+    mut is_live: impl FnMut(&mut T) -> bool,
+) -> bool {
+    let Ok(key) = super::ManagedAgentRuntimeKey::new(pubkey.to_string(), requested_relay_url)
+    else {
+        return false;
+    };
+    let Some(runtime) = runtimes.get_mut(&key) else {
+        return false;
+    };
+    target_matches(runtime, requested_relay_url) && is_live(runtime)
+}
+
 /// Backfill the pinned persona snapshot for pre-existing agents created before
 /// the record became the spawn source of truth. Runs once at launch, before
 /// `restore_managed_agents_on_launch` spawns anything, so no agent boots from an
@@ -165,31 +184,26 @@ pub async fn restore_managed_agents_on_launch(
         // replacing the three separate kernel enumerations.
         super::sweep_untracked_bundle_harnesses(&tracked_pids);
 
-        let candidates: Vec<String> = records
+        let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
+        let mut to_start = Vec::new();
+        for record in records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
-            .map(|record| record.pubkey.clone())
-            .collect();
-
-        let mut to_start = Vec::new();
-        for pubkey in &candidates {
-            if let Some(runtime) = runtimes
-                .iter_mut()
-                .find(|(key, _)| key.pubkey == *pubkey)
-                .map(|(_, runtime)| runtime)
-            {
-                if runtime.child.try_wait().ok().flatten().is_none() {
-                    continue;
-                }
+        {
+            let requested_relay =
+                crate::relay::effective_agent_relay_url(&record.relay_url, &workspace_relay);
+            if phase_a_has_live_requested_pair(
+                &mut runtimes,
+                &record.pubkey,
+                &requested_relay,
+                |runtime, requested| {
+                    super::connection_targets_match(&runtime.connect_relay_url, requested)
+                },
+                |runtime| runtime.child.try_wait().ok().flatten().is_none(),
+            ) {
+                continue;
             }
-            if let Some(record) = records.iter().find(|r| r.pubkey == *pubkey) {
-                if let Some(pid) = record.runtime_pid {
-                    if super::process_is_running(pid) {
-                        continue;
-                    }
-                }
-                to_start.push(record.clone());
-            }
+            to_start.push(record.clone());
         }
         agents_to_start = to_start;
 
@@ -308,38 +322,48 @@ pub async fn restore_managed_agents_on_launch(
                             Ok(key) => {
                                 // F2: if a concurrent startup reconcile already
                                 // tracked a live child for this exact pair during
-                                // the Phase A window, leave it alone. Mirrors the
+                                // the Phase A window, leave it alone - but only
+                                // when it dials the requested URL. Mirrors the
                                 // live-child guard in `start_pair`.
-                                let already_live = app
+                                let tracked_outcome = app
                                     .state::<AppState>()
                                     .managed_agent_processes
                                     .lock()
                                     .ok()
                                     .and_then(|mut runtimes| {
-                                        runtimes.get_mut(&key).map(|runtime| {
-                                            runtime.child.try_wait().ok().flatten().is_none()
-                                        })
-                                    })
-                                    .unwrap_or(false);
-                                if already_live {
-                                    SpawnOutcome::Skipped
+                                        let runtime = runtimes.get_mut(&key)?;
+                                        if runtime.child.try_wait().ok().flatten().is_none() {
+                                            return Some(live_pair_outcome(runtime, &relay_url));
+                                        }
+                                        // A dead tracked entry can be replaced only
+                                        // when it belonged to this same target; a
+                                        // mismatched entry may carry tenant-scoped
+                                        // session cache under the colliding key.
+                                        super::ensure_pair_connection_matches(runtime, &relay_url)
+                                            .err()
+                                            .map(SpawnOutcome::Failed)
+                                    });
+                                if let Some(outcome) = tracked_outcome {
+                                    outcome
                                 } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &key.relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                            )
-                                        }) {
+                                    match super::terminate_untracked_pair_runtime(
+                                        app, &key, &relay_url,
+                                    )
+                                    .and_then(|()| {
+                                        // F1: restore spawns lazy, matching
+                                        // reconcile and manual start. Eager on
+                                        // restore buys nothing — a crashed
+                                        // mid-turn session is not resumed by an
+                                        // eager child — and silently reintroduces
+                                        // N idle brains on every launch.
+                                        spawn_agent_child(
+                                            app,
+                                            record,
+                                            &relay_url,
+                                            true,
+                                            owner_hex_ref,
+                                        )
+                                    }) {
                                         Ok(process) => {
                                             SpawnOutcome::Spawned(key, Box::new(process))
                                         }
@@ -390,6 +414,11 @@ pub async fn restore_managed_agents_on_launch(
                     pid: process.child.id(),
                     desktop_instance_id: super::current_instance_id(app),
                     started_at: now.clone(),
+                    // Phase B stamped the dial URL onto the process at spawn;
+                    // reading it back here (not recomputing from the record)
+                    // keeps the receipt truthful even if the workspace relay
+                    // changed between phases.
+                    connect_relay_url: Some(process.connect_relay_url.clone()),
                 };
                 if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
                     let _ = super::terminate_process(process.child.id());
@@ -556,4 +585,84 @@ fn persist_restore_error(
     record.updated_at = util::now_iso();
     record.last_error = Some(error);
     save_managed_agents(app, &records)
+}
+
+/// Phase-B decision for an already-tracked live pair: reuse (skip spawning)
+/// only when the live child dials the requested URL; a cross-spelling child
+/// is a connection-target conflict recorded as a failed outcome so Phase C
+/// persists the sanitized error instead of silently keeping the wrong tenant.
+fn live_pair_outcome(
+    runtime: &super::ManagedAgentPairRuntime,
+    requested_relay_url: &str,
+) -> SpawnOutcome {
+    match super::ensure_pair_connection_matches(runtime, requested_relay_url) {
+        Ok(()) => SpawnOutcome::Skipped,
+        Err(error) => SpawnOutcome::Failed(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpawnOutcome;
+    use crate::managed_agents::make_pair_runtime_with_connect_url;
+
+    #[test]
+    fn phase_a_skips_only_the_live_requested_pair() {
+        let pubkey = "aa".repeat(32);
+        let key = crate::managed_agents::ManagedAgentRuntimeKey::new(
+            pubkey.clone(),
+            "ws://localhost:3100",
+        )
+        .unwrap();
+        let mut runtimes =
+            std::collections::HashMap::from([(key, ("ws://127.0.0.1:3100".to_string(), true))]);
+        let target_matches = |runtime: &(String, bool), requested: &str| {
+            super::super::connection_targets_match(&runtime.0, requested)
+        };
+        let is_live = |runtime: &mut (String, bool)| runtime.1;
+
+        // Same canonical key, different loopback tenant: Phase A must not
+        // suppress Phase B's explicit connection-target conflict.
+        assert!(!super::phase_a_has_live_requested_pair(
+            &mut runtimes,
+            &pubkey,
+            "ws://localhost:3100",
+            target_matches,
+            is_live,
+        ));
+        assert!(super::phase_a_has_live_requested_pair(
+            &mut runtimes,
+            &pubkey,
+            "ws://127.0.0.1:3100",
+            target_matches,
+            is_live,
+        ));
+        assert!(!super::phase_a_has_live_requested_pair(
+            &mut runtimes,
+            &pubkey,
+            "wss://other.example",
+            target_matches,
+            is_live,
+        ));
+    }
+
+    #[test]
+    fn restore_reuses_live_pair_only_for_matching_spelling() {
+        let matching = make_pair_runtime_with_connect_url("ws://localhost:3100");
+        assert!(matches!(
+            super::live_pair_outcome(&matching, " ws://localhost:3100 "),
+            SpawnOutcome::Skipped
+        ));
+
+        // localhost and 127.0.0.1 share a canonical key but are distinct
+        // tenants: restore must record the conflict, not keep the wrong one.
+        let foreign = make_pair_runtime_with_connect_url("ws://127.0.0.1:3100");
+        match super::live_pair_outcome(&foreign, "ws://localhost:3100") {
+            SpawnOutcome::Failed(error) => {
+                assert!(error.contains("connection-target conflict"));
+                assert!(!error.contains("3100"), "error must not echo URLs");
+            }
+            _ => panic!("cross-spelling live pair must fail, not be reused"),
+        }
+    }
 }
