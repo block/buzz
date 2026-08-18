@@ -532,7 +532,6 @@ class _MessageActionsPopover extends HookWidget {
     }
 
     void selectAction(String actionId) => select(actionId);
-
     return LayoutBuilder(
       builder: (context, constraints) {
         final safeLeft = mediaQuery.padding.left + Grid.xxs;
@@ -634,141 +633,143 @@ class _MessageActionsPopover extends HookWidget {
           menuWidth,
           menuHeight,
         );
-
         return _MessageActionPreviewVisibility(
           visible: showPreview,
           onChanged: onPreviewVisibilityChanged,
           child: Stack(
             children: [
-            Positioned.fill(
-              child: BackdropFilter(
-                filter: ui.ImageFilter.blur(
-                  sigmaX: defaultTargetPlatform == TargetPlatform.iOS ? 4 : 8,
-                  sigmaY: defaultTargetPlatform == TargetPlatform.iOS ? 4 : 8,
-                ),
-                child: AnimatedBuilder(
-                  animation: animation,
-                  builder: (context, child) {
-                    final opacity = Curves.easeOutCubic.transform(
-                      animation.value,
-                    );
-                    return ColoredBox(
-                      key: const ValueKey('message-actions-background'),
-                      color: context.colors.inverseSurface.withValues(
-                        alpha: 0.14 * opacity,
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ),
-            Positioned.fill(
-              child: GestureDetector(
-                key: const ValueKey('message-actions-backdrop'),
-                behavior: HitTestBehavior.opaque,
-                onTap: () => select(null),
-              ),
-            ),
-            if (showPreview)
-              Positioned.fromRect(
-                rect: previewRect,
-                child: AnimatedBuilder(
-                  animation: animation,
-                  child: RepaintBoundary(
-                    child: _LiftedMessagePreview(
-                      anchorSnapshot: anchorSnapshot,
-                    ),
+              Positioned.fill(
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(
+                    sigmaX: defaultTargetPlatform == TargetPlatform.iOS ? 4 : 8,
+                    sigmaY: defaultTargetPlatform == TargetPlatform.iOS ? 4 : 8,
                   ),
-                  builder: (context, child) {
-                    final movement =
-                        (defaultTargetPlatform == TargetPlatform.iOS
-                                ? Curves.easeOutCubic
-                                : Curves.easeInOutCubic)
-                            .transform(animation.value);
-                    final sourceRect = anchorRect.inflate(
-                      _messageActionPreviewInset,
-                    );
-                    final translation = Offset(
-                      ui.lerpDouble(
-                        sourceRect.left - previewRect.left,
-                        0,
-                        movement,
-                      )!,
-                      ui.lerpDouble(
-                        sourceRect.top - previewRect.top,
-                        0,
-                        movement,
-                      )!,
-                    );
-                    final scaleX = ui.lerpDouble(
-                      sourceRect.width / previewRect.width,
-                      1,
-                      movement,
-                    )!;
-                    final scaleY = ui.lerpDouble(
-                      sourceRect.height / previewRect.height,
-                      1,
-                      movement,
-                    )!;
-                    return Transform.translate(
-                      offset: translation,
-                      child: Transform(
-                        alignment: Alignment.topLeft,
-                        transform: Matrix4.diagonal3Values(scaleX, scaleY, 1),
-                        child: child,
+                  child: AnimatedBuilder(
+                    animation: animation,
+                    builder: (context, child) {
+                      final opacity = Curves.easeOutCubic.transform(
+                        animation.value,
+                      );
+                      return ColoredBox(
+                        key: const ValueKey('message-actions-background'),
+                        color: context.colors.inverseSurface.withValues(
+                          alpha: 0.14 * opacity,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              Positioned.fill(
+                child: GestureDetector(
+                  key: const ValueKey('message-actions-backdrop'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => select(null),
+                ),
+              ),
+              if (showPreview)
+                Positioned.fromRect(
+                  rect: previewRect,
+                  child: AnimatedBuilder(
+                    animation: animation,
+                    child: RepaintBoundary(
+                      child: _LiftedMessagePreview(
+                        anchorSnapshot: anchorSnapshot,
                       ),
+                    ),
+                    builder: (context, child) {
+                      final movement =
+                          (defaultTargetPlatform == TargetPlatform.iOS
+                                  ? Curves.easeOutCubic
+                                  : Curves.easeInOutCubic)
+                              .transform(animation.value);
+                      final sourceRect = anchorRect.inflate(
+                        _messageActionPreviewInset,
+                      );
+                      final translation = Offset(
+                        ui.lerpDouble(
+                          sourceRect.left - previewRect.left,
+                          0,
+                          movement,
+                        )!,
+                        ui.lerpDouble(
+                          sourceRect.top - previewRect.top,
+                          0,
+                          movement,
+                        )!,
+                      );
+                      final scaleX = ui.lerpDouble(
+                        sourceRect.width / previewRect.width,
+                        1,
+                        movement,
+                      )!;
+                      final scaleY = ui.lerpDouble(
+                        sourceRect.height / previewRect.height,
+                        1,
+                        movement,
+                      )!;
+                      return Transform.translate(
+                        offset: translation,
+                        child: Transform(
+                          alignment: Alignment.topLeft,
+                          transform: Matrix4.diagonal3Values(scaleX, scaleY, 1),
+                          child: child,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              if (showReactionTray)
+                Positioned(
+                  left: trayRect.left,
+                  top: trayRect.top,
+                  width: trayHostWidth,
+                  height: trayRect.height,
+                  child: _MessageReactionTray(
+                    animation: animation,
+                    trayWidth: trayWidth,
+                    message: message,
+                    pageContext: pageContext,
+                    pageRef: pageRef,
+                    popResult: _messageActionReactionSelection,
+                    onSelected: (result, effect) => select(result, effect),
+                  ),
+                ),
+              Positioned.fromRect(
+                rect: menuRect,
+                child: AnimatedBuilder(
+                  animation: animation,
+                  child: useIosNativeActionSurface
+                      ? _IosNativeMessageActionSurface(
+                          actions: actions,
+                          rowHeight: menuLayout.rowHeight,
+                          onSelected: selectAction,
+                        )
+                      : _MessageActionSurface(
+                          actions: actions,
+                          onSelected: selectAction,
+                        ),
+                  builder: (context, child) {
+                    final appearance = const Interval(
+                      0.08,
+                      0.82,
+                      curve: Curves.easeOutCubic,
+                    ).transform(animation.value);
+                    final fadedChild = Opacity(
+                      opacity: appearance,
+                      child: child,
+                    );
+                    if (defaultTargetPlatform == TargetPlatform.iOS) {
+                      return fadedChild;
+                    }
+                    return Transform.scale(
+                      alignment: Alignment.topLeft,
+                      scale: ui.lerpDouble(0.96, 1, appearance)!,
+                      child: fadedChild,
                     );
                   },
                 ),
               ),
-            if (showReactionTray)
-              Positioned(
-                left: trayRect.left,
-                top: trayRect.top,
-                width: trayHostWidth,
-                height: trayRect.height,
-                child: _MessageReactionTray(
-                  animation: animation,
-                  trayWidth: trayWidth,
-                  message: message,
-                  pageContext: pageContext,
-                  pageRef: pageRef,
-                  popResult: _messageActionReactionSelection,
-                  onSelected: (result, effect) => select(result, effect),
-                ),
-              ),
-            Positioned.fromRect(
-              rect: menuRect,
-              child: AnimatedBuilder(
-                animation: animation,
-                child: useIosNativeActionSurface
-                    ? _IosNativeMessageActionSurface(
-                        actions: actions,
-                        rowHeight: menuLayout.rowHeight,
-                        onSelected: selectAction,
-                      )
-                    : _MessageActionSurface(
-                        actions: actions,
-                        onSelected: selectAction,
-                      ),
-                builder: (context, child) {
-                  final appearance = const Interval(
-                    0.08,
-                    0.82,
-                    curve: Curves.easeOutCubic,
-                  ).transform(animation.value);
-                  final fadedChild = Opacity(opacity: appearance, child: child);
-                  if (defaultTargetPlatform == TargetPlatform.iOS) {
-                    return fadedChild;
-                  }
-                  return Transform.scale(
-                    alignment: Alignment.topLeft,
-                    scale: ui.lerpDouble(0.96, 1, appearance)!,
-                    child: fadedChild,
-                  );
-                },
-              ),
-            ),
             ],
           ),
         );
@@ -956,8 +957,7 @@ class _MessageActionRow extends StatelessWidget {
 }
 
 class _MessageActionSurfaceLayout {
-  final double rowHeight;
-  final double preferredHeight;
+  final double rowHeight, preferredHeight;
 
   const _MessageActionSurfaceLayout({
     required this.rowHeight,
