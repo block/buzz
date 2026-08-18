@@ -99,6 +99,7 @@ check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clip
 # cheap enough to run unconditionally without duplicating path filters.
 file-size-check:
     node --test scripts/check-file-sizes-core.test.mjs
+    node --test scripts/stage-debug-sidecars.test.mjs
     node desktop/scripts/check-file-sizes.mjs
     node web/scripts/check-file-sizes.mjs
     node mobile/scripts/check-file-sizes.mjs
@@ -179,34 +180,7 @@ _stage-debug-sidecars:
     export PATH="{{justfile_directory()}}/bin:$PATH"
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    TARGET_DIR="${TARGET_DIR//\\//}"
-    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
-    EXE_SUFFIX=""
-    if [[ "$TARGET" == *windows* ]]; then
-        EXE_SUFFIX=".exe"
-    else
-        SIDECARS+=(buzz-backend-kubernetes)
-    fi
-    mkdir -p desktop/src-tauri/binaries
-    for bin in "${SIDECARS[@]}"; do
-        source_path="${TARGET_DIR}/debug/${bin}${EXE_SUFFIX}"
-        if [[ ! -f "$source_path" ]]; then
-            echo "Error: expected debug sidecar is missing: $source_path" >&2
-            exit 1
-        fi
-        if [[ ! -s "$source_path" ]]; then
-            echo "Error: expected debug sidecar is empty: $source_path" >&2
-            exit 1
-        fi
-    done
-    for bin in "${SIDECARS[@]}"; do
-        source_path="${TARGET_DIR}/debug/${bin}${EXE_SUFFIX}"
-        destination_path="desktop/src-tauri/binaries/${bin}-${TARGET}${EXE_SUFFIX}"
-        cp "$source_path" "$destination_path"
-        if [[ "$TARGET" != *windows* ]]; then
-            chmod +x "$destination_path"
-        fi
-    done
+    "{{justfile_directory()}}/scripts/stage-debug-sidecars.sh" "$TARGET" "$TARGET_DIR" "{{justfile_directory()}}/desktop/src-tauri/binaries"
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
