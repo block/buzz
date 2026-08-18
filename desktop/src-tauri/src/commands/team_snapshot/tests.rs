@@ -353,6 +353,69 @@ fn team_import_rejects_bidirectional_team_name() {
 }
 
 #[test]
+fn team_export_rejects_unsafe_name_and_instructions() {
+    let definitions = vec![AgentDefinition {
+        id: "alice".to_string(),
+        display_name: "Alice".to_string(),
+        avatar_url: None,
+        system_prompt: "Alice prompt".to_string(),
+        runtime: Some("goose".to_string()),
+        model: None,
+        provider: None,
+        name_pool: vec![],
+        is_builtin: false,
+        is_active: true,
+        shared: false,
+        source_team: None,
+        source_team_persona_slug: None,
+        catalog_source: None,
+        env_vars: Default::default(),
+        respond_to: None,
+        respond_to_allowlist: vec![],
+        parallelism: None,
+        created_at: "now".to_string(),
+        updated_at: "now".to_string(),
+    }];
+    let mut team = TeamRecord {
+        id: "review".to_string(),
+        name: "Review Team".to_string(),
+        description: None,
+        instructions: Some("Be thorough.".to_string()),
+        persona_ids: vec!["alice".to_string()],
+        is_builtin: false,
+        source_dir: None,
+        is_symlink: false,
+        symlink_target: None,
+        version: None,
+        created_at: "now".to_string(),
+        updated_at: "now".to_string(),
+    };
+
+    team.name = "Review\u{200B} Team".to_string();
+    let error = build_team_export_snapshot(
+        &team,
+        &definitions,
+        &[],
+        MemoryLevel::None,
+        &std::collections::HashMap::new(),
+    )
+    .expect_err("export must reject an invisible team name");
+    assert!(error.contains("U+200B"), "unexpected error: {error}");
+
+    team.name = "Review Team".to_string();
+    team.instructions = Some("Be\u{202E} thorough.".to_string());
+    let error = build_team_export_snapshot(
+        &team,
+        &definitions,
+        &[],
+        MemoryLevel::None,
+        &std::collections::HashMap::new(),
+    )
+    .expect_err("export must reject bidi formatting in team instructions");
+    assert!(error.contains("U+202E"), "unexpected error: {error}");
+}
+
+#[test]
 fn team_import_keeps_or_clears_every_member_allowlist_with_one_toggle() {
     let source = snapshot(vec![member("Alice"), member("Bob")]);
     let kept = build_import_definitions(&source, true, "now").unwrap();

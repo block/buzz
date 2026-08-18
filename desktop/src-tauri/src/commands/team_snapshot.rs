@@ -272,6 +272,8 @@ fn build_team_export_snapshot(
     memory_level: MemoryLevel,
     memory_entries_by_persona: &std::collections::HashMap<String, Vec<AgentSnapshotMemoryEntry>>,
 ) -> Result<TeamSnapshot, String> {
+    validate_team_definition_text(&team.name, team.instructions.as_deref())
+        .map_err(|error| format!("Team snapshot is unsafe to export: {error}"))?;
     let members = team
         .persona_ids
         .iter()
