@@ -160,8 +160,12 @@ with a TypeScript lookup table or an id comparison in a component.
    computer, including files, accounts, and connected tools"; remote names "the
    server it runs on, including any accounts and tools available there" —
    deliberately *not* the owner's files, which aren't theirs to describe on a
-   host they don't own. **An unknown location falls back to the local wording —
-   never hedge with "computer or server".** A remote host requires an
+   host they don't own. **For a persona-linked deployed agent, the profile Edit
+   dialog seeds access from the exact clicked instance and saves access through
+   `update_managed_agent`; persona behavior remains the definition default, but
+   must never bypass the instance command's stop, persist, publish, and restart
+   boundary.** An unknown location falls back to the local wording — never hedge
+   with "computer or server". A remote host requires an
    installed `buzz-backend-*` provider, and without one `WhereToRunSection`
    never renders, so "server" would name a concept the owner has never been
    shown; when it *is* remote they picked that host from the selector
@@ -197,6 +201,18 @@ with a TypeScript lookup table or an id comparison in a component.
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
    content.
+
+12. **Owner-only builds discover only verified same-owner remote agents.**
+    The native `list_relay_agents` boundary authenticates ownership through the
+    agent's NIP-OA profile, then retains only agents owned by the active user
+    when the compiled owner-only capability is present. Keep this as the
+    authoritative backstop: internal builds must never admit cross-owner remote
+    agents, while same-owner agents on another machine remain inside the
+    documented owner-only trust boundary. OSS builds retain the complete
+    policy-filtered relay directory and send-time fail-closed mention
+    revalidation. Local `agents-data-changed` events refresh only local
+    persona/team/managed-agent caches; they must never invalidate the remote
+    relay directory.
 
 ## The tests that enforce this
 

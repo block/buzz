@@ -120,14 +120,14 @@ Run `just test` for integration tests if you touched `buzz-relay`,
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
 fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
 Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
-commit. **Pre-push hooks** run clippy (workspace + Tauri), desktop TypeScript
-typechecking (`tsc --noEmit`), and fast unit tests in parallel (Rust, desktop
-JS, Tauri Rust, mobile Flutter) — no overlap with pre-commit. Builds are
-CI-only. Run `just fix-all` to auto-fix all formatting in one shot. Run
-`just ci` for the full local gate. Run `just hooks` to
-re-install hooks after env changes. Before agents run Git or hooks, activate the
-repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
-commands to compensate for an unconfigured shell `PATH`.
+commit. **Pre-push hooks** run the repository-wide differential file-size gate,
+clippy (workspace + Tauri), desktop TypeScript typechecking (`tsc --noEmit`),
+and fast unit tests in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter)
+— no overlap with pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix
+all formatting in one shot. Run `just ci` for the full local gate. Run `just
+hooks` to re-install hooks after env changes. Before agents run Git or hooks,
+activate the repo's Hermit environment (`. ./bin/activate-hermit`); do not
+rewrite hook commands to compensate for an unconfigured shell `PATH`.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
@@ -566,10 +566,10 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 - **Keep widgets small and composable.** One public widget per file; push
   private sub-widgets (`_Foo`) into sibling `part` files under a
   `<page>/` folder rather than growing the page file. Hard ceiling:
-  **1000 lines/file**, enforced by `mobile/scripts/check-file-sizes.mjs` via
-  `just mobile-check` (runs in `just check` + pre-push, mirroring desktop/web).
-  If the guard trips, **split the file — never bump the limit or add an
-  override to slip under it.**
+  **1000 lines/file**, enforced across Desktop, Web, and Mobile by the
+  repository-level `just file-size-check` gate (`just check`, CI, and every
+  pre-push). If the guard trips, **split the file — never bump the limit or add
+  an override to slip under it.**
 - Feature modules must not import from other feature modules — only from
   `shared/`.
 - Use `Grid` tokens for spacing, `Radii` for border radius.

@@ -47,6 +47,7 @@ fn minimal_record() -> ManagedAgentRecord {
             config: serde_json::json!({"api_key": "SENTINEL_BACKEND_SECRET"}),
         },
         backend_agent_id: Some("SENTINEL_BACKEND_AGENT_ID".to_string()), // MUST NOT appear
+        provider_policy_pending: false,
         provider_binary_path: Some("/usr/bin/SENTINEL_PROVIDER_BINARY".to_string()), // MUST NOT appear
         persona_team_dir: Some(std::path::PathBuf::from("SENTINEL_TEAM_DIR")), // MUST NOT appear
         persona_name_in_team: Some("SENTINEL_NAME_IN_TEAM".to_string()),       // MUST NOT appear

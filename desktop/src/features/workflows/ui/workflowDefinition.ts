@@ -9,10 +9,44 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+export function getWorkflowTriggerType(
+  definition: Record<string, unknown>,
+): string | null {
+  const trigger = asRecord(definition.trigger);
+  return typeof trigger?.on === "string" && trigger.on.trim().length > 0
+    ? trigger.on
+    : null;
+}
+
+export function getWorkflowPrimaryAction(
+  definition: Record<string, unknown>,
+): string | null {
+  const firstStep = Array.isArray(definition.steps)
+    ? asRecord(definition.steps[0])
+    : null;
+  return typeof firstStep?.action === "string" &&
+    firstStep.action.trim().length > 0
+    ? firstStep.action
+    : null;
+}
+
 export function getWorkflowEnabled(
   definition: Record<string, unknown>,
 ): boolean {
   return definition.enabled !== false;
+}
+
+export function withWorkflowEnabled(
+  definition: Record<string, unknown>,
+  enabled: boolean,
+): Record<string, unknown> {
+  const updated = { ...definition };
+  if (enabled) {
+    delete updated.enabled;
+  } else {
+    updated.enabled = false;
+  }
+  return updated;
 }
 
 export function getWorkflowDisplayStatus(
