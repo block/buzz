@@ -828,7 +828,7 @@ async fn ensure_agent_tts_audio_publisher(
     {
         return Err("managed-agent identity does not match the Huddle speaker".to_string());
     }
-    let (ephemeral_channel_id, parent_channel_id) = {
+    let (ephemeral_channel_id, parent_channel_id, local_tts_publishers) = {
         let huddle = state.huddle()?;
         (
             huddle
@@ -836,6 +836,7 @@ async fn ensure_agent_tts_audio_publisher(
                 .clone()
                 .ok_or("active Huddle has no backing channel")?,
             huddle.parent_channel_id.clone(),
+            Arc::clone(&huddle.local_tts_publishers),
         )
     };
     let has_bot_membership =
@@ -854,6 +855,7 @@ async fn ensure_agent_tts_audio_publisher(
         state,
         &keys,
         record.auth_tag.as_deref(),
+        local_tts_publishers,
     )
     .await?;
     pipeline.register_audio_publisher(speaker_pubkey, publisher);

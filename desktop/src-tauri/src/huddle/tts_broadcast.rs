@@ -22,6 +22,48 @@ pub(crate) struct TtsBroadcastPacket {
     pub(crate) samples_24k: Vec<f32>,
 }
 
+/// `peer_index -> active local publisher count` for sockets publishing Pocket
+/// TTS synthesized by this desktop.
+pub(crate) type LocalTtsPublishers = Arc<Mutex<HashMap<u8, usize>>>;
+
+/// A live registration for one locally synthesized publisher socket. The lease
+/// is owned by the socket task, so receive-side suppression ends immediately
+/// when that socket exits even if its command handle has not been replaced yet.
+pub(crate) struct LocalTtsPublisherLease {
+    peer_index: u8,
+    local_publishers: LocalTtsPublishers,
+}
+
+impl LocalTtsPublisherLease {
+    pub(crate) fn new(peer_index: u8, local_publishers: LocalTtsPublishers) -> Self {
+        *local_publishers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(peer_index)
+            .or_default() += 1;
+        Self {
+            peer_index,
+            local_publishers,
+        }
+    }
+}
+
+impl Drop for LocalTtsPublisherLease {
+    fn drop(&mut self) {
+        let mut local_publishers = self
+            .local_publishers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(count) = local_publishers.get_mut(&self.peer_index) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            local_publishers.remove(&self.peer_index);
+        }
+    }
+}
+
 /// A live, agent-authenticated audio publisher.
 #[derive(Debug)]
 pub(crate) struct TtsAudioPublisher {
@@ -177,6 +219,30 @@ impl TtsBroadcasters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publisher_lifetime_tracks_local_synthesis_without_replacement_gaps() {
+        let local_publishers = LocalTtsPublishers::default();
+        let first = LocalTtsPublisherLease::new(3, Arc::clone(&local_publishers));
+        assert_eq!(
+            local_publishers.lock().expect("local publishers").get(&3),
+            Some(&1)
+        );
+
+        let replacement = LocalTtsPublisherLease::new(3, Arc::clone(&local_publishers));
+        drop(first);
+        assert_eq!(
+            local_publishers.lock().expect("local publishers").get(&3),
+            Some(&1),
+            "dropping a replaced socket must not expose its live replacement"
+        );
+
+        drop(replacement);
+        assert!(local_publishers
+            .lock()
+            .expect("local publishers")
+            .is_empty());
+    }
 
     #[test]
     fn cancellation_invalidates_queued_packet_versions() {

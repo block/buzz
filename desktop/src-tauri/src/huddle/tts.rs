@@ -75,7 +75,9 @@ use streaming::*;
 #[path = "tts_broadcast.rs"]
 mod broadcast;
 use broadcast::TtsBroadcasters;
-pub(crate) use broadcast::{TtsAudioPublisher, TtsBroadcastPacket};
+pub(crate) use broadcast::{
+    LocalTtsPublisherLease, LocalTtsPublishers, TtsAudioPublisher, TtsBroadcastPacket,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

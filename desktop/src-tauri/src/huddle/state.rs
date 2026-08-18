@@ -87,6 +87,11 @@ pub struct HuddleState {
     /// Active TTS pipeline — not serialized, not cloned.
     #[serde(skip)]
     pub tts_pipeline: Option<Arc<tts::TtsPipeline>>,
+    /// Peer indices currently publishing locally synthesized TTS sockets. The
+    /// receive loop uses this live registry to suppress only this desktop's
+    /// echo, never another socket authenticated as the same bot.
+    #[serde(skip)]
+    pub local_tts_publishers: tts::LocalTtsPublishers,
     /// Whether this client created the huddle (vs. joined it).
     /// Used to enforce that only the creator can end/archive the huddle.
     pub is_creator: bool,
@@ -190,6 +195,7 @@ impl Clone for HuddleState {
             stt_pipeline: None, // Never clone the pipeline handle.
             remote_stt_pipeline: Arc::new(Mutex::new(None)),
             tts_pipeline: None, // Never clone the pipeline handle.
+            local_tts_publishers: Arc::clone(&self.local_tts_publishers),
             is_creator: self.is_creator,
             tts_enabled: self.tts_enabled,
             transcription_enabled: self.transcription_enabled,
@@ -223,6 +229,7 @@ impl Default for HuddleState {
             stt_pipeline: None,
             remote_stt_pipeline: Arc::new(Mutex::new(None)),
             tts_pipeline: None,
+            local_tts_publishers: tts::LocalTtsPublishers::default(),
             is_creator: false,
             tts_enabled: true,
             transcription_enabled: false,

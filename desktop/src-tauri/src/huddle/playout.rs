@@ -92,19 +92,14 @@ fn should_recover_playout(depth: usize, currently_recovering: bool) -> bool {
     }
 }
 
-fn is_agent_audio_peer(
+fn is_locally_synthesized_peer(
     peer_idx: u8,
-    index_to_pubkey: &std::collections::HashMap<u8, String>,
-    agent_pubkeys: &std::sync::Mutex<Vec<String>>,
+    local_tts_publishers: &super::tts::LocalTtsPublishers,
 ) -> bool {
-    let Some(pubkey) = index_to_pubkey.get(&peer_idx) else {
-        return false;
-    };
-    agent_pubkeys
+    local_tts_publishers
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .iter()
-        .any(|agent| agent.eq_ignore_ascii_case(pubkey))
+        .contains_key(&peer_idx)
 }
 
 fn mix_remote_stt_samples(mix: &mut Vec<f32>, samples: &[f32]) {
@@ -203,7 +198,7 @@ pub(crate) async fn run_playout_recv_loop(
     initial_peers: Vec<(u8, String)>,
     tts_active: Arc<AtomicBool>,
     tts_cancel: Arc<AtomicBool>,
-    agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
+    local_tts_publishers: super::tts::LocalTtsPublishers,
     remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
 ) {
     use rodio::buffer::SamplesBuffer;
@@ -271,11 +266,7 @@ pub(crate) async fn run_playout_recv_loop(
                                 );
                                 slot.player.skip_one();
                             }
-                            if !is_agent_audio_peer(
-                                *peer_idx,
-                                &index_to_pubkey,
-                                &agent_pubkeys,
-                            ) {
+                            if !is_locally_synthesized_peer(*peer_idx, &local_tts_publishers) {
                                 mix_remote_stt_samples(&mut remote_stt_mix, &samples);
                             }
                             slot.player.append(SamplesBuffer::new(channels, rate, samples));
@@ -336,11 +327,10 @@ pub(crate) async fn run_playout_recv_loop(
                             continue;
                         }
                         let peer_idx = data[0];
-                        // Desktop renders each agent with its device-local Pocket
-                        // voice. A locally managed agent may also publish that
-                        // synthesized stream for mobile listeners; suppress it
-                        // here so desktop clients do not hear local TTS twice.
-                        if is_agent_audio_peer(peer_idx, &index_to_pubkey, &agent_pubkeys) {
+                        // Suppress only an agent stream synthesized and
+                        // published by this desktop. Other bot-role peers may
+                        // publish their own legitimate audio and must play.
+                        if is_locally_synthesized_peer(peer_idx, &local_tts_publishers) {
                             continue;
                         }
                         let after_idx = &data[1..];
@@ -533,16 +523,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_audio_is_suppressed_only_for_matching_roster_identity() {
-        let peers = std::collections::HashMap::from([
-            (3, "agent-pubkey".to_string()),
-            (4, "human-pubkey".to_string()),
-        ]);
-        let agents = std::sync::Mutex::new(vec!["AGENT-PUBKEY".to_string()]);
+    fn only_the_local_socket_is_suppressed_for_a_shared_agent_identity() {
+        let local_publishers = super::super::tts::LocalTtsPublishers::default();
+        local_publishers
+            .lock()
+            .expect("local publishers")
+            .insert(3, 1);
 
-        assert!(is_agent_audio_peer(3, &peers, &agents));
-        assert!(!is_agent_audio_peer(4, &peers, &agents));
-        assert!(!is_agent_audio_peer(9, &peers, &agents));
+        assert!(is_locally_synthesized_peer(3, &local_publishers));
+        assert!(
+            !is_locally_synthesized_peer(4, &local_publishers),
+            "a second socket for the same agent remains audible"
+        );
+        assert!(!is_locally_synthesized_peer(9, &local_publishers));
     }
 
     #[test]

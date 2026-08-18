@@ -75,7 +75,7 @@ async fn connect_authenticated_audio_socket(
     relay_url: &str,
     keys: &nostr::Keys,
     auth_tag_json: Option<&str>,
-) -> Result<(WsSink, WsReceiver, Vec<(u8, String)>), String> {
+) -> Result<(WsSink, WsReceiver, u8, Vec<(u8, String)>), String> {
     use nostr::JsonUtil;
 
     let ws_url = format!("{relay_url}/huddle/{channel_id}/audio");
@@ -121,7 +121,7 @@ async fn connect_authenticated_audio_socket(
         .await
         .map_err(|e| format!("send auth: {e}"))?;
 
-    let initial_peers = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+    let (peer_index, initial_peers) = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         loop {
             match ws_rx.next().await {
                 Some(Ok(WsMsg::Text(text))) => {
@@ -142,7 +142,11 @@ async fn connect_authenticated_audio_socket(
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            break Ok(peers);
+                            let peer_index = value["peer_index"]
+                                .as_u64()
+                                .and_then(|index| u8::try_from(index).ok())
+                                .ok_or_else(|| "joined message missing peer index".to_string())?;
+                            break Ok((peer_index, peers));
                         }
                         Some("error") => {
                             break Err(format!("audio relay auth error: {}", value["message"]));
@@ -160,7 +164,7 @@ async fn connect_authenticated_audio_socket(
     .await
     .map_err(|_| "timeout waiting for joined from relay".to_string())??;
 
-    Ok((ws_tx, ws_rx, initial_peers))
+    Ok((ws_tx, ws_rx, peer_index, initial_peers))
 }
 
 /// Connect to the relay's audio WebSocket and run the Opus encode/decode pipeline.
@@ -176,19 +180,19 @@ pub(crate) async fn connect_audio_relay(
     let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
-    let (tts_cancel, tts_active, agent_pubkeys, remote_stt_pipeline) = {
+    let (tts_cancel, tts_active, local_tts_publishers, remote_stt_pipeline) = {
         let hs = state.huddle()?;
         (
             Arc::clone(&hs.tts_cancel),
             Arc::clone(&hs.tts_active),
-            Arc::clone(&hs.agent_pubkeys),
+            Arc::clone(&hs.local_tts_publishers),
             Arc::clone(&hs.remote_stt_pipeline),
         )
     };
 
     let app_handle = state.app_handle.lock().ok().and_then(|g| g.clone());
 
-    let (ws_tx, ws_rx, initial_peers) =
+    let (ws_tx, ws_rx, _peer_index, initial_peers) =
         connect_authenticated_audio_socket(channel_id, parent_channel_id, &relay_url, &keys, None)
             .await?;
 
@@ -212,7 +216,7 @@ pub(crate) async fn connect_audio_relay(
             initial_peers,
             tts_cancel,
             tts_active,
-            agent_pubkeys,
+            local_tts_publishers,
             remote_stt_pipeline,
             output_device_name,
         })
@@ -297,9 +301,10 @@ pub(crate) async fn connect_tts_audio_publisher(
     state: &AppState,
     keys: &nostr::Keys,
     auth_tag_json: Option<&str>,
+    local_tts_publishers: super::tts::LocalTtsPublishers,
 ) -> Result<super::tts::TtsAudioPublisher, String> {
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    let (ws_tx, ws_rx, _) = connect_authenticated_audio_socket(
+    let (ws_tx, ws_rx, peer_index, _) = connect_authenticated_audio_socket(
         channel_id,
         parent_channel_id,
         &relay_url,
@@ -313,7 +318,9 @@ pub(crate) async fn connect_tts_audio_publisher(
     let (tx, rx) = tokio::sync::mpsc::channel(TTS_BROADCAST_QUEUE_DEPTH);
     let publisher = super::tts::TtsAudioPublisher::new(tx, cancel);
     let (epoch, speaker_generation) = publisher.version_state();
+    let local_publisher = super::tts::LocalTtsPublisherLease::new(peer_index, local_tts_publishers);
     tokio::spawn(async move {
+        let _local_publisher = local_publisher;
         if let Err(error) = run_tts_audio_publisher(
             ws_tx,
             ws_rx,
@@ -432,7 +439,7 @@ struct AudioRelayPipelineArgs {
     initial_peers: Vec<(u8, String)>,
     tts_cancel: Arc<AtomicBool>,
     tts_active: Arc<AtomicBool>,
-    agent_pubkeys: Arc<std::sync::Mutex<Vec<String>>>,
+    local_tts_publishers: super::tts::LocalTtsPublishers,
     remote_stt_pipeline: Arc<std::sync::Mutex<Option<std::sync::Weak<super::stt::SttPipeline>>>>,
     output_device_name: Option<String>,
 }
@@ -447,7 +454,7 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         initial_peers,
         tts_cancel,
         tts_active,
-        agent_pubkeys,
+        local_tts_publishers,
         remote_stt_pipeline,
         output_device_name,
     } = args;
@@ -558,7 +565,7 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         initial_peers,
         tts_active,
         tts_cancel,
-        agent_pubkeys,
+        local_tts_publishers,
         remote_stt_pipeline,
     ));
 
