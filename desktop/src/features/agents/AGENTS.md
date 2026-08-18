@@ -201,6 +201,16 @@ with a TypeScript lookup table or an id comparison in a component.
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
    content.
+14. **Parameterized model choices stay compatible with the persisted model
+    field.** ACP discovery advertises Cursor's `parameterizedModelPicker`
+    capability and folds its separate `model` + `fast` options into composite
+    IDs such as `grok-4.6[fast=false]`. All model selectors continue to consume
+    the same discovered model list and persist the same normalized `model`
+    field; do not add a Cursor-only render branch. `buzz-acp` is responsible
+    for validating that both pieces were advertised and applying the base
+    model before the `fast` config option. Thought-level options remain a
+    separate harness-native effort concern and must not be folded into this
+    compatibility path.
 
 12. **Owner-only builds discover only verified same-owner remote agents.**
     The native `list_relay_agents` boundary authenticates ownership through the

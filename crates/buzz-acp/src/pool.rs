@@ -30,9 +30,9 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, model_in_catalog,
-    resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
-    StopReason, SystemPromptTransport,
+    extract_model_picker_config_options, extract_model_state, model_in_catalog,
+    resolve_model_switch_plan, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
+    ModelSwitchPlan, StopReason, SystemPromptTransport,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -84,7 +84,7 @@ pub struct TaskMeta {
 /// Fields are read by the desktop's `get_agent_models` Tauri command (Phase 3).
 #[allow(dead_code)] // Scaffolding for desktop integration — fields read via serde.
 pub struct AgentModelCapabilities {
-    /// Stable: configOptions with category "model" from session/new.
+    /// Stable: model-picker configOptions from session/new, including parameters.
     pub config_options_raw: Vec<serde_json::Value>,
     /// Unstable: SessionModelState from session/new.
     pub available_models_raw: Option<serde_json::Value>,
@@ -1042,7 +1042,7 @@ async fn create_session_and_apply_model(
     // Populate model capabilities on first session creation.
     if agent.model_capabilities.is_none() {
         agent.model_capabilities = Some(AgentModelCapabilities {
-            config_options_raw: extract_model_config_options(&resp.raw),
+            config_options_raw: extract_model_picker_config_options(&resp.raw),
             available_models_raw: extract_model_state(&resp.raw),
         });
     }
@@ -1051,9 +1051,9 @@ async fn create_session_and_apply_model(
     // Track whether the switch succeeded so session_config_captured reflects
     // the post-switch state (not the pre-switch desired state).
     let switch_succeeded = if let Some(ref desired) = agent.desired_model {
-        match resolve_model_switch_method(&resp.raw, desired) {
-            Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+        match resolve_model_switch_plan(&resp.raw, desired) {
+            Some(plan) => {
+                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &plan).await?;
                 true
             }
             None => {
@@ -1149,6 +1149,29 @@ async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
     desired: &str,
+    plan: &ModelSwitchPlan,
+) -> Result<(), AcpError> {
+    apply_model_switch_method(acp, session_id, &format!("model {desired}"), &plan.model).await?;
+
+    for (config_id, option_value) in &plan.parameters {
+        apply_model_switch_method(
+            acp,
+            session_id,
+            &format!("model parameter {config_id}={option_value}"),
+            &ModelSwitchMethod::ConfigOption {
+                config_id: config_id.clone(),
+                option_value: option_value.clone(),
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn apply_model_switch_method(
+    acp: &mut AcpClient,
+    session_id: &str,
+    setting: &str,
     method: &ModelSwitchMethod,
 ) -> Result<(), AcpError> {
     let method_label = match method {
@@ -1178,7 +1201,7 @@ async fn apply_model_switch(
         Ok(Ok(_)) => {
             tracing::info!(
                 target: "pool::model",
-                "applied model {desired} via {method_label} on session {session_id}"
+                "applied {setting} via {method_label} on session {session_id}"
             );
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
@@ -1190,7 +1213,7 @@ async fn apply_model_switch(
         | Ok(Err(e @ AcpError::AgentExited)) => {
             tracing::error!(
                 target: "pool::model",
-                "fatal error setting model {desired} via {method_label}: {e}"
+                "fatal error applying {setting} via {method_label}: {e}"
             );
             return Err(e);
         }
@@ -1198,7 +1221,7 @@ async fn apply_model_switch(
         Ok(Err(e)) => {
             tracing::warn!(
                 target: "pool::model",
-                "failed to set model {desired} via {method_label}: {e} — proceeding with agent default"
+                "failed to apply {setting} via {method_label}: {e} — proceeding with agent default"
             );
         }
         Err(_) => {
@@ -1206,7 +1229,7 @@ async fn apply_model_switch(
             // stream in an unknown state. Treat as transport error.
             tracing::error!(
                 target: "pool::model",
-                "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
+                "applying {setting} via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
             return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
         }

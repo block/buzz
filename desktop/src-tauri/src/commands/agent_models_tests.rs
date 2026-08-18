@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn parameterized_fast_options_expand_into_selectable_model_variants() {
+    let raw = serde_json::json!({
+        "agent": { "name": "cursor", "version": "2026.08" },
+        "stable": {
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "currentValue": "grok-4.6",
+                    "options": [
+                        { "value": "grok-4.6", "name": "Grok 4.6" }
+                    ]
+                },
+                {
+                    "id": "fast",
+                    "category": "model",
+                    "currentValue": "false",
+                    "options": [
+                        { "value": "false", "name": "Off" },
+                        { "value": "true", "name": "Fast" }
+                    ]
+                }
+            ]
+        },
+        "unstable": {
+            "currentModelId": "grok-4.6",
+            "availableModels": [
+                { "modelId": "grok-4.6", "name": "Grok 4.6" }
+            ]
+        }
+    });
+
+    let response = normalize_agent_models(&raw, None);
+    let ids = response
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect::<Vec<_>>();
+    let names = response
+        .models
+        .iter()
+        .map(|model| model.name.as_deref())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["grok-4.6[fast=false]", "grok-4.6[fast=true]"]);
+    assert_eq!(names, vec![Some("Grok 4.6 (Off)"), Some("Grok 4.6 (Fast)")]);
+    assert_eq!(
+        response.agent_default_model.as_deref(),
+        Some("grok-4.6[fast=false]")
+    );
+}
+
+#[test]
 fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
     use crate::managed_agents::RespondTo;
 

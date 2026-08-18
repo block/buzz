@@ -723,26 +723,88 @@ pub(super) fn normalize_agent_models(
 
     let mut models: Vec<AgentModelInfo> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut stable_base_ids: HashSet<String> = HashSet::new();
+
+    let stable_config_options = raw["stable"]["configOptions"].as_array();
+    let fast_config = stable_config_options.and_then(|options| {
+        options.iter().find(|option| {
+            option
+                .get("configId")
+                .or_else(|| option.get("id"))
+                .and_then(|value| value.as_str())
+                == Some("fast")
+        })
+    });
+    let fast_options = fast_config
+        .and_then(|option| option.get("options"))
+        .and_then(|options| options.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let current_fast = fast_config
+        .and_then(|option| option.get("currentValue"))
+        .and_then(|value| value.as_str());
+    let parameterize_model_id = |model_id: &str, fast: &str| format!("{model_id}[fast={fast}]");
+    let parameterize_current_model = |model_id: &str| {
+        current_fast.map_or_else(
+            || model_id.to_string(),
+            |fast| parameterize_model_id(model_id, fast),
+        )
+    };
 
     // 1. Stable configOptions (preferred). Only entries with category "model"
-    //    are model options — the CLI pre-filters, but we're defensive here.
-    if let Some(config_options) = raw["stable"]["configOptions"].as_array() {
+    //    are model options. Cursor also categorizes its separate `fast`
+    //    parameter as model config, so keep it out of the base-model pass and
+    //    expand its choices into the composite IDs Buzz already persists.
+    if let Some(config_options) = stable_config_options {
         for opt in config_options {
             if opt.get("category").and_then(|c| c.as_str()) != Some("model") {
+                continue;
+            }
+            if opt
+                .get("configId")
+                .or_else(|| opt.get("id"))
+                .and_then(|value| value.as_str())
+                == Some("fast")
+            {
                 continue;
             }
             if let Some(options) = opt.get("options").and_then(|v| v.as_array()) {
                 for o in options {
                     if let Some(value) = o.get("value").and_then(|v| v.as_str()) {
-                        if seen_ids.insert(value.to_string()) {
-                            models.push(AgentModelInfo {
-                                id: value.to_string(),
-                                name: o
+                        stable_base_ids.insert(value.to_string());
+                        let base_name = o
+                            .get("displayName")
+                            .or_else(|| o.get("name"))
+                            .and_then(|name| name.as_str());
+                        if fast_options.is_empty() {
+                            if seen_ids.insert(value.to_string()) {
+                                models.push(AgentModelInfo {
+                                    id: value.to_string(),
+                                    name: base_name.map(str::to_string),
+                                    description: None,
+                                });
+                            }
+                            continue;
+                        }
+                        for fast_option in fast_options {
+                            let Some(fast_value) =
+                                fast_option.get("value").and_then(|value| value.as_str())
+                            else {
+                                continue;
+                            };
+                            let id = parameterize_model_id(value, fast_value);
+                            if seen_ids.insert(id.clone()) {
+                                let fast_name = fast_option
                                     .get("displayName")
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string),
-                                description: None,
-                            });
+                                    .or_else(|| fast_option.get("name"))
+                                    .and_then(|name| name.as_str())
+                                    .unwrap_or(fast_value);
+                                models.push(AgentModelInfo {
+                                    id,
+                                    name: base_name.map(|name| format!("{name} ({fast_name})")),
+                                    description: None,
+                                });
+                            }
                         }
                     }
                 }
@@ -753,10 +815,15 @@ pub(super) fn normalize_agent_models(
     // 2. Unstable availableModels (fallback — skip duplicates from stable).
     let mut agent_default_model: Option<String> = None;
     if let Some(unstable) = raw.get("unstable") {
-        agent_default_model = unstable["currentModelId"].as_str().map(str::to_string);
+        agent_default_model = unstable["currentModelId"]
+            .as_str()
+            .map(&parameterize_current_model);
         if let Some(available) = unstable["availableModels"].as_array() {
             for m in available {
                 if let Some(id) = m.get("modelId").and_then(|v| v.as_str()) {
+                    if stable_base_ids.contains(id) {
+                        continue;
+                    }
                     if seen_ids.insert(id.to_string()) {
                         models.push(AgentModelInfo {
                             id: id.to_string(),

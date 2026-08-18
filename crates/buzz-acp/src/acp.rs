@@ -408,7 +408,12 @@ fn build_client_capabilities() -> serde_json::Value {
             // Non-standard extension used by claude-agent-acp to advertise the
             // exact terminal login argv for subscription auth. Unknown `_meta`
             // keys are ignored by other adapters.
-            "terminal-auth": true
+            "terminal-auth": true,
+            // Cursor otherwise collapses model parameters into a single
+            // variant ID and only advertises its fast=true default. Buzz
+            // understands the separate model + fast config options and
+            // composes them back into one persisted model selection.
+            "parameterizedModelPicker": true
         }
     })
 }
@@ -646,8 +651,8 @@ impl AcpClient {
     /// member from a null one. When both `ClaudeMeta` and `session_title` are
     /// present the two `_meta` members are merged into a single object.
     ///
-    /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
-    /// to pull model info from the raw result.
+    /// Callers use [`extract_model_picker_config_options`] and
+    /// [`extract_model_state`] to pull model info from the raw result.
     pub async fn session_new_full(
         &mut self,
         cwd: &str,
@@ -2158,21 +2163,76 @@ pub enum ModelSwitchMethod {
     SetModel { model_id: String },
 }
 
-/// Extract `configOptions` entries with `category == "model"` from a `session/new` result.
+/// A model change plus any parameter config options encoded in its persisted ID.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelSwitchPlan {
+    /// The ACP method used to select the base model.
+    pub model: ModelSwitchMethod,
+    /// Additional `session/set_config_option` values applied after the model.
+    pub parameters: Vec<(String, String)>,
+}
+
+fn config_option_id(option: &serde_json::Value) -> Option<&str> {
+    option
+        .get("configId")
+        .or_else(|| option.get("id"))
+        .and_then(|value| value.as_str())
+}
+
+fn is_fast_config_option(option: &serde_json::Value) -> bool {
+    config_option_id(option) == Some("fast")
+}
+
+/// Extract base-model `configOptions` entries from a `session/new` result.
 ///
 /// Returns the raw JSON array entries. Each entry has `configId` (spelled `id`
 /// by some adapters, e.g. claude-agent-acp), `displayName`,
-/// `options: [{ value, displayName }]`, etc.
+/// `options: [{ value, displayName }]`, etc. Cursor's separate `fast` model
+/// parameter is excluded; use [`extract_model_picker_config_options`] when the
+/// caller needs to reconstruct full model choices.
 pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
     result["configOptions"]
         .as_array()
         .map(|arr| {
             arr.iter()
-                .filter(|opt| opt.get("category").and_then(|c| c.as_str()) == Some("model"))
+                .filter(|opt| {
+                    opt.get("category").and_then(|c| c.as_str()) == Some("model")
+                        && !is_fast_config_option(opt)
+                })
                 .cloned()
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Extract the model selector and the Cursor `fast` parameter needed to
+/// reconstruct a complete persisted model choice during discovery.
+pub fn extract_model_picker_config_options(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    result["configOptions"]
+        .as_array()
+        .map(|options| {
+            options
+                .iter()
+                .filter(|option| {
+                    option.get("category").and_then(|value| value.as_str()) == Some("model")
+                        || is_fast_config_option(option)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_fast_model_variant(desired_model: &str) -> (&str, Option<&str>) {
+    for value in ["false", "true"] {
+        let suffix = format!("[fast={value}]");
+        if let Some(model) = desired_model.strip_suffix(&suffix) {
+            if !model.is_empty() {
+                return (model, Some(value));
+            }
+        }
+    }
+    (desired_model, None)
 }
 
 /// Extract `SessionModelState` (unstable path) from a `session/new` result.
@@ -2235,6 +2295,38 @@ pub fn resolve_model_switch_method(
     None
 }
 
+/// Resolve a persisted model ID into the model switch and optional Cursor fast
+/// parameter update required by a parameterized model picker.
+pub fn resolve_model_switch_plan(
+    session_new_result: &serde_json::Value,
+    desired_model: &str,
+) -> Option<ModelSwitchPlan> {
+    let (model_id, fast_value) = parse_fast_model_variant(desired_model);
+    let model = resolve_model_switch_method(session_new_result, model_id)?;
+    let mut parameters = Vec::new();
+
+    if let Some(value) = fast_value {
+        let fast_option = session_new_result["configOptions"]
+            .as_array()?
+            .iter()
+            .find(|option| is_fast_config_option(option))?;
+        let supported = fast_option
+            .get("options")
+            .and_then(|options| options.as_array())
+            .is_some_and(|options| {
+                options.iter().any(|option| {
+                    option.get("value").and_then(|value| value.as_str()) == Some(value)
+                })
+            });
+        if !supported {
+            return None;
+        }
+        parameters.push(("fast".to_string(), value.to_string()));
+    }
+
+    Some(ModelSwitchPlan { model, parameters })
+}
+
 /// Whether `desired_model` appears in pre-extracted catalog halves.
 ///
 /// Mirrors [`resolve_model_switch_method`]'s match, but operates on the
@@ -2246,17 +2338,35 @@ pub fn model_in_catalog(
     available_models: Option<&serde_json::Value>,
     desired_model: &str,
 ) -> bool {
+    let (model_id, fast_value) = parse_fast_model_variant(desired_model);
     let in_config_options = config_options.iter().any(|config_opt| {
+        if is_fast_config_option(config_opt) {
+            return false;
+        }
         config_opt
             .get("options")
             .and_then(|v| v.as_array())
             .is_some_and(|options| {
                 options
                     .iter()
-                    .any(|opt| opt.get("value").and_then(|v| v.as_str()) == Some(desired_model))
+                    .any(|opt| opt.get("value").and_then(|v| v.as_str()) == Some(model_id))
             })
     });
-    if in_config_options {
+    let fast_supported = fast_value.is_none_or(|desired_fast| {
+        config_options.iter().any(|config_opt| {
+            is_fast_config_option(config_opt)
+                && config_opt
+                    .get("options")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|options| {
+                        options.iter().any(|option| {
+                            option.get("value").and_then(|value| value.as_str())
+                                == Some(desired_fast)
+                        })
+                    })
+        })
+    });
+    if in_config_options && fast_supported {
         return true;
     }
 
@@ -2266,8 +2376,9 @@ pub fn model_in_catalog(
         .is_some_and(|available| {
             available
                 .iter()
-                .any(|model| model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model))
+                .any(|model| model.get("modelId").and_then(|v| v.as_str()) == Some(model_id))
         })
+        && fast_supported
 }
 
 // ─── Drop: kill child process ─────────────────────────────────────────────────
@@ -2497,6 +2608,11 @@ mod tests {
             Some(true),
             "goose customNotifications capability must be advertised"
         );
+        assert_eq!(
+            msg["params"]["clientCapabilities"]["_meta"]["parameterizedModelPicker"].as_bool(),
+            Some(true),
+            "parameterized model picker support must be advertised so Cursor exposes fast=false"
+        );
     }
 
     #[test]
@@ -2713,6 +2829,36 @@ mod tests {
     }
 
     #[test]
+    fn extract_model_picker_config_options_includes_cursor_fast_parameter() {
+        let result = serde_json::json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "options": [{ "value": "grok-4.6" }]
+                },
+                {
+                    "id": "fast",
+                    "options": [
+                        { "value": "false" },
+                        { "value": "true" }
+                    ]
+                },
+                {
+                    "id": "theme",
+                    "category": "appearance",
+                    "options": [{ "value": "dark" }]
+                }
+            ]
+        });
+
+        let options = super::extract_model_picker_config_options(&result);
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0]["id"].as_str(), Some("model"));
+        assert_eq!(options[1]["id"].as_str(), Some("fast"));
+    }
+
+    #[test]
     fn extract_model_config_options_empty_when_no_config_options() {
         let result = serde_json::json!({ "sessionId": "sess-1" });
         assert!(super::extract_model_config_options(&result).is_empty());
@@ -2877,6 +3023,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_parameterized_fast_variant_builds_ordered_switch_plan() {
+        let result = serde_json::json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "options": [{ "value": "grok-4.6" }]
+                },
+                {
+                    "id": "fast",
+                    "category": "model",
+                    "options": [
+                        { "value": "false" },
+                        { "value": "true" }
+                    ]
+                }
+            ]
+        });
+
+        let plan = super::resolve_model_switch_plan(&result, "grok-4.6[fast=false]")
+            .expect("parameterized model should resolve");
+
+        assert_eq!(
+            plan,
+            super::ModelSwitchPlan {
+                model: super::ModelSwitchMethod::ConfigOption {
+                    config_id: "model".to_string(),
+                    option_value: "grok-4.6".to_string(),
+                },
+                parameters: vec![("fast".to_string(), "false".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_parameterized_fast_variant_rejects_unadvertised_value() {
+        let result = serde_json::json!({
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "options": [{ "value": "grok-4.6" }]
+                },
+                {
+                    "id": "fast",
+                    "category": "model",
+                    "options": [{ "value": "true" }]
+                }
+            ]
+        });
+
+        assert!(super::resolve_model_switch_plan(&result, "grok-4.6[fast=false]").is_none());
+    }
+
     // ── model_in_catalog tests ────────────────────────────────────────────
 
     #[test]
@@ -2927,6 +3128,31 @@ mod tests {
     #[test]
     fn model_in_catalog_false_when_both_halves_empty() {
         assert!(!super::model_in_catalog(&[], None, "anything"));
+    }
+
+    #[test]
+    fn model_in_catalog_accepts_parameterized_fast_variant() {
+        let config_options = vec![
+            serde_json::json!({
+                "id": "model",
+                "category": "model",
+                "options": [{ "value": "grok-4.6" }]
+            }),
+            serde_json::json!({
+                "id": "fast",
+                "category": "model",
+                "options": [
+                    { "value": "false" },
+                    { "value": "true" }
+                ]
+            }),
+        ];
+
+        assert!(super::model_in_catalog(
+            &config_options,
+            None,
+            "grok-4.6[fast=false]"
+        ));
     }
 
     // ── Error variant display ─────────────────────────────────────────────

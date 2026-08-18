@@ -4984,7 +4984,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
-    use acp::{extract_model_config_options, extract_model_state};
+    use acp::{extract_model_picker_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = std::env::current_dir()
@@ -5041,7 +5041,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         .unwrap_or("unknown");
 
     // Extract model info from session/new response.
-    let config_options = extract_model_config_options(&session_resp.raw);
+    let config_options = extract_model_picker_config_options(&session_resp.raw);
     let model_state = extract_model_state(&session_resp.raw);
 
     if args.json {
