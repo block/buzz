@@ -435,16 +435,19 @@ test("definitively deleted message links open their channel and remain copyable"
           return [styles.backgroundColor, styles.color];
         }),
       ]);
-      return JSON.stringify(deletedStyles) === JSON.stringify(codeStyles);
+      return {
+        sharesDisabledSurface: deletedStyles[0] === codeStyles[0],
+        usesFadedForeground: deletedStyles[1] !== codeStyles[1],
+      };
     })
-    .toBe(true);
+    .toEqual({ sharesDisabledSurface: true, usesFadedForeground: true });
   await expect(deletedLink).toHaveJSProperty("tagName", "BUTTON");
   const deletedSemanticColors = await deletedLink.evaluate((element) => {
     const styles = getComputedStyle(element);
     const rootStyles = getComputedStyle(document.documentElement);
     const probe = document.createElement("span");
     probe.style.backgroundColor = "hsl(var(--disabled))";
-    probe.style.color = "hsl(var(--disabled-foreground))";
+    probe.style.color = "hsl(var(--disabled-foreground) / 0.7)";
     document.body.append(probe);
     const semanticStyles = getComputedStyle(probe);
     const result = {

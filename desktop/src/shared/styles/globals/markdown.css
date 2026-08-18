@@ -90,7 +90,7 @@
 .message-markdown .mention-chip.buzz-link-deleted,
 .message-markdown .mention-chip.buzz-link-deleted:hover {
   background: hsl(var(--disabled));
-  color: hsl(var(--disabled-foreground));
+  color: hsl(var(--disabled-foreground) / 0.7);
 }
 
 .message-markdown .mention-chip.inbox-channel-chip {
