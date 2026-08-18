@@ -216,18 +216,24 @@ fn multi_channel_workflow_query_uses_one_filter_per_channel() {
 }
 
 #[test]
-fn workflow_queries_batch_above_relay_explicit_channel_limit() {
-    let channel_ids = (0..WORKFLOW_QUERY_CHANNEL_BATCH_SIZE + 1)
-        .map(|index| uuid::Uuid::from_u128(index as u128 + 1).to_string())
-        .collect();
-    let batches = channel_workflow_filter_batches(channel_ids).expect("valid channels");
+fn workflow_queries_respect_relay_explicit_channel_limit() {
+    for (channel_count, expected_batch_sizes) in [
+        (WORKFLOW_QUERY_CHANNEL_BATCH_SIZE, vec![128]),
+        (WORKFLOW_QUERY_CHANNEL_BATCH_SIZE + 1, vec![128, 1]),
+    ] {
+        let channel_ids = (0..channel_count)
+            .map(|index| uuid::Uuid::from_u128(index as u128 + 1).to_string())
+            .collect();
+        let batches = channel_workflow_filter_batches(channel_ids).expect("valid channels");
 
-    assert_eq!(batches.len(), 2);
-    assert_eq!(batches[0].len(), WORKFLOW_QUERY_CHANNEL_BATCH_SIZE);
-    assert_eq!(batches[1].len(), 1);
-    assert!(batches.iter().flatten().all(|filter| filter["#h"]
-        .as_array()
-        .is_some_and(|values| values.len() == 1)));
+        assert_eq!(
+            batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            expected_batch_sizes
+        );
+        assert!(batches.iter().flatten().all(|filter| filter["#h"]
+            .as_array()
+            .is_some_and(|values| values.len() == 1)));
+    }
 }
 
 #[test]

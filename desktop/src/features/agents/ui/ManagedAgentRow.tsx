@@ -7,10 +7,8 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import {
-  circuitCooldownRemainingMs,
-  useAgentCircuitStatus,
-} from "@/features/agents/observerRelayStore";
+import { circuitCooldownRemainingMs } from "@/features/agents/observerRelayStore";
+import { useAgentCircuitStatus } from "@/features/agents/agentCircuitHooks";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import {
   formatDurationMs,

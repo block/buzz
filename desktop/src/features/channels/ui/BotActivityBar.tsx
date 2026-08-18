@@ -1,7 +1,7 @@
 import * as React from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
-import { useOpenCircuitAgents } from "@/features/agents/observerRelayStore";
+import { useOpenCircuitAgents } from "@/features/agents/agentCircuitHooks";
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import {
   getActivityHeadline,

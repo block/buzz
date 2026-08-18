@@ -9,10 +9,8 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
-import {
-  circuitCooldownRemainingMs,
-  useAgentCircuitStatus,
-} from "@/features/agents/observerRelayStore";
+import { circuitCooldownRemainingMs } from "@/features/agents/observerRelayStore";
+import { useAgentCircuitStatus } from "@/features/agents/agentCircuitHooks";
 import { formatDurationMs } from "@/features/agents/ui/agentSessionUtils";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";

@@ -19,17 +19,14 @@ function options(refetchOwnerProfiles) {
     ownerOnly: true,
     ownerPolicyError: null,
     refetchManagedAgents: async () => ({ data: [], error: null }),
-    refetchRelayAgents: async () => ({
-      data: [
-        {
-          pubkey: AGENT,
-          respondTo: "anyone",
-          respondToAllowlist: [],
-          channelIds: ["general"],
-        },
-      ],
-      error: null,
-    }),
+    fetchRelayAgents: async () => [
+      {
+        pubkey: AGENT,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+    ],
     refetchOwnerProfiles,
   };
 }
@@ -61,10 +58,9 @@ test("fresh managed evidence survives unrelated relay authorization errors", asy
       data: [{ pubkey: LOCAL_AGENT }],
       error: null,
     }),
-    refetchRelayAgents: async () => ({
-      data: undefined,
-      error: new Error("relay directory unavailable"),
-    }),
+    fetchRelayAgents: async () => {
+      throw new Error("relay directory unavailable");
+    },
   });
 
   assert.deepEqual(result, [HUMAN, LOCAL_AGENT]);
@@ -76,10 +72,9 @@ test("relay-only agents still fail closed when relay discovery fails", async () 
       profiles: { [AGENT]: { ownerPubkey: CURRENT } },
       missing: [],
     })),
-    refetchRelayAgents: async () => ({
-      data: undefined,
-      error: new Error("relay directory unavailable"),
-    }),
+    fetchRelayAgents: async () => {
+      throw new Error("relay directory unavailable");
+    },
   });
 
   assert.deepEqual(result, [HUMAN]);
@@ -97,10 +92,9 @@ test("mixed evidence preserves only fresh managed agents and humans", async () =
       data: [{ pubkey: LOCAL_AGENT }],
       error: null,
     }),
-    refetchRelayAgents: async () => ({
-      data: undefined,
-      error: new Error("relay directory unavailable"),
-    }),
+    fetchRelayAgents: async () => {
+      throw new Error("relay directory unavailable");
+    },
   });
 
   assert.deepEqual(result, [HUMAN, LOCAL_AGENT]);

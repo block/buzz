@@ -29,13 +29,7 @@ import {
   compareObserverEvents,
   isObserverEventAfter,
 } from "./lib/observerEventOrdering";
-import {
-  applyCircuitEvent,
-  getAgentCircuitStatus,
-  getOpenCircuitPubkeySignature,
-  resetCircuitState,
-  type AgentCircuitStatus,
-} from "./agentCircuitStatus";
+import { applyCircuitEvent, resetCircuitState } from "./agentCircuitStatus";
 
 export {
   compareObserverEvents,
@@ -86,41 +80,6 @@ const listeners = new Set<AgentObserverStoreListener>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
-
-/** Persistent per-agent circuit-breaker status, independent of channel/transcript scope. */
-export function useAgentCircuitStatus(
-  agentPubkey: string | null | undefined,
-): AgentCircuitStatus {
-  return React.useSyncExternalStore(subscribeAgentObserverStore, () =>
-    getAgentCircuitStatus(agentPubkey),
-  );
-}
-
-/**
- * The subset of `agents` whose circuit is currently open. Generic over the
- * caller's own agent shape so it works with any `{ pubkey: string }`-shaped
- * roster (e.g. a channel's bot list) without this module needing to know
- * about it. The `useSyncExternalStore` snapshot is a primitive signature
- * string (see `getOpenCircuitPubkeySignature`) rather than an array, so it's
- * reference-stable across renders where nothing changed without this module
- * needing a cache; the actual `T[]` is then derived per-render via a normal
- * `useMemo` keyed on both `agents` and that signature.
- */
-export function useOpenCircuitAgents<T extends { pubkey: string }>(
-  agents: readonly T[],
-): T[] {
-  const signature = React.useSyncExternalStore(
-    subscribeAgentObserverStore,
-    () => getOpenCircuitPubkeySignature(agents.map((agent) => agent.pubkey)),
-  );
-  return React.useMemo(() => {
-    if (!signature) return [];
-    const openPubkeys = new Set(signature.split(","));
-    return agents.filter((agent) =>
-      openPubkeys.has(normalizePubkey(agent.pubkey)),
-    );
-  }, [agents, signature]);
-}
 
 // Per-agent eviction floor: the ordering key of the newest event that eviction
 // has ever discarded for this agent. Once the journal is trimmed to the
@@ -300,11 +259,26 @@ function appendAgentEvents(
     : events;
   if (admissible.length === 0) return null;
 
-  const seen = new Set(
-    current.map(
-      (event) => `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
-    ),
-  );
+  // Ordinary live path: the harness publishes frames in order once per
+  // second, so the whole batch lands strictly after the retained tail. In
+  // that case no admissible event can collide with a retained one (the
+  // journal is sorted), so dedup only needs to look inside the batch and the
+  // merged journal is a plain concat — no Set over the full journal and no
+  // whole-journal re-sort (whose comparator Date.parses per comparison).
+  // Out-of-order or replayed arrivals take the full dedup + re-sort path.
+  const currentLast = current.at(-1);
+  const allAtEnd =
+    !currentLast ||
+    admissible.every((event) => isObserverEventAfter(event, currentLast));
+
+  const seen = allAtEnd
+    ? new Set<string>()
+    : new Set(
+        current.map(
+          (event) =>
+            `${event.timestamp.length}:${event.timestamp}:${event.seq}`,
+        ),
+      );
   const added: ObserverEvent[] = [];
   for (const event of admissible) {
     const eventKey = `${event.timestamp.length}:${event.timestamp}:${event.seq}`;
@@ -315,7 +289,9 @@ function appendAgentEvents(
   if (added.length === 0) return null;
 
   const sortedAdded = added.sort(compareObserverEvents);
-  const sorted = [...current, ...sortedAdded].sort(compareObserverEvents);
+  const sorted = allAtEnd
+    ? [...current, ...sortedAdded]
+    : [...current, ...sortedAdded].sort(compareObserverEvents);
   const trimmed = sorted.length > MAX_OBSERVER_EVENTS;
   const final = trimmed
     ? sorted.slice(sorted.length - OBSERVER_EVENTS_LOW_WATER)
@@ -333,14 +309,11 @@ function appendAgentEvents(
     });
   }
 
-  // The common live path appends a sorted batch after the retained window. Fold
+  // The common live path appends a sorted batch after the retained window
+  // (the same `allAtEnd` that authorized the concat fast-path above). Fold
   // that batch through the transcript state once without rebuilding history.
   // Out-of-order arrivals and cap eviction rebuild from the final window so
   // stateful tool/permission relationships remain correct.
-  const currentLast = current.at(-1);
-  const allAtEnd =
-    !currentLast ||
-    sortedAdded.every((event) => compareObserverEvents(event, currentLast) > 0);
   if (allAtEnd && !trimmed) {
     let transcriptState =
       transcriptByAgent.get(key) ?? createEmptyTranscriptState();
