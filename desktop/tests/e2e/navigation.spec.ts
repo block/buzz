@@ -577,6 +577,59 @@ test("message links to visible root messages open the thread panel", async ({
   );
 });
 
+test("direct-message tooltip metadata stays on one physical line", async ({
+  page,
+}) => {
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  const dmMessageId = "mock-dm-link-one-line";
+
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await page.evaluate((id) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "alice-tyler",
+      content: "DM source message",
+      id,
+    });
+  }, dmMessageId);
+
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`DM link buzz://message?channel=${dmChannelId}&id=${dmMessageId}`);
+  await page.getByTestId("send-message").click();
+
+  const dmLink = page
+    .getByTestId("message-row")
+    .filter({ hasText: "DM link" })
+    .last()
+    .getByRole("button", { name: "Open message in channel alice-tyler" });
+  await expect(dmLink).toHaveText("alice-tyler · DM source message");
+  await dmLink.hover();
+
+  const footer = page
+    .getByRole("tooltip")
+    .locator('[data-buzz-tooltip-metadata-type=""]');
+  await expect(footer).toContainText("Direct message with alice-tyler");
+  await expect(footer).toHaveCSS("white-space", "nowrap");
+  await expect(footer).toHaveCSS("overflow", "hidden");
+  await expect(footer).toHaveCSS("text-overflow", "ellipsis");
+  await expect
+    .poll(() =>
+      footer.evaluate((element) => {
+        const lineHeight = Number.parseFloat(
+          getComputedStyle(element).lineHeight,
+        );
+        return {
+          fitsOneLine: element.scrollHeight <= Math.ceil(lineHeight),
+          heightIsClipped: element.clientHeight === element.scrollHeight,
+        };
+      }),
+    )
+    .toEqual({ fitsOneLine: true, heightIsClipped: true });
+});
+
 test("message links omit tooltips when preview metadata is unavailable", async ({
   page,
 }) => {
