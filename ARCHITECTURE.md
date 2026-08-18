@@ -87,7 +87,8 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
          └── buzz-relay       (ties everything together — the server)
 
 buzz-ifc            (zero I/O — execution-domain derivation and IFC rules)
-    └── buzz-acp            (relay/ACP adapter and worker routing)
+    ├── buzz-acp            (relay/ACP adapter and worker routing)
+    └── buzz-ifc-broker     (stateful JSON-RPC policy process for non-Rust harnesses)
 buzz-sdk            (typed Nostr event builders — used by buzz-acp and buzz-cli)
 buzz-media          (Blossom/S3 media storage)
 buzz-cli            (agent-first CLI)
@@ -677,11 +678,11 @@ Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent 
 
 ---
 
-### buzz-ifc — Shared Agent Policy
+### buzz-ifc and buzz-ifc-broker — Shared Agent Policy
 
 `buzz-ifc` is a zero-I/O policy crate. Given facts already verified by a trusted Buzz adapter, it derives the invocation's audience, retained-state context, membership epoch, and effective capabilities. It also evaluates reads, calls, publications, and process reuse while retaining a conservative label for each process.
 
-`buzz-acp` links the crate directly. The surrounding adapter remains responsible for signed-event and membership verification, process lifecycle, credential mediation, and OS or VM confinement for confidential domains.
+`buzz-acp` links the crate directly. Other harnesses can run `buzz-ifc-broker` and use its bounded JSON-RPC protocol over stdio. Despite the executable name, this is the policy process inside a larger trusted agent gateway, not the complete product broker. It retains policy state for workers on that connection. The surrounding adapter remains responsible for signed-event and membership verification, process lifecycle, credential mediation, and OS or VM confinement for confidential domains.
 
 ---
 

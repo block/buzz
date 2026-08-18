@@ -1,0 +1,37 @@
+{
+  "protocol_version": "buzz-ifc-broker/1",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "domain/derive",
+    "params": {
+      "invocation": {
+        "realm_url": "wss://buzz.example",
+        "channel_id": "00000000-0000-0000-0000-000000000001",
+        "conversation_kind": "restricted",
+        "epoch": "membership:event-1",
+        "members": [
+          "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          "0101010101010101010101010101010101010101010101010101010101010101",
+          "0202020202020202020202020202020202020202020202020202020202020202"
+        ],
+        "executing_agent": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        "requesters": [
+          "0101010101010101010101010101010101010101010101010101010101010101"
+        ],
+        "owner": "0101010101010101010101010101010101010101010101010101010101010101",
+        "bot_capabilities": ["buzz.read.current"],
+        "conversation_capabilities": ["buzz.read.current"]
+      }
+    }
+  },
+  "expected_result": {
+    "audience": "restricted",
+    "compartment": "domain_confined",
+    "context": "conversation",
+    "domain_fingerprint": "77ed1593198b",
+    "domain_id": "fbad5ec7aed0f274f9c517fed619cb41262c2295fb62451477a3df7caf1f3ef1",
+    "epoch_fingerprint": "434d4af44419",
+    "reader_count": 2
+  }
+}

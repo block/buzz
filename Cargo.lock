@@ -1133,6 +1133,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-ifc-broker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-ifc",
+ "clap",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [

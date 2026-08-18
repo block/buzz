@@ -11,6 +11,7 @@ members = [
     "crates/buzz-audit",
     "crates/buzz-acp",
     "crates/buzz-ifc",
+    "crates/buzz-ifc-broker",
     "crates/buzz-agent",
     "crates/sprig",
     "crates/buzz-test-client",

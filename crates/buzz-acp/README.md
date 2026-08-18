@@ -153,7 +153,9 @@ state. Its logs report those remaining gaps explicitly.
 The deterministic label, domain, capability, reuse, and confinement rules live
 in the runtime-independent `buzz-ifc` crate. `buzz-acp` supplies the trusted
 Buzz-specific half: signed-event admission, relay-signed membership resolution,
-and ACP worker replacement.
+and ACP worker replacement. A non-Rust harness can use the same rules through
+the bounded JSON-RPC interface provided by `buzz-ifc-broker`; see that crate's
+README and conformance fixture for the wire contract.
 
 ### Parallel Agents & Heartbeat
 
