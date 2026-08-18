@@ -579,6 +579,7 @@ pub async fn confirm_team_snapshot_import(
             runtime_pid: None,
             backend: crate::managed_agents::BackendKind::Local,
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: Some(imported_team.id.clone()),
             persona_team_dir: None,

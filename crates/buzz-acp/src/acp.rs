@@ -702,7 +702,7 @@ impl AcpClient {
             .session_id)
     }
 
-    /// Send Goose's custom system-prompt request after `session/new`.
+    /// Replace Goose's native system prompt after `session/new`.
     pub async fn session_set_goose_system_prompt(
         &mut self,
         session_id: &str,
@@ -712,7 +712,7 @@ impl AcpClient {
             "_goose/unstable/session/system-prompt/set",
             serde_json::json!({
                 "sessionId": session_id,
-                "mode": "append",
+                "mode": "set",
                 "key": "buzz",
                 "text": text,
             }),
@@ -3421,7 +3421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goose_system_prompt_request_uses_append_contract() {
+    async fn goose_system_prompt_request_uses_set_contract() {
         let script = r#"
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
@@ -3438,7 +3438,7 @@ mod tests {
             "_goose/unstable/session/system-prompt/set"
         );
         assert_eq!(received["params"]["sessionId"], "ses_goose");
-        assert_eq!(received["params"]["mode"], "append");
+        assert_eq!(received["params"]["mode"], "set");
         assert_eq!(received["params"]["key"], "buzz");
         assert_eq!(received["params"]["text"], "Be terse");
     }

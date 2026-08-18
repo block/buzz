@@ -188,6 +188,7 @@ fn local_agent() -> ManagedAgentRecord {
             config: serde_json::json!({ "api_key": "localproviderkey" }),
         },
         backend_agent_id: Some("local-remote-id".to_string()),
+        provider_policy_pending: false,
         provider_binary_path: Some("/local/bin".to_string()),
         team_id: None,
         persona_team_dir: None,
@@ -262,8 +263,13 @@ fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+    let access_changed = apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
 
+    assert_eq!(
+        access_changed,
+        !crate::managed_agents::owner_only_access_build(),
+        "only an effective access change may trigger a runtime refresh"
+    );
     let a = &agents[0];
     // Secrets / harness / runtime — every one preserved from the local record.
     assert_eq!(
@@ -542,6 +548,176 @@ fn inbound_team_no_match_inserts_idempotently() {
     // Re-receive stays idempotent.
     apply_inbound_team(&mut teams, other.to_string(), team_content("New Team"));
     assert_eq!(teams.len(), 2, "re-receive of inserted team no-ops");
+}
+
+// ── Inbound team → membership propagation (commit_inbound_team wiring) ─────
+
+use std::cell::RefCell;
+
+/// A running instance of `persona_id`, optionally bound to a team.
+fn team_instance(seed: char, persona_id: &str, team_id: Option<&str>) -> ManagedAgentRecord {
+    let mut record = local_agent();
+    record.pubkey = seed.to_string().repeat(64);
+    record.name = persona_id.to_string();
+    record.persona_id = Some(persona_id.to_string());
+    record.team_id = team_id.map(str::to_string);
+    record
+}
+
+/// An inbound team edit that ADDS a persona must bind that persona's unbound
+/// running instances to the team — exactly like a local `update_team`. Without
+/// the propagation wiring the instance stays unbound (member in roster, not in
+/// behavior) until restart.
+#[test]
+fn inbound_team_add_binds_unbound_instance_through_wiring() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec!["p-existing".to_string()];
+    let existing = vec![
+        team_instance('a', "p-added", None),
+        team_instance('b', "p-existing", Some(TEAM_ID)),
+    ];
+    let saved = RefCell::new(None);
+
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        TeamEventContent {
+            name: "Team".to_string(),
+            description: None,
+            instructions: None,
+            persona_ids: Some(vec!["p-existing".to_string(), "p-added".to_string()]),
+        },
+        |_| Ok(()),
+        || Ok(existing.clone()),
+        |records| {
+            *saved.borrow_mut() = Some(records.to_vec());
+            Ok(())
+        },
+    )
+    .expect("inbound add succeeds");
+
+    let saved = saved
+        .borrow()
+        .clone()
+        .expect("add must save the agent store");
+    assert_eq!(
+        saved[0].team_id.as_deref(),
+        Some(TEAM_ID),
+        "the added persona's unbound instance is bound to the team"
+    );
+    assert_eq!(
+        saved[1].team_id.as_deref(),
+        Some(TEAM_ID),
+        "an instance already on the team is untouched"
+    );
+}
+
+/// An inbound team edit that REMOVES a persona ("keep agents") must detach that
+/// persona's instances bound to this team, so a kept instance stops drawing the
+/// team's instructions at spawn.
+#[test]
+fn inbound_team_removal_detaches_instance_through_wiring() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec!["p-removed".to_string()];
+    let existing = vec![team_instance('a', "p-removed", Some(TEAM_ID))];
+    let saved = RefCell::new(None);
+
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        TeamEventContent {
+            name: "Team".to_string(),
+            description: None,
+            instructions: None,
+            persona_ids: Some(vec![]),
+        },
+        |_| Ok(()),
+        || Ok(existing.clone()),
+        |records| {
+            *saved.borrow_mut() = Some(records.to_vec());
+            Ok(())
+        },
+    )
+    .expect("inbound removal succeeds");
+
+    let saved = saved
+        .borrow()
+        .clone()
+        .expect("removal must save the agent store");
+    assert_eq!(
+        saved[0].team_id, None,
+        "the removed persona's instance is detached from the team"
+    );
+}
+
+/// An inbound edit that omits `persona_ids` (a pre-always-publish client)
+/// preserves local membership, so the delta is empty and no instance is
+/// re-pointed — a metadata-only inbound edit must not disturb bindings.
+#[test]
+fn inbound_team_omitted_roster_leaves_bindings_untouched() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec!["p-a".to_string()];
+    let existing = vec![team_instance('a', "p-a", None)];
+    let saved = RefCell::new(None);
+
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content_omitting_optional_fields("Renamed"),
+        |_| Ok(()),
+        || Ok(existing.clone()),
+        |records| {
+            *saved.borrow_mut() = Some(records.to_vec());
+            Ok(())
+        },
+    )
+    .expect("inbound metadata-only edit succeeds");
+
+    assert!(
+        saved.borrow().is_none(),
+        "an empty membership delta writes nothing to the agent store"
+    );
+}
+
+/// A failing agent-store write after the authoritative `save_teams` is
+/// swallowed: the inbound reconcile still succeeds (boot repair is the retry),
+/// so a secondary-store hiccup never aborts an inbound event whose team write
+/// already landed.
+#[test]
+fn inbound_team_swallows_agent_store_failure() {
+    let mut teams = vec![local_team()];
+    teams[0].persona_ids = vec![];
+    commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        TeamEventContent {
+            name: "Team".to_string(),
+            description: None,
+            instructions: None,
+            persona_ids: Some(vec!["p-added".to_string()]),
+        },
+        |_| Ok(()),
+        || Err("agent store unreadable".to_string()),
+        |_| Ok(()),
+    )
+    .expect("inbound reconcile swallows secondary-store failure");
+}
+
+/// A `persist_teams` error propagates — the authoritative team write failing is
+/// a real reconcile failure, unlike best-effort agent IO.
+#[test]
+fn inbound_team_propagates_persist_teams_error() {
+    let mut teams = vec![local_team()];
+    let err = commit_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content("Team"),
+        |_| Err("disk full".to_string()),
+        || Ok(vec![]),
+        |_| Ok(()),
+    )
+    .expect_err("a failed team persist must propagate");
+    assert_eq!(err, "disk full");
 }
 
 // ── Tombstone (kind:5) consume ────────────────────────────────────────────

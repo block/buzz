@@ -72,6 +72,9 @@ pub(crate) struct SpawnConfigInputs<'a> {
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
     pub provider: Option<&'a str>,
+    /// Compile-time distribution capability projected at this runtime boundary.
+    /// The stored record remains portable; only effective spawned access is stamped.
+    pub enforced_owner_only: bool,
 }
 
 /// The effective spawn configuration of one managed-agent process.
@@ -136,7 +139,10 @@ impl SpawnConfigSnapshot {
             system_prompt,
             model,
             provider,
+            enforced_owner_only,
         } = inputs;
+        let (respond_to, respond_to_allowlist) =
+            super::projected_access_with_policy(record, enforced_owner_only);
         Self {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
@@ -155,16 +161,14 @@ impl SpawnConfigSnapshot {
                 .then(|| resolve_session_title(record.display_name.as_deref(), &record.name))
                 .flatten(),
             auth_tag: record.auth_tag.clone(),
-            respond_to: record.respond_to.as_str().to_string(),
-            respond_to_allowlist: (record.respond_to == super::types::RespondTo::Allowlist).then(
-                || {
-                    // A list spawn would reject is captured raw: the stamped
-                    // snapshot comes from a successful spawn, so any invalid
-                    // edit correctly compares unequal.
-                    super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)
-                        .unwrap_or_else(|_| record.respond_to_allowlist.clone())
-                },
-            ),
+            respond_to: respond_to.as_str().to_string(),
+            respond_to_allowlist: (respond_to == super::types::RespondTo::Allowlist).then(|| {
+                // A list spawn would reject is captured raw: the stamped
+                // snapshot comes from a successful spawn, so any invalid
+                // edit correctly compares unequal.
+                super::types::validate_respond_to_allowlist(&respond_to_allowlist)
+                    .unwrap_or(respond_to_allowlist)
+            }),
             idle_timeout_seconds: record.idle_timeout_seconds,
             max_turn_duration_seconds: record.max_turn_duration_seconds,
             // Hash the effective parallelism so over-cap edits that don't change
@@ -213,6 +217,7 @@ pub(crate) fn prospective_spawn_config_snapshot(
     teams: &[TeamRecord],
     workspace_relay: &str,
     global: &GlobalAgentConfig,
+    enforced_owner_only: bool,
 ) -> SpawnConfigSnapshot {
     // Prospective re-snapshot: apply the same `apply_persona_snapshot` the
     // start/restore paths run right before spawning, so this describes what a
@@ -262,6 +267,7 @@ pub(crate) fn prospective_spawn_config_snapshot(
         system_prompt: prompt.as_deref(),
         model: model.as_deref(),
         provider: provider.as_deref(),
+        enforced_owner_only,
     })
 }
 
