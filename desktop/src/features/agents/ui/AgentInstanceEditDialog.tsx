@@ -587,10 +587,6 @@ export function AgentInstanceEditDialog({
     );
   }
 
-  function handleOpenChange(next: boolean) {
-    onOpenChange(next);
-  }
-
   const providerValid = isEditAgentProviderSaveValid({
     llmProviderFieldVisible,
     currentProvider: provider,
@@ -737,7 +733,7 @@ export function AgentInstanceEditDialog({
         );
       }
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
-      handleOpenChange(false);
+      onOpenChange(false);
       onUpdated?.(result.agent);
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
@@ -848,7 +844,7 @@ export function AgentInstanceEditDialog({
     : ADVANCED_FIELDS_MOTION_TRANSITION;
 
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
+    <Dialog onOpenChange={onOpenChange} open={open}>
       <ChooserDialogContent
         className="max-w-3xl border-0"
         contentClassName="pt-3"
@@ -860,7 +856,7 @@ export function AgentInstanceEditDialog({
           <div className="flex w-full items-center justify-end gap-2">
             <Button
               disabled={updateMutation.isPending || isAvatarUploadPending}
-              onClick={() => handleOpenChange(false)}
+              onClick={() => onOpenChange(false)}
               type="button"
               variant="outline"
             >
@@ -893,7 +889,7 @@ export function AgentInstanceEditDialog({
               <Button
                 className="w-full"
                 onClick={() => {
-                  handleOpenChange(false);
+                  onOpenChange(false);
                   onEditLinkedPersona();
                 }}
                 size="sm"
