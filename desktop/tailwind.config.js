@@ -2,15 +2,34 @@
 export default {
   theme: {
     extend: {
-      // Sub-`text-xs` ramp for meta text (timestamps, count badges, tracking
-      // labels) and tiny glyphs. Defined in rem so Cmd +/- zoom — which scales
-      // the root <html> font-size — keeps scaling them. Do NOT reintroduce
-      // arbitrary `text-[…rem]` / `text-[…px]` literals; the px-text guard
-      // rejects them. Stock scale picks up from here: xs (12px), sm (14px)…
+      // Consolidated type ramp: 6 prose sizes + 1 mono. Every text class in
+      // the app compiles onto one of these steps:
+      //
+      //   Meta 12 (xs) · Body 14 (sm) · Title 18 (lg) · Section 24 (2xl) ·
+      //   Page 30 (3xl) · Display 40 (title) · Key 36 (nsec-key, mono)
+      //
+      // Legacy class names are remapped here instead of rewritten at every
+      // call site: the sub-12 meta band (3xs 8px, badge 10px, 2xs 11px) folds
+      // up to Meta 12, `text-base` (16px) folds down to Body 14, `text-xl`
+      // (20px) folds down to Title 18, and `text-4xl` (36px) / `text-5xl`
+      // (48px) fold to Display 40. Defined in rem so Cmd +/- zoom — which
+      // scales the root <html> font-size — keeps scaling them. Do NOT
+      // reintroduce arbitrary `text-[…rem]` / `text-[…px]` literals; the
+      // px-text guard rejects them.
       fontSize: {
-        "2xs": "0.6875rem", // 11px — meta-text workhorse (timestamps, badges)
-        "3xs": "0.5rem", // 8px — tiny glyphs / micro labels
-        badge: "0.625rem", // 10px — compact status badges
+        // Meta 12 — timestamps, count badges, tracking labels, tiny glyphs.
+        // Aliases of the stock `text-xs` step.
+        "2xs": "0.75rem",
+        "3xs": "0.75rem",
+        badge: "0.75rem",
+        // Body 14 — folds the old 16px body/description step down one clean
+        // step below its 18px header. Matches stock `text-sm` exactly.
+        base: ["0.875rem", { lineHeight: "1.25rem" }],
+        // Title 18 — folds the old 20px step onto stock `text-lg`.
+        xl: ["1.125rem", { lineHeight: "1.75rem" }],
+        // Display 40 — the single large display step (was 36/40/48).
+        "4xl": ["2.5rem", { lineHeight: "1.15" }],
+        "5xl": ["2.5rem", { lineHeight: "1.15" }],
         // 40px — onboarding page titles (tightened tracking for large display type)
         title: ["2.5rem", { lineHeight: "1.15", letterSpacing: "-0.02em" }],
         // 36px — the backup-step private key, shown large in monospace
