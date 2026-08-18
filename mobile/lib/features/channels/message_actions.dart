@@ -47,6 +47,22 @@ part 'message_actions/message_reaction_tray.dart';
 /// `msg.body.slice(0, 100)`.
 const _reminderPreviewLength = 100;
 
+/// Presents the actions for [message] as an anchored popover when both
+/// [anchorRect] and [captureAnchorSnapshot] are supplied, otherwise as a sheet.
+///
+/// Popover capture is asynchronous: [captureAnchorSnapshot] must remain valid
+/// until its future completes, and the returned image becomes this function's
+/// responsibility to dispose. [onPopoverPresented] runs after capture succeeds
+/// and immediately before the route is pushed. [onPopoverDismissed] runs after
+/// that route completes while [context] is still mounted, so the callbacks are
+/// paired only while their owner remains mounted; neither runs for sheet
+/// fallback or a failed capture.
+///
+/// [composerFocusNode] remains caller-owned and must outlive the popover. If it
+/// has focus when this function is called, the popover unfocuses it and invokes
+/// [restoreComposerFocus] only after a dismissal with no selected action. The
+/// restorer must remain callable for the same lifetime and no-op if its composer
+/// is later disposed or replaced.
 void showMessageActions({
   required BuildContext context,
   required WidgetRef ref,
