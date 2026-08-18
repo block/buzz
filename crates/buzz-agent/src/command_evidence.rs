@@ -57,14 +57,6 @@ enum EvidenceKind {
     Apple,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum EvidenceMode {
-    #[default]
-    Strict,
-    TrustedLan,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawServiceRule {
@@ -77,8 +69,6 @@ struct RawServiceRule {
 #[serde(deny_unknown_fields)]
 struct RawEvidencePolicy {
     version: u32,
-    #[serde(default)]
-    mode: EvidenceMode,
     maximum_evidence_age_seconds: u64,
     services: Vec<RawServiceRule>,
     allowed_apple_ids: Vec<String>,
@@ -139,7 +129,6 @@ pub struct ValidatedToolEvidence {
 /// LM Studio's response ID or emits any portion of the response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandEvidenceGate {
-    mode: EvidenceMode,
     services: BTreeMap<String, ServiceRule>,
     maximum_evidence_age_seconds: i64,
     allowed_apple_ids: BTreeSet<String>,
@@ -154,7 +143,6 @@ impl CommandEvidenceGate {
     ) -> Result<Self, EvidenceRejection> {
         if expected_tool_bindings.is_empty() && raw.is_none_or(str::is_empty) {
             return Ok(Self {
-                mode: EvidenceMode::Strict,
                 services: BTreeMap::new(),
                 maximum_evidence_age_seconds: 1,
                 allowed_apple_ids: BTreeSet::new(),
@@ -172,13 +160,6 @@ impl CommandEvidenceGate {
             || policy.services.len() > MAX_SERVICES
             || policy.allowed_apple_ids.len() > MAX_ALLOWLIST_ENTRIES
             || policy.allowed_file_paths.len() > MAX_ALLOWLIST_ENTRIES
-            || (policy.mode == EvidenceMode::TrustedLan
-                && (!policy.allowed_apple_ids.is_empty()
-                    || !policy.allowed_file_paths.is_empty()
-                    || policy
-                        .services
-                        .iter()
-                        .any(|service| service.kind == EvidenceKind::Apple)))
         {
             return Err(EvidenceRejection::InvalidPolicy);
         }
@@ -210,7 +191,6 @@ impl CommandEvidenceGate {
             return Err(EvidenceRejection::InvalidPolicy);
         }
         Ok(Self {
-            mode: policy.mode,
             services,
             maximum_evidence_age_seconds: i64::try_from(policy.maximum_evidence_age_seconds)
                 .map_err(|_| EvidenceRejection::InvalidPolicy)?,
@@ -254,13 +234,6 @@ impl CommandEvidenceGate {
             return Err(EvidenceRejection::UntrustedService);
         }
         let value = decode_tool_output(&call.output)?;
-        if self.mode == EvidenceMode::TrustedLan {
-            return Ok(ValidatedToolEvidence {
-                server_label: label.clone(),
-                tool_name: call.name.clone(),
-                records: Vec::new(),
-            });
-        }
         match rule.kind {
             EvidenceKind::Memory => memory::validate(
                 &value,

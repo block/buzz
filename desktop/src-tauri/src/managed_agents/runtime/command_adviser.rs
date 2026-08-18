@@ -79,27 +79,6 @@ pub(super) fn should_enable_mcp_hooks(
     runtime_supports_hooks && !persona_id.is_some_and(is_command_adviser_persona)
 }
 
-pub(super) fn trusted_lan_native_catalog(
-    app: &AppHandle,
-    persona_id: Option<&str>,
-) -> Option<crate::command_services::policy::TrustedLanRuntimeCatalog> {
-    persona_id.filter(|id| is_command_adviser_persona(id))?;
-    let config_path = app
-        .path()
-        .app_config_dir()
-        .ok()?
-        .join("trusted-lan-sources.json");
-    let config = load_optional_trusted_lan_config(&config_path)
-        .ok()
-        .flatten()?;
-    crate::command_services::policy::trusted_lan_runtime_catalog(
-        config.memory_url().as_str(),
-        config.rag_url().as_str(),
-        &config.configuration_identity(),
-    )
-    .ok()
-}
-
 pub(super) fn apply_source_env(
     command: &mut std::process::Command,
     app: &AppHandle,

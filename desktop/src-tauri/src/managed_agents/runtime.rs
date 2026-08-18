@@ -847,23 +847,6 @@ pub fn spawn_agent_child(
     }
     let mut security_env = BTreeMap::new();
     apply_runtime_security_env(&mut security_env, runtime_meta);
-    if security_env
-        .get("LM_STUDIO_MCP_INTEGRATIONS")
-        .is_some_and(|integrations| integrations == "[]")
-    {
-        if let Some(catalog) =
-            command_adviser::trusted_lan_native_catalog(app, record.persona_id.as_deref())
-        {
-            security_env.insert(
-                "LM_STUDIO_MCP_INTEGRATIONS".to_string(),
-                catalog.integrations_json,
-            );
-            security_env.insert(
-                "LM_STUDIO_COMMAND_EVIDENCE_POLICY".to_string(),
-                catalog.evidence_policy_json,
-            );
-        }
-    }
     for (key, value) in security_env {
         command.env(key, value);
     }

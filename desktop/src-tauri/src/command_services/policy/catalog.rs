@@ -56,21 +56,6 @@ pub(crate) struct CommandEvidencePolicy {
     allowed_file_paths: Vec<String>,
 }
 
-pub(crate) struct TrustedLanRuntimeCatalog {
-    pub(crate) integrations_json: String,
-    pub(crate) evidence_policy_json: String,
-}
-
-#[derive(Serialize)]
-struct TrustedLanEvidencePolicy {
-    version: u32,
-    mode: &'static str,
-    maximum_evidence_age_seconds: u64,
-    services: Vec<CommandEvidenceService>,
-    allowed_apple_ids: Vec<String>,
-    allowed_file_paths: Vec<String>,
-}
-
 #[derive(Serialize)]
 struct CommandEvidenceService {
     server_label: &'static str,
@@ -191,81 +176,6 @@ pub(crate) fn build_catalog_integrations(
         });
     }
     Ok(result)
-}
-
-pub(crate) fn trusted_lan_runtime_catalog(
-    memory_url: &str,
-    rag_url: &str,
-    configuration_identity: &str,
-) -> Result<TrustedLanRuntimeCatalog, AdmissionError> {
-    validate_service_endpoint(KnowledgeServiceKind::Memory, memory_url)?;
-    validate_service_endpoint(KnowledgeServiceKind::Rag, rag_url)?;
-    if configuration_identity.len() != 64
-        || configuration_identity
-            .bytes()
-            .any(|byte| !byte.is_ascii_hexdigit() || byte.is_ascii_uppercase())
-    {
-        return Err(AdmissionError::InvalidAttestation);
-    }
-    let authorization = BTreeMap::from([(
-        "Authorization".to_string(),
-        "Bearer trusted-lan-loopback".to_string(),
-    )]);
-    let integrations = vec![
-        NativeMcpIntegration {
-            integration_type: "ephemeral_mcp",
-            server_label: "memory".to_string(),
-            server_url: memory_url.to_string(),
-            allowed_tools: [
-                "search_events",
-                "recall_for_entity",
-                "get_entity",
-                "list_entities",
-                "record_event",
-                "upsert_entity",
-                "link_entities",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-            headers: authorization.clone(),
-        },
-        NativeMcpIntegration {
-            integration_type: "ephemeral_mcp",
-            server_label: "rag".to_string(),
-            server_url: rag_url.to_string(),
-            allowed_tools: ["search_knowledge_base", "list_collections", "get_document"]
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            headers: authorization,
-        },
-    ];
-    let policy = TrustedLanEvidencePolicy {
-        version: 1,
-        mode: "trusted_lan",
-        maximum_evidence_age_seconds: 24 * 60 * 60,
-        services: vec![
-            CommandEvidenceService {
-                server_label: "memory",
-                kind: "memory",
-                active_identity: "node:trusted-lan".to_string(),
-            },
-            CommandEvidenceService {
-                server_label: "rag",
-                kind: "rag",
-                active_identity: configuration_identity.to_string(),
-            },
-        ],
-        allowed_apple_ids: Vec::new(),
-        allowed_file_paths: Vec::new(),
-    };
-    Ok(TrustedLanRuntimeCatalog {
-        integrations_json: serde_json::to_string(&integrations)
-            .map_err(|_| AdmissionError::InvalidAttestation)?,
-        evidence_policy_json: serde_json::to_string(&policy)
-            .map_err(|_| AdmissionError::InvalidAttestation)?,
-    })
 }
 
 pub(crate) fn build_adviser_runtime_catalog(
