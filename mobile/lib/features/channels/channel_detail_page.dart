@@ -123,16 +123,29 @@ int? _channelReadTimestamp({
   return dateTimeToUnixSeconds(channel.lastMessageAt);
 }
 
+/// Controls how a hydrated initial thread is added to the navigation stack.
+enum InitialThreadRouteBehavior {
+  /// Keep the channel route beneath the thread.
+  push,
+
+  /// Replace the temporary channel route so Back returns to its origin.
+  replaceCurrentRoute,
+}
+
 class ChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
   final String? initialMessageId;
   final String? initialThreadRootId;
+
+  /// How the automatically opened initial thread affects the route stack.
+  final InitialThreadRouteBehavior initialThreadRouteBehavior;
 
   const ChannelDetailPage({
     super.key,
     required this.channel,
     this.initialMessageId,
     this.initialThreadRootId,
+    this.initialThreadRouteBehavior = InitialThreadRouteBehavior.push,
   });
 
   @override
@@ -453,6 +466,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                               allMessages: messages,
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
+                              initialThreadRouteBehavior:
+                                  initialThreadRouteBehavior,
                               initialOrdinaryUnreadMessageIds:
                                   initialOrdinaryUnreadMessageIds,
                               initialOldestOrdinaryUnreadMessageId:
