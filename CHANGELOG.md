@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.5.16
+
+### Desktop and shared changes
+
+- fix(desktop): restore release agent mentions ([#6182](https://github.com/block/buzz/pull/6182)) ([`ee992ff0822f44d1c308822f116cb9d26f9a3386`](https://github.com/block/buzz/commit/ee992ff0822f44d1c308822f116cb9d26f9a3386))
+- test(desktop): cover exact workflow batch limit ([#6168](https://github.com/block/buzz/pull/6168)) ([`f8692fa9b52ddcfeb4b95fb4862109983509f131`](https://github.com/block/buzz/commit/f8692fa9b52ddcfeb4b95fb4862109983509f131))
+
+### Other repository changes
+
+- None
+
+[Compare desktop-v0.5.15...desktop-v0.5.16](https://github.com/block/buzz/compare/desktop-v0.5.15...desktop-v0.5.16)
+
+## v0.5.15
+
+### Desktop and shared changes
+
+- Preserve managed agent mentions during relay errors ([#6167](https://github.com/block/buzz/pull/6167)) ([`7f61cf431af1d8f0480a0baf525881a12f2be7f2`](https://github.com/block/buzz/commit/7f61cf431af1d8f0480a0baf525881a12f2be7f2))
+- fix(workflows): preserve multi-channel listing semantics ([#6009](https://github.com/block/buzz/pull/6009)) ([`f7a01bda7b1bf95cdbc9dc21bb69970955b14ecc`](https://github.com/block/buzz/commit/f7a01bda7b1bf95cdbc9dc21bb69970955b14ecc))
+- fix(desktop): align preview sidebar row styling ([#6163](https://github.com/block/buzz/pull/6163)) ([`439c03749182495ee09f85a73423dd17e7ccda61`](https://github.com/block/buzz/commit/439c03749182495ee09f85a73423dd17e7ccda61))
+- fix(desktop): repair dropped team membership links at boot and on edit ([#5904](https://github.com/block/buzz/pull/5904)) ([`57feca2f20bb3434d70ce770b9ed98b1c1472332`](https://github.com/block/buzz/commit/57feca2f20bb3434d70ce770b9ed98b1c1472332))
+- Rename Bumble agent to Pollen ([#5864](https://github.com/block/buzz/pull/5864)) ([`076081bfc646f8fdf8ff9dc6e00843b5bdae0ad0`](https://github.com/block/buzz/commit/076081bfc646f8fdf8ff9dc6e00843b5bdae0ad0))
+- fix(desktop): resolve agent profiles through one archive-aware selector ([#5706](https://github.com/block/buzz/pull/5706)) ([`d12d82577818a95babac4d30cf242c46124feb5e`](https://github.com/block/buzz/commit/d12d82577818a95babac4d30cf242c46124feb5e))
+- feat(workflows): add responsive library card actions ([#6008](https://github.com/block/buzz/pull/6008)) ([`edc4a09aaa41c29e2495a28247c895febaf6587d`](https://github.com/block/buzz/commit/edc4a09aaa41c29e2495a28247c895febaf6587d))
+- fix(desktop): enforce shared agent access across devices ([#6086](https://github.com/block/buzz/pull/6086)) ([`f716eef437dcf91994518b8df7f581e86bb51748`](https://github.com/block/buzz/commit/f716eef437dcf91994518b8df7f581e86bb51748))
+- feat(model-capabilities): drive model capabilities and labels from one manifest ([#5597](https://github.com/block/buzz/pull/5597)) ([`1b7e5ac1be641f5ecc2b2a0ba37a1dc400e073c9`](https://github.com/block/buzz/commit/1b7e5ac1be641f5ecc2b2a0ba37a1dc400e073c9))
+- fix(desktop): hide the offcanvas-collapsed sidebar so it stops painting over the community rail ([#5947](https://github.com/block/buzz/pull/5947)) ([`78cbffeb64c01220e705adf0aa9690fdbd0d7a37`](https://github.com/block/buzz/commit/78cbffeb64c01220e705adf0aa9690fdbd0d7a37))
+
+### Other repository changes
+
+- Remove Startup Recovery section in base prompt ([#6161](https://github.com/block/buzz/pull/6161)) ([`f64899e5d17df4c928ea415a5f42052120edaecb`](https://github.com/block/buzz/commit/f64899e5d17df4c928ea415a5f42052120edaecb))
+- fix(cli): keep project replacement timestamps at or after wall clock ([#5666](https://github.com/block/buzz/pull/5666)) ([`a282e0643fe0f14ace4d9b57ead99d0635e38995`](https://github.com/block/buzz/commit/a282e0643fe0f14ace4d9b57ead99d0635e38995))
+- Remove GitHub security advisory commitment ([#6144](https://github.com/block/buzz/pull/6144)) ([`85bacea52b8359999f22c6ac07207a130809c488`](https://github.com/block/buzz/commit/85bacea52b8359999f22c6ac07207a130809c488))
+- fix(acp): gate relay-signed workflow messages on their attributed author ([#6129](https://github.com/block/buzz/pull/6129)) ([`54f11219efe6b2617ba74d1ef8701fb5413956d8`](https://github.com/block/buzz/commit/54f11219efe6b2617ba74d1ef8701fb5413956d8))
+- fix(acp): replace Goose native system prompt ([#5964](https://github.com/block/buzz/pull/5964)) ([`5b3f0375a26843d73b29b55cc2f3c313bd857ccb`](https://github.com/block/buzz/commit/5b3f0375a26843d73b29b55cc2f3c313bd857ccb))
+- docs: refresh agent development guidance ([#6049](https://github.com/block/buzz/pull/6049)) ([`f956e6fe06a76e50cbd8fba1a162482e752e7f1a`](https://github.com/block/buzz/commit/f956e6fe06a76e50cbd8fba1a162482e752e7f1a))
+- feat(mobile): require device authentication for identity export ([#5116](https://github.com/block/buzz/pull/5116)) ([`d8281b9c93395f15d55091b131bb2747a0a3da8a`](https://github.com/block/buzz/commit/d8281b9c93395f15d55091b131bb2747a0a3da8a))
+- Polish mobile message threads and composer ([#5645](https://github.com/block/buzz/pull/5645)) ([`69107dc3bfecbb80cc5f5b8bb6a7647ad054ce57`](https://github.com/block/buzz/commit/69107dc3bfecbb80cc5f5b8bb6a7647ad054ce57))
+
+[Compare desktop-v0.5.14...desktop-v0.5.15](https://github.com/block/buzz/compare/desktop-v0.5.14...desktop-v0.5.15)
+
 ## v0.5.14
 
 ### Desktop and shared changes

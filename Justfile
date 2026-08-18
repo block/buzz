@@ -323,6 +323,14 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # buzz-agent model-capabilities corpus: the Rust half of the
+        # cross-language drift guard. `model_capabilities.rs` embeds
+        # scripts/model-capabilities.json + scripts/normative-corpus.json via
+        # include_str! and replays all 103 vectors as pure in-process tests (no
+        # infra). Enumerated explicitly because nothing in CI runs
+        # `cargo test --workspace`; without this step a manifest edit that
+        # diverges Rust from the corpus ships green.
+        cargo nextest run -p buzz-agent --lib
     else
         ./scripts/run-tests.sh unit
     fi
@@ -330,6 +338,15 @@ test-unit:
 # Run integration tests only (starts services if needed)
 test-integration:
     ./scripts/run-tests.sh integration
+
+# Regenerate the model-capability normative corpus from the production Rust
+# resolver. The corpus is a golden snapshot, never hand-edited: this runs the
+# `#[ignore]`d writer test in buzz-agent, which serializes `resolve()` over the
+# inputs-only question table to scripts/normative-corpus.json. Run this after
+# any model-capabilities.json edit, then commit the regenerated file. The
+# `corpus_matches_generated_snapshot` gate fails CI if the committed file drifts.
+regen-model-corpus:
+    cargo test -p buzz-agent --lib model_capabilities::tests::regen_corpus_file -- --ignored --exact
 
 # Buzz shared compute e2e: current desktop discovery/admission logic and
 # Playwright UI coverage.

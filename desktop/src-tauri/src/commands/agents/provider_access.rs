@@ -15,7 +15,9 @@ pub(super) fn needs_reconciliation_with_policy(
     record: &ManagedAgentRecord,
     owner_only_access: bool,
 ) -> bool {
-    owner_only_access && record.backend != BackendKind::Local && record.backend_agent_id.is_some()
+    (owner_only_access || record.provider_policy_pending)
+        && record.backend != BackendKind::Local
+        && record.backend_agent_id.is_some()
 }
 
 #[derive(Debug)]
@@ -50,25 +52,23 @@ fn collect_targets_with(
         .collect()
 }
 
-/// Redeploy every existing provider agent in an owner-only access build.
+/// Redeploy existing provider agents whose access policy requires enforcement.
 ///
-/// The saved `backend_agent_id` only proves that some provider deployment
-/// exists. A marked build sends the current owner-only payload before each
-/// community UI load. Workspace apply fails closed if any provider rejects it.
+/// Owner-only builds refresh every existing deployment before each community UI
+/// load. All builds also retry records whose saved policy has not yet been
+/// acknowledged by a successful provider deployment. Workspace apply fails
+/// closed if any selected provider rejects the current policy.
 pub(crate) async fn reconcile_on_workspace_apply(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<(), String> {
-    if !crate::managed_agents::owner_only_access_build() {
-        return Ok(());
-    }
-
+    let owner_only_access = crate::managed_agents::owner_only_access_build();
     let targets = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        collect_targets_with(load_managed_agents(app)?, true, |record| {
+        collect_targets_with(load_managed_agents(app)?, owner_only_access, |record| {
             super::build_deploy_payload(app, state, record)
         })
     };
@@ -110,7 +110,7 @@ pub(crate) async fn reconcile_on_workspace_apply(
     Ok(())
 }
 
-fn persist_failure(
+pub(crate) fn persist_failure(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
@@ -180,17 +180,53 @@ mod tests {
     }
 
     #[test]
-    fn unmarked_build_collects_no_upgrade_targets() {
-        let records = vec![record(
+    fn unmarked_build_collects_only_pending_targets() {
+        let mut pending = record(
+            BackendKind::Provider {
+                id: "pending-provider".into(),
+                config: serde_json::json!({}),
+            },
+            Some("existing-pending"),
+        );
+        pending.pubkey = "pending-agent".into();
+        pending.provider_policy_pending = true;
+        let ordinary = record(
+            BackendKind::Provider {
+                id: "ordinary-provider".into(),
+                config: serde_json::json!({}),
+            },
+            Some("existing-ordinary"),
+        );
+
+        let targets = collect_targets_with(vec![ordinary, pending], false, |record| {
+            Ok(serde_json::json!({"pubkey": record.pubkey}))
+        });
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].pubkey, "pending-agent");
+        assert_eq!(targets[0].provider_id, "pending-provider");
+        assert_eq!(
+            targets[0].agent_json.as_ref().unwrap()["pubkey"],
+            "pending-agent"
+        );
+    }
+
+    #[test]
+    fn pending_policy_requires_an_existing_provider_deployment() {
+        let mut undeployed = record(
             BackendKind::Provider {
                 id: "provider".into(),
                 config: serde_json::json!({}),
             },
-            Some("existing"),
-        )];
-
-        assert!(
-            collect_targets_with(records, false, |_| { Ok(serde_json::Value::Null) }).is_empty()
+            None,
         );
+        undeployed.provider_policy_pending = true;
+        let mut local = record(BackendKind::Local, Some("stale-provider-id"));
+        local.provider_policy_pending = true;
+
+        assert!(collect_targets_with(vec![undeployed, local], false, |_| {
+            Ok(serde_json::Value::Null)
+        })
+        .is_empty());
     }
 }

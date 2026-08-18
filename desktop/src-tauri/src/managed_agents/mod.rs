@@ -39,6 +39,7 @@ pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
 pub(crate) mod team_events;
 mod team_repair;
+pub(crate) use team_repair::team_persona_key;
 mod teams;
 mod types;
 

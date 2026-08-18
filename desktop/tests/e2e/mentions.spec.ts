@@ -1214,6 +1214,52 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
     .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 
+test("managed agents keep their p tag when relay discovery fails before send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        status: "running",
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await expect(input).toHaveText("@quinn ");
+  await page.keyboard.type("hello");
+  await expect(input).toHaveText("@quinn hello");
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentListErrors = Array(5).fill(
+      "mock unrelated relay directory failure",
+    );
+  });
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+});
+
 test("selected relay agents revoked before send emit no p tag", async ({
   page,
 }) => {
@@ -1406,6 +1452,36 @@ test("owner-only builds hide other-owned relay agents", async ({ page }) => {
   await page.getByTestId("message-input").fill("@quinn");
 
   await expect(autocomplete(page)).toHaveCount(0);
+});
+
+test("owner-only builds show verified same-owner relay agents", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    ownerOnlyAccessBuild: true,
+    searchProfiles: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        isAgent: true,
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        name: "quinn",
+        respondTo: "owner-only",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill("@quinn");
+
+  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
 });
 
 test("relay-only allowlisted agents stay hidden outside their channel", async ({
@@ -2429,7 +2505,7 @@ test("agent profile popover shows its owner", async ({ page }) => {
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: TEST_IDENTITIES.bob.pubkey,
         isAgent: true,
       },
@@ -2440,16 +2516,16 @@ test("agent profile popover shows its owner", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
@@ -2469,7 +2545,7 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: MOCK_VIEWER_PUBKEY,
         isAgent: true,
       },
@@ -2480,16 +2556,16 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
@@ -2509,7 +2585,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: CASEY_PROFILE_PUBKEY,
         isAgent: true,
       },
@@ -2520,16 +2596,16 @@ test("agent profile popover falls back to the owner's pubkey", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',

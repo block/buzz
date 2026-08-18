@@ -113,6 +113,7 @@ type MockManagedAgentRuntimeSeed = {
 
 type MockRelayAgentSeed = {
   pubkey: string;
+  ownerPubkey?: string | null;
   name: string;
   agentType?: string;
   capabilities?: string[];
@@ -236,6 +237,8 @@ type E2eConfig = {
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
+    /** When set, workflow updates fail with this message. */
+    workflowUpdateError?: string;
     /** When set, the `delete_custom_harness` mock command throws with this message. */
     deleteCustomHarnessError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
@@ -849,6 +852,7 @@ type RawSendChannelMessageResponse = {
 
 type RawRelayAgent = {
   pubkey: string;
+  owner_pubkey?: string | null;
   name: string;
   agent_type: string;
   channels: string[];
@@ -2322,6 +2326,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
     });
     mockRelayAgents.push({
       pubkey: seed.pubkey,
+      owner_pubkey: seed.ownerPubkey ?? null,
       name: seed.name,
       agent_type: seed.agentType ?? "goose",
       channels: channels.map((channel) => channel.name),
@@ -2406,9 +2411,9 @@ function resetMockPersonas(config?: E2eConfig) {
     },
     {
       id: "builtin:bumble",
-      display_name: "Bumble",
+      display_name: "Pollen",
       avatar_url: null,
-      system_prompt: "You are Bumble.",
+      system_prompt: "You are Pollen.",
     },
   ];
   mockPersonas = builtInPersonas.map((persona) => ({
@@ -3356,6 +3361,7 @@ let mockRelayAgents: RawRelayAgent[] = defaultMockRelayAgents.map((agent) => ({
 
 type MockWorkflow = {
   id: string;
+  revision: string;
   name: string;
   owner_pubkey: string;
   channel_id: string | null;
@@ -3443,6 +3449,7 @@ function handleCreateWorkflow(args: {
       : `workflow_${mockWorkflowIdCounter}`;
   const workflow: MockWorkflow = {
     id: `mock-wf-${mockWorkflowIdCounter}`,
+    revision: `mock-revision-${mockWorkflowIdCounter}-1`,
     name,
     owner_pubkey: MOCK_IDENTITY_PUBKEY,
     channel_id: args.channelId,
@@ -3466,13 +3473,22 @@ function handleCreateWorkflow(args: {
 function handleUpdateWorkflow(args: {
   workflowId: string;
   yamlDefinition: string;
+  expectedRevision: string;
 }) {
   const workflow = mockWorkflows.find((w) => w.id === args.workflowId);
   if (!workflow) throw new Error(`Workflow ${args.workflowId} not found`);
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowUpdateError;
+  if (configuredError) throw new Error(configuredError);
+  if (workflow.revision !== args.expectedRevision) {
+    throw new Error(
+      "workflow changed since it was loaded; refresh and try again",
+    );
+  }
   const definition = parseWorkflowDefinition(args.yamlDefinition);
   if (typeof definition.name === "string") workflow.name = definition.name;
   workflow.definition = definition;
   workflow.updated_at = Math.floor(Date.now() / 1000);
+  workflow.revision = `mock-revision-${workflow.id}-${workflow.updated_at}-${Math.random()}`;
 
   const trigger = definition.trigger as Record<string, unknown> | undefined;
   return {

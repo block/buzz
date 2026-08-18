@@ -1239,7 +1239,6 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     use std::process::{Command, Stdio};
     // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
     // `true` exits immediately with 0 — just a handle we need for type purposes.
-    //
     // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
     // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
     // bare `true` lookup during that window fails with NotFound (observed
@@ -1256,13 +1255,14 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         .expect("spawn true for placeholder");
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
-        log_path: std::path::PathBuf::new(),
+        log_path: Default::default(),
         spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
             &minimal_record(&"cc".repeat(32)),
             &[],
             &[],
             "wss://relay.example",
             &Default::default(),
+            false,
         ),
         setup_mode: false,
         adapter_availability: None,

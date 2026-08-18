@@ -14,8 +14,7 @@ class _ComposeBarLayout extends StatelessWidget {
   final _AttachmentSurface attachmentSurface;
   final ValueChanged<BuildContext> onAttachmentTap;
   final VoidCallback onExpand;
-  final double expansionValue;
-  final double expansionProgress;
+  final Animation<double> expansionAnimation;
   final bool formattingOpen;
   final VoidCallback onCloseFormatting;
   final Duration motionDuration;
@@ -43,8 +42,7 @@ class _ComposeBarLayout extends StatelessWidget {
     required this.attachmentSurface,
     required this.onAttachmentTap,
     required this.onExpand,
-    required this.expansionValue,
-    required this.expansionProgress,
+    required this.expansionAnimation,
     required this.formattingOpen,
     required this.onCloseFormatting,
     required this.motionDuration,
@@ -69,184 +67,173 @@ class _ComposeBarLayout extends StatelessWidget {
     final collapsedText = trimmedDraft.isEmpty
         ? resolvedHint
         : trimmedDraft.replaceAll(RegExp(r'\s+'), ' ');
-    final composerRadius =
-        Radii.dialog + Grid.quarter * (1 - expansionProgress);
-    return Container(
-      key: const ValueKey('composer-surface'),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(composerRadius),
-        border: Border.all(
-          color: Colors.black.withValues(alpha: 0.04),
-          width: 1,
-        ),
-      ),
-      padding: const EdgeInsets.all(Grid.xxs),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (attachments.isNotEmpty) ...[
-            _AttachmentStrip(
-              attachments: attachments,
-              onRemove: onRemoveAttachment,
-            ),
-            const SizedBox(height: Grid.xxs),
-          ],
-          if (uploadError case final error?) ...[
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                error,
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.error,
-                ),
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (attachments.isNotEmpty) ...[
+          _AttachmentStrip(
+            attachments: attachments,
+            onRemove: onRemoveAttachment,
+          ),
+          const SizedBox(height: Grid.xxs),
+        ],
+        if (uploadError case final error?) ...[
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              error,
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.error,
               ),
             ),
-            const SizedBox(height: Grid.xxs),
-          ],
-          // Keep the default state out of the focus system entirely so
-          // restored native focus cannot expand a newly opened channel.
-          if (isExpanded)
-            resizeDuration == Duration.zero
-                ? KeyedSubtree(
-                    key: const ValueKey('composer-text-height-motion'),
-                    child: _buildTextField(context),
-                  )
-                : AnimatedSize(
-                    key: const ValueKey('composer-text-height-motion'),
-                    alignment: Alignment.topCenter,
-                    duration: resizeDuration,
-                    curve: Curves.easeOutCubic,
-                    child: _buildTextField(context),
-                  )
-          else
-            Row(
-              children: [
-                _AttachmentTrigger(
-                  surface: attachmentSurface,
-                  formattingOpen: false,
-                  onTap: onAttachmentTap,
-                ),
-                const SizedBox(width: Grid.xxs),
-                Expanded(
-                  child: Semantics(
-                    button: true,
-                    label: resolvedHint,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () => _runComposerAction(onExpand),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          vertical: Grid.half,
-                        ),
-                        child: Align(
-                          alignment: Alignment.centerLeft,
-                          child: Text(
-                            collapsedText,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.bodyLarge?.copyWith(
-                              color: trimmedDraft.isEmpty
-                                  ? context.colors.onSurfaceVariant
-                                  : context.colors.onSurface,
-                            ),
+          ),
+          const SizedBox(height: Grid.xxs),
+        ],
+        // Keep the default state out of the focus system entirely so
+        // restored native focus cannot expand a newly opened channel.
+        if (isExpanded)
+          resizeDuration == Duration.zero
+              ? KeyedSubtree(
+                  key: const ValueKey('composer-text-height-motion'),
+                  child: _buildTextField(context),
+                )
+              : AnimatedSize(
+                  key: const ValueKey('composer-text-height-motion'),
+                  alignment: Alignment.topCenter,
+                  duration: resizeDuration,
+                  curve: Curves.easeOutCubic,
+                  child: _buildTextField(context),
+                )
+        else
+          Row(
+            children: [
+              _AttachmentTrigger(
+                surface: attachmentSurface,
+                formattingOpen: false,
+                onTap: onAttachmentTap,
+              ),
+              const SizedBox(width: Grid.xxs),
+              Expanded(
+                child: Semantics(
+                  button: true,
+                  label: resolvedHint,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => _runComposerAction(onExpand),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: Grid.half),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          collapsedText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.textTheme.bodyLarge?.copyWith(
+                            color: trimmedDraft.isEmpty
+                                ? context.colors.onSurfaceVariant
+                                : context.colors.onSurface,
                           ),
                         ),
                       ),
                     ),
                   ),
                 ),
-                const SizedBox(width: Grid.xxs),
-                _SendButton(
-                  isDisabled: !canSend || hasPendingUploads,
-                  isSending: isSending,
-                  onTap: onSend,
-                ),
-              ],
-            ),
-          ClipRect(
-            child: Align(
-              alignment: Alignment.topCenter,
-              heightFactor: expansionValue,
-              child: IgnorePointer(
-                ignoring: !isExpanded,
-                child: Opacity(
-                  opacity: expansionProgress,
-                  child: Transform.translate(
-                    offset: Offset(0, Grid.xxs * (1 - expansionProgress)),
-                    child: Column(
-                      children: [
-                        const SizedBox(height: Grid.xxs),
-                        Row(
-                          children: [
-                            _AttachmentTrigger(
-                              surface: attachmentSurface,
-                              formattingOpen: formattingOpen,
-                              onTap: (triggerContext) {
-                                if (formattingOpen) {
-                                  onCloseFormatting();
-                                } else {
-                                  onAttachmentTap(triggerContext);
-                                }
-                              },
+              ),
+              const SizedBox(width: Grid.xxs),
+              _SendButton(
+                isDisabled: !canSend || hasPendingUploads,
+                isSending: isSending,
+                onTap: onSend,
+              ),
+            ],
+          ),
+        _ExpandedComposerActionsMotion(
+          animation: expansionAnimation,
+          isExpanded: isExpanded,
+          child: Column(
+            children: [
+              const SizedBox(height: Grid.xxs),
+              Row(
+                children: [
+                  _AttachmentTrigger(
+                    surface: attachmentSurface,
+                    formattingOpen: formattingOpen,
+                    onTap: (triggerContext) {
+                      if (formattingOpen) {
+                        onCloseFormatting();
+                      } else {
+                        onAttachmentTap(triggerContext);
+                      }
+                    },
+                  ),
+                  const SizedBox(width: Grid.half),
+                  Expanded(
+                    child: AnimatedSwitcher(
+                      duration: motionDuration,
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      layoutBuilder: (currentChild, previousChildren) => Stack(
+                        alignment: Alignment.centerLeft,
+                        children: [...previousChildren, ?currentChild],
+                      ),
+                      child: formattingOpen
+                          ? _FormattingToolbar(onFormat: onFormat)
+                          : Row(
+                              key: const ValueKey('standard-actions'),
+                              children: [
+                                _ComposeAction(
+                                  icon: LucideIcons.atSign,
+                                  onTap: onMention,
+                                ),
+                                _ComposeAction(
+                                  icon: LucideIcons.hash,
+                                  onTap: onChannel,
+                                ),
+                                _ComposeAction(
+                                  icon: LucideIcons.smilePlus,
+                                  onTap: onEmoji,
+                                ),
+                                _ComposeAction(
+                                  icon: LucideIcons.aLargeSmall,
+                                  onTap: onOpenFormatting,
+                                ),
+                                const Spacer(),
+                                _SendButton(
+                                  isDisabled: !canSend || hasPendingUploads,
+                                  isSending: isSending,
+                                  onTap: onSend,
+                                ),
+                              ],
                             ),
-                            const SizedBox(width: Grid.half),
-                            Expanded(
-                              child: AnimatedSwitcher(
-                                duration: motionDuration,
-                                switchInCurve: Curves.easeOutCubic,
-                                switchOutCurve: Curves.easeInCubic,
-                                layoutBuilder:
-                                    (currentChild, previousChildren) => Stack(
-                                      alignment: Alignment.centerLeft,
-                                      children: [
-                                        ...previousChildren,
-                                        ?currentChild,
-                                      ],
-                                    ),
-                                child: formattingOpen
-                                    ? _FormattingToolbar(onFormat: onFormat)
-                                    : Row(
-                                        key: const ValueKey('standard-actions'),
-                                        children: [
-                                          _ComposeAction(
-                                            icon: LucideIcons.atSign,
-                                            onTap: onMention,
-                                          ),
-                                          _ComposeAction(
-                                            icon: LucideIcons.hash,
-                                            onTap: onChannel,
-                                          ),
-                                          _ComposeAction(
-                                            icon: LucideIcons.smilePlus,
-                                            onTap: onEmoji,
-                                          ),
-                                          _ComposeAction(
-                                            icon: LucideIcons.aLargeSmall,
-                                            onTap: onOpenFormatting,
-                                          ),
-                                          const Spacer(),
-                                          _SendButton(
-                                            isDisabled:
-                                                !canSend || hasPendingUploads,
-                                            isSending: isSending,
-                                            onTap: onSend,
-                                          ),
-                                        ],
-                                      ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
                     ),
                   ),
-                ),
+                ],
               ),
+            ],
+          ),
+        ),
+      ],
+    );
+    return AnimatedBuilder(
+      animation: expansionAnimation,
+      child: content,
+      builder: (context, child) {
+        final progress = expansionAnimation.value.clamp(0.0, 1.0).toDouble();
+        final composerRadius = Radii.dialog + Grid.quarter * (1 - progress);
+        return Container(
+          key: const ValueKey('composer-surface'),
+          decoration: BoxDecoration(
+            color: context.colors.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(composerRadius),
+            border: Border.all(
+              color: Colors.black.withValues(alpha: 0.04),
+              width: 1,
             ),
           ),
-        ],
-      ),
+          padding: const EdgeInsets.all(Grid.xxs),
+          child: child,
+        );
+      },
     );
   }
 
@@ -284,6 +271,46 @@ class _ComposeBarLayout extends StatelessWidget {
         ),
         isDense: true,
       ),
+    );
+  }
+}
+
+class _ExpandedComposerActionsMotion extends StatelessWidget {
+  final Animation<double> animation;
+  final bool isExpanded;
+  final Widget child;
+
+  const _ExpandedComposerActionsMotion({
+    required this.animation,
+    required this.isExpanded,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: animation,
+      child: child,
+      builder: (context, child) {
+        final value = animation.value;
+        final progress = value.clamp(0.0, 1.0).toDouble();
+        return ClipRect(
+          child: Align(
+            alignment: Alignment.topCenter,
+            heightFactor: value,
+            child: IgnorePointer(
+              ignoring: !isExpanded,
+              child: Opacity(
+                opacity: progress,
+                child: Transform.translate(
+                  offset: Offset(0, Grid.xxs * (1 - progress)),
+                  child: child,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

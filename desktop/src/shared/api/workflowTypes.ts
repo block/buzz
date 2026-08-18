@@ -2,6 +2,7 @@ export type WorkflowStatus = "active" | "disabled" | "archived";
 
 export type Workflow = {
   id: string;
+  revision: string;
   name: string;
   ownerPubkey: string;
   channelId: string | null;
