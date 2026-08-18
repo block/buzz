@@ -85,6 +85,7 @@ fn managed_agent_message_builder_rejects_invalid_mentions() {
     .expect_err("invalid mentions should fail");
     assert!(error.contains("pubkey must be a 64-character hex string"));
 }
+
 #[test]
 fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
     let filter = build_search_messages_filter("  pro  ", 12, Some("channel-1"), None, None, None);
