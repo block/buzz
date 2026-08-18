@@ -272,6 +272,21 @@ fn png_snapshot_downscales_oversize_avatar_under_cap() {
     );
     // Aspect ratio preserved: the longest edge (height) is clamped to the cap.
     assert_eq!(height, 512, "longest edge should hit the 512px cap");
+
+    // The manifest keeps the untouched full-resolution source reference — only
+    // the PNG body is downscaled. The oversize source bytes exceed the inline
+    // cap, so the manifest falls back to the record's `avatar_url`.
+    let manifest =
+        decode_snapshot_png(&encode_snapshot_png(&snapshot, Some(&source_bytes)).unwrap()).unwrap();
+    assert_eq!(
+        manifest.profile.avatar_url.as_deref(),
+        Some("https://example.com/avatar.png"),
+        "manifest must preserve the untouched source avatar reference"
+    );
+    assert!(
+        manifest.profile.avatar_data_url.is_none(),
+        "oversize source bytes must not be inlined into the manifest"
+    );
 }
 
 #[test]
