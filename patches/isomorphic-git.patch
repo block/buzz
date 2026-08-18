@@ -1,0 +1,23 @@
+diff --git a/package.json b/package.json
+index 330b0513126e2ace570d8ba5664b49a2903a9b37..46e5b3e5fa7297e2cd6c47eb8eb4f4de504e4c5d 100644
+--- a/package.json
++++ b/package.json
+@@ -8,13 +8,13 @@
+   "module": "./index.js",
+   "exports": {
+     ".": {
+-      "node": {
+-        "types": "./index.d.cts",
+-        "default": "./index.cjs"
+-      },
+-      "default": {
++      "import": {
+         "types": "./index.d.ts",
+         "default": "./index.js"
++      },
++      "require": {
++        "types": "./index.d.cts",
++        "default": "./index.cjs"
+       }
+     },
+     "./http/node": {

@@ -1,0 +1,26 @@
+#!/bin/sh
+# CAKE entrypoint — bridge Istio abstract socket to file socket, then exec relay.
+#
+# Traffic flow:
+#   Client → Envoy → @istio-proxy.sock (abstract) → socat → /tmp/local.sock → Buzz
+#   K8s probes → 0.0.0.0:8080 → Buzz (direct, no Istio)
+#   Prometheus → 0.0.0.0:9102/metrics → Buzz
+set -eu
+
+SIDECAR_SOCKET="${SIDECAR_LISTENER_BIND:-@istio-proxy.sock}"
+LOCAL_SOCKET="/tmp/local.sock"
+
+# Clean up stale socket file from previous run.
+rm -f "${LOCAL_SOCKET}"
+
+# Bridge: Envoy writes to abstract socket → socat → app reads from file socket.
+# Only start if SIDECAR_LISTENER_BIND is set (i.e., running in CAKE).
+if [ -n "${SIDECAR_LISTENER_BIND:-}" ]; then
+    socat "ABSTRACT-LISTEN:${SIDECAR_SOCKET#@},fork" "UNIX-CONNECT:${LOCAL_SOCKET}" &
+    export BUZZ_UDS_PATH="${LOCAL_SOCKET}"
+fi
+
+export BUZZ_HEALTH_PORT="${BUZZ_HEALTH_PORT:-8080}"
+export BUZZ_METRICS_PORT="${BUZZ_METRICS_PORT:-9102}"
+
+exec /code/buzz-relay

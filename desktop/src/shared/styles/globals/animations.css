@@ -1,0 +1,932 @@
+.sprout-arc-spinner {
+  animation: sprout-arc-spinner-spin 500ms linear infinite;
+}
+
+@keyframes buzz-qr-cell-reveal {
+  0% {
+    opacity: 0;
+    transform: scale(0);
+  }
+
+  27% {
+    opacity: 0.27;
+    transform: scale(0);
+  }
+
+  30% {
+    opacity: 0.3;
+    transform: scale(0.043);
+  }
+
+  35% {
+    opacity: 0.35;
+    transform: scale(0.167);
+  }
+
+  40% {
+    opacity: 0.4;
+    transform: scale(0.358);
+  }
+
+  45% {
+    opacity: 0.45;
+    transform: scale(0.632);
+  }
+
+  49% {
+    opacity: 0.49;
+    transform: scale(0.918);
+  }
+
+  50% {
+    opacity: 0.5;
+    transform: scale(1.1);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.buzz-qr-cell-reveal {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: buzz-qr-cell-reveal 58ms linear var(--buzz-qr-reveal-delay, 0ms)
+    forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-qr-cell-reveal {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+}
+
+@keyframes sprout-arc-spinner-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.buzz-wave-hand {
+  display: inline-block;
+  transform-origin: 70% 70%;
+  will-change: transform;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .buzz-wave-hover-trigger:hover .buzz-wave-hand {
+    animation: buzz-wave-hand 1200ms ease-in-out both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-wave-hover-trigger:hover .buzz-wave-hand {
+    animation: none;
+  }
+}
+
+@keyframes buzz-wave-hand {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+
+  12%,
+  38%,
+  64% {
+    transform: rotate(15deg);
+  }
+
+  25%,
+  51%,
+  77% {
+    transform: rotate(-15deg);
+  }
+}
+
+.buzz-emoji-mart {
+  align-items: stretch;
+  display: flex;
+  justify-content: stretch;
+  overflow: hidden;
+  width: 100%;
+}
+
+.buzz-emoji-mart > div {
+  align-items: stretch;
+  display: flex;
+  height: 100%;
+  justify-content: stretch;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.buzz-emoji-mart em-emoji-picker {
+  --border-radius: 12px;
+  --category-icon-size: 24px;
+  --color-border: transparent;
+  --color-border-over: rgb(255 255 255 / 0.1);
+  --font-family: inherit;
+  --font-size: 14px;
+  --rgb-accent: var(--buzz-emoji-picker-rgb-color, 245, 247, 255);
+  --rgb-background: var(--buzz-emoji-picker-rgb-background, 54, 58, 79);
+  --rgb-color: var(--buzz-emoji-picker-rgb-color, 245, 247, 255);
+  --rgb-input: var(--buzz-emoji-picker-rgb-input, 47, 51, 68);
+  --shadow: none;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+@keyframes buzz-avatar-squish {
+  0% {
+    transform: translate(
+        var(--buzz-avatar-emoji-offset-x, 0px),
+        var(--buzz-avatar-emoji-offset-y, 0px)
+      )
+      scale(1);
+  }
+
+  42% {
+    transform: translate(
+        var(--buzz-avatar-emoji-offset-x, 0px),
+        var(--buzz-avatar-emoji-offset-y, 0px)
+      )
+      scaleX(0.96) scaleY(0.88);
+  }
+
+  100% {
+    transform: translate(
+        var(--buzz-avatar-emoji-offset-x, 0px),
+        var(--buzz-avatar-emoji-offset-y, 0px)
+      )
+      scale(1);
+  }
+}
+
+.buzz-avatar-emoji-glyph {
+  --buzz-avatar-emoji-offset-x: 1px;
+  --buzz-avatar-emoji-offset-y: 7px;
+  transform: translate(
+    var(--buzz-avatar-emoji-offset-x),
+    var(--buzz-avatar-emoji-offset-y)
+  );
+}
+
+.buzz-avatar-squish {
+  animation: buzz-avatar-squish 200ms ease-out;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-avatar-squish {
+    animation: none;
+  }
+}
+
+.buzz-shimmer {
+  --buzz-shimmer-duration: 2600ms;
+  --buzz-shimmer-highlight: color-mix(
+    in srgb,
+    hsl(var(--background)) 60%,
+    hsl(var(--muted-foreground)) 40%
+  );
+  --buzz-shimmer-spread: 2rem;
+
+  color: hsl(var(--muted-foreground));
+  display: inline-block;
+  position: relative;
+}
+
+/*
+ * The highlight lives on an aria-hidden overlay child that duplicates the
+ * label text and animates ONLY opacity. The previous implementation animated
+ * background-position under -webkit-background-clip: text, which WebKit
+ * cannot run on the compositor: every animation frame forced a full document
+ * style resolve + compositing-hierarchy walk, burning ~20% CPU at rest
+ * whenever a large timeline was mounted with a working agent. Opacity is
+ * compositor-accelerated: the layer paints once and the pulse runs outside
+ * the web process's main thread. A real element (not ::after generated
+ * content) is used so the duplicate text can be aria-hidden — pseudo-element
+ * text is inconsistently exposed to screen readers and cannot be hidden.
+ */
+.buzz-shimmer > .buzz-shimmer-overlay {
+  animation: buzz-shimmer var(--buzz-shimmer-duration) ease-in-out infinite;
+  background-clip: text;
+  background-image: linear-gradient(
+    90deg,
+    transparent calc(50% - var(--buzz-shimmer-spread)),
+    var(--buzz-shimmer-highlight) 50%,
+    transparent calc(50% + var(--buzz-shimmer-spread))
+  );
+  color: transparent;
+  inset: 0;
+  overflow: inherit;
+  padding: inherit;
+  position: absolute;
+  text-overflow: inherit;
+  white-space: inherit;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+@keyframes buzz-shimmer {
+  0%,
+  100% {
+    opacity: 0;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-shimmer > .buzz-shimmer-overlay {
+    animation: none;
+    display: none;
+  }
+}
+
+.buzz-poof-layer {
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: fixed;
+  z-index: 2147483647;
+}
+
+.buzz-poof-burst {
+  contain: layout paint style;
+  height: var(--buzz-poof-size);
+  left: 0;
+  position: absolute;
+  top: 0;
+  transform: translate3d(
+    calc(var(--buzz-poof-x) - 50%),
+    calc(var(--buzz-poof-y) - 50%),
+    0
+  );
+  width: var(--buzz-poof-size);
+}
+
+.buzz-poof-frame {
+  animation: buzz-poof-frame 400ms linear both;
+  height: 100%;
+  inset: 0;
+  object-fit: contain;
+  opacity: 0;
+  position: absolute;
+  transform: translate3d(0, 0, 0) scale(0.92);
+  transform-origin: center;
+  width: 100%;
+}
+
+.buzz-poof-frame-1 {
+  animation-name: buzz-poof-frame-1;
+}
+
+.buzz-poof-frame-2 {
+  animation-name: buzz-poof-frame-2;
+}
+
+.buzz-poof-frame-3 {
+  animation-name: buzz-poof-frame-3;
+}
+
+.buzz-poof-frame-4 {
+  animation-name: buzz-poof-frame-4;
+}
+
+.buzz-poof-frame-5 {
+  animation-name: buzz-poof-frame-5;
+}
+
+@keyframes buzz-poof-frame-1 {
+  0%,
+  19.99% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(0.94);
+  }
+
+  20%,
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes buzz-poof-frame-2 {
+  0%,
+  19.99% {
+    opacity: 0;
+  }
+
+  20%,
+  39.99% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  40%,
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(1.01);
+  }
+}
+
+@keyframes buzz-poof-frame-3 {
+  0%,
+  39.99% {
+    opacity: 0;
+  }
+
+  40%,
+  59.99% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1.01);
+  }
+
+  60%,
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(1.02);
+  }
+}
+
+@keyframes buzz-poof-frame-4 {
+  0%,
+  59.99% {
+    opacity: 0;
+  }
+
+  60%,
+  79.99% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1.02);
+  }
+
+  80%,
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(1.03);
+  }
+}
+
+@keyframes buzz-poof-frame-5 {
+  0%,
+  79.99% {
+    opacity: 0;
+  }
+
+  80%,
+  99.99% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1.03);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(1.04);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-poof-frame {
+    animation: buzz-poof-frame-reduced 180ms ease-out both;
+  }
+
+  .buzz-poof-frame:not(.buzz-poof-frame-3) {
+    display: none;
+  }
+}
+
+@keyframes buzz-poof-frame-reduced {
+  0% {
+    opacity: 0.9;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.buzz-avatar-hue-scrubber {
+  background: linear-gradient(
+    90deg,
+    #ff0000 0%,
+    #ffff00 16.67%,
+    #00ff00 33.33%,
+    #00ffff 50%,
+    #0000ff 66.67%,
+    #ff00ff 83.33%,
+    #ff0000 100%
+  );
+  outline: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.buzz-animated-count {
+  display: inline-block;
+  font-kerning: none;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.buzz-animated-count__motion {
+  display: inline-flex;
+  line-height: 1;
+}
+
+.buzz-animated-count__static {
+  display: none;
+}
+
+.buzz-sidebar-action-card--success {
+  background-color: color-mix(
+    in srgb,
+    var(--status-added) 12%,
+    hsl(var(--background)) 88%
+  );
+  border-color: color-mix(
+    in srgb,
+    var(--status-added) 34%,
+    hsl(var(--border)) 66%
+  );
+  color: hsl(var(--foreground));
+}
+
+.buzz-sidebar-action-card--success:hover {
+  background-color: color-mix(
+    in srgb,
+    var(--status-added) 16%,
+    hsl(var(--background)) 84%
+  );
+}
+
+.dark .buzz-sidebar-action-card--success {
+  background-color: color-mix(
+    in srgb,
+    var(--status-added) 15%,
+    hsl(var(--background)) 85%
+  );
+  border-color: color-mix(
+    in srgb,
+    var(--status-added) 42%,
+    hsl(var(--border)) 58%
+  );
+}
+
+.dark .buzz-sidebar-action-card--success:hover {
+  background-color: color-mix(
+    in srgb,
+    var(--status-added) 19%,
+    hsl(var(--background)) 81%
+  );
+}
+
+.buzz-sidebar-action-card__success-icon {
+  color: var(--status-added);
+}
+
+.buzz-sidebar-action-description {
+  --buzz-sidebar-action-description-line-height: 1.375em;
+  display: inline-block;
+  line-height: var(--buzz-sidebar-action-description-line-height);
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+.buzz-sidebar-action-description__motion {
+  display: block;
+  height: var(--buzz-sidebar-action-description-line-height);
+  overflow: hidden;
+}
+
+.buzz-sidebar-action-description__reel {
+  animation: buzz-sidebar-action-description-roll-up 260ms
+    cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  display: flex;
+  flex-direction: column;
+  line-height: var(--buzz-sidebar-action-description-line-height);
+  will-change: transform;
+}
+
+/* The roll-up reel animates between two fixed one-line slots, so text is
+   clipped to a single line only while the transition plays; the settled
+   state above wraps freely. */
+.buzz-sidebar-action-description__reel > span {
+  display: block;
+  height: var(--buzz-sidebar-action-description-line-height);
+  line-height: var(--buzz-sidebar-action-description-line-height);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes buzz-sidebar-action-description-roll-up {
+  from {
+    transform: translateY(0);
+  }
+
+  to {
+    transform: translateY(
+      calc(-1 * var(--buzz-sidebar-action-description-line-height))
+    );
+  }
+}
+
+.buzz-animated-count__slot {
+  display: inline-block;
+  height: 1em;
+  line-height: 1;
+}
+
+.buzz-animated-count__slot--digit {
+  overflow: hidden;
+  text-align: center;
+  width: 1ch;
+}
+
+.buzz-animated-count__reel {
+  display: flex;
+  flex-direction: column;
+  height: 2em;
+  line-height: 1;
+  will-change: transform;
+}
+
+.buzz-animated-count__reel > span {
+  display: block;
+  height: 1em;
+  line-height: 1;
+}
+
+.buzz-animated-count__slot[data-direction="up"] .buzz-animated-count__reel {
+  animation: buzz-animated-count-roll-up 260ms cubic-bezier(0.2, 0.8, 0.2, 1)
+    both;
+}
+
+.buzz-animated-count__slot[data-direction="down"] .buzz-animated-count__reel {
+  animation: buzz-animated-count-roll-down 260ms cubic-bezier(0.2, 0.8, 0.2, 1)
+    both;
+}
+
+.buzz-animated-count__symbol {
+  display: inline-block;
+  line-height: 1;
+}
+
+.buzz-animated-count__symbol[data-direction="up"] {
+  animation: buzz-animated-count-symbol-up 220ms cubic-bezier(0.2, 0.8, 0.2, 1)
+    both;
+}
+
+.buzz-animated-count__symbol[data-direction="down"] {
+  animation: buzz-animated-count-symbol-down 220ms
+    cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes buzz-animated-count-roll-up {
+  from {
+    transform: translateY(0);
+  }
+
+  to {
+    transform: translateY(-1em);
+  }
+}
+
+@keyframes buzz-animated-count-roll-down {
+  from {
+    transform: translateY(-1em);
+  }
+
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes buzz-animated-count-symbol-up {
+  from {
+    opacity: 0;
+    transform: translateY(0.25em);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes buzz-animated-count-symbol-down {
+  from {
+    opacity: 0;
+    transform: translateY(-0.25em);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-animated-count__motion {
+    display: none;
+  }
+
+  .buzz-animated-count__static {
+    display: inline;
+  }
+}
+
+/* ── Tiptap rich-text composer ──────────────────────────────────────── */
+
+/* ── Setup / cold-boot loading screen ───────────────────────────────────
+   Theme-adaptive grainient background for the "setting up your community"
+   gate. Restored from pre-#1570; the animated Buzz mark is the hero (see
+   AppLoadingGate in app/App.tsx). */
+
+@property --buzz-grainient-x-0 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 85%;
+}
+
+@property --buzz-grainient-y-0 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 80%;
+}
+
+@property --buzz-grainient-x-1 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 60%;
+}
+
+@property --buzz-grainient-y-1 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 24%;
+}
+
+@property --buzz-grainient-x-2 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 13%;
+}
+
+@property --buzz-grainient-y-2 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 82%;
+}
+
+@property --buzz-grainient-x-3 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 24%;
+}
+
+@property --buzz-grainient-y-3 {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 7%;
+}
+
+.buzz-setup-loading-shell {
+  --buzz-grainient-alpha-strong: 0.46;
+  --buzz-grainient-alpha-medium: 0.34;
+  --buzz-grainient-alpha-soft: 0.24;
+  --buzz-grainient-color-0: hsl(
+    var(--chart-5) /
+    var(--buzz-grainient-alpha-strong)
+  );
+  --buzz-grainient-color-1: hsl(
+    var(--chart-3) /
+    var(--buzz-grainient-alpha-strong)
+  );
+  --buzz-grainient-color-2: hsl(
+    var(--primary) /
+    var(--buzz-grainient-alpha-medium)
+  );
+  --buzz-grainient-color-3: hsl(
+    var(--chart-2) /
+    var(--buzz-grainient-alpha-strong)
+  );
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  isolation: isolate;
+  position: relative;
+}
+
+.dark .buzz-setup-loading-shell {
+  --buzz-grainient-alpha-strong: 0.68;
+  --buzz-grainient-alpha-medium: 0.5;
+  --buzz-grainient-alpha-soft: 0.34;
+}
+
+.buzz-setup-grainient {
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+
+.buzz-setup-grainient__wash,
+.buzz-setup-grainient__veil {
+  inset: 0;
+  position: absolute;
+}
+
+.buzz-setup-grainient__wash {
+  --buzz-grainient-s-start-0: 9%;
+  --buzz-grainient-s-end-0: 55%;
+  --buzz-grainient-s-start-1: 5%;
+  --buzz-grainient-s-end-1: 72%;
+  --buzz-grainient-s-start-2: 5%;
+  --buzz-grainient-s-end-2: 52%;
+  --buzz-grainient-s-start-3: 13%;
+  --buzz-grainient-s-end-3: 68%;
+  --buzz-grainient-x-0: 85%;
+  --buzz-grainient-y-0: 80%;
+  --buzz-grainient-x-1: 60%;
+  --buzz-grainient-y-1: 24%;
+  --buzz-grainient-x-2: 13%;
+  --buzz-grainient-y-2: 82%;
+  --buzz-grainient-x-3: 24%;
+  --buzz-grainient-y-3: 7%;
+  animation: buzz-grainient-orbit 10s linear infinite alternate;
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(
+      circle at var(--buzz-grainient-x-0) var(--buzz-grainient-y-0),
+      var(--buzz-grainient-color-0) var(--buzz-grainient-s-start-0),
+      transparent var(--buzz-grainient-s-end-0)
+    ),
+    radial-gradient(
+      circle at var(--buzz-grainient-x-1) var(--buzz-grainient-y-1),
+      var(--buzz-grainient-color-1) var(--buzz-grainient-s-start-1),
+      transparent var(--buzz-grainient-s-end-1)
+    ),
+    radial-gradient(
+      circle at var(--buzz-grainient-x-2) var(--buzz-grainient-y-2),
+      var(--buzz-grainient-color-2) var(--buzz-grainient-s-start-2),
+      transparent var(--buzz-grainient-s-end-2)
+    ),
+    radial-gradient(
+      circle at var(--buzz-grainient-x-3) var(--buzz-grainient-y-3),
+      var(--buzz-grainient-color-3) var(--buzz-grainient-s-start-3),
+      transparent var(--buzz-grainient-s-end-3)
+    );
+  background-blend-mode: normal, normal, normal, normal;
+  contain: paint;
+  filter: saturate(1.08);
+  transform: translateZ(0);
+  will-change: transform, opacity;
+}
+
+.buzz-setup-grainient__veil {
+  background:
+    radial-gradient(
+      ellipse 74% 54% at 50% 52%,
+      transparent 0%,
+      hsl(var(--background) / 0.04) 72%,
+      hsl(var(--background) / 0.16) 100%
+    ),
+    linear-gradient(
+      180deg,
+      hsl(var(--background) / 0.04),
+      hsl(var(--background) / 0.12)
+    );
+}
+
+@keyframes buzz-grainient-orbit {
+  0% {
+    --buzz-grainient-x-0: 85%;
+    --buzz-grainient-y-0: 80%;
+    --buzz-grainient-x-1: 60%;
+    --buzz-grainient-y-1: 24%;
+    --buzz-grainient-x-2: 13%;
+    --buzz-grainient-y-2: 82%;
+    --buzz-grainient-x-3: 24%;
+    --buzz-grainient-y-3: 7%;
+  }
+
+  100% {
+    --buzz-grainient-x-0: 31%;
+    --buzz-grainient-y-0: 94%;
+    --buzz-grainient-x-1: 2%;
+    --buzz-grainient-y-1: 25%;
+    --buzz-grainient-x-2: 98%;
+    --buzz-grainient-y-2: 20%;
+    --buzz-grainient-x-3: 95%;
+    --buzz-grainient-y-3: 92%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-setup-grainient__wash {
+    animation: none;
+  }
+}
+
+/* Buzz bee wing-flap (ported from the Buzz website's BeeField, tuned for a
+   single hero bee). The two wing lobes beat continuously — a fast in/out scale
+   so the bee reads as actively flapping on the loading gate rather than resting
+   most of the cycle (the website staggers many bees, so it could afford long
+   rests; one bee cannot).
+
+   The animated elements are HTML-level <svg> wings (see FlappingBee.tsx), not
+   SVG children: WebKit paints SVG children on the main thread, so their
+   animations freeze while boot work hogs the thread — exactly when the loading
+   gate is visible. HTML-level transforms run on the compositor and keep
+   flapping. Translation is in percentages of the wing's own 183.4-unit box
+   (30/183.4 = 16.3577%) so the beat is identical at any rendered size.
+
+   The loading gate can be short-lived on a warm refresh, so the flap starts
+   mid-stroke (negative animation-delay, quarter beat in) — the bee is never
+   caught frozen at the rest pose on first paint, and a one-frame flash shows
+   wings visibly mid-beat rather than at the squished full-tuck extreme. The
+   optional --flap-delay custom property can still stagger multiple bees. */
+.bee-sprite .bee-wing {
+  animation-delay: var(--flap-delay, -0.07s);
+  animation-duration: 0.28s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+  will-change: transform;
+}
+
+.bee-sprite .bee-wing-left {
+  animation-name: bee-wing-left-flap;
+}
+
+.bee-sprite .bee-wing-right {
+  animation-name: bee-wing-right-flap;
+}
+
+/* Static cutout masks over the wing layers. In the single-SVG mark, the slot
+   cutouts punch through body AND wings (the wings tuck behind the body far
+   enough to sit under the slots' left ends). The wing layers reproduce those
+   holes with a static CSS mask on the non-animated wrapper, so the holes stay
+   fixed while the wing beats beneath them — matching the masked single-SVG
+   rendering. Rect coordinates are the mark's slot cutouts translated into each
+   wing's local 183.4x183.4 box (left wing box starts at x=0, y=62.8; right
+   wing box at x=282.6, y=62.8). The eye cutouts never intersect the wing
+   circles, so they are omitted. */
+.bee-wing-layer {
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+.bee-wing-layer-left {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM171.3,94.4H298.2A5,5 0 0 1 303.2,99.4V127.7A5,5 0 0 1 298.2,132.7H171.3A5,5 0 0 1 166.3,127.7V99.4A5,5 0 0 1 171.3,94.4ZM171.9,172.3H298.1A5,5 0 0 1 303.1,177.3V204.9A5,5 0 0 1 298.1,209.9H171.9A5,5 0 0 1 166.9,204.9V177.3A5,5 0 0 1 171.9,172.3Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM171.3,94.4H298.2A5,5 0 0 1 303.2,99.4V127.7A5,5 0 0 1 298.2,132.7H171.3A5,5 0 0 1 166.3,127.7V99.4A5,5 0 0 1 171.3,94.4ZM171.9,172.3H298.1A5,5 0 0 1 303.1,177.3V204.9A5,5 0 0 1 298.1,209.9H171.9A5,5 0 0 1 166.9,204.9V177.3A5,5 0 0 1 171.9,172.3Z'/%3E%3C/svg%3E");
+}
+
+.bee-wing-layer-right {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM-111.3,94.4H15.6A5,5 0 0 1 20.6,99.4V127.7A5,5 0 0 1 15.6,132.7H-111.3A5,5 0 0 1 -116.3,127.7V99.4A5,5 0 0 1 -111.3,94.4ZM-110.7,172.3H15.5A5,5 0 0 1 20.5,177.3V204.9A5,5 0 0 1 15.5,209.9H-110.7A5,5 0 0 1 -115.7,204.9V177.3A5,5 0 0 1 -110.7,172.3Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 183.4 183.4'%3E%3Cpath fill-rule='evenodd' d='M0,0H183.4V183.4H0ZM-111.3,94.4H15.6A5,5 0 0 1 20.6,99.4V127.7A5,5 0 0 1 15.6,132.7H-111.3A5,5 0 0 1 -116.3,127.7V99.4A5,5 0 0 1 -111.3,94.4ZM-110.7,172.3H15.5A5,5 0 0 1 20.5,177.3V204.9A5,5 0 0 1 15.5,209.9H-110.7A5,5 0 0 1 -115.7,204.9V177.3A5,5 0 0 1 -110.7,172.3Z'/%3E%3C/svg%3E");
+}
+
+@keyframes bee-wing-left-flap {
+  0%,
+  100% {
+    transform: translateX(0) scaleX(1);
+  }
+  50% {
+    transform: translateX(16.3577%) scaleX(0.62);
+  }
+}
+
+@keyframes bee-wing-right-flap {
+  0%,
+  100% {
+    transform: translateX(0) scaleX(1);
+  }
+  50% {
+    transform: translateX(-16.3577%) scaleX(0.62);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bee-sprite .bee-wing {
+    animation: none;
+  }
+}

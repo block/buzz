@@ -1,0 +1,121 @@
+import 'package:flutter/material.dart';
+
+const _fontFamily = 'Inter';
+const _chatLineHeight = 22 / 16;
+
+/// Optional 12sp body style for compact secondary metadata.
+const bodyExtraSmallTextStyle = TextStyle(
+  fontFamily: _fontFamily,
+  fontSize: 12,
+  fontWeight: FontWeight.w400,
+  height: 1.25,
+  letterSpacing: 0,
+);
+
+const textTheme = TextTheme(
+  displayLarge: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 52,
+    fontWeight: FontWeight.w400,
+    height: 1.23,
+    letterSpacing: 0,
+  ),
+  displayMedium: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 44,
+    fontWeight: FontWeight.w400,
+    height: 1.18,
+    letterSpacing: 0,
+  ),
+  displaySmall: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 36,
+    fontWeight: FontWeight.w400,
+    height: 1.22,
+    letterSpacing: 0,
+  ),
+  headlineLarge: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 32,
+    fontWeight: FontWeight.w600,
+    height: 1.25,
+    letterSpacing: 0,
+  ),
+  headlineMedium: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 28,
+    fontWeight: FontWeight.w600,
+    height: 1.29,
+    letterSpacing: 0,
+  ),
+  headlineSmall: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 24,
+    fontWeight: FontWeight.w600,
+    height: 1.33,
+    letterSpacing: 0,
+  ),
+  titleLarge: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 24,
+    fontWeight: FontWeight.w400,
+    height: 1.25,
+    letterSpacing: 0,
+  ),
+  titleMedium: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 20,
+    fontWeight: FontWeight.w500,
+    height: 1.3,
+    letterSpacing: 0,
+  ),
+  titleSmall: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 16,
+    fontWeight: FontWeight.w500,
+    height: _chatLineHeight,
+    letterSpacing: 0,
+  ),
+  labelLarge: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 16,
+    fontWeight: FontWeight.w500,
+    height: 1.2,
+    letterSpacing: 0,
+  ),
+  labelMedium: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 14,
+    fontWeight: FontWeight.w500,
+    height: 1.25,
+    letterSpacing: 0,
+  ),
+  labelSmall: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 11,
+    fontWeight: FontWeight.w500,
+    height: 1.2,
+    letterSpacing: 0,
+  ),
+  bodyLarge: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 16,
+    fontWeight: FontWeight.w400,
+    height: 20 / 16,
+    letterSpacing: 0,
+  ),
+  bodyMedium: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 14,
+    fontWeight: FontWeight.w400,
+    height: 1.3,
+    letterSpacing: 0,
+  ),
+  bodySmall: TextStyle(
+    fontFamily: _fontFamily,
+    fontSize: 14,
+    fontWeight: FontWeight.w400,
+    height: 1.25,
+    letterSpacing: 0,
+  ),
+);

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "prCreation": "immediate",
+  "automerge": true,
+  "rebaseWhen": "conflicted",
+  "recreateWhen": "always",
+  "separateMinorPatch": true,
+  "postUpdateOptions": ["cargo:updateLockfile"],
+  "packageRules": [
+    {
+      "description": "Major version bumps often require code changes — require human review.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "description": "Keep Rust crate updates isolated because 0.x minor releases often contain breaking changes. Group all minor updates per crate (don't split by individual version).",
+      "matchManagers": ["cargo"],
+      "groupName": null,
+      "separateMinorPatch": true,
+      "separateMultipleMinor": false
+    },
+    {
+      "description": "evalexpr v13 relicensed from MIT to AGPL-3.0 — pin below v13 until migrated to an MIT alternative.",
+      "matchPackageNames": ["evalexpr"],
+      "allowedVersions": "<13"
+    },
+    {
+      "description": "deadpool-redis re-exports redis types — version mismatch causes trait incompatibility.",
+      "matchPackageNames": ["redis", "deadpool-redis"],
+      "matchManagers": ["cargo"],
+      "groupName": "redis"
+    },
+    {
+      "description": "tiptap 3.23.x breaks editor lifecycle under real relay latency — pin until upstream stabilizes.",
+      "matchPackageNames": ["@tiptap/{/,}**"],
+      "allowedVersions": "<3.23.0"
+    }
+  ]
+}
