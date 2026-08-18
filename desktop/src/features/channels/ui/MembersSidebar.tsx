@@ -27,7 +27,10 @@ import {
   useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
-import { formatOwnerLabel } from "@/features/profile/lib/identity";
+import {
+  formatOwnerLabel,
+  resolveUserLabel,
+} from "@/features/profile/lib/identity";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
@@ -603,6 +606,12 @@ export function MembersSidebar({
   function renderMemberCard(member: ChannelMember, memberIsBot: boolean) {
     const memberProfile =
       memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()];
+    const memberHoverLabel = resolveUserLabel({
+      pubkey: member.pubkey,
+      currentPubkey,
+      fallbackName: member.displayName,
+      profiles: memberProfilesQuery.data?.profiles,
+    });
     const viewerIsOwner = Boolean(
       memberProfile?.ownerPubkey &&
         currentPubkey &&
@@ -645,6 +654,7 @@ export function MembersSidebar({
           memberAvatarLabel={
             member.displayName ?? truncatePubkey(member.pubkey)
           }
+          memberHoverLabel={memberHoverLabel}
           memberLabel={formatMemberName(member, currentPubkey)}
           moderationState={moderationStateByPubkey.get(
             normalizePubkey(member.pubkey),
