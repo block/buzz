@@ -4,6 +4,7 @@ import {
   useKeepMentionedAgentsPinned,
 } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
 import { Switch } from "@/shared/ui/switch";
+import { DeviceNameSettingsCard } from "./DeviceNameSettingsCard";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import {
@@ -48,6 +49,7 @@ export function AgentsSettingsPanel() {
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>
+        <DeviceNameSettingsCard />
         <PreventSleepSettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />

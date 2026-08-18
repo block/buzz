@@ -422,7 +422,7 @@ export function useMentionSendFlow({
           }
         }
         const agentReadiness = await ensureManagedAgentMentionsReady(
-          managedMentionPubkeys.filter(
+          agentMentionPubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
           ),
           sendChannelId ?? "",
@@ -444,6 +444,11 @@ export function useMentionSendFlow({
         if (!isMountedRef.current) {
           persistPreflightDraft();
           return;
+        }
+        if (agentReadiness.notices.length > 0) {
+          // A notice, not an error: the message still sends, it just cannot be
+          // answered from here.
+          toast.info(agentReadiness.notices.join(" "));
         }
         if (agentReadiness.errors.length > 0) {
           const message =

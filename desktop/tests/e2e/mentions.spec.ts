@@ -57,6 +57,14 @@ const JOIN_COLLAPSE_PROFILES = [
   { pubkey: GANDALF_PUBKEY, displayName: "Gandalf" },
 ];
 const JOIN_COLLAPSE_CHANNEL_NAME = "random";
+/**
+ * Second built-in mock agent named "alice", holding a different keypair on a
+ * different computer of the same account. Mirrors
+ * `ALICE_OTHER_DEVICE_PUBKEY` / `MOCK_OTHER_DEVICE_LABEL` in `e2eBridge.ts`.
+ */
+const ALICE_OTHER_DEVICE_PUBKEY =
+  "f6a1501f0a4e4d2c8b7a3e19d5c60b4471e8f2a3c9d0b6e5f4a3928170615243";
+const OTHER_DEVICE_LABEL = "mfeth-win";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
@@ -4938,4 +4946,134 @@ test("delayed inaccessible agent profile keeps all actions hidden", async ({
       `user-profile-popover-huddle-${DELAYED_RELAY_AGENT_PUBKEY}`,
     ),
   ).toHaveCount(0);
+});
+
+// ---------------------------------------------------------------------------
+// Stage 0 device identity: the same account signed in on several computers
+// mints a separate keypair per computer for the same agent, so a channel can
+// show two identically named agents of which only one is runnable here.
+// ---------------------------------------------------------------------------
+
+test("mention dropdown names the device behind same-named agents", async ({
+  page,
+}) => {
+  // Seeding `alice` locally makes exactly one of the two relay `alice`
+  // identities this device's; the other stays a remote twin.
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("@alice");
+
+  const dropdown = autocomplete(page);
+  const localRow = dropdown.getByTestId(
+    `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
+  );
+  const remoteRow = dropdown.getByTestId(
+    `mention-suggestion-${ALICE_OTHER_DEVICE_PUBKEY}`,
+  );
+  await expect(localRow).toBeVisible();
+  await expect(remoteRow).toBeVisible();
+  await waitForAnimations(page);
+
+  await expect(remoteRow.getByTestId("mention-device-label")).toHaveText(
+    `on ${OTHER_DEVICE_LABEL}`,
+  );
+  await expect(localRow.getByTestId("mention-device-label")).toHaveText(
+    "on this device",
+  );
+
+  // The collision npub is the impersonation guard and is deliberately left
+  // unchanged by the device line.
+  await expect(localRow.getByTestId("mention-collision-npub")).toBeVisible();
+  await expect(remoteRow.getByTestId("mention-collision-npub")).toBeVisible();
+});
+
+test("mention dropdown stays silent about the device when a name is unique", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill("@quinn");
+
+  const quinnRow = autocomplete(page).getByTestId(
+    `mention-suggestion-${ALLOWLIST_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(quinnRow).toBeVisible();
+  await waitForAnimations(page);
+  // No collision, and it is this device's agent: saying so would be noise for
+  // the single-device majority, so the element must not exist at all.
+  await expect(quinnRow.getByTestId("mention-device-label")).toHaveCount(0);
+  await expect(quinnRow.getByTestId("mention-collision-npub")).toHaveCount(0);
+});
+
+test("mentioning another device's agent says so and still sends", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@alice");
+  const remoteRow = autocomplete(page).getByTestId(
+    `mention-suggestion-${ALICE_OTHER_DEVICE_PUBKEY}`,
+  );
+  await expect(remoteRow).toBeVisible();
+  await remoteRow.click();
+  await page.keyboard.type("are you there");
+
+  const content = "@alice are you there";
+  await expect(input).toHaveText(content);
+  await page.getByTestId("send-message").click();
+
+  const inviteButton = page.getByRole("button", {
+    name: "Invite",
+    exact: true,
+  });
+  if (await inviteButton.isVisible().catch(() => false)) {
+    await inviteButton.click();
+  }
+
+  // The notice names the computer that would have to answer, instead of the
+  // silence that produced "I @-mentioned four agents and none replied".
+  await expect(
+    page.getByText(
+      `alice is set up on ${OTHER_DEVICE_LABEL}, not on this device. Only that device can reply.`,
+    ),
+  ).toBeVisible();
+
+  // A notice, not an error: the message still goes out carrying its p tag.
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toContain(ALICE_OTHER_DEVICE_PUBKEY);
 });

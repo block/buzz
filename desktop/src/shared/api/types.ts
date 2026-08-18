@@ -255,28 +255,15 @@ export type {
 } from "./searchTypes";
 
 // ── Relay Members ────────────────────────────────────────────────────────────
+// Types live in ./relayDirectoryTypes (extracted by the device-identity
+// feature); RelayAgent.status there includes upstream's "unknown" state.
 
-export type RelayMemberRole = "owner" | "admin" | "member";
-
-export type RelayMember = {
-  pubkey: string;
-  role: RelayMemberRole;
-  addedBy: string | null;
-  createdAt: string;
-};
-export type RelayAgent = {
-  pubkey: string;
-  ownerPubkey: string | null;
-  name: string;
-  agentType: string;
-  channels: string[];
-  channelIds: string[];
-  capabilities: string[];
-  /** Policy-only discovery has no liveness evidence. */
-  status: "online" | "away" | "offline" | "unknown";
-  respondTo: RespondToMode | null;
-  respondToAllowlist: string[];
-};
+export type {
+  DeviceIdentity,
+  RelayAgent,
+  RelayMember,
+  RelayMemberRole,
+} from "./relayDirectoryTypes";
 
 export type ManagedAgentRuntimeLifecycle =
   | "starting"

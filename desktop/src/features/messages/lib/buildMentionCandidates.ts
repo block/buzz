@@ -125,6 +125,7 @@ export function buildMentionCandidates({
           : null) ??
         null,
       isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
+      deviceLabel: current.deviceLabel ?? candidate.deviceLabel ?? null,
     });
   };
   for (const member of members ?? []) {
@@ -183,6 +184,7 @@ export function buildMentionCandidates({
       ownerPubkey: agent.ownerPubkey,
       isAgent: true,
       isActiveAgent: agent.status === "online" || agent.status === "away",
+      deviceLabel: agent.deviceLabel,
     });
   }
   for (const agent of managedAgents ?? []) {
