@@ -180,7 +180,7 @@ export function RestartDiffBadge({
       <TooltipContent className="max-w-72 text-xs" side="bottom">
         <p className="mb-1.5 font-semibold">Config changed since last start:</p>
         <DiffList cap={TOOLTIP_CAP} entries={restartDiff} />
-        <p className="mt-1.5 text-secondary-foreground/70">
+        <p className="mt-1.5 text-primary-foreground/70">
           {autoRestartEnabled ? AUTO_RESTART_ON_BLURB : AUTO_RESTART_OFF_BLURB}
         </p>
       </TooltipContent>

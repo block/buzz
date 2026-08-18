@@ -143,7 +143,7 @@ export function AddChannelBotTeamsSection({
                   <div className="space-y-1.5">
                     <p className="font-medium">{team.name}</p>
                     {team.description ? (
-                      <p className="text-2xs text-secondary-foreground/80">
+                      <p className="text-2xs text-primary-foreground/80">
                         {team.description}
                       </p>
                     ) : null}

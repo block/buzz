@@ -14,9 +14,6 @@
     --secondary-foreground: 234 16.02% 35.49%;
     --muted: 223 15.91% 82.75%;
     --muted-foreground: 233 12.8% 41.37%;
-    /* Unavailable content stays visible but semantically recedes. */
-    --disabled: var(--muted);
-    --disabled-foreground: var(--muted-foreground);
     --huddle-drawer-surface: 0 0% 0%;
     --huddle-control-surface: 0 0% 20%;
     --huddle-control-hover-surface: 0 0% 24%;

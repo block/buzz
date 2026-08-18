@@ -105,10 +105,6 @@ export default {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
         },
-        disabled: {
-          DEFAULT: "hsl(var(--disabled))",
-          foreground: "hsl(var(--disabled-foreground))",
-        },
         destructive: {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
