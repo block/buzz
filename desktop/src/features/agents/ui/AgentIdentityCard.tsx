@@ -84,6 +84,13 @@ export function AgentIdentityCard({
           {label}
         </span>
         {modelControl ? (
+          // Not a control: a propagation boundary. `modelControl` supplies its own
+          // interactive element; this span only stops the click from also reaching
+          // the card's full-bleed button overlay. It is never focused itself, and
+          // keyboard activation of the child fires a click that this same handler
+          // stops, so a key handler here would be dead code.
+          // biome-ignore lint/a11y/noStaticElementInteractions: see above
+          // biome-ignore lint/a11y/useKeyWithClickEvents: see above
           <span
             className="pointer-events-auto min-w-0"
             onClick={(event) => event.stopPropagation()}
