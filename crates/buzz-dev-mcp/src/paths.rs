@@ -1,8 +1,10 @@
 //! Path resolution and file I/O shared across dev-mcp tools.
 //!
 //! `resolve_path` resolves and canonicalizes a user-supplied path against a
-//! workspace root. No containment enforcement — the resolved path may land
-//! anywhere on the filesystem (consistent with the `shell` tool's posture).
+//! workspace root. A leading `~` expands to the user's home directory (bare
+//! `~` or `~/...`), matching the shell tool. No containment enforcement — the
+//! resolved path may land anywhere on the filesystem (consistent with the
+//! `shell` tool's posture).
 //!
 //! `read_text_file` builds on `resolve_path` to provide the full
 //! resolve → stat → size-check → read → UTF-8 decode pipeline shared by
@@ -28,6 +30,17 @@ pub(crate) fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
     #[cfg(windows)]
     let path = &msys_to_windows(path);
 
+    // Expand a leading `~` (bare or `~/...`) to the user's home directory,
+    // matching the shell tool's tilde semantics. Without this, a user-named
+    // path like `~/.claude/skills/x` takes the relative branch and resolves
+    // under the workspace root (`<root>/~/.claude/...`), which never exists.
+    // We deliberately do NOT handle `~user` (another user's home): that needs
+    // a passwd lookup and is out of scope, mirroring the conservative posture
+    // for un-mappable MSYS forms above. `~user...` falls through untouched and
+    // fails with the clear `path not accessible` error rather than mis-mapping.
+    let expanded = expand_tilde(path, home_dir().as_deref());
+    let path: &str = expanded.as_deref().unwrap_or(path);
+
     let raw = Path::new(path);
     let candidate: PathBuf = if raw.is_absolute() {
         raw.to_path_buf()
@@ -39,6 +52,53 @@ pub(crate) fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("path not accessible: {} ({e})", candidate.display()))?;
 
     Ok(resolved)
+}
+
+/// Expand a leading `~` to the user's home directory, returning `Some(expanded)`
+/// when a rewrite happened and `None` when the input should be used unchanged.
+///
+/// Handles the two shell forms that map deterministically to a home directory:
+///   - bare `~`            -> `home`
+///   - `~/rest` (or `~\rest` on Windows) -> `<home>/rest`
+///
+/// A leading `~` followed by anything else (`~user`, `~+`, `~foo`) is a form we
+/// cannot resolve without extra state, so it is left untouched — consistent with
+/// how `msys_to_windows` leaves un-mappable inputs alone. Returns `None` when
+/// `home` is `None` (unset) so the caller falls back to the raw path. Kept pure
+/// (home passed in) so it is testable without mutating process environment.
+fn expand_tilde(path: &str, home: Option<&str>) -> Option<String> {
+    let rest = path.strip_prefix('~')?;
+    // Only a bare `~` or a `~` immediately followed by a path separator is a
+    // home-relative reference. Anything else (`~user`) is left to the caller.
+    let is_sep = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    if !rest.is_empty() && !rest.starts_with(is_sep) {
+        return None;
+    }
+
+    let home = home?;
+    if home.is_empty() {
+        return None;
+    }
+
+    if rest.is_empty() {
+        // Bare `~` -> home directory.
+        return Some(home.to_string());
+    }
+    // `~/rest` -> `<home>/rest`. `rest` begins with a separator, so strip it to
+    // avoid an absolute-looking join and let `Path` re-add the separator.
+    let tail = rest.trim_start_matches(is_sep);
+    let joined = Path::new(home).join(tail);
+    Some(joined.to_string_lossy().into_owned())
+}
+
+/// The user's home directory from the environment: `%USERPROFILE%` on Windows,
+/// `$HOME` elsewhere. Returns `None` if the variable is unset or not UTF-8.
+fn home_dir() -> Option<String> {
+    #[cfg(windows)]
+    let var = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let var = std::env::var_os("HOME");
+    var?.to_str().map(str::to_string)
 }
 
 /// Translate the MSYS/Cygwin absolute path forms bash would accept into a
@@ -206,6 +266,58 @@ mod tests {
         // Resolves a normal path inside.
         let p = resolve_path(dir.path(), "file.txt").expect("resolve");
         assert!(p.ends_with("file.txt"));
+    }
+
+    // `expand_tilde` is pure (home is passed in), so these cases need no env
+    // mutation and cannot race parallel tests.
+    #[test]
+    fn expand_tilde_forms() {
+        let home = "/home/agent";
+
+        // Non-tilde inputs are never rewritten.
+        assert_eq!(expand_tilde("file.txt", Some(home)), None);
+        assert_eq!(expand_tilde("/abs/path", Some(home)), None);
+        assert_eq!(expand_tilde("sub/~notleading", Some(home)), None);
+
+        // `~user` and other non-separator suffixes are left for the caller.
+        assert_eq!(expand_tilde("~user/x", Some(home)), None);
+        assert_eq!(expand_tilde("~foo", Some(home)), None);
+
+        // Bare `~` and `~/rest` expand against the supplied home.
+        assert_eq!(expand_tilde("~", Some(home)), Some(home.to_string()));
+        let expanded = expand_tilde("~/.claude/skills/x", Some(home)).expect("expands");
+        assert_eq!(
+            expanded,
+            Path::new(home).join(".claude/skills/x").to_string_lossy()
+        );
+
+        // Unset or empty home -> no rewrite, caller falls back to the raw path.
+        assert_eq!(expand_tilde("~/rest", None), None);
+        assert_eq!(expand_tilde("~", None), None);
+        assert_eq!(expand_tilde("~/rest", Some("")), None);
+    }
+
+    // End-to-end through `resolve_path`, exercising the real `home_dir()` env
+    // read: a `~/...` path resolves against the actual home directory, not the
+    // workspace root. Uses a temp file created under the real home so it does
+    // not mutate the environment.
+    #[test]
+    fn resolve_path_expands_tilde_against_home() {
+        let home = match home_dir() {
+            Some(h) if !h.is_empty() => h,
+            _ => return, // No home in this environment (e.g. minimal CI) — skip.
+        };
+        let marker = format!(".dev-mcp-tilde-test-{}", std::process::id());
+        let target = Path::new(&home).join(&marker);
+        fs::write(&target, b"z").expect("write under home");
+
+        let workspace = tempdir().expect("tempdir");
+        let resolved = resolve_path(workspace.path(), &format!("~/{marker}"))
+            .expect("tilde path resolves against home, not workspace");
+        let want = std::fs::canonicalize(&target).expect("canon");
+        assert_eq!(resolved, want);
+
+        let _ = fs::remove_file(&target);
     }
 
     // Windows MSYS-absolute path translation. These test `msys_to_windows`
