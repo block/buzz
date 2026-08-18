@@ -1,7 +1,8 @@
-import { History, Pencil, X } from "lucide-react";
+import { History, Pencil, Play, X } from "lucide-react";
 import * as React from "react";
 import { stringify as yamlStringify } from "yaml";
 
+import { useTriggerWorkflowMutation } from "@/features/workflows/hooks";
 import type { Channel, Workflow } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -14,6 +15,7 @@ import {
 } from "@/shared/ui/dialog";
 import { WorkflowDetailPanel } from "./WorkflowDetailPanel";
 import { WorkflowFormBuilder } from "./WorkflowFormBuilder";
+import { yamlToFormState } from "./workflowFormTypes";
 import { getWorkflowDescription } from "./workflowDefinition";
 
 type WorkflowDetailDialogProps = {
@@ -37,6 +39,21 @@ export function WorkflowDetailDialog({
     () => yamlStringify(workflow.definition),
     [workflow.definition],
   );
+  const formParse = React.useMemo(() => yamlToFormState(yaml), [yaml]);
+  const triggerMutation = useTriggerWorkflowMutation(workflow.id);
+  const triggerError =
+    triggerMutation.error instanceof Error &&
+    triggerMutation.error.message.trim().length > 0
+      ? triggerMutation.error.message
+      : "The relay did not create a workflow run.";
+
+  async function handleTrigger() {
+    try {
+      await triggerMutation.mutateAsync();
+    } catch {
+      // React Query retains the error for the inline alert.
+    }
+  }
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -54,6 +71,17 @@ export function WorkflowDetailDialog({
             </DialogDescription>
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              className="h-8 gap-1.5"
+              disabled={triggerMutation.isPending}
+              onClick={() => void handleTrigger()}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <Play className="h-4 w-4" />
+              {triggerMutation.isPending ? "Triggering..." : "Trigger"}
+            </Button>
             <Button
               aria-pressed={historyOpen}
               className="h-8 gap-1.5"
@@ -88,6 +116,17 @@ export function WorkflowDetailDialog({
             </DialogClose>
           </div>
         </DialogHeader>
+        {triggerMutation.isError ? (
+          <div
+            className="border-y px-6 py-2 text-xs text-destructive"
+            role="alert"
+          >
+            <p className="font-medium">Failed to trigger workflow</p>
+            <p className="mt-1 break-words text-muted-foreground">
+              {triggerError}
+            </p>
+          </div>
+        ) : null}
         <div className="min-h-0 flex-1">
           <WorkflowFormBuilder
             channels={channels}
@@ -101,11 +140,11 @@ export function WorkflowDetailDialog({
                 />
               ) : null
             }
-            mode="form"
+            mode={formParse.ok ? "form" : "yaml"}
             onChange={() => {}}
             onHistoryClose={() => setHistoryOpen(false)}
             onSelectedNodeChange={() => {}}
-            parseError={null}
+            parseError={formParse.ok ? null : formParse.error}
             selectedNode={null}
             workflowChannelId={workflow.channelId}
             yaml={yaml}

@@ -722,7 +722,46 @@ test("stale editor save preserves the local draft and reports the conflict", asy
   await expect(dialog).toBeVisible();
 });
 
-test("card click opens the detail modal and run history", async ({ page }) => {
+test("unsupported workflow detail shows canonical YAML without a fabricated sequence", async ({
+  page,
+}) => {
+  const workflowName = `unsupported_detail_${Date.now()}`;
+  await navigateToWorkflows(page);
+  const workflowId = await page.evaluate(async (name) => {
+    const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) throw new Error("mock command bridge unavailable");
+    const workflow = (await invoke("create_workflow", {
+      channelId: "94a444a4-c0a3-5966-ab05-530c6ddc2301",
+      yamlDefinition: `name: ${name}\ntrigger:\n  on: message_posted\n  legacy_filter:\n    author: alice\nsteps:\n  - id: legacy_step\n    action: send_message\n    text: preserve me\n`,
+    })) as { id: string };
+    return workflow.id;
+  }, workflowName);
+
+  await page.goto(`/#/workflows/${workflowId}`);
+  const detailDialog = page.getByRole("dialog", { name: workflowName });
+  await expect(detailDialog).toBeVisible();
+  await expect(detailDialog.getByRole("alert")).toContainText(
+    'Unsupported message_posted trigger field "legacy_filter"',
+  );
+  const yamlEditor = detailDialog.getByRole("textbox", {
+    name: "Workflow YAML",
+  });
+  await expect(yamlEditor).toBeDisabled();
+  await expect(yamlEditor).toContainText("legacy_filter:");
+  await expect(yamlEditor).toContainText("author: alice");
+  await expect(yamlEditor).toContainText("id: legacy_step");
+  await expect(yamlEditor).toContainText("text: preserve me");
+  await expect(
+    detailDialog.getByRole("button", { name: "Trigger: Message Posted" }),
+  ).toHaveCount(0);
+  await expect(
+    detailDialog.getByRole("button", { name: "Step 1: Send Message" }),
+  ).toHaveCount(0);
+});
+
+test("card click opens detail, triggers a run, and opens run history", async ({
+  page,
+}) => {
   const workflowName = `card_editor_${Date.now()}`;
 
   await navigateToWorkflows(page);
@@ -732,8 +771,39 @@ test("card click opens the detail modal and run history", async ({ page }) => {
   await expect(page).toHaveURL(/#\/workflows\/[^?]+$/);
   const detailDialog = page.getByRole("dialog", { name: workflowName });
   await expect(detailDialog).toBeVisible();
+  const triggerButton = detailDialog.getByRole("button", {
+    name: "Trigger",
+    exact: true,
+  });
+  await expect(triggerButton).toBeVisible();
+  const triggerCallsBefore = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_COMMAND_PAYLOADS__?.filter(
+        (call) => call.command === "trigger_workflow",
+      ).length ?? 0,
+  );
+  await triggerButton.click();
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_COMMAND_PAYLOADS__?.filter(
+            (call) => call.command === "trigger_workflow",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(triggerCallsBefore + 1);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ ??= {};
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.workflowTriggerError = "relay refused the run";
+  });
+  await triggerButton.click();
+  await expect(detailDialog.getByRole("alert")).toContainText(
+    "relay refused the run",
+  );
   await expect(
-    detailDialog.getByText("Trigger", { exact: true }),
+    detailDialog.getByText("Trigger", { exact: true }).first(),
   ).toBeVisible();
   await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
   await detailDialog.getByRole("button", { name: "Run history" }).click();
