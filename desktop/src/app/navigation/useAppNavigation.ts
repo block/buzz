@@ -169,6 +169,7 @@ export function useAppNavigation() {
           params: {
             workflowId,
           },
+          search: { pane: "trigger" },
           state: { workflowEditorHasOrigin: true },
         },
         behavior,

@@ -669,7 +669,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                 </div>
               </div>
 
-              <AnimatePresence initial={false}>
+              <AnimatePresence>
                 {selectedNode || historyPanel ? (
                   <motion.button
                     animate={{ opacity: 1 }}
