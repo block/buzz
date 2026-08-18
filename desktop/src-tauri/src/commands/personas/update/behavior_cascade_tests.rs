@@ -224,14 +224,9 @@ fn unknown_definition_mode_fails_loudly() {
     let mut bogus = persona(Some("anyone"), vec![], None);
     bogus.respond_to = Some("spaceship".to_string());
 
-    let err = propagate_persona_behavior(
-        &mut records,
-        "persona-1",
-        RespondTo::OwnerOnly,
-        &[],
-        &bogus,
-    )
-    .unwrap_err();
+    let err =
+        propagate_persona_behavior(&mut records, "persona-1", RespondTo::OwnerOnly, &[], &bogus)
+            .unwrap_err();
 
     assert!(err.contains("spaceship"), "{err}");
     assert_eq!(
@@ -294,7 +289,10 @@ fn empty_allowlist_definition_skips_adoption_without_failing() {
     );
     assert!(records[0].respond_to_allowlist.is_empty());
     // Mirrors still reflect the (broken) definition bytes for inspect paths.
-    assert_eq!(records[0].definition_respond_to.as_deref(), Some("allowlist"));
+    assert_eq!(
+        records[0].definition_respond_to.as_deref(),
+        Some("allowlist")
+    );
     assert!(records[0].definition_respond_to_allowlist.is_empty());
 }
 
@@ -320,8 +318,8 @@ fn same_mode_allowlist_pin_survives_definition_edit() {
     propagate_persona_behavior(
         &mut records,
         "persona-1",
-        RespondTo::Allowlist,   // pre-edit definition mode
-        &["a".repeat(64)],      // pre-edit definition allowlist
+        RespondTo::Allowlist, // pre-edit definition mode
+        &["a".repeat(64)],    // pre-edit definition allowlist
         &updated,
     )
     .unwrap();
@@ -364,4 +362,81 @@ fn cascade_to_non_allowlist_mode_clears_stored_allowlist() {
         records[0].respond_to_allowlist.is_empty(),
         "non-allowlist modes store an empty list, matching mint-time semantics"
     );
+}
+
+/// Review nit 1 on #4115: the Allowlist+[] skip must be scoped to the
+/// respond_to gate, not to the whole adoption. `behavior_changed` fires on a
+/// parallelism-only edit, so freezing an inheriting instance's pool width
+/// because the definition happens to sit in an unsafe respond_to state is a
+/// separate, unasked-for behaviour change.
+#[test]
+fn unsafe_definition_state_still_cascades_parallelism() {
+    let mut records = vec![agent("persona-1", "A1", RespondTo::OwnerOnly)];
+    records[0].parallelism = 1;
+    // Definition in `allowlist` with no principals — the state the mint path
+    // rejects, so the respond_to gate must NOT cascade.
+    let updated = persona(Some("allowlist"), vec![], Some(6));
+
+    let touched = propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::OwnerOnly,
+        &[],
+        &updated,
+    )
+    .unwrap();
+
+    assert!(touched);
+    // Gate held back...
+    assert_eq!(records[0].respond_to, RespondTo::OwnerOnly);
+    assert!(records[0].respond_to_allowlist.is_empty());
+    // ...but the pool width still reaches the instance.
+    assert_eq!(records[0].parallelism, 6);
+}
+
+/// Review nit 2 on #4115: an instance holding the same principals in a
+/// different order is still inheriting. A positional comparison read it as a
+/// deliberate pin and stranded it on the old gate permanently.
+#[test]
+fn allowlist_ordering_does_not_read_as_a_pin() {
+    let (a, b) = ("a".repeat(64), "b".repeat(64));
+    let mut records = vec![agent("persona-1", "A1", RespondTo::Allowlist)];
+    records[0].respond_to_allowlist = vec![b.clone(), a.clone()];
+    let updated = persona(Some("anyone"), vec![], None);
+
+    let touched = propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::Allowlist,
+        &[a.clone(), b.clone()], // same set, opposite order
+        &updated,
+    )
+    .unwrap();
+
+    assert!(touched);
+    assert_eq!(records[0].respond_to, RespondTo::Anyone);
+    assert!(records[0].respond_to_allowlist.is_empty());
+}
+
+/// The order-insensitive comparison must not swallow a genuine difference:
+/// a duplicated principal is a different list, not a reordering.
+#[test]
+fn allowlist_duplicate_is_not_the_same_set() {
+    let (a, b) = ("a".repeat(64), "b".repeat(64));
+    let mut records = vec![agent("persona-1", "A1", RespondTo::Allowlist)];
+    records[0].respond_to_allowlist = vec![a.clone(), a.clone()];
+    let updated = persona(Some("anyone"), vec![], None);
+
+    propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::Allowlist,
+        &[a.clone(), b.clone()],
+        &updated,
+    )
+    .unwrap();
+
+    // Read as a deliberate pin — untouched.
+    assert_eq!(records[0].respond_to, RespondTo::Allowlist);
+    assert_eq!(records[0].respond_to_allowlist, vec![a.clone(), a]);
 }

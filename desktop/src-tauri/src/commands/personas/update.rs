@@ -129,21 +129,49 @@ fn propagate_persona_behavior(
         record.definition_respond_to_allowlist = persona.respond_to_allowlist.clone();
         record.definition_parallelism = persona.parallelism;
 
-        if definition_adoptable
-            && record.respond_to == old_mode
-            && record.respond_to_allowlist.as_slice() == inherited_allowlist
-        {
-            // Still inheriting — adopt the new definition value as the
-            // instance's effective gate. `None` on the definition means "no
-            // explicit mode": the harness default (owner-only) applies.
-            record.respond_to = new_mode;
-            record.respond_to_allowlist = adopted_allowlist.to_vec();
+        let still_inheriting = record.respond_to == old_mode
+            && same_allowlist(&record.respond_to_allowlist, inherited_allowlist);
+
+        if still_inheriting {
+            // Parallelism is not part of the unsafe state. Adopting the
+            // respond_to gate from a definition sitting in Allowlist with an
+            // empty allowlist would cascade a state the mint path rejects, so
+            // that is gated -- but freezing an inheriting instance's pool
+            // width as a side effect of the same condition is a separate,
+            // unasked-for behaviour change, and `behavior_changed` fires on a
+            // parallelism-only edit (review on #4115).
             if let Some(parallelism) = persona.parallelism {
                 record.parallelism = parallelism;
+            }
+
+            if definition_adoptable {
+                // Adopt the new definition value as the instance's effective
+                // gate. `None` on the definition means "no explicit mode":
+                // the harness default (owner-only) applies.
+                record.respond_to = new_mode;
+                record.respond_to_allowlist = adopted_allowlist.to_vec();
             }
         }
     }
     Ok(linked)
+}
+
+/// Whether two allowlists hold the same principals.
+///
+/// Order-insensitive on purpose: nothing guarantees a stable ordering out of
+/// the person-picker, and a positional comparison reads an instance holding
+/// the same pubkeys in a different order as pinned -- silently stranding it
+/// on the old gate forever (review on #4115). Sorted rather than set-wise so
+/// a genuine duplicate still counts as a difference.
+fn same_allowlist(left: &[String], right: &[String]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left: Vec<&str> = left.iter().map(String::as_str).collect();
+    let mut right: Vec<&str> = right.iter().map(String::as_str).collect();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
 }
 
 #[tauri::command]
