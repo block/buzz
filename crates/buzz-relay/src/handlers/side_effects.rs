@@ -3137,8 +3137,35 @@ pub async fn publish_nipia_archival_list(
         );
     }
 
+    // Force created_at strictly past any prior snapshot: NIP-01 resolves
+    // same-second replaceable events by lowest event id (randomly signed), so
+    // an intermediate snapshot could otherwise win over a newer accepted delta.
+    // Same guard as publish_dm_visibility_snapshot /
+    // emit_addressable_discovery_event.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = {
+        let existing = state
+            .db
+            .query_events(&buzz_db::event::EventQuery {
+                kinds: Some(vec![KIND_IA_ARCHIVED_LIST as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                limit: Some(1),
+                ..buzz_db::event::EventQuery::for_community(tenant.community())
+            })
+            .await
+            .unwrap_or_default();
+        existing
+            .first()
+            .map(|e| (e.event.created_at.as_secs() + 1).max(now))
+            .unwrap_or(now)
+    };
+
     let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
         .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
 
