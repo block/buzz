@@ -23,24 +23,33 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-test("always mentioning an agent removes the active query, adds the lock, and closes the picker", async () => {
+test("always mentioning an inline agent removes the mention and query, adds the lock, and pulses", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
   );
   const appliedEdits = [];
   const addedPubkeys = [];
+  const pulsedPubkeys = [];
+  const text = "Ask @Agent Ada later @";
   const mentions = {
     cancelMentionAutocomplete: () => {},
+    getDraftMentionRefs: () => [
+      {
+        displayName: "Agent Ada",
+        pubkey: "agent-pubkey",
+        isAgent: true,
+      },
+    ],
     getMentionDisplayName: () => "Agent Ada",
-    mentionStartIndex: 5,
+    mentionStartIndex: text.lastIndexOf("@"),
   };
   const audience = {
     pubkeys: [],
     addPubkey: (pubkey) => addedPubkeys.push(pubkey),
   };
   const richText = {
-    getPlainTextAndCursor: () => ({ text: "ping @", cursor: 6 }),
+    getPlainTextAndCursor: () => ({ text, cursor: text.length }),
   };
   const { result } = renderHook(() =>
     useAgentAddressLockPicker({
@@ -48,7 +57,7 @@ test("always mentioning an agent removes the active query, adds the lock, and cl
       audience,
       audienceScope: "channel-scope",
       mentions,
-      onPulseAddressLock: () => {},
+      onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
       richText,
     }),
   );
@@ -62,9 +71,15 @@ test("always mentioning an agent removes the active query, adds the lock, and cl
   });
 
   assert.deepEqual(appliedEdits, [
-    { replaceFromOffset: 5, replaceToOffset: 6, insertText: "" },
+    {
+      replaceFromOffset: text.lastIndexOf("@"),
+      replaceToOffset: text.length,
+      insertText: "",
+    },
+    { replaceFromOffset: 4, replaceToOffset: 15, insertText: "" },
   ]);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
+  assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
 });
 
 test("selecting an already addressed agent removes the query and pulses its badge", async () => {
@@ -77,6 +92,7 @@ test("selecting an already addressed agent removes the query and pulses its badg
   const pulsedPubkeys = [];
   const mentions = {
     cancelMentionAutocomplete: () => {},
+    getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
     insertMention: () => {
       throw new Error("an already addressed agent must not be inserted");

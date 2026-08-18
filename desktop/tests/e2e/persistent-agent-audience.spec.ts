@@ -135,7 +135,7 @@ test("always mentions multiple agents from the mention picker", async ({
     composer.getByRole("button", {
       name: "Stop always mentioning Morgarita",
     }),
-  ).toHaveAttribute("aria-pressed", "true");
+  ).toHaveCount(1);
 
   await input.fill("@Vog");
   await composer
@@ -145,7 +145,7 @@ test("always mentions multiple agents from the mention picker", async ({
   await expect(input).toHaveText("");
   await expect(
     composer.getByRole("button", { name: "Stop always mentioning Vogue" }),
-  ).toHaveAttribute("aria-pressed", "true");
+  ).toHaveCount(1);
   await expect
     .poll(() =>
       page.evaluate(
@@ -161,6 +161,83 @@ test("always mentions multiple agents from the mention picker", async ({
     .toEqual([AGENT_A, AGENT_B]);
 });
 
+test("the avatar opens the profile and only the hover x removes the agent", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const avatar = composer.getByRole("button", {
+    name: "Open profile for Morgarita",
+  });
+  const remove = composer.getByRole("button", {
+    name: "Stop always mentioning Morgarita",
+  });
+
+  await expect(remove).toHaveCSS("opacity", "0");
+  await avatar.hover();
+  await expect(remove).toHaveCSS("opacity", "1");
+  await avatar.click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+          );
+          return stored[scope] ?? [];
+        },
+        { scope: CHANNEL_SCOPE },
+      ),
+    )
+    .toEqual([AGENT_A]);
+
+  await avatar.hover();
+  await remove.click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+          );
+          return stored[scope] ?? [];
+        },
+        { scope: CHANNEL_SCOPE },
+      ),
+    )
+    .toEqual([]);
+});
+
+test("reselecting an always-mentioned agent pulses its composer badge", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  const badge = composer.getByTestId(
+    `composer-address-lock-mention-badge-${AGENT_A}`,
+  );
+  await expect(badge).toHaveAttribute("data-pulse-version", "0");
+
+  await input.fill("@Mor");
+  await composer
+    .getByTestId("mention-autocomplete")
+    .getByRole("button", { name: "Mention Morgarita" })
+    .click();
+
+  await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
+  await expect(input).toHaveText("");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+  await expect(badge).toHaveAttribute("data-pulse-version", "1");
+});
+
 test("always-mentioned agents remain in the tray while Enter-send resolves", async ({
   page,
 }) => {
@@ -171,6 +248,10 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   const composer = threadComposer(page);
   const input = composer.getByTestId("message-input");
   const send = composer.getByTestId("send-message");
+  const badge = composer.getByTestId(
+    `composer-address-lock-mention-badge-${AGENT_A}`,
+  );
+  await expect(badge).toHaveAttribute("data-pulse-version", "0");
   await input.fill("hello");
   await input.press("Enter");
 
@@ -187,6 +268,7 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "hello"))
     .toContain(AGENT_A);
+  await expect(badge).toHaveAttribute("data-pulse-version", "1");
 
   const sentRow = page
     .getByTestId("message-row")
@@ -260,6 +342,9 @@ test("always-mentioned agents restore and can be removed independently", async (
   ).toBeVisible();
 
   await composer
+    .getByRole("button", { name: "Open profile for Vogue" })
+    .hover();
+  await composer
     .getByRole("button", { name: "Stop always mentioning Vogue" })
     .click();
   await expect
@@ -315,6 +400,9 @@ test("channel always-mentions carry into threads and stay synchronized", async (
   await expect(channelAlwaysMention).toBeVisible();
   await expect(threadAlwaysMention).toBeVisible();
 
+  await threadComposer(page)
+    .getByRole("button", { name: "Open profile for Morgarita" })
+    .hover();
   await threadAlwaysMention.click();
   await expect(threadAlwaysMention).toHaveCount(0);
   await expect(channelAlwaysMention).toHaveCount(0);

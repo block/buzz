@@ -1,4 +1,4 @@
-import { AtSign } from "lucide-react";
+import { AtSign, X } from "lucide-react";
 import * as React from "react";
 import {
   AnimatePresence,
@@ -7,6 +7,7 @@ import {
   useReducedMotion,
 } from "motion/react";
 
+import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -25,7 +26,7 @@ function AddressMentionBadge({
 }) {
   const controls = useAnimationControls();
   const shouldReduceMotion = useReducedMotion();
-  const previousPulseVersionRef = React.useRef(pulseVersion);
+  const previousPulseVersionRef = React.useRef(0);
 
   React.useEffect(() => {
     if (pulseVersion <= previousPulseVersionRef.current) return;
@@ -62,6 +63,8 @@ export function ComposerAddressLocks({
   onRemove: (pubkey: string) => void;
   pulseVersionByPubkey?: Readonly<Record<string, number>>;
 }) {
+  const { openProfilePanel } = useProfilePanel();
+
   return (
     <div
       className="flex min-w-0 select-none flex-wrap items-center gap-1.5"
@@ -71,7 +74,7 @@ export function ComposerAddressLocks({
         {agents.map((agent) => (
           <motion.div
             animate={{ opacity: 1, scale: 1 }}
-            className="relative h-10 w-10 shrink-0"
+            className="group relative h-10 w-10 shrink-0"
             data-testid={`composer-address-lock-${agent.pubkey}`}
             exit={{ opacity: 0, scale: 0.8 }}
             initial={{ opacity: 0, scale: 0.8 }}
@@ -82,10 +85,9 @@ export function ComposerAddressLocks({
             <Tooltip disableHoverableContent>
               <TooltipTrigger asChild>
                 <button
-                  aria-label={`Stop always mentioning ${agent.displayName}`}
-                  aria-pressed="true"
+                  aria-label={`Open profile for ${agent.displayName}`}
                   className="relative h-10 w-10 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                  onClick={() => onRemove(agent.pubkey)}
+                  onClick={() => openProfilePanel?.(agent.pubkey)}
                   type="button"
                 >
                   <UserAvatar
@@ -103,6 +105,22 @@ export function ComposerAddressLocks({
               </TooltipTrigger>
               <TooltipContent className="select-none">
                 Always mentioning {agent.displayName}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip disableHoverableContent>
+              <TooltipTrigger asChild>
+                <button
+                  aria-label={`Stop always mentioning ${agent.displayName}`}
+                  className="pointer-events-none absolute -right-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
+                  data-testid={`composer-address-lock-remove-${agent.pubkey}`}
+                  onClick={() => onRemove(agent.pubkey)}
+                  type="button"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>
+                Stop always mentioning {agent.displayName}
               </TooltipContent>
             </Tooltip>
           </motion.div>
