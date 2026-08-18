@@ -41,19 +41,14 @@ use serde::Deserialize;
 pub const POLICY_ENV: &str = "BUZZ_ROUTING_POLICY";
 
 /// How a rule matches the prompt text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchKind {
     /// Any of `any` appears in the prompt, case-insensitively.
+    #[default]
     Contains,
     /// Every one of `any` appears in the prompt, case-insensitively.
     ContainsAll,
-}
-
-impl Default for MatchKind {
-    fn default() -> Self {
-        Self::Contains
-    }
 }
 
 /// One deterministic routing rule.
