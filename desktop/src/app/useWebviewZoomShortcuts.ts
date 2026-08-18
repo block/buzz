@@ -119,9 +119,21 @@ export function useWebviewZoomShortcuts() {
       applyTextScale(nextZoomFactor);
     }
 
+    function handleStorage(event: StorageEvent) {
+      if (event.key !== TEXT_SCALE_STORAGE_KEY && event.key !== null) {
+        return;
+      }
+
+      const storedZoomFactor = readStoredZoomFactor();
+      zoomFactorRef.current = storedZoomFactor;
+      applyTextZoomFactor(storedZoomFactor);
+    }
+
     window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("storage", handleStorage);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 }

@@ -2558,6 +2558,88 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   });
 });
 
+test("storage clear resets composed font size and keyboard zoom across windows", async ({
+  context,
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "appearance");
+  await page.getByTestId("font-size-larger").click();
+
+  const dispatchZoomIn = () =>
+    page.evaluate(() => {
+      const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "Equal",
+          ctrlKey: !isMac,
+          key: "+",
+          metaKey: isMac,
+          shiftKey: true,
+        }),
+      );
+    });
+
+  for (let step = 0; step < 5; step += 1) {
+    await dispatchZoomIn();
+  }
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        fontSize: document.documentElement.dataset.fontSize,
+        textRemSize: getComputedStyle(document.documentElement)
+          .getPropertyValue("--buzz-type-rem")
+          .trim(),
+        textScale: localStorage.getItem("buzz:text-scale"),
+      })),
+    )
+    .toEqual({
+      fontSize: "larger",
+      textRemSize: "25.714286px",
+      textScale: "1.5",
+    });
+
+  const peerPage = await context.newPage();
+  await installMockBridge(peerPage);
+  await peerPage.goto("/");
+  await peerPage.evaluate(() => localStorage.clear());
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        fontSize: document.documentElement.dataset.fontSize,
+        textRemSize: getComputedStyle(document.documentElement)
+          .getPropertyValue("--buzz-type-rem")
+          .trim(),
+        textScale: localStorage.getItem("buzz:text-scale"),
+      })),
+    )
+    .toEqual({
+      fontSize: "default",
+      textRemSize: "16px",
+      textScale: null,
+    });
+
+  await page.keyboard.press(
+    process.platform === "darwin" ? "Meta+-" : "Control+-",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        textRemSize: getComputedStyle(document.documentElement)
+          .getPropertyValue("--buzz-type-rem")
+          .trim(),
+        textScale: localStorage.getItem("buzz:text-scale"),
+      })),
+    )
+    .toEqual({ textRemSize: "14.4px", textScale: "0.9" });
+
+  await peerPage.close();
+});
+
 test("shows agent runtimes in agent settings", async ({ page }) => {
   await page.goto("/");
 
