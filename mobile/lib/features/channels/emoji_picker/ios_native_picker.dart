@@ -28,21 +28,84 @@ Future<void> _presentIosEmojiPicker({
   _iosEmojiPickerPresenting = true;
 
   final container = ProviderScope.containerOf(context, listen: false);
+  final paletteState = container.read(customEmojiPaletteProvider);
   final List<CustomEmoji> customEmoji;
-  try {
-    customEmoji = await container.read(customEmojiPaletteProvider.future);
-  } catch (_) {
-    // A palette fetch failure must not strand the composer's open state: fall
-    // back to the Flutter picker, which watches the palette itself.
-    _iosEmojiPickerPresenting = false;
-    if (context.mounted) {
-      _showFlutterEmojiPicker(
-        context: context,
-        onSelect: onSelect,
-        onDismiss: onDismiss,
-      );
+  BuildContext? loadingSheetContext;
+  var leavingLoadingSheet = false;
+  var loadingCancelled = false;
+  Future<void>? loadingSheet;
+
+  if (paletteState case AsyncData(:final value)) {
+    customEmoji = value;
+  } else {
+    // Palette history can take the relay timeout to resolve. Give the tap an
+    // immediate, cancellable surface instead of holding the global guard while
+    // the composer appears unresponsive.
+    final loadingSheetBuilt = Completer<void>();
+    loadingSheet =
+        showBuzzModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          showCloseButton: false,
+          builder: (sheetContext) {
+            loadingSheetContext = sheetContext;
+            if (!loadingSheetBuilt.isCompleted) loadingSheetBuilt.complete();
+            return const SizedBox(
+              key: Key('ios-emoji-picker-palette-loading'),
+              height: 180,
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: Grid.sm),
+                    Text('Loading emoji…'),
+                  ],
+                ),
+              ),
+            );
+          },
+        ).whenComplete(() {
+          if (leavingLoadingSheet) return;
+          loadingCancelled = true;
+          _iosEmojiPickerPresenting = false;
+          onDismiss?.call();
+        });
+
+    try {
+      customEmoji = await container.read(customEmojiPaletteProvider.future);
+    } catch (_) {
+      if (loadingCancelled) return;
+      await loadingSheetBuilt.future;
+      if (loadingCancelled) return;
+      leavingLoadingSheet = true;
+      if (loadingSheetContext case final sheetContext?
+          when sheetContext.mounted) {
+        Navigator.of(sheetContext).pop();
+      }
+      await loadingSheet;
+      // A palette fetch failure must not strand the composer's open state: fall
+      // back to the Flutter picker, which watches the palette itself.
+      _iosEmojiPickerPresenting = false;
+      if (context.mounted) {
+        _showFlutterEmojiPicker(
+          context: context,
+          onSelect: onSelect,
+          onDismiss: onDismiss,
+        );
+      }
+      return;
     }
-    return;
+
+    if (loadingCancelled) return;
+    await loadingSheetBuilt.future;
+    if (loadingCancelled) return;
+    leavingLoadingSheet = true;
+    if (loadingSheetContext case final sheetContext?
+        when sheetContext.mounted) {
+      Navigator.of(sheetContext).pop();
+    }
+    await loadingSheet;
   }
   if (!context.mounted) {
     _iosEmojiPickerPresenting = false;

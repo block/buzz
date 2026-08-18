@@ -787,7 +787,7 @@ void main() {
       }
     });
 
-    testWidgets('awaits the custom emoji palette before presenting', (
+    testWidgets('shows cancellable feedback while loading the custom palette', (
       tester,
     ) async {
       final previousPlatform = debugDefaultTargetPlatformOverride;
@@ -827,10 +827,83 @@ void main() {
         await tester.tap(find.text('Open picker'));
         await tester.pump();
         expect(presentation, isNull);
+        expect(
+          find.byKey(const Key('ios-emoji-picker-palette-loading')),
+          findsOneWidget,
+        );
+        expect(find.text('Loading emoji…'), findsOneWidget);
 
         palette.complete(_customEmoji);
         await tester.pumpAndSettle();
+        expect(
+          find.byKey(const Key('ios-emoji-picker-palette-loading')),
+          findsNothing,
+        );
         expect(presentation?.method, 'present');
+      } finally {
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('cancels palette loading without presenting native picker', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      final palette = Completer<List<CustomEmoji>>();
+      var presents = 0;
+      var dismissals = 0;
+      _setMockNativeEmojiPickerHandler((call) async {
+        if (call.method == 'present') presents += 1;
+        return true;
+      });
+
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              customEmojiPaletteProvider.overrideWith(
+                () => _FakeCustomEmojiPaletteNotifier(palette.future),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Scaffold(
+                body: Builder(
+                  builder: (context) => FilledButton(
+                    onPressed: () => showEmojiPicker(
+                      context: context,
+                      onSelect: (_) {},
+                      onDismiss: () => dismissals += 1,
+                    ),
+                    child: const Text('Open picker'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Open picker'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(
+          find.byKey(const Key('ios-emoji-picker-palette-loading')),
+          findsOneWidget,
+        );
+
+        await tester.tapAt(const Offset(20, 20));
+        await tester.pumpAndSettle();
+        expect(dismissals, 1);
+        expect(presents, 0);
+
+        palette.complete(_customEmoji);
+        await tester.pumpAndSettle();
+        expect(presents, 0);
+        expect(dismissals, 1);
       } finally {
         _setMockNativeEmojiPickerHandler(null);
         debugDefaultTargetPlatformOverride = previousPlatform;
