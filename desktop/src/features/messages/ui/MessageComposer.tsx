@@ -49,15 +49,13 @@ import { ComposerAddressLocks } from "./ComposerAddressLocks";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
-import {
-  MentionAutocomplete,
-  type MentionSuggestion,
-} from "./MentionAutocomplete";
+import { MentionAutocomplete } from "./MentionAutocomplete";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
+import { useAddressMentionPulse } from "./useAddressMentionPulse";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
@@ -290,6 +288,7 @@ function MessageComposerImpl({
   onLinkShortcutRef.current = linkEditor.openFromShortcut;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
   const persistentAudience = usePersistentAgentAudience(audienceScope);
+  const addressPulse = useAddressMentionPulse();
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -299,6 +298,7 @@ function MessageComposerImpl({
     drafts,
     emojiAutocomplete,
     mentions,
+    onAddressedAgentsSent: addressPulse.pulseMany,
     onPrepareSendChannel,
     onSendRef,
     richText,
@@ -390,26 +390,20 @@ function MessageComposerImpl({
     },
     [richText.replacePlainTextRange],
   );
-  const applyMentionInsert = React.useCallback(
-    (suggestion: MentionSuggestion) => {
-      const { cursor } = richText.getPlainTextAndCursor();
-      applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
-    },
-    [
-      applyAutocompleteEdit,
-      mentions.insertMention,
-      richText.getPlainTextAndCursor,
-    ],
-  );
-  const { alwaysMentionAgent, lockedAgents, lockedAgentPubkeys } =
-    useAgentAddressLockPicker({
-      applyAutocompleteEdit,
-      audience: persistentAudience,
-      audienceScope,
-      mentions,
-      profiles,
-      richText,
-    });
+  const {
+    alwaysMentionAgent,
+    lockedAgents,
+    lockedAgentPubkeys,
+    selectMentionSuggestion,
+  } = useAgentAddressLockPicker({
+    applyAutocompleteEdit,
+    audience: persistentAudience,
+    audienceScope,
+    mentions,
+    onPulseAddressLock: addressPulse.pulseOne,
+    profiles,
+    richText,
+  });
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();
@@ -673,7 +667,7 @@ function MessageComposerImpl({
       const { handled, suggestion } = mentions.handleMentionKeyDown(event);
       if (handled) {
         if (suggestion) {
-          applyMentionInsert(suggestion);
+          selectMentionSuggestion(suggestion);
         }
         return;
       }
@@ -702,7 +696,7 @@ function MessageComposerImpl({
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
       mentions.handleMentionKeyDown,
-      applyMentionInsert,
+      selectMentionSuggestion,
       linkEditor.isCardOpen,
       linkEditor.focusCardFirstControl,
       isDeferredEditPending,
@@ -905,7 +899,7 @@ function MessageComposerImpl({
                   : undefined
               }
               onFetchMore={mentions.fetchMoreSuggestions}
-              onSelect={applyMentionInsert}
+              onSelect={selectMentionSuggestion}
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
             />
@@ -932,6 +926,7 @@ function MessageComposerImpl({
                   <ComposerAddressLocks
                     agents={lockedAgents}
                     onRemove={persistentAudience.removePubkey}
+                    pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
                   />
                 ) : null}
                 {media.pendingImeta.length > 0 ||

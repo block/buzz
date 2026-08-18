@@ -1,5 +1,11 @@
 import { AtSign } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
+import * as React from "react";
+import {
+  AnimatePresence,
+  motion,
+  useAnimationControls,
+  useReducedMotion,
+} from "motion/react";
 
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -10,12 +16,51 @@ export type ComposerAddressLock = {
   pubkey: string;
 };
 
+function AddressMentionBadge({
+  pubkey,
+  pulseVersion,
+}: {
+  pubkey: string;
+  pulseVersion: number;
+}) {
+  const controls = useAnimationControls();
+  const shouldReduceMotion = useReducedMotion();
+  const previousPulseVersionRef = React.useRef(pulseVersion);
+
+  React.useEffect(() => {
+    if (pulseVersion <= previousPulseVersionRef.current) return;
+    previousPulseVersionRef.current = pulseVersion;
+    if (shouldReduceMotion) return;
+
+    void controls.start({
+      scale: [1, 1.35, 0.96, 1.12, 1],
+      y: [0, -5, 2, -2, 0],
+      transition: { duration: 0.52, ease: "easeOut" },
+    });
+  }, [controls, pulseVersion, shouldReduceMotion]);
+
+  return (
+    <motion.span
+      animate={controls}
+      aria-hidden="true"
+      className="absolute bottom-0 right-0 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm ring-2 ring-background"
+      data-pulse-version={pulseVersion}
+      data-testid={`composer-address-lock-mention-badge-${pubkey}`}
+      initial={false}
+    >
+      <AtSign className="h-3 w-3" />
+    </motion.span>
+  );
+}
+
 export function ComposerAddressLocks({
   agents,
   onRemove,
+  pulseVersionByPubkey = {},
 }: {
   agents: readonly ComposerAddressLock[];
   onRemove: (pubkey: string) => void;
+  pulseVersionByPubkey?: Readonly<Record<string, number>>;
 }) {
   return (
     <div
@@ -50,12 +95,10 @@ export function ComposerAddressLocks({
                     size="md"
                     testId="composer-address-lock-avatar"
                   />
-                  <span
-                    aria-hidden="true"
-                    className="absolute bottom-0 right-0 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm ring-2 ring-background"
-                  >
-                    <AtSign className="h-3 w-3" />
-                  </span>
+                  <AddressMentionBadge
+                    pubkey={agent.pubkey}
+                    pulseVersion={pulseVersionByPubkey[agent.pubkey] ?? 0}
+                  />
                 </button>
               </TooltipTrigger>
               <TooltipContent className="select-none">

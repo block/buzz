@@ -16,6 +16,7 @@ export function useAgentAddressLockPicker({
   audience,
   audienceScope,
   mentions,
+  onPulseAddressLock,
   profiles,
   richText,
 }: {
@@ -23,6 +24,7 @@ export function useAgentAddressLockPicker({
   audience: ReturnType<typeof usePersistentAgentAudience>;
   audienceScope: string | null;
   mentions: UseMentionsResult;
+  onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
 }) {
@@ -71,5 +73,32 @@ export function useAgentAddressLockPicker({
     ],
   );
 
-  return { alwaysMentionAgent, lockedAgents, lockedAgentPubkeys };
+  const selectMentionSuggestion = React.useCallback(
+    (suggestion: MentionSuggestion) => {
+      const pubkey = normalizePubkey(suggestion.pubkey ?? "");
+      if (suggestion.isAgent && pubkey && lockedAgentPubkeys.has(pubkey)) {
+        alwaysMentionAgent(suggestion);
+        onPulseAddressLock(pubkey);
+        return;
+      }
+
+      const { cursor } = richText.getPlainTextAndCursor();
+      applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
+    },
+    [
+      alwaysMentionAgent,
+      applyAutocompleteEdit,
+      lockedAgentPubkeys,
+      mentions.insertMention,
+      onPulseAddressLock,
+      richText.getPlainTextAndCursor,
+    ],
+  );
+
+  return {
+    alwaysMentionAgent,
+    lockedAgents,
+    lockedAgentPubkeys,
+    selectMentionSuggestion,
+  };
 }

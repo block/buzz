@@ -59,6 +59,7 @@ type UseMentionSendFlowOptions = {
   emojiAutocomplete: Pick<UseEmojiAutocompleteResult, "clearEmojis">;
   mentions: UseMentionsResult;
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
+  onAddressedAgentsSent?: (pubkeys: readonly string[]) => void;
   onSendRef: React.MutableRefObject<
     (
       content: string,
@@ -93,6 +94,7 @@ export function useMentionSendFlow({
   emojiAutocomplete,
   mentions,
   onPrepareSendChannel,
+  onAddressedAgentsSent,
   onSendRef,
   richText,
   setContent,
@@ -564,6 +566,9 @@ export function useMentionSendFlow({
             draft.preparedLinkPreviews != null,
           );
           if (signal?.aborted || isSendCancelled()) return;
+          if (isMountedRef.current && draft.addressedAgentPubkeys.length > 0) {
+            onAddressedAgentsSent?.(draft.addressedAgentPubkeys);
+          }
           if (draft.sentDraftKey) {
             drafts.markDraftSent(
               draft.sentDraftKey,
@@ -631,6 +636,7 @@ export function useMentionSendFlow({
       getManagedAgentsByPubkey,
       mentions.isAgentPubkey,
       mentions.revalidateMentionPubkeys,
+      onAddressedAgentsSent,
       onPrepareSendChannel,
       onSendRef,
       richText.setContent,
