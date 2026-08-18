@@ -57,14 +57,13 @@ export async function revalidateAgentMentionPubkeys({
       ? refetchOwnerProfiles([...requestedAgentPubkeys]).catch(() => null)
       : Promise.resolve(null),
   ]);
+  const relayDirectoryReady =
+    relayResult.error === null && relayResult.data !== undefined;
   if (
-    managedResult.error !== null ||
-    relayResult.error !== null ||
-    managedResult.data === undefined ||
-    relayResult.data === undefined ||
     ownerOnly === undefined ||
     ownerPolicyError !== null ||
-    (ownerOnly && ownerProfiles === null)
+    managedResult.error !== null ||
+    managedResult.data === undefined
   ) {
     return filterAdmittedMentionPubkeys(pubkeys, agentPubkeys, new Set());
   }
@@ -76,23 +75,28 @@ export async function revalidateAgentMentionPubkeys({
     currentPubkey,
     eligibilityScope,
     managedAgentPubkeys: managedPubkeys,
-    relayAgents: relayResult.data,
+    relayAgents: relayDirectoryReady ? relayResult.data : [],
     sharedChannelIds,
   });
   const admittedPubkeys = new Set(
-    [...agentPubkeys].filter(
-      (pubkey) =>
+    [...agentPubkeys].filter((pubkey) => {
+      const isManagedAgent = managedPubkeys.has(normalizePubkey(pubkey));
+      const directoryReady =
+        isManagedAgent ||
+        (relayDirectoryReady && (!ownerOnly || ownerProfiles !== null));
+      return (
         getAgentMentionAdmission({
           isAgent: true,
-          isManagedAgent: managedPubkeys.has(pubkey),
+          isManagedAgent,
           pubkey,
           ownerPubkey: ownerProfiles?.profiles[pubkey]?.ownerPubkey,
           currentPubkey,
           mentionableAgentPubkeys: mentionablePubkeys,
-          directoryReady: true,
+          directoryReady,
           ownerOnly,
-        }) === "allow",
-    ),
+        }) === "allow"
+      );
+    }),
   );
   return filterAdmittedMentionPubkeys(pubkeys, agentPubkeys, admittedPubkeys);
 }

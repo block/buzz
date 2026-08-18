@@ -87,7 +87,7 @@ export type ProfileSummaryViewProps = {
   isFollowing: boolean;
   isOwner: boolean | undefined;
   isSelf: boolean;
-  instances: ManagedAgent[];
+  instanceBuckets: { live: ManagedAgent[]; archived: ManagedAgent[] };
   managedAgent: ManagedAgent | undefined;
   agentInfoFields: ProfileField[];
   archiveActions: IdentityArchiveActions;
@@ -163,7 +163,7 @@ export function ProfileSummaryView({
   isFollowing,
   isOwner,
   isSelf,
-  instances,
+  instanceBuckets,
   managedAgent,
   agentInfoFields,
   archiveActions,
@@ -233,7 +233,8 @@ export function ProfileSummaryView({
     (managedAgent !== undefined ||
       runtimeConfigurationFields.length > 0 ||
       runtimeSettingsFields.length > 0 ||
-      instances.length > 0 ||
+      instanceBuckets.live.length > 0 ||
+      instanceBuckets.archived.length > 0 ||
       diagnosticsFields.length > 0 ||
       canOpenAgentLogs);
   const showDiagnosticsIngress =
@@ -535,7 +536,8 @@ export function ProfileSummaryView({
                   diagnosticsFields={diagnosticsFields}
                   diagnosticsSummary={diagnosticsTrailing}
                   configurationFields={runtimeFields}
-                  instances={instances}
+                  instances={instanceBuckets.live}
+                  archivedInstances={instanceBuckets.archived}
                   modelSettings={
                     isOwner === true && managedAgent !== undefined ? (
                       <AgentConfigPanel

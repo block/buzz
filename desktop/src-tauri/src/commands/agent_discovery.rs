@@ -1,14 +1,7 @@
-use tauri::State;
-
-use crate::{
-    app_state::AppState,
-    managed_agents::{
-        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
-        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
-        RelayAgentInfo, DEFAULT_ACP_COMMAND,
-    },
-    nostr_convert,
-    relay::query_relay,
+use crate::managed_agents::{
+    command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+    DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
+    DEFAULT_ACP_COMMAND,
 };
 
 mod post_install_verification;
@@ -1037,30 +1030,30 @@ pub async fn discover_managed_agent_prereqs(
     .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
-#[tauri::command]
-pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    // Query kind:10100 agent profile events from the relay.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [10100],
-        })],
-    )
-    .await?;
-
-    // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
-    // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
-    let agents = value
-        .get("agents")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
-}
+mod relay_directory;
+#[cfg(test)]
+use relay_directory::advance_relay_cursor;
+pub use relay_directory::list_relay_agents;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_directory_cursor_uses_timestamp_and_event_id() {
+        use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+        let event = EventBuilder::new(Kind::Custom(30177), "{}")
+            .custom_created_at(Timestamp::from(42))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign cursor event");
+        let mut filter = serde_json::json!({"kinds": [30177]});
+
+        advance_relay_cursor(&mut filter, std::slice::from_ref(&event));
+
+        assert_eq!(filter["until"], 42);
+        assert_eq!(filter["before_id"], event.id.to_hex());
+    }
 
     // ── is_npm_global_install ─────────────────────────────────────────────────
 

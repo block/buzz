@@ -1,9 +1,19 @@
 /**
  * Source-of-truth constants for buzz-agent model-tuning configuration knobs.
  *
- * Values must stay in sync with `crates/buzz-agent/src/config.rs`
- * `parse_thinking_effort` — that function is the authoritative list.
+ * The thinking-effort value list and the provider/model → effort projection are
+ * both derived from the shared capability manifest via the interpreter in
+ * `./modelCapabilities`; this module owns only the buzz-agent env-var keys and
+ * the runtime-id guard. Mirrors the `config.rs` ⇄ `model_capabilities.rs` seam
+ * in `crates/buzz-agent`, where effort resolution is delegated to the manifest.
+ * (The interpreter owns the value list rather than the reverse, because it uses
+ * the values at module-load for zod — the acyclic direction.)
  */
+import {
+  THINKING_EFFORT_VALUES,
+  type ThinkingEffortValue,
+  resolveModelCapabilities,
+} from "./modelCapabilities";
 
 /** Env var key for the thinking/effort level sent to the LLM. */
 export const BUZZ_AGENT_THINKING_EFFORT = "BUZZ_AGENT_THINKING_EFFORT";
@@ -19,24 +29,12 @@ export const BUZZ_AGENT_MAX_ROUNDS = "BUZZ_AGENT_MAX_ROUNDS";
 
 /**
  * Ordered set of valid thinking-effort values accepted by buzz-agent.
- * Mirrors `parse_thinking_effort` in `crates/buzz-agent/src/config.rs`.
+ * Re-exported from the manifest interpreter, which owns the canonical list
+ * (mirrors `parse_thinking_effort` in `crates/buzz-agent/src/config.rs`).
  */
-export const BUZZ_AGENT_THINKING_EFFORT_VALUES = [
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
+export const BUZZ_AGENT_THINKING_EFFORT_VALUES = THINKING_EFFORT_VALUES;
 
-export type ThinkingEffortValue =
-  (typeof BUZZ_AGENT_THINKING_EFFORT_VALUES)[number];
-
-// ---------------------------------------------------------------------------
-// Provider-aware effort configuration
-// ---------------------------------------------------------------------------
+export type { ThinkingEffortValue };
 
 /**
  * Describes which thinking-effort values are valid for a given provider+model,
@@ -44,12 +42,8 @@ export type ThinkingEffortValue =
  *
  * `defaultValue = null` means the provider/model's default is to omit the
  * thinking configuration entirely (i.e. "Inherit" is the natural default).
- * This applies to Anthropic manual-budget models where the effort level maps
- * to a budget_tokens count — there is no "default effort level" in the API.
- *
- * Mirrors the model-family tables in `crates/buzz-agent/src/config.rs`
- * (`openai_efforts_for_model`, `is_manual_budget_model`,
- * `is_adaptive_thinking_model`, `clamp_adaptive_effort`). Keep in sync.
+ * This applies to Anthropic manual-budget models, whose effort maps to a
+ * budget_tokens count — there is no "default effort level" in the API.
  */
 export type ProviderEffortConfig = {
   validValues: ReadonlyArray<ThinkingEffortValue>;
@@ -57,246 +51,23 @@ export type ProviderEffortConfig = {
   defaultValue: ThinkingEffortValue | null;
 };
 
-const ALL_VALUES = BUZZ_AGENT_THINKING_EFFORT_VALUES;
-
 /**
- * Returns the valid thinking-effort values and semantic default for the
- * given provider and optional model string.
+ * Returns the valid thinking-effort values and semantic default for the given
+ * provider and optional model, projected from the shared capability manifest.
  *
- * Model matching mirrors the Rust backend:
- * - Anthropic: strip any endpoint-naming prefix, then test `is_manual_budget_model`
- *   / `is_adaptive_thinking_model` / `clamp_adaptive_effort` family checks.
- * - OpenAI: strip any endpoint-naming prefix, then test `openai_efforts_for_model`
- *   family checks (boundary-aware: -pro before -5.x, digit/letter boundary).
- * - DatabricksV2: strip prefix and route by model family.
- * - Unknown/empty: all 7 values, default medium.
- *
- * Prefix stripping: finds the first occurrence of a known model-family token
- * (`claude-`, `gpt-`) and drops everything before it. This handles any
- * endpoint-naming convention (e.g. `databricks-`, `goose-`, `team-x-`) without
- * maintaining an allowlist of known prefixes. If no family token is found, the
- * raw model name is used as-is.
+ * A thin projection over `resolveModelCapabilities`: `validValues` is the
+ * resolved `supportedEfforts` axis and `defaultValue` is `defaultEffort`.
+ * Provider canonicalization (alias map) and endpoint-prefix stripping happen
+ * inside the resolver, so callers pass raw provider/model strings.
  */
 export function getProviderEffortConfig(
   providerId: string,
   model?: string,
 ): ProviderEffortConfig {
-  const provider = providerId.toLowerCase();
-  // Strip arbitrary endpoint-naming prefix before model-family matching.
-  // Find the first occurrence of a known family token and drop everything before it.
-  // e.g. "goose-claude-fable-5" → "claude-fable-5"
-  //      "team-x-gpt-5.5"      → "gpt-5.5"
-  //      "databricks-claude-3" → "claude-3"
-  //      "claude-opus-4-7"     → "claude-opus-4-7" (no prefix to strip)
-  const rawModel = (model ?? "").trim().toLowerCase();
-  const FAMILY_TOKENS = ["claude-", "gpt-"] as const;
-  const firstFamilyIdx = Math.min(
-    ...FAMILY_TOKENS.map((tok) => {
-      const idx = rawModel.indexOf(tok);
-      return idx === -1 ? Infinity : idx;
-    }),
-  );
-  const m =
-    firstFamilyIdx === Infinity ? rawModel : rawModel.slice(firstFamilyIdx);
-
-  if (provider === "anthropic") {
-    return anthropicConfig(m);
-  }
-  if (provider === "openai") {
-    return openaiConfig(m);
-  }
-  if (provider === "databricks_v2") {
-    // Route by model family: claude* → Anthropic tables, gpt-5* → OpenAI tables.
-    // Non-Claude concrete models (e.g. llama-3) go through MlflowChatCompletions,
-    // which applies normalize_effort_for_openai_route → clamps max to xhigh.
-    // Route them through openaiConfig to exclude max. Only blank/unknown model
-    // uses the all-7 fallback (can't know the route without a concrete model).
-    if (m.startsWith("claude-")) {
-      return anthropicConfig(m);
-    }
-    if (gpt5FamilyModel(m)) {
-      return openaiConfig(m);
-    }
-    if (m.length > 0) {
-      // Concrete non-Claude, non-GPT model → MLflow path clamps max → xhigh.
-      return openaiConfig(m);
-    }
-    // Blank model — route unknown, show all 7.
-    return { validValues: ALL_VALUES, defaultValue: "medium" };
-  }
-  if (provider === "databricks") {
-    // databricks v1 uses OpenAI Chat Completions wire format.
-    return openaiConfig(m);
-  }
-  if (provider === "openrouter") {
-    return { validValues: ALL_VALUES, defaultValue: "medium" };
-  }
-  // openai-compat, unknown, empty — all values, default medium.
-  return { validValues: ALL_VALUES, defaultValue: "medium" };
-}
-
-// ---------------------------------------------------------------------------
-// Anthropic family tables
-// ---------------------------------------------------------------------------
-
-function anthropicConfig(m: string): ProviderEffortConfig {
-  // Manual-budget models: claude-3* and claude-opus-4-5.
-  // These use budget_tokens — there is no "default effort level" in the API.
-  if (m.startsWith("claude-3") || m === "claude-opus-4-5") {
-    return {
-      validValues: ["low", "medium", "high"],
-      defaultValue: null,
-    };
-  }
-  // Adaptive models that support xhigh: opus-4-7+, sonnet-5.x, fable-5, mythos-5.
-  // mirrors clamp_adaptive_effort supports_xhigh check.
-  if (
-    m.startsWith("claude-opus-4-7") ||
-    m.startsWith("claude-opus-4-8") ||
-    m.startsWith("claude-sonnet-5") ||
-    m.startsWith("claude-fable-5") ||
-    m.startsWith("claude-mythos-5")
-  ) {
-    return {
-      validValues: ["low", "medium", "high", "xhigh", "max"],
-      defaultValue: "high",
-    };
-  }
-  // Adaptive models that do NOT support xhigh: opus-4-6, sonnet-4-6, mythos-preview.
-  if (
-    m.startsWith("claude-opus-4-6") ||
-    m.startsWith("claude-sonnet-4-6") ||
-    m.startsWith("claude-mythos-preview")
-  ) {
-    return {
-      validValues: ["low", "medium", "high", "max"],
-      defaultValue: "high",
-    };
-  }
-  // Unknown Anthropic model — assume adaptive with full support.
+  const cap = resolveModelCapabilities(providerId, model ?? "");
   return {
-    validValues: ["low", "medium", "high", "xhigh", "max"],
-    defaultValue: "high",
-  };
-}
-
-// ---------------------------------------------------------------------------
-// OpenAI family tables — mirrors openai_efforts_for_model in config.rs
-// ---------------------------------------------------------------------------
-
-/**
- * Returns true if `m` contains a GPT-5 family token at a word boundary
- * (not immediately followed by a digit or letter). Mirrors
- * `gpt5_token_matches` / `gpt5_base_matches` in config.rs.
- */
-function gpt5TokenMatches(m: string, token: string): boolean {
-  let start = 0;
-  while (true) {
-    const idx = m.indexOf(token, start);
-    if (idx === -1) return false;
-    const afterIdx = idx + token.length;
-    const afterChar = afterIdx < m.length ? m[afterIdx] : "";
-    // Boundary: end-of-string or a `-` separator (not a digit or letter).
-    if (afterChar === "" || afterChar === "-") return true;
-    start = afterIdx;
-  }
-}
-
-/** Like gpt5TokenMatches but also rejects short -<1-3 digit> suffixes (e.g. -5, -10). */
-function gpt5BaseMatches(m: string, token: string): boolean {
-  let start = 0;
-  while (true) {
-    const idx = m.indexOf(token, start);
-    if (idx === -1) return false;
-    const afterIdx = idx + token.length;
-    const suffix = m.slice(afterIdx);
-    if (suffix === "") return true;
-    if (!suffix.startsWith("-")) {
-      start = afterIdx;
-      continue;
-    }
-    // Has a `-` suffix — check if it looks like a 1-3 digit version number.
-    const dashRest = suffix.slice(1);
-    if (/^\d{1,3}(?:[^a-z\d]|$)/i.test(dashRest)) {
-      start = afterIdx;
-      continue;
-    }
-    return true;
-  }
-}
-
-/** Returns true if the model string belongs to any GPT-5 family. */
-function gpt5FamilyModel(m: string): boolean {
-  return (
-    gpt5TokenMatches(m, "gpt-5-pro") ||
-    gpt5TokenMatches(m, "gpt5-pro") ||
-    gpt5TokenMatches(m, "gpt-5.6") ||
-    gpt5TokenMatches(m, "gpt5.6") ||
-    gpt5TokenMatches(m, "gpt-5-6") ||
-    gpt5TokenMatches(m, "gpt5-6") ||
-    gpt5TokenMatches(m, "gpt-5.5") ||
-    gpt5TokenMatches(m, "gpt5.5") ||
-    gpt5TokenMatches(m, "gpt-5.4") ||
-    gpt5TokenMatches(m, "gpt5.4") ||
-    gpt5TokenMatches(m, "gpt-5.1") ||
-    gpt5TokenMatches(m, "gpt5.1") ||
-    gpt5BaseMatches(m, "gpt-5") ||
-    gpt5BaseMatches(m, "gpt5")
-  );
-}
-
-function openaiConfig(m: string): ProviderEffortConfig {
-  // Check -pro before versioned suffixes (gpt-5-pro contains "gpt-5").
-  if (gpt5TokenMatches(m, "gpt-5-pro") || gpt5TokenMatches(m, "gpt5-pro")) {
-    return { validValues: ["high"], defaultValue: "high" };
-  }
-  if (
-    gpt5TokenMatches(m, "gpt-5.6") ||
-    gpt5TokenMatches(m, "gpt5.6") ||
-    gpt5TokenMatches(m, "gpt-5-6") ||
-    gpt5TokenMatches(m, "gpt5-6")
-  ) {
-    return {
-      validValues: ["none", "low", "medium", "high", "xhigh", "max"],
-      defaultValue: "medium",
-    };
-  }
-  if (
-    gpt5TokenMatches(m, "gpt-5.5") ||
-    gpt5TokenMatches(m, "gpt5.5") ||
-    gpt5TokenMatches(m, "gpt-5-5") ||
-    gpt5TokenMatches(m, "gpt5-5") ||
-    gpt5TokenMatches(m, "gpt-5.4") ||
-    gpt5TokenMatches(m, "gpt5.4") ||
-    gpt5TokenMatches(m, "gpt-5-4") ||
-    gpt5TokenMatches(m, "gpt5-4")
-  ) {
-    return {
-      validValues: ["none", "low", "medium", "high", "xhigh"],
-      defaultValue: "medium",
-    };
-  }
-  if (
-    gpt5TokenMatches(m, "gpt-5.1") ||
-    gpt5TokenMatches(m, "gpt5.1") ||
-    gpt5TokenMatches(m, "gpt-5-1") ||
-    gpt5TokenMatches(m, "gpt5-1")
-  ) {
-    return {
-      validValues: ["none", "low", "medium", "high"],
-      defaultValue: "none",
-    };
-  }
-  if (gpt5BaseMatches(m, "gpt-5") || gpt5BaseMatches(m, "gpt5")) {
-    return {
-      validValues: ["minimal", "low", "medium", "high"],
-      defaultValue: "medium",
-    };
-  }
-  // Unknown OpenAI model — conservative fallback; max is enabled only for families whose table includes it.
-  return {
-    validValues: ["none", "minimal", "low", "medium", "high", "xhigh"],
-    defaultValue: "medium",
+    validValues: cap.supportedEfforts,
+    defaultValue: cap.defaultEffort,
   };
 }
 
