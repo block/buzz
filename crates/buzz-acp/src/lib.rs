@@ -2186,7 +2186,7 @@ async fn tokio_main() -> Result<()> {
         } else {
             tracing::warn!(
                 target: "buzz_acp::ifc",
-                "information-flow isolation enabled; ACP process reuse and owner-core reads are enforced, but tool and publication paths remain unmediated"
+                "information-flow routing enabled; public work shares the public worker class, confidential domains use dedicated ACP children, and OS confinement remains external"
             );
         }
         ifc::Auditor::new(
@@ -2198,7 +2198,7 @@ async fn tokio_main() -> Result<()> {
             config.information_flow,
         )
     });
-    let ifc_process_spec = config.information_flow.isolates_processes().then(|| {
+    let ifc_process_spec = config.information_flow.routes_workers().then(|| {
         pool::AgentProcessSpec::new(
             config.agent_command.clone(),
             config.agent_args.clone(),
@@ -3866,7 +3866,7 @@ async fn dispatch_pending(
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
         let turn_id = Uuid::new_v4().to_string();
-        let mut prepared_ifc_turn = if ctx.information_flow.isolates_processes() {
+        let mut prepared_ifc_turn = if ctx.information_flow.routes_workers() {
             match ctx.ifc_auditor.as_ref() {
                 Some(auditor) => Some(auditor.resolve_turn(&batch, &turn_id, None).await),
                 None => None,
@@ -3876,7 +3876,7 @@ async fn dispatch_pending(
         };
         let domain = prepared_ifc_turn
             .as_ref()
-            .and_then(crate::ifc::ActiveTurn::domain_key);
+            .and_then(crate::ifc::ActiveTurn::domain_binding);
         let affinity_hit = pool.has_affinity_for(channel_id, domain.as_ref());
         let agent = match pool.try_claim(Some(channel_id), domain.as_ref()) {
             Some(a) => a,
@@ -4546,7 +4546,7 @@ fn dispatch_heartbeat(
         return;
     }
     let turn_id = Uuid::new_v4().to_string();
-    let mut prepared_ifc_turn = if ctx.information_flow.isolates_processes() {
+    let mut prepared_ifc_turn = if ctx.information_flow.routes_workers() {
         ctx.ifc_auditor
             .as_ref()
             .map(|auditor| auditor.resolve_heartbeat(&turn_id, None))
@@ -4555,7 +4555,7 @@ fn dispatch_heartbeat(
     };
     let domain = prepared_ifc_turn
         .as_ref()
-        .and_then(crate::ifc::ActiveTurn::domain_key);
+        .and_then(crate::ifc::ActiveTurn::domain_binding);
     let agent = match pool.try_claim(None, domain.as_ref()) {
         Some(a) => a,
         None => return,

@@ -106,7 +106,7 @@ pub enum AcpError {
     #[error("Protocol error: {0}")]
     Protocol(String),
 
-    #[error("Information-flow isolation failed: {0}")]
+    #[error("Information-flow policy failed: {0}")]
     InformationFlow(String),
 
     #[error("Agent reported error (code {code}): {message}")]

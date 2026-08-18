@@ -86,7 +86,8 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
          │
          └── buzz-relay       (ties everything together — the server)
 
-buzz-acp            (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
+buzz-ifc            (zero I/O — execution-domain derivation and IFC rules)
+    └── buzz-acp            (relay/ACP adapter and worker routing)
 buzz-sdk            (typed Nostr event builders — used by buzz-acp and buzz-cli)
 buzz-media          (Blossom/S3 media storage)
 buzz-cli            (agent-first CLI)
@@ -669,9 +670,18 @@ Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent 
 - Pool of 1–32 agent subprocesses with claim/return lifecycle.
 - Per-channel queuing: at most one prompt in-flight per channel; subsequent @mentions queue until the agent responds.
 - Crash recovery: agent subprocess crashes are detected and the agent is respawned.
-- Depends on `buzz-core` (kind constants) and `buzz-sdk` (relay/REST utilities).
+- Optional information-flow modes verify signed channel policy, share realm-public work, and route restricted work only to ACP children bound to the same exact domain. The feature is off by default.
+- Depends on `buzz-core` (kind constants), `buzz-sdk` (relay/REST utilities), and `buzz-ifc` (execution-domain policy).
 
 **Does NOT:** persist state.
+
+---
+
+### buzz-ifc — Shared Agent Policy
+
+`buzz-ifc` is a zero-I/O policy crate. Given facts already verified by a trusted Buzz adapter, it derives the invocation's audience, retained-state context, membership epoch, and effective capabilities. It also evaluates reads, calls, publications, and process reuse while retaining a conservative label for each process.
+
+`buzz-acp` links the crate directly. The surrounding adapter remains responsible for signed-event and membership verification, process lifecycle, credential mediation, and OS or VM confinement for confidential domains.
 
 ---
 

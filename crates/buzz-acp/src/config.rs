@@ -142,8 +142,8 @@ pub enum PermissionMode {
 ///
 /// `Off` preserves the existing harness path without membership queries or policy
 /// bookkeeping. `Audit` evaluates and logs the design-paper rules without changing
-/// runtime behavior. `Isolate` additionally binds each ACP child process and all of
-/// its retained state to one execution domain.
+/// runtime behavior. `Route` additionally binds each ACP child process and its
+/// retained ACP state to one execution domain. It does not claim OS confinement.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum InformationFlowMode {
     /// Do not construct or invoke the experimental policy evaluator.
@@ -151,8 +151,9 @@ pub enum InformationFlowMode {
     Off,
     /// Evaluate and log policy without changing the existing turn.
     Audit,
-    /// Replace an ACP child before it crosses an execution-domain boundary.
-    Isolate,
+    /// Route ACP children by domain and replace them before domain changes.
+    #[value(alias = "isolate")]
+    Route,
 }
 
 impl std::fmt::Display for InformationFlowMode {
@@ -160,7 +161,7 @@ impl std::fmt::Display for InformationFlowMode {
         match self {
             Self::Off => f.write_str("off"),
             Self::Audit => f.write_str("audit"),
-            Self::Isolate => f.write_str("isolate"),
+            Self::Route => f.write_str("route"),
         }
     }
 }
@@ -172,8 +173,8 @@ impl InformationFlowMode {
     }
 
     /// Whether execution-domain boundaries change ACP process reuse.
-    pub(crate) fn isolates_processes(self) -> bool {
-        self == Self::Isolate
+    pub(crate) fn routes_workers(self) -> bool {
+        self == Self::Route
     }
 }
 
@@ -483,8 +484,8 @@ pub struct CliArgs {
     pub permission_mode: PermissionMode,
 
     /// Apply the audience-scoped information-flow policy. `audit` only logs;
-    /// `isolate` also confines ACP process reuse and retained state by domain.
-    /// `off` is the default and leaves existing harness behavior unchanged.
+    /// `route` also separates ACP process reuse and retained state by domain.
+    /// This does not provide OS confinement. `off` is the default.
     #[arg(
         long,
         env = "BUZZ_ACP_INFORMATION_FLOW",
@@ -2275,16 +2276,25 @@ channels = "ALL"
         ]);
         assert_eq!(audit.information_flow, InformationFlowMode::Audit);
 
-        let isolate = CliArgs::parse_from([
+        let route = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--information-flow",
+            "route",
+        ]);
+        assert_eq!(route.information_flow, InformationFlowMode::Route);
+        assert!(route.information_flow.enabled());
+        assert!(route.information_flow.routes_workers());
+
+        let isolate_alias = CliArgs::parse_from([
             "buzz-acp",
             "--private-key",
             &key,
             "--information-flow",
             "isolate",
         ]);
-        assert_eq!(isolate.information_flow, InformationFlowMode::Isolate);
-        assert!(isolate.information_flow.enabled());
-        assert!(isolate.information_flow.isolates_processes());
+        assert_eq!(isolate_alias.information_flow, InformationFlowMode::Route);
     }
 
     #[test]

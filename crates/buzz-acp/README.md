@@ -127,21 +127,33 @@ policy, derives `D = (Audience, Context, Epoch, Capabilities)`, evaluates read,
 call, publish, and process-reuse rules, and keeps a conservative process-level
 state label. Decisions are emitted under the `buzz_acp::ifc` tracing target.
 
-`--information-flow isolate` evaluates the same policy before pool selection and
-uses the complete execution domain as the ACP worker routing key. A fresh child is
-bound on first use. If its audience, context, membership epoch, or capabilities no
-longer match, Buzz starts a replacement child and clears all ACP sessions and
-harness-side session state before delivering the turn. Owner-private core memory
-is not fetched for public or shared-conversation domains. Heartbeats use their own
-owner-private domain.
+`--information-flow route` evaluates the same policy before pool selection and
+uses the complete execution domain as the ACP worker routing key. Public channels
+select the `shared_public` compartment profile and may reuse the same pool of
+public-bound children. Restricted channels, DMs, and owner-private work select
+`domain_confined`; their children and retained state may be reused only within
+the exact same domain. Crossing between either profile, or between two
+confidential domains, replaces the child and clears its ACP sessions and
+harness-side session state before delivering the turn.
+
+Owner-private core memory is fetched only for the owner-private domain. Public
+workers otherwise keep the existing ACP runtime and tools. Heartbeats use their
+own owner-private domain.
 
 The default is `off`. In that mode no IFC auditor is constructed, no extra channel
 policy queries run, and prompt/session behavior is unchanged.
 
-Audit mode remains entirely observational. Isolate mode enforces ACP process and
-core-memory separation, but it does not yet mediate tool credentials, bind replies
-to a broker-controlled destination, isolate the shared workspace, or provide OS
-confinement. Its logs report those remaining gaps explicitly.
+Audit mode remains entirely observational. Route mode enforces ACP child and
+core-memory separation, but `domain_confined` is a placement requirement rather
+than a claim that `buzz-acp` has created an OS sandbox. The surrounding runtime
+must still keep confidential workers away from public workers and the broker,
+mediate sensitive credentials and output paths, and provide separate writable
+state. Its logs report those remaining gaps explicitly.
+
+The deterministic label, domain, capability, reuse, and confinement rules live
+in the runtime-independent `buzz-ifc` crate. `buzz-acp` supplies the trusted
+Buzz-specific half: signed-event admission, relay-signed membership resolution,
+and ACP worker replacement.
 
 ### Parallel Agents & Heartbeat
 

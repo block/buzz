@@ -132,10 +132,10 @@ pub struct SessionState {
     /// Process-level IFC audit state. This is intentionally not cleared when an
     /// ACP session is invalidated: a live process does not forget prior input.
     pub ifc_audit: crate::ifc::ProcessAuditState,
-    /// Complete execution domain to which this ACP child is bound in isolate
-    /// mode. It survives session invalidation and changes only when the child
-    /// process itself is replaced.
-    pub ifc_domain: Option<crate::ifc::DomainKey>,
+    /// Complete execution-domain assignment retained by this ACP child in
+    /// route mode. It survives session invalidation and changes only when the
+    /// child process itself is replaced.
+    pub ifc_domain: Option<crate::ifc::DomainBinding>,
 }
 
 impl SessionState {
@@ -561,7 +561,7 @@ impl ChannelInfoResolver {
 }
 
 /// Everything needed to replace an ACP child when a slot crosses an execution
-/// domain. Constructed only in isolate mode so off/audit keep the existing
+/// domain. Constructed only in route mode so off/audit keep the existing
 /// process lifecycle and configuration footprint.
 #[derive(Clone)]
 pub(crate) struct AgentProcessSpec {
@@ -627,12 +627,12 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
-    /// Present for information-flow audit or isolation. `None` is the default
+    /// Present for information-flow audit or routing. `None` is the default
     /// fast path and performs no membership queries or IFC bookkeeping.
     pub ifc_auditor: Option<crate::ifc::Auditor>,
     /// Information-flow behavior selected at startup.
     pub information_flow: InformationFlowMode,
-    /// Spawn configuration used only when isolate mode must replace an ACP
+    /// Spawn configuration used only when route mode must replace an ACP
     /// child before binding it to another domain.
     pub ifc_process_spec: Option<AgentProcessSpec>,
     /// Agent identity — used to derive the NIP-AE conversation key at
@@ -684,7 +684,7 @@ impl AgentPool {
     pub fn try_claim(
         &mut self,
         channel_id: Option<Uuid>,
-        domain: Option<&crate::ifc::DomainKey>,
+        domain: Option<&crate::ifc::DomainBinding>,
     ) -> Option<OwnedAgent> {
         // Pass 1: prefer agent with existing session for this channel.
         if let Some(cid) = channel_id {
@@ -704,8 +704,8 @@ impl AgentPool {
         }
 
         // Pass 2: prefer a process already bound to the resolved domain. This
-        // lets all public channels share their public worker while keeping
-        // restricted conversations on their own workers.
+        // lets all public channels reuse public-bound workers while keeping
+        // restricted conversations on workers bound to their exact domain.
         if let Some(domain) = domain {
             if let Some(index) = self.agents.iter().position(|slot| {
                 slot.as_ref()
@@ -725,7 +725,7 @@ impl AgentPool {
             return self.agents[index].take();
         }
 
-        // Pass 4: first idle agent. Isolate mode replaces it before use if its
+        // Pass 4: first idle agent. Route mode replaces it before use if its
         // binding differs; off/audit mode preserve the historical behavior.
         let idx = self.agents.iter().position(|slot| slot.is_some());
         idx.and_then(|i| self.agents[i].take())
@@ -757,7 +757,7 @@ impl AgentPool {
     pub fn has_affinity_for(
         &self,
         channel_id: Uuid,
-        domain: Option<&crate::ifc::DomainKey>,
+        domain: Option<&crate::ifc::DomainBinding>,
     ) -> bool {
         self.agents.iter().flatten().any(|agent| {
             let domain_matches =
@@ -1559,8 +1559,8 @@ enum DomainBindingAction {
 }
 
 fn domain_binding_action(
-    current: Option<&crate::ifc::DomainKey>,
-    requested: &crate::ifc::DomainKey,
+    current: Option<&crate::ifc::DomainBinding>,
+    requested: &crate::ifc::DomainBinding,
 ) -> DomainBindingAction {
     match current {
         None => DomainBindingAction::BindFresh,
@@ -1572,11 +1572,13 @@ fn domain_binding_action(
 /// Bind an ACP child to one complete execution domain before any turn input is
 /// delivered. Crossing a domain boundary replaces the child, which clears its
 /// model context, ACP sessions, process group, and harness-side session state.
-/// Files and credentials outside that process group still require the separate
-/// OS-confinement work described by the design.
+/// Realm-public work shares the public profile. Restricted and owner-private
+/// work receives the domain-confined profile and never reuses another domain's
+/// child. Files, credentials, and output paths outside the child process still
+/// require the runtime confinement described by the design.
 async fn bind_agent_to_domain(
     agent: &mut OwnedAgent,
-    requested: crate::ifc::DomainKey,
+    requested: crate::ifc::DomainBinding,
     spec: Option<&AgentProcessSpec>,
     turn_id: &str,
 ) -> Result<(), AcpError> {
@@ -1584,10 +1586,11 @@ async fn bind_agent_to_domain(
         DomainBindingAction::BindFresh => {
             tracing::info!(
                 target: "buzz_acp::ifc",
-                ifc_mode = "isolate",
+                ifc_mode = "route",
                 turn_id,
                 agent_index = agent.index,
                 domain = %requested.fingerprint(),
+                compartment = requested.profile().as_str(),
                 rule = "process_binding",
                 decision = "allow",
                 action = "bind_fresh",
@@ -1600,10 +1603,11 @@ async fn bind_agent_to_domain(
         DomainBindingAction::Reuse => {
             tracing::info!(
                 target: "buzz_acp::ifc",
-                ifc_mode = "isolate",
+                ifc_mode = "route",
                 turn_id,
                 agent_index = agent.index,
                 domain = %requested.fingerprint(),
+                compartment = requested.profile().as_str(),
                 rule = "process_binding",
                 decision = "allow",
                 action = "reuse",
@@ -1617,15 +1621,16 @@ async fn bind_agent_to_domain(
                 .state
                 .ifc_domain
                 .as_ref()
-                .map(crate::ifc::DomainKey::fingerprint)
+                .map(crate::ifc::DomainBinding::fingerprint)
                 .unwrap_or_else(|| "unbound".to_string());
             tracing::warn!(
                 target: "buzz_acp::ifc",
-                ifc_mode = "isolate",
+                ifc_mode = "route",
                 turn_id,
                 agent_index = agent.index,
                 previous_domain = %previous,
                 requested_domain = %requested.fingerprint(),
+                compartment = requested.profile().as_str(),
                 rule = "process_binding",
                 decision = "deny",
                 action = "replace_process",
@@ -1634,7 +1639,7 @@ async fn bind_agent_to_domain(
             );
             let spec = spec.ok_or_else(|| {
                 AcpError::InformationFlow(
-                    "isolate mode has no ACP process replacement configuration".to_string(),
+                    "route mode has no ACP process replacement configuration".to_string(),
                 )
             })?;
             const REPLACEMENT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1675,10 +1680,11 @@ async fn bind_agent_to_domain(
 
             tracing::info!(
                 target: "buzz_acp::ifc",
-                ifc_mode = "isolate",
+                ifc_mode = "route",
                 turn_id,
                 agent_index = agent.index,
                 domain = %requested.fingerprint(),
+                compartment = requested.profile().as_str(),
                 rule = "process_binding",
                 decision = "allow",
                 action = "replacement_bound",
@@ -1733,7 +1739,7 @@ pub(crate) async fn run_prompt_task(
     };
 
     // Resolve the complete execution domain before the ACP child receives any
-    // prompt, memory, session, or tool state. Isolate-mode channel dispatch
+    // prompt, memory, session, or tool state. Route-mode channel dispatch
     // normally prepares this before pool selection so the domain is the routing
     // key; audit mode resolves here to preserve the old non-blocking dispatcher.
     let ifc_turn = match prepared_ifc_turn {
@@ -1749,7 +1755,7 @@ pub(crate) async fn run_prompt_task(
         },
     };
 
-    if ctx.information_flow.isolates_processes() {
+    if ctx.information_flow.routes_workers() {
         let Some(turn) = ifc_turn.as_ref() else {
             send_prompt_result(
                 &result_tx,
@@ -1763,7 +1769,7 @@ pub(crate) async fn run_prompt_task(
             );
             return;
         };
-        let Some(domain) = turn.domain_key() else {
+        let Some(domain) = turn.domain_binding() else {
             send_prompt_result(
                 &result_tx,
                 &turn_id,
@@ -1901,7 +1907,7 @@ pub(crate) async fn run_prompt_task(
     // `SessionState::invalidate_channel`).
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
-    let owner_memory_allowed = !ctx.information_flow.isolates_processes()
+    let owner_memory_allowed = !ctx.information_flow.routes_workers()
         || ifc_turn
             .as_ref()
             .is_some_and(crate::ifc::ActiveTurn::permits_owner_private_input);
@@ -1943,7 +1949,7 @@ pub(crate) async fn run_prompt_task(
             }
         }
     } else if ctx.memory_enabled
-        && ctx.information_flow.isolates_processes()
+        && ctx.information_flow.routes_workers()
         && matches!(&source, PromptSource::Channel(_))
         && ctx.agent_owner_pubkey.is_some()
     {
@@ -4778,8 +4784,14 @@ mod tests {
 
     #[test]
     fn domain_binding_requires_replacement_only_across_domains() {
-        let first = crate::ifc::DomainKey::for_test("first");
-        let second = crate::ifc::DomainKey::for_test("second");
+        let first = crate::ifc::domain_binding_for_test(
+            "first",
+            buzz_ifc::CompartmentProfile::SharedPublic,
+        );
+        let second = crate::ifc::domain_binding_for_test(
+            "second",
+            buzz_ifc::CompartmentProfile::DomainConfined,
+        );
 
         assert_eq!(
             domain_binding_action(None, &first),
@@ -4791,6 +4803,15 @@ mod tests {
         );
         assert_eq!(
             domain_binding_action(Some(&first), &second),
+            DomainBindingAction::Replace
+        );
+
+        let confidential_first = crate::ifc::domain_binding_for_test(
+            "first",
+            buzz_ifc::CompartmentProfile::DomainConfined,
+        );
+        assert_eq!(
+            domain_binding_action(Some(&first), &confidential_first),
             DomainBindingAction::Replace
         );
     }
@@ -4805,8 +4826,14 @@ mod tests {
         )
         .await
         .expect("spawn old ACP child");
-        let old_domain = crate::ifc::DomainKey::for_test("old-domain");
-        let new_domain = crate::ifc::DomainKey::for_test("new-domain");
+        let old_domain = crate::ifc::domain_binding_for_test(
+            "old-domain",
+            buzz_ifc::CompartmentProfile::SharedPublic,
+        );
+        let new_domain = crate::ifc::domain_binding_for_test(
+            "new-domain",
+            buzz_ifc::CompartmentProfile::DomainConfined,
+        );
         let channel = Uuid::new_v4();
         let mut state = SessionState {
             ifc_domain: Some(old_domain),
@@ -4875,8 +4902,14 @@ while IFS= read -r line; do :; done"#;
             .await
             .expect("spawn inert ACP child")
         };
-        let first_domain = crate::ifc::DomainKey::for_test("first-domain");
-        let requested_domain = crate::ifc::DomainKey::for_test("requested-domain");
+        let first_domain = crate::ifc::domain_binding_for_test(
+            "first-domain",
+            buzz_ifc::CompartmentProfile::SharedPublic,
+        );
+        let requested_domain = crate::ifc::domain_binding_for_test(
+            "requested-domain",
+            buzz_ifc::CompartmentProfile::DomainConfined,
+        );
         let make_agent = |index, acp, domain| OwnedAgent {
             index,
             acp,

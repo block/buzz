@@ -831,6 +831,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "buzz-core",
+ "buzz-ifc",
  "buzz-persona",
  "buzz-sdk",
  "chrono",
@@ -1117,6 +1118,18 @@ dependencies = [
  "tracing-subscriber",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "buzz-ifc"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "nostr 0.44.7",
+ "serde",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

@@ -3,7 +3,7 @@
 //! This module is deliberately isolated from ACP transport and prompt formatting. In
 //! `off` mode it is not constructed at all. In `audit` mode it observes the data that
 //! the existing harness admits and emits structured decisions without changing runtime
-//! behavior. In `isolate` mode the harness also uses its domain key to route or replace
+//! behavior. In `route` mode the harness also uses its domain key to route or replace
 //! ACP children before state crosses an audience, context, epoch, or capability boundary.
 //!
 //! Comments prefixed with "Paper" refer to the matching section in the
@@ -11,8 +11,12 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::marker::PhantomData;
 
+use buzz_ifc::{
+    derive_execution_domain, CapabilityPolicy, CapabilitySet, CompartmentProfile, ConversationKind,
+    DerivationError, DomainFacts, DomainKey, ExecutionDomain, MembershipEpoch, Principal,
+    ProcessState, RealmId, ResourceLabel, RuleEvaluator,
+};
 use nostr::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -21,560 +25,47 @@ use crate::config::InformationFlowMode;
 use crate::queue::FlushBatch;
 use crate::relay::RestClient;
 
-/// A Buzz principal represented by a validated, normalized Nostr public key.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Principal(String);
+pub(crate) type ProcessAuditState = ProcessState;
 
-impl Principal {
-    fn from_hex(value: &str) -> Result<Self, ResolutionError> {
-        PublicKey::from_hex(value)
-            .map(|key| Self(key.to_hex().to_ascii_lowercase()))
-            .map_err(|_| ResolutionError::InvalidPrincipal)
-    }
-
-    fn from_key(value: PublicKey) -> Self {
-        Self(value.to_hex().to_ascii_lowercase())
-    }
-}
-
-/// A confidentiality universe. Public in one Buzz community is not public in
-/// another, so every reader-set lattice is scoped to a relay/community realm.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct RealmId([u8; 32]);
-
-impl RealmId {
-    fn from_relay_url(relay_url: &str) -> Self {
-        Self(Sha256::digest(relay_url.as_bytes()).into())
-    }
-
-    fn fingerprint(&self) -> String {
-        hex::encode(&self.0[..6])
-    }
-}
-
-/// The authorized readers of a value.
+/// The complete policy assignment retained beside an ACP child.
 ///
-/// Paper: "Labels and ordering." `Everyone` is the bottom/public element. An
-/// explicit set becomes more restrictive as principals are removed.
+/// The opaque key prevents cross-domain reuse. The profile tells the runtime
+/// whether this is the shared public worker class or a confidential domain that
+/// requires an externally enforced compartment.
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum ReaderSet {
-    Everyone,
-    Only(BTreeSet<Principal>),
+pub(crate) struct DomainBinding {
+    key: DomainKey,
+    profile: CompartmentProfile,
 }
 
-impl ReaderSet {
-    /// The paper's square ordering, `source ⊑ destination`, is reverse set
-    /// inclusion: every reader at the destination must be able to read source.
-    fn can_flow_to(&self, destination: &Self) -> bool {
-        match (self, destination) {
-            (Self::Everyone, _) => true,
-            (Self::Only(_), Self::Everyone) => false,
-            (Self::Only(source), Self::Only(destination)) => destination.is_subset(source),
-        }
-    }
-
-    /// Paper: "Combining information." Join is reader-set intersection, which
-    /// gives a result influenced by both inputs the stricter combined label.
-    fn join(&self, other: &Self) -> Self {
-        match (self, other) {
-            (Self::Everyone, value) | (value, Self::Everyone) => value.clone(),
-            (Self::Only(left), Self::Only(right)) => {
-                Self::Only(left.intersection(right).cloned().collect())
-            }
-        }
-    }
-
-    /// The lattice meet is reader-set union.
-    #[cfg(test)]
-    fn meet(&self, other: &Self) -> Self {
-        match (self, other) {
-            (Self::Everyone, _) | (_, Self::Everyone) => Self::Everyone,
-            (Self::Only(left), Self::Only(right)) => {
-                Self::Only(left.union(right).cloned().collect())
-            }
-        }
-    }
-
-    fn explicit_count(&self) -> Option<usize> {
-        match self {
-            Self::Everyone => None,
-            Self::Only(readers) => Some(readers.len()),
-        }
-    }
-
-    fn stable_hash(&self, hasher: &mut Sha256) {
-        match self {
-            Self::Everyone => hasher.update(b"everyone"),
-            Self::Only(readers) => {
-                hasher.update(b"only");
-                for reader in readers {
-                    hash_field(hasher, reader.0.as_bytes());
-                }
-            }
-        }
-    }
-}
-
-/// A reader-set label within one Buzz community.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ConfidentialityLabel {
-    realm: RealmId,
-    readers: ReaderSet,
-}
-
-impl ConfidentialityLabel {
-    fn public(realm: RealmId) -> Self {
+impl DomainBinding {
+    fn from_domain(domain: &ExecutionDomain) -> Self {
         Self {
-            realm,
-            readers: ReaderSet::Everyone,
+            key: domain.key(),
+            profile: domain.compartment_profile(),
         }
     }
 
-    fn restricted(realm: RealmId, readers: BTreeSet<Principal>) -> Self {
-        Self {
-            realm,
-            readers: ReaderSet::Only(readers),
-        }
-    }
-
-    fn can_flow_to(&self, destination: &Self) -> bool {
-        self.realm == destination.realm && self.readers.can_flow_to(&destination.readers)
-    }
-
-    fn join(&self, other: &Self) -> Result<Self, LatticeError> {
-        if self.realm != other.realm {
-            return Err(LatticeError::CrossRealm);
-        }
-        Ok(Self {
-            realm: self.realm.clone(),
-            readers: self.readers.join(&other.readers),
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LatticeError {
-    CrossRealm,
-}
-
-/// Which retained context a worker belongs to. Audience and context remain
-/// separate: two private conversations can have identical readers without
-/// implicitly sharing memory.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum DomainContext {
-    RealmPublic(RealmId),
-    Conversation { realm: RealmId, channel_id: Uuid },
-    OwnerPrivate { realm: RealmId, owner: Principal },
-}
-
-impl DomainContext {
-    fn realm(&self) -> &RealmId {
-        match self {
-            Self::RealmPublic(realm)
-            | Self::Conversation { realm, .. }
-            | Self::OwnerPrivate { realm, .. } => realm,
-        }
-    }
-
-    fn resource_context(&self) -> ResourceContext {
-        match self {
-            Self::RealmPublic(realm) => ResourceContext::RealmPublic(realm.clone()),
-            Self::Conversation { realm, channel_id } => ResourceContext::Conversation {
-                realm: realm.clone(),
-                channel_id: *channel_id,
-            },
-            Self::OwnerPrivate { realm, owner } => ResourceContext::OwnerPrivate {
-                realm: realm.clone(),
-                owner: owner.clone(),
-            },
-        }
-    }
-
-    /// Context policy used by the paper's `ContextPolicy(D, x)` predicate.
-    /// Owner-private work may aggregate conversations the owner can read; the
-    /// confidentiality check independently proves that the owner is a reader.
-    fn permits(&self, resource: &ResourceContext) -> bool {
-        match resource {
-            ResourceContext::TrustedConfiguration => true,
-            ResourceContext::RealmPublic(resource_realm) => self.realm() == resource_realm,
-            ResourceContext::Conversation {
-                realm: resource_realm,
-                channel_id: resource_channel,
-            } => match self {
-                Self::Conversation { realm, channel_id } => {
-                    realm == resource_realm && channel_id == resource_channel
-                }
-                Self::OwnerPrivate { realm, .. } => realm == resource_realm,
-                Self::RealmPublic(_) => false,
-            },
-            ResourceContext::OwnerPrivate {
-                realm: resource_realm,
-                owner: resource_owner,
-            } => matches!(
-                self,
-                Self::OwnerPrivate { realm, owner }
-                    if realm == resource_realm && owner == resource_owner
-            ),
-        }
-    }
-
-    fn stable_hash(&self, hasher: &mut Sha256) {
-        match self {
-            Self::RealmPublic(realm) => {
-                hasher.update(b"realm-public");
-                hasher.update(realm.0);
-            }
-            Self::Conversation { realm, channel_id } => {
-                hasher.update(b"conversation");
-                hasher.update(realm.0);
-                hasher.update(channel_id.as_bytes());
-            }
-            Self::OwnerPrivate { realm, owner } => {
-                hasher.update(b"owner-private");
-                hasher.update(realm.0);
-                hash_field(hasher, owner.0.as_bytes());
-            }
-        }
-    }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::RealmPublic(_) => "public",
-            Self::Conversation { .. } => "conversation",
-            Self::OwnerPrivate { .. } => "owner_private",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum ResourceContext {
-    TrustedConfiguration,
-    RealmPublic(RealmId),
-    Conversation { realm: RealmId, channel_id: Uuid },
-    OwnerPrivate { realm: RealmId, owner: Principal },
-}
-
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct Capability(String);
-
-impl Capability {
-    fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct CapabilitySet(BTreeSet<Capability>);
-
-impl CapabilitySet {
-    fn from_names<const N: usize>(names: [&str; N]) -> Self {
-        Self(names.into_iter().map(Capability::new).collect())
-    }
-
-    /// Paper: `C(turn) = C(bot) ∩ C(requester) ∩ C(domain)`.
-    fn effective(bot: &Self, requester: &Self, domain: &Self) -> Self {
-        let bot_and_requester: BTreeSet<_> = bot.0.intersection(&requester.0).cloned().collect();
-        Self(bot_and_requester.intersection(&domain.0).cloned().collect())
-    }
-
-    fn contains(&self, operation: &str) -> bool {
-        self.0.contains(&Capability::new(operation))
-    }
-
-    fn stable_hash(&self, hasher: &mut Sha256) {
-        for capability in &self.0 {
-            hash_field(hasher, capability.0.as_bytes());
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct MembershipEpoch(String);
-
-/// Opaque routing key for one complete execution domain.
-///
-/// The pool may compare and log this value, but only this module constructs it.
-/// That keeps worker routing coupled to the complete paper definition rather
-/// than a caller-selected subset such as channel ID or audience alone.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct DomainKey(String);
-
-impl DomainKey {
     pub(crate) fn fingerprint(&self) -> String {
-        short_fingerprint(&self.0)
+        self.key.fingerprint()
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test(value: &str) -> Self {
-        Self(value.to_string())
-    }
-}
-
-/// Paper: `D = (Audience, Context, Epoch, Capabilities)`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ExecutionDomain {
-    audience: ConfidentialityLabel,
-    context: DomainContext,
-    epoch: MembershipEpoch,
-    capabilities: CapabilitySet,
-}
-
-impl ExecutionDomain {
-    fn id(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(b"buzz-ifc-domain-v1");
-        hasher.update(self.audience.realm.0);
-        self.audience.readers.stable_hash(&mut hasher);
-        self.context.stable_hash(&mut hasher);
-        hash_field(&mut hasher, self.epoch.0.as_bytes());
-        self.capabilities.stable_hash(&mut hasher);
-        hex::encode(hasher.finalize())
-    }
-
-    fn key(&self) -> DomainKey {
-        DomainKey(self.id())
-    }
-
-    fn resource_label(&self) -> ResourceLabel {
-        ResourceLabel {
-            confidentiality: self.audience.clone(),
-            context: self.context.resource_context(),
-        }
+    pub(crate) fn profile(&self) -> CompartmentProfile {
+        self.profile
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResourceLabel {
-    confidentiality: ConfidentialityLabel,
-    context: ResourceContext,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RuleDecision {
-    allowed: bool,
-    reason: &'static str,
-}
-
-impl RuleDecision {
-    fn allow(reason: &'static str) -> Self {
-        Self {
-            allowed: true,
-            reason,
-        }
+#[cfg(test)]
+pub(crate) fn domain_binding_for_test(value: &str, profile: CompartmentProfile) -> DomainBinding {
+    let domain = ExecutionDomain::public(
+        RealmId::from_relay_url("wss://ifc.test"),
+        MembershipEpoch::new(value),
+        CapabilitySet::default(),
+    );
+    DomainBinding {
+        key: domain.key(),
+        profile,
     }
-
-    fn deny(reason: &'static str) -> Self {
-        Self {
-            allowed: false,
-            reason,
-        }
-    }
-
-    fn result(&self) -> &'static str {
-        if self.allowed {
-            "allow"
-        } else {
-            "deny"
-        }
-    }
-}
-
-struct RuleEvaluator;
-
-impl RuleEvaluator {
-    /// Paper: `read(D, x) ⇔ A(D) ⊆ R(x) ∧ ContextPolicy(D, x)`.
-    fn read(domain: &ExecutionDomain, resource: &ResourceLabel) -> RuleDecision {
-        if !resource.confidentiality.can_flow_to(&domain.audience) {
-            return RuleDecision::deny("destination audience includes an unauthorized reader");
-        }
-        if !domain.context.permits(&resource.context) {
-            return RuleDecision::deny("resource belongs to a different context");
-        }
-        RuleDecision::allow("audience and context both permit the read")
-    }
-
-    /// Paper: `call(D, op) ⇔ op ∈ C(D)`.
-    fn call(domain: &ExecutionDomain, operation: &str) -> RuleDecision {
-        if domain.capabilities.contains(operation) {
-            RuleDecision::allow("operation is in the effective capability set")
-        } else {
-            RuleDecision::deny("operation is absent from the effective capability set")
-        }
-    }
-
-    /// Paper: `reuse(D, e)` requires the complete domain, including epoch, to
-    /// match. A separate ACP session in the same process is not sufficient.
-    fn reuse(existing: &ExecutionDomain, requested: &ExecutionDomain) -> RuleDecision {
-        if existing == requested {
-            RuleDecision::allow("complete execution domain matches")
-        } else {
-            RuleDecision::deny("agent process has already entered a different domain")
-        }
-    }
-
-    /// Paper: "Confinement invariant." Output may flow only to an audience no
-    /// broader than the accumulated label, unless an exact verified grant applies.
-    fn publish(
-        state: &ConfinementState,
-        source_domain: &ExecutionDomain,
-        destination: &ConfidentialityLabel,
-        destination_context: &DomainContext,
-        content_digest: &[u8; 32],
-        grant: Option<&DeclassificationGrant<VerifiedGrant>>,
-    ) -> RuleDecision {
-        if grant.is_some_and(|grant| {
-            grant.matches(
-                &source_domain.id(),
-                destination,
-                destination_context,
-                content_digest,
-            )
-        }) {
-            return RuleDecision::allow("exact owner-authorized declassification grant matches");
-        }
-        if state.unknown_input || state.cross_realm {
-            return RuleDecision::deny("process state contains unresolved input provenance");
-        }
-        if !source_domain.audience.can_flow_to(destination) {
-            return RuleDecision::deny("destination is broader than the execution domain");
-        }
-        if state
-            .label
-            .as_ref()
-            .is_some_and(|label| label.can_flow_to(destination))
-        {
-            return RuleDecision::allow("destination is no broader than accumulated state");
-        }
-        RuleDecision::deny("output would widen the accumulated reader set")
-    }
-}
-
-/// Conservative label for everything an agent process may remember. This is
-/// process-level rather than ACP-session-level because model sessions, tools,
-/// files, and caches can influence one another inside a worker.
-#[derive(Clone, Debug, Default)]
-struct ConfinementState {
-    label: Option<ConfidentialityLabel>,
-    contexts: BTreeSet<ResourceContext>,
-    unknown_input: bool,
-    cross_realm: bool,
-}
-
-impl ConfinementState {
-    fn observe(&mut self, resource: &ResourceLabel) {
-        self.contexts.insert(resource.context.clone());
-        self.label = match self.label.take() {
-            None => Some(resource.confidentiality.clone()),
-            Some(existing) => match existing.join(&resource.confidentiality) {
-                Ok(combined) => Some(combined),
-                Err(LatticeError::CrossRealm) => {
-                    self.cross_realm = true;
-                    Some(existing)
-                }
-            },
-        };
-    }
-
-    fn mark_unknown(&mut self) {
-        self.unknown_input = true;
-    }
-}
-
-/// Audit state tied to one actual ACP agent process. It intentionally survives
-/// channel-session invalidation: replacing a session does not make the process
-/// forget information it has already seen.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ProcessAuditState {
-    entered_domains: Vec<ExecutionDomain>,
-    confinement: ConfinementState,
-}
-
-impl ProcessAuditState {
-    fn enter(&mut self, requested: &ExecutionDomain) -> RuleDecision {
-        let decision = match self.entered_domains.as_slice() {
-            [] => RuleDecision::allow("fresh process has no prior execution domain"),
-            [existing] => RuleEvaluator::reuse(existing, requested),
-            _ => RuleDecision::deny("agent process has entered multiple execution domains"),
-        };
-        if !self
-            .entered_domains
-            .iter()
-            .any(|domain| domain == requested)
-        {
-            self.entered_domains.push(requested.clone());
-        }
-        decision
-    }
-}
-
-/// Typestate marker: the owner's signature has not yet been checked.
-#[allow(dead_code)]
-struct PendingGrant;
-
-/// Typestate marker: an external verifier has authenticated the owner signature.
-struct VerifiedGrant;
-
-/// A content-specific declassification grant. The evaluator only accepts the
-/// `VerifiedGrant` state, so an unchecked grant cannot accidentally reach the
-/// publish rule.
-struct DeclassificationGrant<State> {
-    approver: Principal,
-    source_domain_id: String,
-    destination: ConfidentialityLabel,
-    destination_context: DomainContext,
-    content_digest: [u8; 32],
-    _state: PhantomData<State>,
-}
-
-#[allow(dead_code)]
-trait GrantSignatureVerifier {
-    fn verifies(&self, grant: &DeclassificationGrant<PendingGrant>) -> bool;
-}
-
-#[allow(dead_code)]
-impl DeclassificationGrant<PendingGrant> {
-    fn verify<V: GrantSignatureVerifier>(
-        self,
-        expected_owner: &Principal,
-        verifier: &V,
-    ) -> Result<DeclassificationGrant<VerifiedGrant>, GrantError> {
-        if &self.approver != expected_owner {
-            return Err(GrantError::WrongApprover);
-        }
-        if !verifier.verifies(&self) {
-            return Err(GrantError::InvalidSignature);
-        }
-        Ok(DeclassificationGrant {
-            approver: self.approver,
-            source_domain_id: self.source_domain_id,
-            destination: self.destination,
-            destination_context: self.destination_context,
-            content_digest: self.content_digest,
-            _state: PhantomData,
-        })
-    }
-}
-
-impl DeclassificationGrant<VerifiedGrant> {
-    fn matches(
-        &self,
-        source_domain_id: &str,
-        destination: &ConfidentialityLabel,
-        destination_context: &DomainContext,
-        content_digest: &[u8; 32],
-    ) -> bool {
-        self.source_domain_id == source_domain_id
-            && &self.destination == destination
-            && &self.destination_context == destination_context
-            && &self.content_digest == content_digest
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
-enum GrantError {
-    WrongApprover,
-    InvalidSignature,
 }
 
 /// Trigger events after ID/signature and channel-binding checks. Domain
@@ -596,6 +87,7 @@ enum ResolutionError {
     MissingMembership,
     InvalidAuthoritativeEvent,
     InvalidPrincipal,
+    InvalidDomain,
     EmptyRestrictedAudience,
     AgentNotMember,
     RequesterNotMember,
@@ -618,6 +110,7 @@ impl fmt::Display for ResolutionError {
                 "channel policy event failed identity, signature, or channel checks"
             }
             Self::InvalidPrincipal => "channel policy contains an invalid principal",
+            Self::InvalidDomain => "resolved execution-domain fields are inconsistent",
             Self::EmptyRestrictedAudience => "restricted channel has no human audience",
             Self::AgentNotMember => "executing agent is absent from channel membership",
             Self::RequesterNotMember => "trigger requester is absent from channel membership",
@@ -628,7 +121,7 @@ impl fmt::Display for ResolutionError {
     }
 }
 
-/// Stateless policy front-end retained by `PromptContext` in audit or isolate mode.
+/// Stateless policy front-end retained by `PromptContext` in audit or route mode.
 pub(crate) struct Auditor {
     realm: RealmId,
     rest_client: RestClient,
@@ -651,8 +144,8 @@ impl Auditor {
             realm: RealmId::from_relay_url(relay_url),
             rest_client,
             relay_self: relay_self.and_then(|value| PublicKey::from_hex(value).ok()),
-            agent: Principal::from_key(agent),
-            owner: owner.map(Principal::from_key),
+            agent: Principal::from_public_key(&agent),
+            owner: owner.map(|key| Principal::from_public_key(&key)),
             mode,
         }
     }
@@ -675,7 +168,7 @@ impl Auditor {
                     rule: "event_admission",
                     decision: "allow",
                     reason: "all trigger IDs, signatures, and channel bindings verified",
-                    enforced: self.mode.isolates_processes(),
+                    enforced: self.mode.routes_workers(),
                 });
                 verified
             }
@@ -688,7 +181,7 @@ impl Auditor {
                     rule: "event_admission",
                     decision: "deny",
                     reason: &error.to_string(),
-                    enforced: self.mode.isolates_processes(),
+                    enforced: self.mode.routes_workers(),
                 });
                 return ActiveTurn::unresolved(
                     turn_id,
@@ -711,7 +204,7 @@ impl Auditor {
                     rule: "domain_resolution",
                     decision: "deny",
                     reason: &error.to_string(),
-                    enforced: self.mode.isolates_processes(),
+                    enforced: self.mode.routes_workers(),
                 });
                 return ActiveTurn::unresolved(
                     turn_id,
@@ -731,15 +224,16 @@ impl Auditor {
             agent_index,
             domain_id = %domain_id,
             realm = %self.realm.fingerprint(),
-            context = domain.context.kind(),
-            audience = if matches!(domain.audience.readers, ReaderSet::Everyone) {
+            context = domain.context().kind(),
+            compartment = domain.compartment_profile().as_str(),
+            audience = if domain.audience().is_public() {
                 "public"
             } else {
                 "restricted"
             },
-            reader_count = domain.audience.readers.explicit_count(),
+            reader_count = domain.audience().reader_count(),
             requester_count = verified.requesters.len(),
-            epoch = %short_fingerprint(&domain.epoch.0),
+            epoch = %domain.epoch_fingerprint(),
             "ifc execution domain resolved"
         );
 
@@ -769,7 +263,7 @@ impl Auditor {
                 rule: "domain_resolution",
                 decision: "deny",
                 reason: &ResolutionError::NoOwner.to_string(),
-                enforced: self.mode.isolates_processes(),
+                enforced: self.mode.routes_workers(),
             });
             return ActiveTurn::unresolved(
                 turn_id,
@@ -779,16 +273,12 @@ impl Auditor {
                 TurnOrigin::Heartbeat,
             );
         };
-        let context = DomainContext::OwnerPrivate {
-            realm: self.realm.clone(),
-            owner: owner.clone(),
-        };
-        let domain = ExecutionDomain {
-            audience: ConfidentialityLabel::restricted(self.realm.clone(), BTreeSet::from([owner])),
-            context,
-            epoch: MembershipEpoch("owner-heartbeat-v1".to_string()),
-            capabilities: bot_capabilities(),
-        };
+        let domain = ExecutionDomain::owner_private(
+            self.realm.clone(),
+            owner,
+            MembershipEpoch::new("owner-heartbeat-v1"),
+            bot_capabilities(),
+        );
         tracing::info!(
             target: "buzz_acp::ifc",
             ifc_mode = %self.mode,
@@ -796,10 +286,11 @@ impl Auditor {
             agent_index,
             domain_id = %domain.id(),
             realm = %self.realm.fingerprint(),
-            context = domain.context.kind(),
+            context = domain.context().kind(),
+            compartment = domain.compartment_profile().as_str(),
             audience = "restricted",
             reader_count = 1,
-            epoch = %short_fingerprint(&domain.epoch.0),
+            epoch = %domain.epoch_fingerprint(),
             "ifc execution domain resolved"
         );
         ActiveTurn {
@@ -850,66 +341,54 @@ impl Auditor {
         )
         .await?
         .ok_or(ResolutionError::MissingMetadata)?;
-        let channel_type = channel_type(&metadata);
-        if channel_type == "stream" {
-            let context = DomainContext::RealmPublic(self.realm.clone());
-            return Ok(ExecutionDomain {
-                audience: ConfidentialityLabel::public(self.realm.clone()),
-                capabilities: effective_turn_capabilities(&context, trigger, self.owner.as_ref()),
-                context,
+        let (kind, epoch, members) = match channel_type(&metadata) {
+            "stream" => (
+                ConversationKind::Public,
                 // All public channels in this community intentionally share one
                 // execution domain and public memory.
-                epoch: MembershipEpoch(format!("community:{}", relay_self.to_hex())),
-            });
-        }
-
-        let membership = select_authoritative_event(
-            &events,
-            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS,
-            trigger.channel_id,
-            relay_self,
-        )
-        .await?
-        .ok_or(ResolutionError::MissingMembership)?;
-        let mut readers = member_principals(&membership)?;
-        if !readers.contains(&self.agent) {
-            return Err(ResolutionError::AgentNotMember);
-        }
-        let relay_principal = Principal::from_key(relay_self);
-        if verified_requester_outside_membership(trigger, &readers, &relay_principal) {
-            return Err(ResolutionError::RequesterNotMember);
-        }
-        // The executing bot is a processor, not an additional human recipient.
-        // Other bots remain in the audience because they may relay what they see.
-        readers.remove(&self.agent);
-        if readers.is_empty() {
-            return Err(ResolutionError::EmptyRestrictedAudience);
-        }
-
-        let context = match (&self.owner, channel_type) {
-            (Some(owner), "dm")
-                if readers.len() == 1 && readers.first().is_some_and(|reader| reader == owner) =>
-            {
-                DomainContext::OwnerPrivate {
-                    realm: self.realm.clone(),
-                    owner: owner.clone(),
-                }
+                MembershipEpoch::new(format!("community:{}", relay_self.to_hex())),
+                BTreeSet::new(),
+            ),
+            restricted_kind => {
+                let membership = select_authoritative_event(
+                    &events,
+                    buzz_core::kind::KIND_NIP29_GROUP_MEMBERS,
+                    trigger.channel_id,
+                    relay_self,
+                )
+                .await?
+                .ok_or(ResolutionError::MissingMembership)?;
+                let members = member_principals(&membership)?;
+                let kind = if restricted_kind == "dm" {
+                    ConversationKind::DirectMessage
+                } else {
+                    ConversationKind::Restricted
+                };
+                (
+                    kind,
+                    // The relay-signed replaceable membership event is the epoch,
+                    // not merely a hash of the current roster. Remove-then-readd
+                    // rotates state even if the final readers are identical.
+                    MembershipEpoch::new(format!("membership:{}", membership.id.to_hex())),
+                    members,
+                )
             }
-            _ => DomainContext::Conversation {
+        };
+        derive_execution_domain(
+            DomainFacts {
                 realm: self.realm.clone(),
                 channel_id: trigger.channel_id,
+                kind,
+                epoch,
+                members,
+                executing_agent: self.agent.clone(),
+                requesters: trigger.requesters.clone(),
+                system_principal: Some(Principal::from_public_key(&relay_self)),
+                owner: self.owner.clone(),
             },
-        };
-
-        Ok(ExecutionDomain {
-            audience: ConfidentialityLabel::restricted(self.realm.clone(), readers),
-            capabilities: effective_turn_capabilities(&context, trigger, self.owner.as_ref()),
-            context,
-            // The relay-signed replaceable membership event is the epoch, not
-            // merely a hash of the current roster. Remove-then-readd therefore
-            // rotates state even if the final reader set happens to be identical.
-            epoch: MembershipEpoch(format!("membership:{}", membership.id.to_hex())),
-        })
+            &capability_policy(),
+        )
+        .map_err(map_derivation_error)
     }
 }
 
@@ -947,8 +426,8 @@ impl ActiveTurn {
         }
     }
 
-    pub(crate) fn domain_key(&self) -> Option<DomainKey> {
-        self.domain.as_ref().map(ExecutionDomain::key)
+    pub(crate) fn domain_binding(&self) -> Option<DomainBinding> {
+        self.domain.as_ref().map(DomainBinding::from_domain)
     }
 
     pub(crate) fn assign_agent(&mut self, agent_index: usize) {
@@ -960,7 +439,7 @@ impl ActiveTurn {
     /// process is either proven reusable or replaced for this domain.
     pub(crate) fn enter_process(&self, process: &mut ProcessAuditState) {
         let Some(domain) = self.domain.as_ref() else {
-            process.confinement.mark_unknown();
+            process.mark_unknown();
             return;
         };
         let domain_id = domain.id();
@@ -972,8 +451,8 @@ impl ActiveTurn {
             domain_id: Some(&domain_id),
             rule: "reuse",
             decision: reuse.result(),
-            reason: reuse.reason,
-            enforced: self.mode.isolates_processes(),
+            reason: reuse.reason(),
+            enforced: self.mode.routes_workers(),
         });
         match self.origin {
             TurnOrigin::Channel => {
@@ -989,27 +468,16 @@ impl ActiveTurn {
     }
 
     /// Whether owner-private material may enter this turn's domain. This is
-    /// checked before the broker fetches core memory in isolate mode.
+    /// checked before the harness fetches core memory in route mode.
     pub(crate) fn permits_owner_private_input(&self) -> bool {
         let (Some(domain), Some(owner)) = (self.domain.as_ref(), self.owner.as_ref()) else {
             return false;
         };
-        let mut readers = BTreeSet::new();
-        readers.insert(owner.clone());
         RuleEvaluator::read(
             domain,
-            &ResourceLabel {
-                confidentiality: ConfidentialityLabel::restricted(
-                    domain.audience.realm.clone(),
-                    readers,
-                ),
-                context: ResourceContext::OwnerPrivate {
-                    realm: domain.audience.realm.clone(),
-                    owner: owner.clone(),
-                },
-            },
+            &ResourceLabel::owner_private(domain.audience().realm().clone(), owner.clone()),
         )
-        .allowed
+        .allowed()
     }
 
     pub(crate) fn log_blocked_owner_private_input(&self, source: &'static str) {
@@ -1036,7 +504,7 @@ impl ActiveTurn {
         source: &'static str,
     ) {
         let Some(domain) = self.domain.as_ref() else {
-            process.confinement.mark_unknown();
+            process.mark_unknown();
             log_rule(RuleLog {
                 mode: self.mode,
                 turn_id: &self.turn_id,
@@ -1045,7 +513,7 @@ impl ActiveTurn {
                 rule: "read",
                 decision: "deny",
                 reason: "execution domain is unresolved",
-                enforced: self.mode.isolates_processes(),
+                enforced: self.mode.routes_workers(),
             });
             return;
         };
@@ -1059,7 +527,7 @@ impl ActiveTurn {
         source: &'static str,
     ) {
         let (Some(domain), Some(owner)) = (self.domain.as_ref(), self.owner.as_ref()) else {
-            process.confinement.mark_unknown();
+            process.mark_unknown();
             let domain_id = self.domain.as_ref().map(ExecutionDomain::id);
             log_rule(RuleLog {
                 mode: self.mode,
@@ -1069,25 +537,14 @@ impl ActiveTurn {
                 rule: "read",
                 decision: "deny",
                 reason: "owner-private input lacks a resolved owner or domain",
-                enforced: self.mode.isolates_processes(),
+                enforced: self.mode.routes_workers(),
             });
             return;
         };
-        let mut readers = BTreeSet::new();
-        readers.insert(owner.clone());
         self.observe_resource(
             process,
             source,
-            ResourceLabel {
-                confidentiality: ConfidentialityLabel::restricted(
-                    domain.audience.realm.clone(),
-                    readers,
-                ),
-                context: ResourceContext::OwnerPrivate {
-                    realm: domain.audience.realm.clone(),
-                    owner: owner.clone(),
-                },
-            },
+            ResourceLabel::owner_private(domain.audience().realm().clone(), owner.clone()),
         );
     }
 
@@ -1099,16 +556,13 @@ impl ActiveTurn {
         source: &'static str,
     ) {
         let Some(domain) = self.domain.as_ref() else {
-            process.confinement.mark_unknown();
+            process.mark_unknown();
             return;
         };
         self.observe_resource(
             process,
             source,
-            ResourceLabel {
-                confidentiality: ConfidentialityLabel::public(domain.audience.realm.clone()),
-                context: ResourceContext::TrustedConfiguration,
-            },
+            ResourceLabel::trusted_configuration(domain.audience().realm().clone()),
         );
     }
 
@@ -1120,7 +574,7 @@ impl ActiveTurn {
         process: &mut ProcessAuditState,
         source: &'static str,
     ) {
-        process.confinement.mark_unknown();
+        process.mark_unknown();
         tracing::info!(
             target: "buzz_acp::ifc",
             ifc_mode = %self.mode,
@@ -1143,15 +597,15 @@ impl ActiveTurn {
         resource: ResourceLabel,
     ) {
         let Some(domain) = self.domain.as_ref() else {
-            process.confinement.mark_unknown();
+            process.mark_unknown();
             return;
         };
         let decision = RuleEvaluator::read(domain, &resource);
         // Audit mode records denied inputs because the model still sees them.
-        // Isolate mode records only admitted inputs; denied owner-private input
+        // Route mode records only admitted inputs; denied owner-private input
         // is stopped before the broker fetches it.
-        if decision.allowed || !self.mode.isolates_processes() {
-            process.confinement.observe(&resource);
+        if decision.allowed() || !self.mode.routes_workers() {
+            process.observe(&resource);
         }
         let domain_id = domain.id();
         tracing::info!(
@@ -1163,8 +617,8 @@ impl ActiveTurn {
             rule = "read",
             source,
             decision = decision.result(),
-            reason = decision.reason,
-            enforced = self.mode.isolates_processes(),
+            reason = decision.reason(),
+            enforced = self.mode.routes_workers(),
             "ifc rule evaluated"
         );
     }
@@ -1194,7 +648,7 @@ impl ActiveTurn {
                 attempted = false,
                 stage = "capability_assignment",
                 decision = decision.result(),
-                reason = decision.reason,
+                reason = decision.reason(),
                 enforced = false,
                 "ifc rule evaluated"
             );
@@ -1219,14 +673,7 @@ impl ActiveTurn {
             return;
         };
         let digest: [u8; 32] = Sha256::digest(b"audit-only-unbound-output").into();
-        let decision = RuleEvaluator::publish(
-            &process.confinement,
-            domain,
-            &domain.audience,
-            &domain.context,
-            &digest,
-            None,
-        );
+        let decision = process.publish(domain, domain.audience(), domain.context(), &digest, None);
         tracing::info!(
             target: "buzz_acp::ifc",
             ifc_mode = %self.mode,
@@ -1235,7 +682,7 @@ impl ActiveTurn {
             domain_id = %domain.id(),
             rule = "publish",
             decision = decision.result(),
-            reason = decision.reason,
+            reason = decision.reason(),
             output_bound = false,
             enforced = false,
             "ifc rule evaluated"
@@ -1243,10 +690,23 @@ impl ActiveTurn {
     }
 
     fn log_unmediated_coverage(&self) {
-        let gaps = if self.mode.isolates_processes() {
-            "ambient_workspace, credential_bearing_mcp, direct_buzz_publication, static_capability_inventory, operating_system_isolation"
-        } else {
-            "shared_agent_process, ambient_workspace, credential_bearing_mcp, direct_buzz_publication, static_capability_inventory, operating_system_isolation"
+        let (compartment, gaps) = match self
+            .domain
+            .as_ref()
+            .map(ExecutionDomain::compartment_profile)
+        {
+            Some(CompartmentProfile::SharedPublic) => (
+                CompartmentProfile::SharedPublic.as_str(),
+                "broker_process_protection, private_compartment_protection, ambient_private_sources, direct_buzz_publication, static_capability_inventory",
+            ),
+            Some(CompartmentProfile::DomainConfined) => (
+                CompartmentProfile::DomainConfined.as_str(),
+                "dedicated_writable_state, credential_bearing_mcp, controlled_output_paths, direct_buzz_publication, operating_system_isolation",
+            ),
+            None => (
+                "unresolved",
+                "shared_agent_process, ambient_workspace, credential_bearing_mcp, direct_buzz_publication, operating_system_isolation",
+            ),
         };
         tracing::warn!(
             target: "buzz_acp::ifc",
@@ -1254,6 +714,7 @@ impl ActiveTurn {
             turn_id = %self.turn_id,
             agent_index = self.agent_index,
             domain_id = self.domain.as_ref().map(ExecutionDomain::id),
+            compartment,
             rule = "confinement_coverage",
             decision = "not_proven",
             enforced = false,
@@ -1281,7 +742,7 @@ async fn verify_trigger_batch(batch: &FlushBatch) -> Result<VerifiedTrigger, Res
             if !has_channel_tag(&event, "h", &channel_id.to_string()) {
                 return Err(ResolutionError::TriggerChannelMismatch);
             }
-            requesters.insert(Principal::from_key(event.pubkey));
+            requesters.insert(Principal::from_public_key(&event.pubkey));
         }
         Ok(VerifiedTrigger {
             channel_id,
@@ -1364,54 +825,15 @@ fn member_principals(event: &Event) -> Result<BTreeSet<Principal>, ResolutionErr
                 .then(|| fields.get(1).map(String::as_str))
                 .flatten()
         })
-        .map(Principal::from_hex)
+        .map(|value| Principal::from_hex(value).map_err(|_| ResolutionError::InvalidPrincipal))
         .collect()
 }
 
-fn verified_requester_outside_membership(
-    trigger: &VerifiedTrigger,
-    members: &BTreeSet<Principal>,
-    relay: &Principal,
-) -> bool {
-    // Relay-signed workflow events are admitted by Buzz's existing attributed-
-    // author gate. They remain trusted system events here; requester-specific
-    // capability delegation still needs the attributed human identity.
-    trigger
-        .requesters
-        .iter()
-        .any(|requester| requester != relay && !members.contains(requester))
-}
-
-fn effective_turn_capabilities(
-    context: &DomainContext,
-    trigger: &VerifiedTrigger,
-    owner: Option<&Principal>,
-) -> CapabilitySet {
+fn capability_policy() -> CapabilityPolicy {
     let conversation =
         CapabilitySet::from_names(["buzz.read.current", "buzz.publish.current", "memory.domain"]);
     let bot = bot_capabilities();
-    let requester_is_owner = owner.is_some_and(|owner| {
-        !trigger.requesters.is_empty()
-            && trigger
-                .requesters
-                .iter()
-                .all(|requester| requester == owner)
-    });
-    let requester = if requester_is_owner {
-        bot.clone()
-    } else {
-        conversation.clone()
-    };
-    let domain = if matches!(context, DomainContext::OwnerPrivate { .. }) {
-        bot.clone()
-    } else {
-        conversation
-    };
-
-    // Paper: "Integrity and capabilities." Personal tools require both an
-    // owner-authored request and the owner-private execution domain. Either
-    // condition alone is insufficient.
-    CapabilitySet::effective(&bot, &requester, &domain)
+    CapabilityPolicy::new(bot, conversation)
 }
 
 fn bot_capabilities() -> CapabilitySet {
@@ -1425,14 +847,15 @@ fn bot_capabilities() -> CapabilitySet {
     ])
 }
 
-fn hash_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update(value.len().to_be_bytes());
-    hasher.update(value);
-}
-
-fn short_fingerprint(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    hex::encode(&digest[..6])
+fn map_derivation_error(error: DerivationError) -> ResolutionError {
+    match error {
+        DerivationError::AgentNotMember => ResolutionError::AgentNotMember,
+        DerivationError::RequesterNotMember => ResolutionError::RequesterNotMember,
+        DerivationError::EmptyRestrictedAudience => ResolutionError::EmptyRestrictedAudience,
+        DerivationError::EmptyRequesters | DerivationError::InvalidDomain => {
+            ResolutionError::InvalidDomain
+        }
+    }
 }
 
 struct RuleLog<'a> {
@@ -1475,212 +898,17 @@ fn log_rule(entry: RuleLog<'_>) {
 mod tests {
     use super::*;
     use crate::queue::BatchEvent;
+    use buzz_ifc::DomainContext;
     use nostr::{EventBuilder, Keys, Tag};
     use std::time::Instant;
 
     fn principal(name: &str) -> Principal {
-        Principal(name.to_string())
-    }
-
-    fn set(names: &[&str]) -> BTreeSet<Principal> {
-        names.iter().map(|name| principal(name)).collect()
+        let digest = Sha256::digest(name.as_bytes());
+        Principal::from_hex(&hex::encode(digest)).expect("valid deterministic test principal")
     }
 
     fn realm() -> RealmId {
         RealmId::from_relay_url("wss://buzz.example")
-    }
-
-    fn label(readers: &[&str]) -> ConfidentialityLabel {
-        ConfidentialityLabel::restricted(realm(), set(readers))
-    }
-
-    fn public_label() -> ConfidentialityLabel {
-        ConfidentialityLabel::public(realm())
-    }
-
-    fn domain(
-        readers: &[&str],
-        channel_id: Uuid,
-        epoch: &str,
-        capabilities: CapabilitySet,
-    ) -> ExecutionDomain {
-        ExecutionDomain {
-            audience: label(readers),
-            context: DomainContext::Conversation {
-                realm: realm(),
-                channel_id,
-            },
-            epoch: MembershipEpoch(epoch.to_string()),
-            capabilities,
-        }
-    }
-
-    #[test]
-    fn reader_order_is_reverse_set_inclusion() {
-        let public = ReaderSet::Everyone;
-        let alice_bob = ReaderSet::Only(set(&["alice", "bob"]));
-        let alice = ReaderSet::Only(set(&["alice"]));
-
-        assert!(public.can_flow_to(&alice_bob));
-        assert!(alice_bob.can_flow_to(&alice));
-        assert!(!alice.can_flow_to(&alice_bob));
-        assert!(!alice.can_flow_to(&public));
-    }
-
-    #[test]
-    fn reader_sets_obey_lattice_laws() {
-        let values = [
-            ReaderSet::Everyone,
-            ReaderSet::Only(set(&[])),
-            ReaderSet::Only(set(&["alice"])),
-            ReaderSet::Only(set(&["bob"])),
-            ReaderSet::Only(set(&["alice", "bob"])),
-        ];
-
-        for a in &values {
-            assert_eq!(a.join(a), *a);
-            assert_eq!(a.meet(a), *a);
-            for b in &values {
-                assert_eq!(a.join(b), b.join(a));
-                assert_eq!(a.meet(b), b.meet(a));
-                assert_eq!(a.join(&a.meet(b)), *a);
-                assert_eq!(a.meet(&a.join(b)), *a);
-                for c in &values {
-                    assert_eq!(a.join(&b.join(c)), a.join(b).join(c));
-                    assert_eq!(a.meet(&b.meet(c)), a.meet(b).meet(c));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn combining_inputs_intersects_authorized_readers() {
-        let left = label(&["alice", "bob"]);
-        let right = label(&["alice", "carol"]);
-        assert_eq!(left.join(&right).expect("same realm"), label(&["alice"]));
-    }
-
-    #[test]
-    fn labels_never_flow_across_communities() {
-        let first = ConfidentialityLabel::public(RealmId::from_relay_url("wss://one"));
-        let second = ConfidentialityLabel::public(RealmId::from_relay_url("wss://two"));
-        assert!(!first.can_flow_to(&second));
-        assert_eq!(first.join(&second), Err(LatticeError::CrossRealm));
-    }
-
-    #[test]
-    fn read_requires_both_audience_and_context() {
-        let channel = Uuid::new_v4();
-        let other_channel = Uuid::new_v4();
-        let turn = domain(&["alice", "bob"], channel, "v1", CapabilitySet::default());
-        let wrong_audience = ResourceLabel {
-            confidentiality: label(&["alice"]),
-            context: ResourceContext::Conversation {
-                realm: realm(),
-                channel_id: channel,
-            },
-        };
-        let wrong_context = ResourceLabel {
-            confidentiality: label(&["alice", "bob"]),
-            context: ResourceContext::Conversation {
-                realm: realm(),
-                channel_id: other_channel,
-            },
-        };
-
-        assert!(!RuleEvaluator::read(&turn, &wrong_audience).allowed);
-        assert!(!RuleEvaluator::read(&turn, &wrong_context).allowed);
-        assert!(RuleEvaluator::read(&turn, &turn.resource_label()).allowed);
-    }
-
-    #[test]
-    fn owner_private_context_can_aggregate_only_data_owner_may_read() {
-        let owner = principal("alice");
-        let owner_domain = ExecutionDomain {
-            audience: label(&["alice"]),
-            context: DomainContext::OwnerPrivate {
-                realm: realm(),
-                owner,
-            },
-            epoch: MembershipEpoch("owner-v1".into()),
-            capabilities: CapabilitySet::default(),
-        };
-        let readable_channel = ResourceLabel {
-            confidentiality: label(&["alice", "bob"]),
-            context: ResourceContext::Conversation {
-                realm: realm(),
-                channel_id: Uuid::new_v4(),
-            },
-        };
-        let unreadable_channel = ResourceLabel {
-            confidentiality: label(&["bob", "carol"]),
-            context: ResourceContext::Conversation {
-                realm: realm(),
-                channel_id: Uuid::new_v4(),
-            },
-        };
-
-        assert!(RuleEvaluator::read(&owner_domain, &readable_channel).allowed);
-        assert!(!RuleEvaluator::read(&owner_domain, &unreadable_channel).allowed);
-    }
-
-    #[test]
-    fn effective_capabilities_are_the_three_way_intersection() {
-        let bot = CapabilitySet::from_names(["buzz.read.current", "email.read", "drive.read"]);
-        let requester = CapabilitySet::from_names(["buzz.read.current", "email.read"]);
-        let domain = CapabilitySet::from_names(["buzz.read.current", "drive.read"]);
-        assert_eq!(
-            CapabilitySet::effective(&bot, &requester, &domain),
-            CapabilitySet::from_names(["buzz.read.current"])
-        );
-    }
-
-    #[test]
-    fn personal_capabilities_require_owner_request_and_owner_context() {
-        let owner = principal("alice");
-        let owner_trigger = VerifiedTrigger {
-            channel_id: Uuid::new_v4(),
-            requesters: BTreeSet::from([owner.clone()]),
-        };
-        let other_trigger = VerifiedTrigger {
-            channel_id: Uuid::new_v4(),
-            requesters: BTreeSet::from([principal("bob")]),
-        };
-        let owner_context = DomainContext::OwnerPrivate {
-            realm: realm(),
-            owner: owner.clone(),
-        };
-        let public_context = DomainContext::RealmPublic(realm());
-
-        assert!(
-            effective_turn_capabilities(&owner_context, &owner_trigger, Some(&owner))
-                .contains("email.read")
-        );
-        assert!(
-            !effective_turn_capabilities(&public_context, &owner_trigger, Some(&owner))
-                .contains("email.read")
-        );
-        assert!(
-            !effective_turn_capabilities(&owner_context, &other_trigger, Some(&owner))
-                .contains("email.read")
-        );
-    }
-
-    #[test]
-    fn reuse_requires_context_epoch_and_capabilities_to_match() {
-        let channel = Uuid::new_v4();
-        let capabilities = CapabilitySet::from_names(["buzz.read.current"]);
-        let first = domain(&["alice", "bob"], channel, "v1", capabilities.clone());
-        let same = first.clone();
-        let new_epoch = domain(&["alice", "bob"], channel, "v2", capabilities.clone());
-        let new_context = domain(&["alice", "bob"], Uuid::new_v4(), "v1", capabilities);
-
-        assert!(RuleEvaluator::reuse(&first, &same).allowed);
-        assert!(!RuleEvaluator::reuse(&first, &new_epoch).allowed);
-        assert!(!RuleEvaluator::reuse(&first, &new_context).allowed);
-        assert_eq!(first.key(), same.key());
-        assert_ne!(first.key(), new_epoch.key());
-        assert_ne!(first.key(), new_context.key());
     }
 
     #[test]
@@ -1689,164 +917,31 @@ mod tests {
         let owner_turn = ActiveTurn {
             turn_id: "owner".into(),
             agent_index: Some(0),
-            domain: Some(ExecutionDomain {
-                audience: label(&["alice"]),
-                context: DomainContext::OwnerPrivate {
-                    realm: realm(),
-                    owner: owner.clone(),
-                },
-                epoch: MembershipEpoch("owner-v1".into()),
-                capabilities: bot_capabilities(),
-            }),
+            domain: Some(ExecutionDomain::owner_private(
+                realm(),
+                owner.clone(),
+                MembershipEpoch::new("owner-v1"),
+                bot_capabilities(),
+            )),
             owner: Some(owner.clone()),
-            mode: InformationFlowMode::Isolate,
+            mode: InformationFlowMode::Route,
             origin: TurnOrigin::Channel,
         };
         let public_turn = ActiveTurn {
             turn_id: "public".into(),
             agent_index: Some(1),
-            domain: Some(ExecutionDomain {
-                audience: public_label(),
-                context: DomainContext::RealmPublic(realm()),
-                epoch: MembershipEpoch("public-v1".into()),
-                capabilities: CapabilitySet::default(),
-            }),
+            domain: Some(ExecutionDomain::public(
+                realm(),
+                MembershipEpoch::new("public-v1"),
+                CapabilitySet::default(),
+            )),
             owner: Some(owner),
-            mode: InformationFlowMode::Isolate,
+            mode: InformationFlowMode::Route,
             origin: TurnOrigin::Channel,
         };
 
         assert!(owner_turn.permits_owner_private_input());
         assert!(!public_turn.permits_owner_private_input());
-    }
-
-    #[test]
-    fn process_reuse_stays_denied_after_crossing_a_domain_boundary() {
-        let capabilities = CapabilitySet::from_names(["buzz.read.current"]);
-        let first = domain(
-            &["alice", "bob"],
-            Uuid::new_v4(),
-            "v1",
-            capabilities.clone(),
-        );
-        let second = domain(&["alice", "carol"], Uuid::new_v4(), "v1", capabilities);
-        let mut process = ProcessAuditState::default();
-
-        assert!(process.enter(&first).allowed);
-        assert!(!process.enter(&second).allowed);
-        assert!(
-            !process.enter(&first).allowed,
-            "returning to the first domain does not erase the second domain's influence"
-        );
-    }
-
-    #[test]
-    fn denied_input_still_taints_a_log_only_process() {
-        let channel = Uuid::new_v4();
-        let turn = domain(&["alice", "bob"], channel, "v1", CapabilitySet::default());
-        let private = ResourceLabel {
-            confidentiality: label(&["alice"]),
-            context: ResourceContext::OwnerPrivate {
-                realm: realm(),
-                owner: principal("alice"),
-            },
-        };
-        assert!(!RuleEvaluator::read(&turn, &private).allowed);
-
-        let mut state = ConfinementState::default();
-        state.observe(&turn.resource_label());
-        state.observe(&private);
-        let digest = [7; 32];
-        assert!(
-            !RuleEvaluator::publish(&state, &turn, &turn.audience, &turn.context, &digest, None,)
-                .allowed,
-            "audit mode must not claim safety after allowing a denied read through"
-        );
-    }
-
-    struct AlwaysValid;
-
-    impl GrantSignatureVerifier for AlwaysValid {
-        fn verifies(&self, _grant: &DeclassificationGrant<PendingGrant>) -> bool {
-            true
-        }
-    }
-
-    #[test]
-    fn declassification_is_owner_verified_and_exact() {
-        let channel = Uuid::new_v4();
-        let turn = domain(&["alice"], channel, "v1", CapabilitySet::default());
-        let destination = public_label();
-        let content = [9; 32];
-        let pending = DeclassificationGrant::<PendingGrant> {
-            approver: principal("alice"),
-            source_domain_id: turn.id(),
-            destination: destination.clone(),
-            destination_context: DomainContext::RealmPublic(realm()),
-            content_digest: content,
-            _state: PhantomData,
-        };
-        let verified = pending
-            .verify(&principal("alice"), &AlwaysValid)
-            .expect("owner signature");
-        let mut state = ConfinementState::default();
-        state.observe(&turn.resource_label());
-
-        assert!(
-            RuleEvaluator::publish(
-                &state,
-                &turn,
-                &destination,
-                &DomainContext::RealmPublic(realm()),
-                &content,
-                Some(&verified),
-            )
-            .allowed
-        );
-        assert!(
-            !RuleEvaluator::publish(
-                &state,
-                &turn,
-                &destination,
-                &DomainContext::RealmPublic(realm()),
-                &[8; 32],
-                Some(&verified),
-            )
-            .allowed
-        );
-        assert!(
-            !RuleEvaluator::publish(
-                &state,
-                &turn,
-                &destination,
-                &DomainContext::Conversation {
-                    realm: realm(),
-                    channel_id: Uuid::new_v4(),
-                },
-                &content,
-                Some(&verified),
-            )
-            .allowed,
-            "a grant for one destination context cannot authorize another"
-        );
-    }
-
-    #[test]
-    fn public_domain_ids_match_across_public_channels() {
-        let capabilities = CapabilitySet::from_names(["buzz.read.current"]);
-        let first = ExecutionDomain {
-            audience: public_label(),
-            context: DomainContext::RealmPublic(realm()),
-            epoch: MembershipEpoch("community".into()),
-            capabilities: capabilities.clone(),
-        };
-        let second = ExecutionDomain {
-            audience: public_label(),
-            context: DomainContext::RealmPublic(realm()),
-            epoch: MembershipEpoch("community".into()),
-            capabilities,
-        };
-        assert_eq!(first.id(), second.id());
     }
 
     #[tokio::test]
@@ -1944,7 +1039,7 @@ mod tests {
         .expect("signed membership");
         assert_eq!(
             member_principals(&valid).expect("valid members"),
-            BTreeSet::from([Principal::from_key(member.public_key())])
+            BTreeSet::from([Principal::from_public_key(&member.public_key())])
         );
 
         let invalid = EventBuilder::new(
@@ -1960,40 +1055,6 @@ mod tests {
         assert!(matches!(
             member_principals(&invalid),
             Err(ResolutionError::InvalidPrincipal)
-        ));
-    }
-
-    #[test]
-    fn restricted_event_admission_rejects_nonmember_requesters() {
-        let alice = principal("alice");
-        let bob = principal("bob");
-        let relay = principal("relay");
-        let members = BTreeSet::from([alice.clone()]);
-
-        let member = VerifiedTrigger {
-            channel_id: Uuid::new_v4(),
-            requesters: BTreeSet::from([alice]),
-        };
-        assert!(!verified_requester_outside_membership(
-            &member, &members, &relay
-        ));
-
-        let nonmember = VerifiedTrigger {
-            channel_id: Uuid::new_v4(),
-            requesters: BTreeSet::from([bob]),
-        };
-        assert!(verified_requester_outside_membership(
-            &nonmember, &members, &relay
-        ));
-
-        let relay_workflow = VerifiedTrigger {
-            channel_id: Uuid::new_v4(),
-            requesters: BTreeSet::from([relay.clone()]),
-        };
-        assert!(!verified_requester_outside_membership(
-            &relay_workflow,
-            &members,
-            &relay,
         ));
     }
 
@@ -2082,10 +1143,13 @@ mod tests {
         turn.enter_process(&mut process);
         let domain = turn.domain.as_ref().expect("resolved domain");
 
-        assert!(matches!(domain.context, DomainContext::OwnerPrivate { .. }));
-        assert_eq!(domain.audience.readers.explicit_count(), Some(1));
-        assert!(domain.capabilities.contains("email.read"));
-        assert_eq!(process.entered_domains.len(), 1);
+        assert!(matches!(
+            domain.context(),
+            DomainContext::OwnerPrivate { .. }
+        ));
+        assert_eq!(domain.audience().reader_count(), Some(1));
+        assert!(domain.capabilities().contains("email.read"));
+        assert_eq!(process.entered_domain_count(), 1);
         server.await.expect("policy server");
     }
 }
