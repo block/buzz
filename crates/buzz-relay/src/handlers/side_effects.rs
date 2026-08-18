@@ -116,20 +116,24 @@ async fn evict_conn_channel_subscriptions(
 
     if let Some(subscriptions) = state.conn_manager.subscriptions_for(conn_id) {
         let mut conn_subscriptions = subscriptions.lock().await;
-        for (sub_id, _) in &removed {
-            conn_subscriptions.remove(sub_id);
+        for update in &removed {
+            if update.removed {
+                conn_subscriptions.remove(&update.sub_id);
+            }
         }
     }
 
-    for (sub_id, removed_scope) in removed {
+    for update in removed {
         state
             .pubsub
-            .release_topic(tenant, topic_for_subscription(removed_scope.channel_id))
+            .release_topic(tenant, buzz_pubsub::EventTopic::Channel(channel_id))
             .await;
-        let _ = state.conn_manager.send_to(
-            conn_id,
-            RelayMessage::closed(&sub_id, "restricted: channel access revoked"),
-        );
+        if update.removed {
+            let _ = state.conn_manager.send_to(
+                conn_id,
+                RelayMessage::closed(&update.sub_id, "restricted: channel access revoked"),
+            );
+        }
     }
 }
 
@@ -3365,13 +3369,6 @@ pub async fn publish_nipia_unarchived(
         None,
     )
     .await
-}
-
-fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
-    match channel_id {
-        Some(channel_id) => EventTopic::Channel(channel_id),
-        None => EventTopic::Global,
-    }
 }
 
 #[cfg(test)]
