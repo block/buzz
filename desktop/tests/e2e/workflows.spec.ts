@@ -23,6 +23,7 @@ async function selectWorkflowChannel(
     await dialog.getByRole("combobox", { name: "Channel" }).click();
   }
   await expect(channelList).toBeVisible();
+  await waitForAnimations(page);
   await channelList
     .getByRole("button", { name: "agents", exact: true })
     .click();
@@ -37,6 +38,9 @@ async function editWorkflowName(
   await input.fill(name);
   await dialog.getByRole("button", { name: "Save workflow name" }).click();
   await expect(input).not.toBeVisible();
+  await expect(
+    dialog.page().getByTestId("channel-combobox-list"),
+  ).not.toBeVisible();
 }
 
 async function createWorkflow(
@@ -120,6 +124,34 @@ test("navigates to workflows view and shows the empty create tile", async ({
   await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
 });
 
+test("creation reveals the trigger pane only after a one-shot channel pick", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+  await page.getByRole("button", { name: "Create Workflow" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
+  const channelList = page.getByTestId("channel-combobox-list");
+  await expect(channelList).toBeVisible();
+  await expect(dialog.getByTestId("workflow-node-inspector")).toHaveCount(0);
+
+  await page.keyboard.press("Escape");
+  await expect(channelList).not.toBeVisible();
+  await expect
+    .poll(() => dialog.getByText("Untitled workflow", { exact: true }).count())
+    .toBe(0);
+  await expect(channelList).not.toBeVisible();
+
+  await dialog.getByRole("combobox", { name: "Channel" }).click();
+  await channelList
+    .getByRole("button", { name: "agents", exact: true })
+    .click();
+  await expect(dialog.getByTestId("workflow-node-inspector")).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Trigger event" }),
+  ).toBeVisible();
+});
+
 test("creates a workflow via the form builder", async ({ page }) => {
   const workflowName = `test_workflow_${Date.now()}`;
 
@@ -136,6 +168,7 @@ test("disables autocapitalization in the workflow form", async ({ page }) => {
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
 
+  await selectWorkflowChannel(page, dialog);
   await dialog.getByRole("button", { name: "Edit workflow name" }).click();
   await expect(
     dialog.getByRole("textbox", { name: "Workflow name" }),

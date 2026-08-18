@@ -267,6 +267,9 @@ export function WorkflowDialog({
     null,
   );
   const [workflowNameEditing, setWorkflowNameEditing] = React.useState(false);
+  const [channelAutoOpenPending, setChannelAutoOpenPending] = React.useState(
+    mode === "create" && !channelId,
+  );
   const [nameLeadingElement, setNameLeadingElement] =
     React.useState<HTMLDivElement | null>(null);
   const [savedWebhookInfo, setSavedWebhookInfo] = React.useState<{
@@ -582,12 +585,13 @@ export function WorkflowDialog({
                     <ChannelCombobox
                       channels={channels}
                       defaultOpen={
-                        mode === "create" &&
+                        channelAutoOpenPending &&
                         editorMode === "form" &&
                         !selectedChannelId
                       }
                       disabled={mutation.isPending}
                       id="wf-channel-select"
+                      onAutoOpen={() => setChannelAutoOpenPending(false)}
                       onChange={(value) => {
                         mutation.reset();
                         setSelectedChannelId(value);
@@ -614,7 +618,9 @@ export function WorkflowDialog({
                   />
                 ) : null
               }
-              selectedNode={pane}
+              selectedNode={
+                mode === "create" && !selectedChannelId ? null : pane
+              }
               workflowChannelId={selectedChannelId || null}
               yaml={yamlDefinition}
             />

@@ -40,6 +40,7 @@ type ChannelComboboxProps = {
   emptyLabel?: string;
   id?: string;
   isChannelDisabled?: (channel: Channel) => boolean;
+  onAutoOpen?: () => void;
   onChange: (value: string) => void;
   readOnly?: boolean;
   readOnlyTooltip?: string;
@@ -57,6 +58,7 @@ export function ChannelCombobox({
   emptyLabel = "Choose a channel",
   id,
   isChannelDisabled,
+  onAutoOpen,
   onChange,
   readOnly = false,
   readOnlyTooltip = "The channel can't be changed after a workflow is created.",
@@ -67,15 +69,20 @@ export function ChannelCombobox({
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
+  const autoOpenHandledRef = React.useRef(false);
 
   React.useEffect(() => {
-    if (!defaultOpen) return;
+    if (!defaultOpen || autoOpenHandledRef.current) return;
 
     // Let the pointer interaction that mounted the containing dialog finish
     // before installing Radix's outside-interaction listeners.
-    const frame = window.requestAnimationFrame(() => setOpen(true));
+    const frame = window.requestAnimationFrame(() => {
+      autoOpenHandledRef.current = true;
+      setOpen(true);
+      onAutoOpen?.();
+    });
     return () => window.cancelAnimationFrame(frame);
-  }, [defaultOpen]);
+  }, [defaultOpen, onAutoOpen]);
 
   const selected = channels.find((c) => c.id === value);
   const currentPubkey = useIdentityQuery().data?.pubkey;
