@@ -481,9 +481,15 @@ test("message links to visible root messages open the thread panel", async ({
   await expect(
     messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
   ).toHaveClass(/line-clamp-2/);
-  await expect(
-    messageTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
-  ).toHaveText(/#general · .+ · (just now|\d+[mhdw] ago)/);
+  const messageFooter = messageTooltip.locator(
+    '[data-buzz-tooltip-metadata-type=""]',
+  );
+  await expect(messageFooter).toHaveText(
+    /#general · .+ · (just now|\d+[mhdw] ago)/,
+  );
+  await expect(messageFooter).toHaveCSS("white-space", "nowrap");
+  await expect(messageFooter).toHaveCSS("overflow", "hidden");
+  await expect(messageFooter).toHaveCSS("text-overflow", "ellipsis");
   const messageChipBox = await rootThreadLink.boundingBox();
   const messageTooltipBox = await messageTooltip.boundingBox();
   if (!messageChipBox || !messageTooltipBox) {
@@ -523,9 +529,13 @@ test("message links to visible root messages open the thread panel", async ({
   await expect(
     channelTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
   ).toHaveText("Off-topic, fun stuff");
-  await expect(
-    channelTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
-  ).toHaveText("Public channel");
+  const channelFooter = channelTooltip.locator(
+    '[data-buzz-tooltip-metadata-type=""]',
+  );
+  await expect(channelFooter).toHaveText("Public channel");
+  await expect(channelFooter).toHaveCSS("white-space", "nowrap");
+  await expect(channelFooter).toHaveCSS("overflow", "hidden");
+  await expect(channelFooter).toHaveCSS("text-overflow", "ellipsis");
   await rootThreadLink.hover();
   await rootThreadLink.click({ button: "right" });
 

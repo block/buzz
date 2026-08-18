@@ -121,9 +121,11 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(
     prTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
   ).toContainText(PR_SUBJECT);
-  await expect(
-    prTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
-  ).toHaveText("Pull request · relay-tools");
+  const prFooter = prTooltip.locator('[data-buzz-tooltip-metadata-type=""]');
+  await expect(prFooter).toHaveText("Pull request · relay-tools");
+  await expect(prFooter).toHaveCSS("white-space", "nowrap");
+  await expect(prFooter).toHaveCSS("overflow", "hidden");
+  await expect(prFooter).toHaveCSS("text-overflow", "ellipsis");
   const tooltipSemanticColors = await prTooltip.evaluate((element) => {
     const styles = getComputedStyle(element);
     const probe = document.createElement("span");

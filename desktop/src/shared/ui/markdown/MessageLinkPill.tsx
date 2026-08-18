@@ -97,7 +97,7 @@ function MessageLinkMetadataTooltip({
             {content}
           </span>
           <span
-            className="mt-1 block text-2xs text-secondary-foreground/70"
+            className="mt-1 block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/70"
             data-buzz-tooltip-metadata-type=""
           >
             {footer}
