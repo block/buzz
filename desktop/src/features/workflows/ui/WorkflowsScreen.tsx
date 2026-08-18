@@ -17,7 +17,7 @@ export type WorkflowEditorRoute =
     }
   | {
       hasOrigin: boolean;
-      mode: "duplicate" | "edit";
+      mode: "detail" | "duplicate" | "edit";
       pane: WorkflowEditorPane;
       workflowId: string;
     };
@@ -29,6 +29,7 @@ type WorkflowsScreenProps = {
   onCreateWorkflow: () => void;
   onDuplicateWorkflow: (workflowId: string) => void;
   onEditWorkflow: (workflowId: string) => void;
+  onViewWorkflow: (workflowId: string) => void;
   onEditorPaneChange: (pane: WorkflowEditorPane) => void;
 };
 

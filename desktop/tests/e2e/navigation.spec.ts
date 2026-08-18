@@ -30,7 +30,7 @@ async function createWorkflow(
   const channelList = page.getByTestId("channel-combobox-list");
   await expect(channelList).toBeVisible();
   await channelList
-    .getByRole("button", { name: "agents", exact: true })
+    .getByRole("option", { name: "agents", exact: true })
     .click();
 
   await dialog.getByRole("button", { name: "Edit workflow name" }).click();
@@ -117,7 +117,7 @@ test.fixme("direct forum thread links close back to the forum route", async ({
   ).toBeVisible();
 });
 
-test("direct workflow editor links close back to workflows", async ({
+test("direct workflow detail links close back to workflows", async ({
   page,
 }) => {
   const workflowName = `workflow_nav_${Date.now()}`;
@@ -136,9 +136,9 @@ test("direct workflow editor links close back to workflows", async ({
 
   await page.goto(`/#/workflows/${workflowId}`);
 
-  const dialog = page.getByRole("dialog", { name: "Edit workflow" });
-  await expect(dialog).toContainText(workflowName);
-  await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
+  const dialog = page.getByRole("dialog", { name: workflowName });
+  await expect(dialog).toContainText("Run history");
+  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
   await expect(page).toHaveURL(/#\/workflows$/);

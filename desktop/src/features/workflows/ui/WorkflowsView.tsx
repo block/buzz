@@ -12,7 +12,9 @@ import {
 } from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
+import { WorkflowDetailDialog } from "@/features/workflows/ui/WorkflowDetailDialog";
 import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
+import { WorkflowUnavailableDialog } from "@/features/workflows/ui/WorkflowUnavailableDialog";
 import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
 import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
 import {
@@ -37,6 +39,7 @@ type WorkflowsViewProps = {
   onCreateWorkflow: () => void;
   onDuplicateWorkflow: (workflowId: string) => void;
   onEditWorkflow: (workflowId: string) => void;
+  onViewWorkflow: (workflowId: string) => void;
   onEditorPaneChange: (pane: WorkflowEditorPane) => void;
 };
 
@@ -95,6 +98,7 @@ export function WorkflowsView({
   onCreateWorkflow,
   onDuplicateWorkflow,
   onEditWorkflow,
+  onViewWorkflow,
   onEditorPaneChange,
 }: WorkflowsViewProps) {
   const [deleteTarget, setDeleteTarget] = React.useState<Workflow | null>(null);
@@ -206,6 +210,11 @@ export function WorkflowsView({
     [deleteOne],
   );
 
+  const handleView = React.useCallback(
+    (workflow: Workflow) => onViewWorkflow(workflow.id),
+    [onViewWorkflow],
+  );
+
   const handleEdit = React.useCallback(
     (workflow: Workflow) => onEditWorkflow(workflow.id),
     [onEditWorkflow],
@@ -285,7 +294,7 @@ export function WorkflowsView({
                   onEdit={handleEdit}
                   onToggleEnabled={handleToggleEnabled}
                   onTrigger={handleTrigger}
-                  onView={handleEdit}
+                  onView={handleView}
                   workflow={workflow}
                 />
               ))}
@@ -294,7 +303,16 @@ export function WorkflowsView({
         </div>
       </div>
 
-      {editor && canOpenEditor ? (
+      {editor?.mode === "detail" && editorWorkflow ? (
+        <WorkflowDetailDialog
+          onEditWorkflow={onEditWorkflow}
+          onOpenChange={(open) => {
+            if (!open) onCloseEditor();
+          }}
+          open
+          workflow={editorWorkflow}
+        />
+      ) : editor && editor.mode !== "detail" && canOpenEditor ? (
         <WorkflowDialog
           channels={memberChannels}
           key={
@@ -314,6 +332,15 @@ export function WorkflowsView({
           onTriggerWorkflow={handleTrigger}
           pane={editor.pane}
           workflow={editorWorkflow}
+        />
+      ) : editor ? (
+        <WorkflowUnavailableDialog
+          loading={editorWorkflowQuery.isLoading}
+          onOpenChange={(open) => {
+            if (!open) onCloseEditor();
+          }}
+          onRetry={() => void editorWorkflowQuery.refetch()}
+          open
         />
       ) : null}
 

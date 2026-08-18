@@ -170,7 +170,7 @@ function WorkflowNameEditor({
   );
 
   const commit = React.useCallback(() => {
-    const nextName = draft.trim();
+    const nextName = inputRef.current?.value.trim() ?? draft.trim();
     if (!nextName || !onCommit(nextName)) return;
     changeEditing(false);
   }, [changeEditing, draft, onCommit]);
@@ -196,13 +196,19 @@ function WorkflowNameEditor({
             }
           }}
           ref={inputRef}
-          value={draft}
+          defaultValue={name}
         />
         <Button
           aria-label="Save workflow name"
           className="text-muted-foreground"
           disabled={disabled || !draft.trim()}
           onClick={commit}
+          onPointerDown={(event) => {
+            // Commit before pointer focus changes can re-render the portalled
+            // header controls and restore the generated name.
+            event.preventDefault();
+            commit();
+          }}
           size="icon-xs"
           title="Save workflow name"
           type="button"
@@ -280,6 +286,8 @@ export function WorkflowDialog({
   } | null>(null);
   const [discardConfirmationOpen, setDiscardConfirmationOpen] =
     React.useState(false);
+  const [secretConfirmationOpen, setSecretConfirmationOpen] =
+    React.useState(false);
   const [generatingName, setGeneratingName] = React.useState(false);
   const initialValuesRef = React.useRef({
     channelId,
@@ -332,6 +340,7 @@ export function WorkflowDialog({
             yaml: generatedYaml,
           };
           setYamlDefinition(generatedYaml);
+          formBuilderRef.current?.synchronizeYaml(generatedYaml);
         })
         .catch(() => {
           // Leave the editable "Untitled workflow" fallback in place.
@@ -359,7 +368,7 @@ export function WorkflowDialog({
     yamlDefinition !== initialValuesRef.current.yaml ||
     selectedChannelId !== initialValuesRef.current.channelId;
   const navigationBlocker = useBlocker({
-    enableBeforeUnload: isDirty,
+    enableBeforeUnload: isDirty || savedWebhookInfo !== null,
     shouldBlockFn: ({ current, next }) => {
       const currentSearch = current.search as {
         pane?: unknown;
@@ -370,28 +379,38 @@ export function WorkflowDialog({
         current.pathname === next.pathname &&
         currentSearch.view === nextSearch.view &&
         currentSearch.pane !== nextSearch.pane;
-      return isDirty && !allowNavigationRef.current && !isPaneOnlyNavigation;
+      return (
+        (isDirty || savedWebhookInfo !== null) &&
+        !allowNavigationRef.current &&
+        !isPaneOnlyNavigation
+      );
     },
     withResolver: true,
   });
 
   React.useEffect(() => {
     if (navigationBlocker.status === "blocked") {
-      setDiscardConfirmationOpen(true);
+      if (savedWebhookInfo) {
+        setSecretConfirmationOpen(true);
+      } else {
+        setDiscardConfirmationOpen(true);
+      }
     }
-  }, [navigationBlocker.status]);
+  }, [navigationBlocker.status, savedWebhookInfo]);
 
   const handleOpenChange = React.useCallback(
     (nextOpen: boolean) => {
       if (nextOpen) {
         onOpenChange(true);
+      } else if (savedWebhookInfo) {
+        setSecretConfirmationOpen(true);
       } else if (isDirty) {
         setDiscardConfirmationOpen(true);
       } else {
         closeDialog();
       }
     },
-    [closeDialog, isDirty, onOpenChange],
+    [closeDialog, isDirty, onOpenChange, savedWebhookInfo],
   );
 
   async function handleSubmit() {
@@ -403,8 +422,8 @@ export function WorkflowDialog({
         channelId: selectedChannelId,
         yaml: yamlDefinition,
       };
-      allowNavigationRef.current = true;
       if (saved.webhookSecret) {
+        allowNavigationRef.current = false;
         const webhookInfo = {
           relayHttpUrl: null,
           relayUrlError: null,
@@ -425,6 +444,7 @@ export function WorkflowDialog({
           });
         }
       } else {
+        allowNavigationRef.current = true;
         closeDialog();
       }
     } catch {
@@ -477,12 +497,9 @@ export function WorkflowDialog({
       mutation.reset();
       yamlDefinitionRef.current = nextYaml;
       setYamlDefinition(nextYaml);
-      if (editorMode === "form") {
-        formBuilderRef.current?.setWorkflowName(name);
-      }
       return true;
     },
-    [editorMode, mutation.reset],
+    [mutation.reset],
   );
   const handleToggleWorkflowEnabled = React.useCallback(() => {
     const nextYaml = yamlWithWorkflowEnabled(
@@ -743,14 +760,58 @@ export function WorkflowDialog({
         </AlertDialogContent>
       </AlertDialog>
 
+      <AlertDialog
+        onOpenChange={(nextOpen) => {
+          setSecretConfirmationOpen(nextOpen);
+          if (
+            !nextOpen &&
+            navigationBlocker.status === "blocked" &&
+            !proceedingNavigationRef.current
+          ) {
+            navigationBlocker.reset();
+          }
+        }}
+        open={secretConfirmationOpen}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Continue without this secret?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This private webhook secret cannot be recovered. Copy and store it
+              before continuing, or explicitly leave it behind.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button type="button" variant="outline">
+                Go back
+              </Button>
+            </AlertDialogCancel>
+            <AlertDialogAction asChild>
+              <Button
+                onClick={() => {
+                  setSecretConfirmationOpen(false);
+                  allowNavigationRef.current = true;
+                  if (navigationBlocker.status === "blocked") {
+                    proceedingNavigationRef.current = true;
+                    navigationBlocker.proceed();
+                    return;
+                  }
+                  closeDialog();
+                }}
+                type="button"
+                variant="destructive"
+              >
+                Continue
+              </Button>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {savedWebhookInfo ? (
         <WorkflowWebhookSecretDialog
-          onOpenChange={(nextOpen) => {
-            if (!nextOpen) {
-              allowNavigationRef.current = true;
-              closeDialog();
-            }
-          }}
+          onContinue={() => setSecretConfirmationOpen(true)}
           open
           relayHttpUrl={savedWebhookInfo.relayHttpUrl}
           relayUrlError={savedWebhookInfo.relayUrlError}

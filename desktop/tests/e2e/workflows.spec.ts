@@ -25,7 +25,7 @@ async function selectWorkflowChannel(
   await expect(channelList).toBeVisible();
   await waitForAnimations(page);
   await channelList
-    .getByRole("button", { name: "agents", exact: true })
+    .getByRole("option", { name: "agents", exact: true })
     .click();
 }
 
@@ -38,6 +38,7 @@ async function editWorkflowName(
   await input.fill(name);
   await dialog.getByRole("button", { name: "Save workflow name" }).click();
   await expect(input).not.toBeVisible();
+  await expect(dialog).toContainText(name);
   await expect(
     dialog.page().getByTestId("channel-combobox-list"),
   ).not.toBeVisible();
@@ -144,7 +145,7 @@ test("creation reveals the trigger pane only after a one-shot channel pick", asy
 
   await dialog.getByRole("combobox", { name: "Channel" }).click();
   await channelList
-    .getByRole("button", { name: "agents", exact: true })
+    .getByRole("option", { name: "agents", exact: true })
     .click();
   await expect(dialog.getByTestId("workflow-node-inspector")).toBeVisible();
   await expect(
@@ -160,6 +161,27 @@ test("creates a workflow via the form builder", async ({ page }) => {
 
   // Verify workflow appears in the list
   await expect(page.getByTestId("workflows-view")).toContainText(workflowName);
+});
+
+test("accepts the generated name through the first form mutation", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+  await page.getByRole("button", { name: "Create Workflow" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
+  await selectWorkflowChannel(page, dialog);
+  const generatedName = (
+    await dialog
+      .getByRole("button", { name: "Edit workflow name" })
+      .evaluate((button) => button.previousElementSibling?.textContent ?? "")
+  ).trim();
+  expect(generatedName).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
+
+  await dialog.getByRole("button", { name: "Add first step" }).click();
+  await dialog.getByRole("button", { name: "Create workflow" }).click();
+
+  await expect(page.getByTestId("workflows-view")).toContainText(generatedName);
 });
 
 test("disables autocapitalization in the workflow form", async ({ page }) => {
@@ -383,12 +405,22 @@ test("shows the webhook secret dialog after saving a webhook workflow", async ({
     trigger: "webhook",
   });
 
-  await expect(page.getByText("Webhook Ready")).toBeVisible();
+  await expect(page.getByText("Webhook ready")).toBeVisible();
   await expect(page.getByRole("button", { name: "Copy URL" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Copy Secret" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Close" }).click();
-  await expect(page.getByText("Webhook Ready")).not.toBeVisible();
+  await expect(page.getByText(/•{24}/)).toBeVisible();
+  await page.goBack();
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Continue without this secret?",
+  });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "Go back" }).click();
+  await expect(page.getByText("Webhook ready")).toBeVisible();
+
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await confirmation.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByText("Webhook ready")).not.toBeVisible();
 });
 
 test("edits an existing workflow", async ({ page }) => {
@@ -607,7 +639,7 @@ test("clean editor close respects in-app versus direct-entry provenance", async 
   await expect(page).toHaveURL(/#\/workflows$/);
 });
 
-test("direct workflow routes survive refresh and invalid view opens edit", async ({
+test("direct workflow routes survive refresh and invalid view opens detail", async ({
   page,
 }) => {
   const workflowName = `route_test_${Date.now()}`;
@@ -620,10 +652,8 @@ test("direct workflow routes survive refresh and invalid view opens edit", async
   const workflowId = new URL(page.url()).hash.match(/workflows\/([^?]+)/)?.[1];
   expect(workflowId).toBeTruthy();
   await page.goto(`/#/workflows/${workflowId}?view=invalid`);
-  await expect(
-    page.getByRole("dialog", { name: "Edit workflow" }),
-  ).toContainText(workflowName);
-  await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
+  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run history" })).toBeVisible();
 
   await page.goto("/#/workflows?view=create");
   await page.reload();
@@ -647,9 +677,7 @@ test("dirty create close is blocked and keep editing preserves the draft", async
   });
   await expect(confirmation).toBeVisible();
   await confirmation.getByRole("button", { name: "Keep editing" }).click();
-  await expect(
-    dialog.getByText("preserved_dirty_draft", { exact: true }),
-  ).toBeVisible();
+  await expect(dialog).toContainText("preserved_dirty_draft");
 });
 
 test("stale editor save preserves the local draft and reports the conflict", async ({
@@ -692,16 +720,32 @@ test("stale editor save preserves the local draft and reports the conflict", asy
   await expect(dialog).toBeVisible();
 });
 
-test("card click opens the editor modal", async ({ page }) => {
+test("card click opens the detail modal and run history", async ({ page }) => {
   const workflowName = `card_editor_${Date.now()}`;
 
   await navigateToWorkflows(page);
   await createWorkflow(page, workflowName);
   await page.getByRole("button", { name: `View ${workflowName}` }).click();
 
-  await expect(page).toHaveURL(/#\/workflows\/[^?]+\?.*view=edit/);
+  await expect(page).toHaveURL(/#\/workflows\/[^?]+$/);
+  await expect(page.getByRole("dialog", { name: workflowName })).toBeVisible();
+  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run history" })).toBeVisible();
+});
+
+test("missing workflow routes show an unavailable modal with close and retry", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+  await page.goto("/#/workflows/missing-workflow?view=edit");
+
+  const unavailable = page.getByRole("dialog", {
+    name: "Workflow unavailable",
+  });
+  await expect(unavailable).toBeVisible();
   await expect(
-    page.getByRole("dialog", { name: "Edit workflow" }),
-  ).toContainText(workflowName);
-  await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
+    unavailable.getByRole("button", { name: "Retry" }),
+  ).toBeVisible();
+  await unavailable.getByRole("button", { name: "Close" }).click();
+  await expect(page).toHaveURL(/#\/workflows$/);
 });

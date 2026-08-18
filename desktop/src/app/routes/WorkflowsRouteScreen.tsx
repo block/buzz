@@ -17,8 +17,13 @@ export function WorkflowsRouteScreen({
   editor = null,
   onEditorPaneChange,
 }: WorkflowsRouteScreenProps) {
-  const { goDuplicateWorkflow, goEditWorkflow, goNewWorkflow, goWorkflows } =
-    useAppNavigation();
+  const {
+    goDuplicateWorkflow,
+    goEditWorkflow,
+    goNewWorkflow,
+    goWorkflow,
+    goWorkflows,
+  } = useAppNavigation();
   const closeEditor = React.useCallback(() => {
     if (editor?.hasOrigin) {
       window.history.back();
@@ -43,6 +48,9 @@ export function WorkflowsRouteScreen({
       }}
       onEditWorkflow={(workflowId) => {
         void goEditWorkflow(workflowId);
+      }}
+      onViewWorkflow={(workflowId) => {
+        void goWorkflow(workflowId);
       }}
       onEditorPaneChange={onEditorPaneChange}
     />

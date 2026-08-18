@@ -84,6 +84,7 @@ export function ChannelCombobox({
     return () => window.cancelAnimationFrame(frame);
   }, [defaultOpen, onAutoOpen]);
 
+  const listboxId = `${id ?? "channel"}-listbox`;
   const selected = channels.find((c) => c.id === value);
   const currentPubkey = useIdentityQuery().data?.pubkey;
   const dmParticipantPubkeys = React.useMemo(() => {
@@ -208,8 +209,10 @@ export function ChannelCombobox({
     <Popover onOpenChange={handleOpenChange} open={open}>
       <PopoverTrigger asChild>
         <button
-          aria-label={ariaLabel}
+          aria-controls={listboxId}
           aria-expanded={open}
+          aria-haspopup="listbox"
+          aria-label={ariaLabel}
           aria-required={required}
           className={cn(
             "group flex w-full items-center rounded-lg px-3 py-2 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
@@ -248,6 +251,8 @@ export function ChannelCombobox({
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <input
+            aria-controls={listboxId}
+            aria-label={`Search ${ariaLabel.toLowerCase()}s`}
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
@@ -264,16 +269,21 @@ export function ChannelCombobox({
           />
         </div>
         <PortalledScrollArea
+          aria-label={`${ariaLabel} options`}
           className="max-h-60 overflow-y-auto p-1"
           data-testid="channel-combobox-list"
+          id={listboxId}
+          role="listbox"
         >
           {allowEmpty && !query ? (
             <button
+              aria-selected={!value}
               className={cn(
                 "flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
                 !value && "bg-accent/50",
               )}
               onClick={() => selectChannel("")}
+              role="option"
               type="button"
             >
               <span className="h-5 w-5 shrink-0" />
@@ -295,6 +305,7 @@ export function ChannelCombobox({
               const optionDisabled = isChannelDisabled?.(channel) ?? false;
               return (
                 <button
+                  aria-selected={channel.id === value}
                   className={cn(
                     "flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-foreground",
                     channel.id === value && "bg-accent/50",
@@ -305,6 +316,7 @@ export function ChannelCombobox({
                   disabled={optionDisabled}
                   key={channel.id}
                   onClick={() => selectChannel(channel.id)}
+                  role="option"
                   type="button"
                 >
                   <ChannelPrivacyIcon channel={channel} />

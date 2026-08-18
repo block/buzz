@@ -32,7 +32,12 @@ function WorkflowRouteComponent() {
   const editor: import("@/features/workflows/ui/WorkflowsScreen").WorkflowEditorRoute =
     {
       hasOrigin,
-      mode: view === "duplicate" ? "duplicate" : "edit",
+      mode:
+        view === "duplicate"
+          ? "duplicate"
+          : view === "edit"
+            ? "edit"
+            : "detail",
       pane: parseWorkflowEditorPane(pane),
       workflowId,
     };

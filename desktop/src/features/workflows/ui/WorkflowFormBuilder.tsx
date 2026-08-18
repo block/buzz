@@ -7,6 +7,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { FocusScope } from "@radix-ui/react-focus-scope";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { createPortal } from "react-dom";
@@ -152,7 +153,7 @@ type WorkflowFormBuilderProps = {
 
 export type WorkflowFormBuilderHandle = {
   addFirstStep: () => void;
-  setWorkflowName: (name: string) => void;
+  synchronizeYaml: (yaml: string) => void;
 };
 
 export type WorkflowEditorMode = "form" | "yaml";
@@ -397,14 +398,31 @@ export const WorkflowFormBuilder = React.forwardRef<
       ? selectedRouteNode
       : null;
   const [selectionDirection, setSelectionDirection] = React.useState<1 | -1>(1);
+  const [narrowInspector, setNarrowInspector] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement>(null);
   const shouldReduceMotion = useReducedMotion();
   const previousModeRef = React.useRef(mode);
+  const lastSynchronizedYamlRef = React.useRef(yaml);
+  const canonicalYamlRef = React.useRef(yaml);
   const pendingPaneReconciliationRef = React.useRef<WorkflowEditorPane>(null);
+
+  React.useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const update = () => setNarrowInspector(container.clientWidth <= 58 * 16);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   const updateFormState = React.useCallback(
     (next: WorkflowFormState) => {
+      const nextYaml = formStateToYaml(next);
+      lastSynchronizedYamlRef.current = nextYaml;
+      canonicalYamlRef.current = nextYaml;
       setFormState(next);
-      onChange(formStateToYaml(next));
+      onChange(nextYaml);
     },
     [onChange],
   );
@@ -419,8 +437,20 @@ export const WorkflowFormBuilder = React.forwardRef<
     }
 
     const result = yamlToFormState(yaml);
-    if (result.ok) setFormState(result.state);
+    if (result.ok) {
+      setFormState(result.state);
+      lastSynchronizedYamlRef.current = yaml;
+    }
   }, [mode, onSelectedNodeChange, yaml]);
+
+  React.useLayoutEffect(() => {
+    canonicalYamlRef.current = yaml;
+    if (mode !== "form" || yaml === lastSynchronizedYamlRef.current) return;
+    const result = yamlToFormState(yaml);
+    if (!result.ok) return;
+    setFormState(result.state);
+    lastSynchronizedYamlRef.current = yaml;
+  }, [mode, yaml]);
 
   React.useEffect(() => {
     if (pendingPaneReconciliationRef.current) {
@@ -460,9 +490,13 @@ export const WorkflowFormBuilder = React.forwardRef<
 
   const insertStep = React.useCallback(
     (index: number, action: ActionType) => {
-      const nextSteps = [...formState.steps];
+      const synchronizedState = yamlToFormState(canonicalYamlRef.current);
+      const sourceState = synchronizedState.ok
+        ? synchronizedState.state
+        : formState;
+      const nextSteps = [...sourceState.steps];
       const newStep: StepFormState = {
-        id: nextStepId(formState.steps),
+        id: nextStepId(sourceState.steps),
         action,
       };
       if (action === "call_webhook") {
@@ -470,7 +504,7 @@ export const WorkflowFormBuilder = React.forwardRef<
       }
       nextSteps.splice(index, 0, newStep);
       updateFormState({
-        ...formState,
+        ...sourceState,
         steps: nextSteps,
       });
       selectNode({ type: "step", stepId: newStep.id });
@@ -482,10 +516,15 @@ export const WorkflowFormBuilder = React.forwardRef<
     ref,
     () => ({
       addFirstStep: () => insertStep(0, "send_message"),
-      setWorkflowName: (name: string) =>
-        updateFormState({ ...formState, name }),
+      synchronizeYaml: (nextYaml: string) => {
+        const result = yamlToFormState(nextYaml);
+        if (!result.ok) return;
+        lastSynchronizedYamlRef.current = nextYaml;
+        canonicalYamlRef.current = nextYaml;
+        setFormState(result.state);
+      },
     }),
-    [formState, insertStep, updateFormState],
+    [insertStep],
   );
 
   const removeStep = React.useCallback(
@@ -545,9 +584,16 @@ export const WorkflowFormBuilder = React.forwardRef<
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col [container-type:inline-size]">
+      <div
+        className="flex h-full min-h-0 flex-col [container-type:inline-size]"
+        ref={containerRef}
+      >
         {parseError ? (
-          <p className="mx-6 mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <p
+            aria-live="assertive"
+            className="mx-6 mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            role="alert"
+          >
             Cannot switch to form view: {parseError}
           </p>
         ) : null}
@@ -639,141 +685,155 @@ export const WorkflowFormBuilder = React.forwardRef<
                   />
                 ) : null}
                 {selectedNode ? (
-                  <motion.aside
-                    animate={{ opacity: 1, width: "26rem", x: 0 }}
-                    className="flex flex-shrink-0 p-4 [@container(max-width:58rem)]:absolute [@container(max-width:58rem)]:inset-y-0 [@container(max-width:58rem)]:right-0 [@container(max-width:58rem)]:z-30 [@container(max-width:58rem)]:max-w-full"
-                    data-testid="workflow-node-inspector"
-                    exit={{ opacity: 0, width: 0, x: 24 }}
-                    initial={{ opacity: 0, width: 0, x: 24 }}
-                    key="workflow-node-inspector"
-                    transition={
-                      shouldReduceMotion
-                        ? { duration: 0 }
-                        : { duration: 0.24, ease: [0.22, 1, 0.36, 1] }
-                    }
+                  <FocusScope
+                    asChild
+                    loop={narrowInspector}
+                    trapped={narrowInspector}
                   >
-                    <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/40 [@container(max-width:58rem)]:bg-background [@container(max-width:58rem)]:shadow-2xl">
-                      <div
-                        aria-hidden="true"
-                        className="pointer-events-none absolute inset-0 z-0 hidden bg-muted/40 [@container(max-width:58rem)]:block"
-                      />
-                      <div className="relative z-10 flex w-96 min-w-96 flex-shrink-0 items-start justify-between gap-3 px-5 pb-3 pt-5 [@container(max-width:26rem)]:w-full [@container(max-width:26rem)]:min-w-0">
-                        <div className="min-w-0">
-                          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                            {selectedNode.type === "trigger"
-                              ? "Trigger"
-                              : `Step ${selectedStepIndex + 1}`}
-                          </p>
-                          {selectedNode.type === "trigger" ? (
-                            <InspectorTypeMenu
-                              ariaLabel="Trigger event"
-                              disabled={disabled}
-                              labels={TRIGGER_LABELS}
-                              onChange={(triggerType) =>
-                                updateFormState({
-                                  ...formState,
-                                  trigger: { on: triggerType },
-                                })
-                              }
-                              options={SELECTABLE_TRIGGER_TYPES}
-                              value={formState.trigger.on}
-                            />
-                          ) : selectedStep ? (
-                            <InspectorTypeMenu
-                              ariaLabel="Action"
-                              disabled={disabled}
-                              labels={ACTION_LABELS}
-                              onChange={(action) => {
-                                const next = { ...selectedStep, action };
-                                if (action === "call_webhook" && !next.method) {
-                                  next.method = "POST";
+                    <motion.aside
+                      animate={{ opacity: 1, width: "26rem", x: 0 }}
+                      aria-label={
+                        narrowInspector ? "Workflow node inspector" : undefined
+                      }
+                      aria-modal={narrowInspector || undefined}
+                      className="flex flex-shrink-0 p-4 [@container(max-width:58rem)]:absolute [@container(max-width:58rem)]:inset-y-0 [@container(max-width:58rem)]:right-0 [@container(max-width:58rem)]:z-30 [@container(max-width:58rem)]:max-w-full"
+                      data-testid="workflow-node-inspector"
+                      exit={{ opacity: 0, width: 0, x: 24 }}
+                      initial={{ opacity: 0, width: 0, x: 24 }}
+                      key="workflow-node-inspector"
+                      role={narrowInspector ? "dialog" : "complementary"}
+                      transition={
+                        shouldReduceMotion
+                          ? { duration: 0 }
+                          : { duration: 0.24, ease: [0.22, 1, 0.36, 1] }
+                      }
+                    >
+                      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/40 [@container(max-width:58rem)]:bg-background [@container(max-width:58rem)]:shadow-2xl">
+                        <div
+                          aria-hidden="true"
+                          className="pointer-events-none absolute inset-0 z-0 hidden bg-muted/40 [@container(max-width:58rem)]:block"
+                        />
+                        <div className="relative z-10 flex w-96 min-w-96 flex-shrink-0 items-start justify-between gap-3 px-5 pb-3 pt-5 [@container(max-width:26rem)]:w-full [@container(max-width:26rem)]:min-w-0">
+                          <div className="min-w-0">
+                            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                              {selectedNode.type === "trigger"
+                                ? "Trigger"
+                                : `Step ${selectedStepIndex + 1}`}
+                            </p>
+                            {selectedNode.type === "trigger" ? (
+                              <InspectorTypeMenu
+                                ariaLabel="Trigger event"
+                                disabled={disabled}
+                                labels={TRIGGER_LABELS}
+                                onChange={(triggerType) =>
+                                  updateFormState({
+                                    ...formState,
+                                    trigger: { on: triggerType },
+                                  })
                                 }
-                                updateStep(selectedStepIndex, next);
-                              }}
-                              options={SELECTABLE_ACTION_TYPES}
-                              value={selectedStep.action}
-                            />
-                          ) : null}
-                        </div>
-                        <div className="flex items-center gap-1">
-                          {selectedNode.type === "step" && selectedStep ? (
+                                options={SELECTABLE_TRIGGER_TYPES}
+                                value={formState.trigger.on}
+                              />
+                            ) : selectedStep ? (
+                              <InspectorTypeMenu
+                                ariaLabel="Action"
+                                disabled={disabled}
+                                labels={ACTION_LABELS}
+                                onChange={(action) => {
+                                  const next = { ...selectedStep, action };
+                                  if (
+                                    action === "call_webhook" &&
+                                    !next.method
+                                  ) {
+                                    next.method = "POST";
+                                  }
+                                  updateStep(selectedStepIndex, next);
+                                }}
+                                options={SELECTABLE_ACTION_TYPES}
+                                value={selectedStep.action}
+                              />
+                            ) : null}
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {selectedNode.type === "step" && selectedStep ? (
+                              <Button
+                                aria-label="Remove step"
+                                className="h-8 w-8"
+                                disabled={disabled}
+                                onClick={() => removeStep(selectedStepIndex)}
+                                size="icon"
+                                type="button"
+                                variant="ghost"
+                              >
+                                <Trash2 className="h-4 w-4 text-muted-foreground" />
+                              </Button>
+                            ) : null}
                             <Button
-                              aria-label="Remove step"
+                              aria-label="Close inspector"
                               className="h-8 w-8"
-                              disabled={disabled}
-                              onClick={() => removeStep(selectedStepIndex)}
+                              onClick={() => onSelectedNodeChange(null)}
                               size="icon"
                               type="button"
                               variant="ghost"
                             >
-                              <Trash2 className="h-4 w-4 text-muted-foreground" />
+                              <X className="h-4 w-4" />
                             </Button>
-                          ) : null}
-                          <Button
-                            aria-label="Close inspector"
-                            className="h-8 w-8"
-                            onClick={() => onSelectedNodeChange(null)}
-                            size="icon"
-                            type="button"
-                            variant="ghost"
+                          </div>
+                        </div>
+
+                        <div className="relative z-10 min-h-0 w-96 min-w-96 flex-1 overflow-y-auto px-5 pb-5 pt-2 [@container(max-width:26rem)]:w-full [@container(max-width:26rem)]:min-w-0">
+                          <AnimatePresence
+                            custom={selectionDirection}
+                            initial={false}
+                            mode="wait"
                           >
-                            <X className="h-4 w-4" />
-                          </Button>
+                            <motion.div
+                              animate="center"
+                              custom={selectionDirection}
+                              exit="exit"
+                              initial="enter"
+                              key={
+                                selectedNode.type === "trigger"
+                                  ? "trigger"
+                                  : `step-${selectedNode.stepId}`
+                              }
+                              transition={
+                                shouldReduceMotion
+                                  ? { duration: 0 }
+                                  : { duration: 0.15, ease: "easeOut" }
+                              }
+                              variants={inspectorContentVariants}
+                            >
+                              {selectedNode.type === "trigger" ? (
+                                <div>
+                                  <TriggerConfigFields
+                                    onUpdate={(trigger) =>
+                                      updateFormState({ ...formState, trigger })
+                                    }
+                                    trigger={formState.trigger}
+                                  />
+                                </div>
+                              ) : selectedStep ? (
+                                <WorkflowStepCard
+                                  bare
+                                  disabled={disabled}
+                                  index={selectedStepIndex}
+                                  onRemove={() => removeStep(selectedStepIndex)}
+                                  onUpdate={(updated) =>
+                                    updateStep(selectedStepIndex, updated)
+                                  }
+                                  showHeader={false}
+                                  step={selectedStep}
+                                  triggerType={formState.trigger.on}
+                                  workflowChannelId={workflowChannelId}
+                                />
+                              ) : null}
+                            </motion.div>
+                          </AnimatePresence>
                         </div>
                       </div>
-
-                      <div className="relative z-10 min-h-0 w-96 min-w-96 flex-1 overflow-y-auto px-5 pb-5 pt-2 [@container(max-width:26rem)]:w-full [@container(max-width:26rem)]:min-w-0">
-                        <AnimatePresence
-                          custom={selectionDirection}
-                          initial={false}
-                          mode="wait"
-                        >
-                          <motion.div
-                            animate="center"
-                            custom={selectionDirection}
-                            exit="exit"
-                            initial="enter"
-                            key={
-                              selectedNode.type === "trigger"
-                                ? "trigger"
-                                : `step-${selectedNode.stepId}`
-                            }
-                            transition={
-                              shouldReduceMotion
-                                ? { duration: 0 }
-                                : { duration: 0.15, ease: "easeOut" }
-                            }
-                            variants={inspectorContentVariants}
-                          >
-                            {selectedNode.type === "trigger" ? (
-                              <div>
-                                <TriggerConfigFields
-                                  onUpdate={(trigger) =>
-                                    updateFormState({ ...formState, trigger })
-                                  }
-                                  trigger={formState.trigger}
-                                />
-                              </div>
-                            ) : selectedStep ? (
-                              <WorkflowStepCard
-                                bare
-                                disabled={disabled}
-                                index={selectedStepIndex}
-                                onRemove={() => removeStep(selectedStepIndex)}
-                                onUpdate={(updated) =>
-                                  updateStep(selectedStepIndex, updated)
-                                }
-                                showHeader={false}
-                                step={selectedStep}
-                                triggerType={formState.trigger.on}
-                                workflowChannelId={workflowChannelId}
-                              />
-                            ) : null}
-                          </motion.div>
-                        </AnimatePresence>
-                      </div>
-                    </div>
-                  </motion.aside>
+                    </motion.aside>
+                  </FocusScope>
                 ) : null}
               </AnimatePresence>
             </div>

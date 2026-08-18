@@ -169,6 +169,7 @@ export function useAppNavigation() {
           params: {
             workflowId,
           },
+          state: { workflowEditorHasOrigin: true },
         },
         behavior,
       ),

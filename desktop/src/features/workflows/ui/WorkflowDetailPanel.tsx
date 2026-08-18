@@ -20,14 +20,18 @@ import {
 
 type WorkflowDetailPanelProps = {
   workflowId: string;
-  onClose: () => void;
-  onEdit: (workflow: Workflow) => void;
+  onClose?: () => void;
+  onEdit?: (workflow: Workflow) => void;
+  showDefinition?: boolean;
+  showHeader?: boolean;
 };
 
 export function WorkflowDetailPanel({
   workflowId,
   onClose,
   onEdit,
+  showDefinition = true,
+  showHeader = true,
 }: WorkflowDetailPanelProps) {
   const workflowQuery = useWorkflowQuery(workflowId);
   const runsQuery = useWorkflowRunsQuery(workflowId);
@@ -69,63 +73,69 @@ export function WorkflowDetailPanel({
       className="flex h-full flex-col border-l bg-background pt-4"
       data-testid="workflow-detail-panel"
     >
-      <div className="flex items-center justify-between border-b px-4 py-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            {workflow ? (
-              <h3 className="truncate text-sm font-semibold">
-                {workflow.name}
-              </h3>
-            ) : (
-              <Skeleton className="h-4 w-36" />
-            )}
-            {workflowStatus ? <RunStatusBadge status={workflowStatus} /> : null}
+      {showHeader ? (
+        <div className="flex items-center justify-between border-b px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              {workflow ? (
+                <h3 className="truncate text-sm font-semibold">
+                  {workflow.name}
+                </h3>
+              ) : (
+                <Skeleton className="h-4 w-36" />
+              )}
+              {workflowStatus ? (
+                <RunStatusBadge status={workflowStatus} />
+              ) : null}
+            </div>
+            {workflowDescription ? (
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {workflowDescription}
+              </p>
+            ) : workflowQuery.isLoading ? (
+              <Skeleton className="mt-1 h-3 w-full max-w-64" />
+            ) : null}
+            {triggerSummary ? (
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {triggerSummary}
+              </p>
+            ) : workflowQuery.isLoading ? (
+              <Skeleton className="mt-1 h-3 w-40" />
+            ) : null}
           </div>
-          {workflowDescription ? (
-            <p className="mt-1 truncate text-xs text-muted-foreground">
-              {workflowDescription}
-            </p>
-          ) : workflowQuery.isLoading ? (
-            <Skeleton className="mt-1 h-3 w-full max-w-64" />
-          ) : null}
-          {triggerSummary ? (
-            <p className="mt-1 truncate text-xs text-muted-foreground">
-              {triggerSummary}
-            </p>
-          ) : workflowQuery.isLoading ? (
-            <Skeleton className="mt-1 h-3 w-40" />
-          ) : null}
-        </div>
-        <div className="flex items-center gap-1">
-          {workflow ? (
+          <div className="flex items-center gap-1">
+            {workflow && onEdit ? (
+              <Button
+                onClick={() => onEdit(workflow)}
+                size="sm"
+                variant="outline"
+              >
+                <Pencil className="mr-1 h-4 w-4" />
+                Edit
+              </Button>
+            ) : null}
             <Button
-              onClick={() => onEdit(workflow)}
+              disabled={triggerMutation.isPending || workflowQuery.isLoading}
+              onClick={() => void handleTrigger()}
               size="sm"
               variant="outline"
             >
-              <Pencil className="mr-1 h-4 w-4" />
-              Edit
+              <Play className="mr-1 h-4 w-4" />
+              {triggerMutation.isPending ? "Triggering..." : "Trigger"}
             </Button>
-          ) : null}
-          <Button
-            disabled={triggerMutation.isPending || workflowQuery.isLoading}
-            onClick={() => void handleTrigger()}
-            size="sm"
-            variant="outline"
-          >
-            <Play className="mr-1 h-4 w-4" />
-            {triggerMutation.isPending ? "Triggering..." : "Trigger"}
-          </Button>
-          <Button
-            aria-label="Close detail panel"
-            onClick={onClose}
-            size="icon"
-            variant="ghost"
-          >
-            <X className="h-4 w-4" />
-          </Button>
+            {onClose ? (
+              <Button
+                aria-label="Close detail panel"
+                onClick={onClose}
+                size="icon"
+                variant="ghost"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            ) : null}
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {triggerMutation.isError ? (
         <div
@@ -145,14 +155,16 @@ export function WorkflowDetailPanel({
       >
         {workflow ? (
           <div className="space-y-4 p-4">
-            <div>
-              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Definition
-              </h4>
-              <pre className="max-h-64 overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs leading-relaxed">
-                {JSON.stringify(workflow.definition, null, 2)}
-              </pre>
-            </div>
+            {showDefinition ? (
+              <div>
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Definition
+                </h4>
+                <pre className="max-h-64 overflow-auto rounded-md bg-muted/50 p-3 font-mono text-xs leading-relaxed">
+                  {JSON.stringify(workflow.definition, null, 2)}
+                </pre>
+              </div>
+            ) : null}
 
             <div>
               <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
