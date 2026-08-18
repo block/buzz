@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.17
+
+### Desktop and shared changes
+
+- fix(desktop): bound remote agent mention authorization ([#6224](https://github.com/block/buzz/pull/6224)) ([`3fdf289b78c40f80abce86575c25b5ed6361d82c`](https://github.com/block/buzz/commit/3fdf289b78c40f80abce86575c25b5ed6361d82c))
+- fix(desktop): bind presence retry timers ([#6213](https://github.com/block/buzz/pull/6213)) ([`081910424a5b6f01b283ad632b0718240c6b3cbf`](https://github.com/block/buzz/commit/081910424a5b6f01b283ad632b0718240c6b3cbf))
+- ci: make file-size policy a first-class gate ([#6187](https://github.com/block/buzz/pull/6187)) ([`6d45f98665004d314468d98e50084996f4046cdf`](https://github.com/block/buzz/commit/6d45f98665004d314468d98e50084996f4046cdf))
+- fix(desktop): eliminate mounted-view CPU burn — compositor-safe shimmer, observer append fast path, poll-tick disk reads ([#6198](https://github.com/block/buzz/pull/6198)) ([`f0234f1449ab8a6d52d45a9e1ec19cc675b40fe9`](https://github.com/block/buzz/commit/f0234f1449ab8a6d52d45a9e1ec19cc675b40fe9))
+
+### Other repository changes
+
+- fix: bump h2 for RUSTSEC-2026-0258 ([#6222](https://github.com/block/buzz/pull/6222)) ([`cc8a8b0dcbf5c01311b2ac7e1827ff3e582299f3`](https://github.com/block/buzz/commit/cc8a8b0dcbf5c01311b2ac7e1827ff3e582299f3))
+
+[Compare desktop-v0.5.16...desktop-v0.5.17](https://github.com/block/buzz/compare/desktop-v0.5.16...desktop-v0.5.17)
+
 ## v0.5.16
 
 ### Desktop and shared changes
