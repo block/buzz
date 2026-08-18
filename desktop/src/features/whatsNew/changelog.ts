@@ -137,6 +137,16 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Release history in Settings → Updates lists same-day releases newest-first, as it always should have",
     ],
   },
+  {
+    version: "0.5.16-0",
+    date: "2026-08-17",
+    bullets: [
+      "Updated to the latest Buzz release, bringing two versions of upstream improvements",
+      "Agent mentions are preserved when the relay errors, and shared agent access is enforced across your devices",
+      "Sidebar fixes: the collapsed sidebar no longer paints over the community rail, and preview rows line up correctly",
+      "The Bumble agent is now called Pollen",
+    ],
+  },
 ];
 
 /**

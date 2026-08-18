@@ -324,15 +324,11 @@ pub fn run() {
             {
                 macos_notifications::init(&app_handle)?;
             }
-            // Claims Buzz's AUMID and repairs the Start Menu shortcut so
-            // Windows recognizes Buzz as a notification-capable app — see
-            // `commands::notifications::windows::ensure_startup_registration`
-            // for why this must run at startup, unconditionally, rather than
-            // lazily on first notification attempt.
-            #[cfg(target_os = "windows")]
-            {
-                commands::notifications::windows::ensure_startup_registration(&app_handle);
-            }
+            // Claims the platform's notification identity at startup rather
+            // than lazily on first notification attempt — see
+            // `commands::notifications::ensure_startup_registration`. A no-op
+            // outside Windows.
+            commands::notifications::ensure_startup_registration(&app_handle);
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe

@@ -12,7 +12,7 @@ edit, or the bot keeps answering from the old text.
 Maintenance: this file is the agent's entire knowledge of the product. When a
 release changes user-facing behaviour, update the Features section in the same
 commit — an out-of-date entry here becomes a confident wrong answer in `#help`.
-Last checked against: **0.5.14-6**.
+Last checked against: **0.5.16-0**.
 
 ---
 

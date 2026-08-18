@@ -53,6 +53,22 @@ pub async fn show_native_notification(
     }
 }
 
+/// Claim this app's notification identity at startup, where the platform has
+/// one to claim.
+///
+/// Exposed as a single cross-platform entry point so `lib.rs` can call it
+/// unconditionally instead of carrying a `#[cfg]` block at the call site —
+/// the same shape `mouse_nav.rs` uses for its macOS-only wiring. On Windows
+/// this claims the AUMID and repairs the Start Menu shortcut so the OS
+/// recognises Buzz as notification-capable; everywhere else it does nothing.
+#[cfg(target_os = "windows")]
+pub(crate) fn ensure_startup_registration(app: &tauri::AppHandle) {
+    windows::ensure_startup_registration(app);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn ensure_startup_registration(_app: &tauri::AppHandle) {}
+
 #[cfg(target_os = "windows")]
 pub(crate) mod windows {
     use std::sync::Once;

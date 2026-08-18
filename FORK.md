@@ -7,7 +7,7 @@ Everything upstream does, this does. This document covers only what is
 **different**, so you can decide whether to run this build, take a patch from
 it, or contribute.
 
-Current release: **`0.5.14-6`**, based on upstream `desktop-v0.5.14`.
+Current release: **`0.5.16-0`**, based on upstream `desktop-v0.5.16`.
 Windows installers are published under
 [Releases](https://github.com/ranjank2alpha/buzz/releases).
 

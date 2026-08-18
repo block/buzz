@@ -5,8 +5,8 @@ A complete map of what this product does today, for competitive gap analysis.
 **What this is.** Buzz is a desktop team-chat application (Tauri 2 + React,
 Windows/macOS/Linux) built on the Nostr protocol. Messages are signed events on
 a relay rather than rows in a vendor database. This repository is `k2alpha`, a
-fork of the open-source `block/buzz` project, currently at version `0.5.14-6`
-(based on upstream `desktop-v0.5.14`, plus fork-specific work).
+fork of the open-source `block/buzz` project, currently at version `0.5.16-0`
+(based on upstream `desktop-v0.5.16`, plus fork-specific work).
 
 **Who uses it.** A team of ~40 senior professionals, predominantly on Windows,
 whose prior habit was WhatsApp.
