@@ -294,9 +294,8 @@ export function UserProfilePanel({
   const isBot =
     Boolean(relayAgent || managedAgent || resolvedPersona) || isAgentByOaOwner;
   const managedAgentOwner = useIsManagedAgent(isBot ? effectivePubkey : null);
-  // Ownership signals (UI gating only; real boundary is server-side): `isOwner` = this
-  // desktop holds the seckey or an editable persona (gates edit + local owner access);
-  // `viewerIsOwner` = that OR declared NIP-OA owner, the gate for owner-scoped data.
+  // UI-only gates: `isOwner` means local edit authority; `viewerIsOwner` also
+  // accepts declared NIP-OA ownership. The server remains authoritative.
   const isOwner = resolvedPersona ? true : managedAgentOwner;
   const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
@@ -313,7 +312,6 @@ export function UserProfilePanel({
       }),
     [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
   );
-  // Observer ingestion is owner-global across local and declared-owned agents.
   const canEditAgent = Boolean(isOwner && (managedAgent ?? resolvedPersona));
   const isSelf =
     currentPubkey !== undefined &&
@@ -615,7 +613,6 @@ export function UserProfilePanel({
     [deletePersonaMutation.mutateAsync, onClose],
   );
 
-  // Count of instances backed by the persona being deleted (shown in confirm dialog).
   const personaDeleteInstanceCount = React.useMemo(
     () =>
       personaToDelete

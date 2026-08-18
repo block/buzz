@@ -121,16 +121,17 @@ function assertStrictlyIncreasing(boundaries) {
 
 test("buildLocalDayBoundaries stays strictly increasing across DST transitions", () => {
   const cases = [
-    // Mar 12, after the Mar 10 spring-forward.
-    ["America/New_York", new Date(2024, 2, 12, 10, 0, 0), "Daylight"],
-    // Nov 6, after the Nov 3 fall-back.
-    ["America/New_York", new Date(2024, 10, 6, 10, 0, 0), "Standard"],
+    // Mar 12, after the Mar 10 spring-forward (UTC-4).
+    ["America/New_York", new Date(2024, 2, 12, 10, 0, 0), 240],
+    // Nov 6, after the Nov 3 fall-back (UTC-5).
+    ["America/New_York", new Date(2024, 10, 6, 10, 0, 0), 300],
   ];
-  for (const [tz, now, marker] of cases) {
+  for (const [tz, now, expectedOffsetMinutes] of cases) {
     withTz(tz, () => {
-      assert.ok(
-        now.toString().includes(marker),
-        `sanity: expected ${marker} time for ${now.toString()}`,
+      assert.equal(
+        now.getTimezoneOffset(),
+        expectedOffsetMinutes,
+        `sanity: unexpected UTC offset for ${now.toString()}`,
       );
       const boundaries = buildLocalDayBoundaries(7, now);
       assert.equal(boundaries.length, 8);
