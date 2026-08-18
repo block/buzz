@@ -22,8 +22,8 @@ pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondT
 
 mod metadata;
 pub(crate) use metadata::{
-    apply_agent_display_env, resolve_session_title, runtime_metadata_env_vars,
-    DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
+    apply_agent_display_env, apply_openai_api_key, resolve_session_title,
+    runtime_metadata_env_vars, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -822,6 +822,9 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+
+    apply_openai_api_key(&mut command, &descriptor.env);
+
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
