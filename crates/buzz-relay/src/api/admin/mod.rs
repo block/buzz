@@ -332,7 +332,10 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_state() -> Arc<crate::state::AppState> {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = {
+            let _env = crate::test_env::EnvGuard::new();
+            crate::config::Config::from_env().expect("default config loads")
+        };
         config.require_relay_membership = false;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.admin = Some(crate::config::AdminConfig {

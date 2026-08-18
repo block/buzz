@@ -530,7 +530,10 @@ mod tests {
     /// ever reached Redis this test would hang/fail.
     #[tokio::test]
     async fn mesh_off_boots_nothing() {
-        let mut config = crate::config::Config::from_env().expect("default config loads");
+        let mut config = {
+            let _env = crate::test_env::EnvGuard::new();
+            crate::config::Config::from_env().expect("default config loads")
+        };
         config.mesh.enabled = false;
         let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // unroutable
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -557,7 +560,10 @@ mod tests {
         if std::env::var("BUZZ_MESH").is_ok() {
             return; // externally forced — skip rather than assert a lie
         }
-        let config = crate::config::Config::from_env().expect("default config loads");
+        let config = {
+            let _env = crate::test_env::EnvGuard::new();
+            crate::config::Config::from_env().expect("default config loads")
+        };
         assert!(!config.mesh.enabled, "BUZZ_MESH absent must mean mesh off");
     }
 
