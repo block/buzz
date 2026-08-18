@@ -721,6 +721,22 @@ impl NestRegenGate {
     /// written. The lock spans the compare and the write so the check-and-write
     /// is atomic and no await occurs while it is held.
     fn commit(&self, agents_md: &Path, content: &str, generation: u64) -> io::Result<bool> {
+        self.commit_hooked(agents_md, content, generation, || {})
+    }
+
+    /// [`commit`] with a hook invoked while the lock is held, after the
+    /// eligibility compare and before the write. Production passes a no-op, so
+    /// this is exactly [`commit`]; tests pass a hook that starts a competing
+    /// [`claim`] to prove no claim can land inside the compare-then-write
+    /// window (the flawed separate-watermark/separate-write-lock design would
+    /// let it slip in). The `impl FnOnce` monomorphizes the no-op away.
+    fn commit_hooked(
+        &self,
+        agents_md: &Path,
+        content: &str,
+        generation: u64,
+        under_lock: impl FnOnce(),
+    ) -> io::Result<bool> {
         let requested = self
             .highest_requested
             .lock()
@@ -728,6 +744,7 @@ impl NestRegenGate {
         if generation < *requested {
             return Ok(false);
         }
+        under_lock();
         upsert_managed_section(agents_md, content)?;
         Ok(true)
     }
