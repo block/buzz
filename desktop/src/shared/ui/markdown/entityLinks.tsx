@@ -44,18 +44,20 @@ function EntityMetadataTooltip({
   link: ParsedEntityLink;
   projects: Project[] | undefined;
 }) {
-  const [metadata, setMetadata] = React.useState<
-    LinkPreviewMetadata | null | undefined
-  >(undefined);
+  const [resolved, setResolved] = React.useState<{
+    href: string;
+    metadata: LinkPreviewMetadata | null;
+  } | null>(null);
   React.useEffect(() => {
     let cancelled = false;
     void loadBuzzEntityMetadata(href).then((value) => {
-      if (!cancelled) setMetadata(value);
+      if (!cancelled) setResolved({ href, metadata: value });
     });
     return () => {
       cancelled = true;
     };
   }, [href]);
+  const metadata = resolved?.href === href ? resolved.metadata : undefined;
   const repositoryAddress =
     link.type === "issue" || link.type === "pr"
       ? `30617:${link.owner}:${link.dtag}`
@@ -101,7 +103,7 @@ function EntityMetadataTooltip({
             </span>
           ) : null}
           <span
-            className={`${context ? "mt-1 " : ""}block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/70`}
+            className={`${context ? "mt-1 " : ""}block max-w-full truncate whitespace-nowrap text-2xs text-primary-foreground/70`}
             data-buzz-tooltip-metadata-type=""
           >
             {footer}

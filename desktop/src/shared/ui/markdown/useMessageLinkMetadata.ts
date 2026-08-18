@@ -7,17 +7,7 @@ import { getUserProfile } from "@/shared/api/tauriProfiles";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
 const MESSAGE_METADATA_RETRY_DELAY_MS = 750;
-const EVENT_NOT_FOUND_MESSAGE = "event not found";
 const PREVIEWABLE_MESSAGE_KINDS = new Set([9, 40002, 45001, 45003]);
-
-function isEventNotFoundError(error: unknown): boolean {
-  if (typeof error === "string") {
-    return error.includes(EVENT_NOT_FOUND_MESSAGE);
-  }
-  return (
-    error instanceof Error && error.message.includes(EVENT_NOT_FOUND_MESSAGE)
-  );
-}
 
 function waitForMessageMetadataRetry(): Promise<void> {
   return new Promise((resolve) => {
@@ -28,8 +18,7 @@ function waitForMessageMetadataRetry(): Promise<void> {
 async function getMessageLinkEvent(messageId: string) {
   try {
     return await getEventById(messageId);
-  } catch (error) {
-    if (isEventNotFoundError(error)) throw error;
+  } catch {
     await waitForMessageMetadataRetry();
     return getEventById(messageId);
   }
@@ -44,12 +33,10 @@ type MessageLinkMetadataState =
   | { kind: "idle" }
   | { kind: "loading" }
   | ({ kind: "ready" } & MessageLinkMetadata)
-  | { kind: "deleted" }
   | { kind: "unavailable" };
 
 type CachedMessageLinkMetadata =
   | ({ kind: "ready" } & MessageLinkMetadata)
-  | { kind: "deleted" }
   | { kind: "unavailable" };
 
 const metadataCache = new Map<string, Promise<CachedMessageLinkMetadata>>();
@@ -84,11 +71,7 @@ function fetchMetadata(
           snippet: summarizeMessageLinkContent(event.content),
         };
       })
-      .catch((error) =>
-        isEventNotFoundError(error)
-          ? ({ kind: "deleted" } as const)
-          : ({ kind: "unavailable" } as const),
-      );
+      .catch(() => ({ kind: "unavailable" }) as const);
     metadataCache.set(key, request);
     void request.then((result) => {
       if (result.kind === "unavailable" && metadataCache.get(key) === request) {
@@ -103,13 +86,14 @@ export function useMessageLinkMetadata(
   link: ParsedMessageLink,
   channelReadable: boolean,
 ): { state: MessageLinkMetadataState } {
-  const [state, setState] = React.useState<MessageLinkMetadataState>({
-    kind: "idle",
-  });
+  const [resolved, setResolved] = React.useState<{
+    key: string;
+    state: CachedMessageLinkMetadata;
+  } | null>(null);
   const requestId = React.useRef(0);
+  const key = `${link.channelId}:${link.messageId}`;
   React.useEffect(() => {
     requestId.current += 1;
-    setState({ kind: "idle" });
     if (!channelReadable) return;
 
     const currentRequest = requestId.current;
@@ -117,15 +101,17 @@ export function useMessageLinkMetadata(
       channelId: link.channelId,
       messageId: link.messageId,
     };
-    setState({ kind: "loading" });
     void fetchMetadata(currentLink).then((metadata) => {
       if (requestId.current === currentRequest) {
-        setState(metadata);
+        setResolved({ key, state: metadata });
       }
     });
     return () => {
       requestId.current += 1;
     };
-  }, [channelReadable, link.channelId, link.messageId]);
-  return { state };
+  }, [channelReadable, key, link.channelId, link.messageId]);
+  if (!channelReadable) return { state: { kind: "idle" } };
+  return {
+    state: resolved?.key === key ? resolved.state : { kind: "loading" },
+  };
 }
