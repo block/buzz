@@ -22,7 +22,10 @@ pub(crate) fn read_config_surface(
         .map(|m| m.id)
         .and_then(|id| match id {
             "goose" => super::goose::read_config_file().map(|c| (c, true)),
-            "claude" => super::claude::read_config_file().map(|c| (c, true)),
+            "claude" => super::claude::read_config_file(
+                crate::managed_agents::default_agent_workdir().as_deref(),
+            )
+            .map(|c| (c, true)),
             "codex" => super::codex::read_config_file().map(|c| (c, true)),
             "buzz-agent" => super::buzz_agent::read_config_file().map(|c| (c, true)),
             _ => None,
