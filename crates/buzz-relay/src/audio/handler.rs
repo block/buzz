@@ -670,12 +670,14 @@ async fn handle_active_audio_connection(
     emit_participant_event(
         &state,
         &tenant,
-        Kind::Custom(48101),
         channel_id,
         parent_id_for_event,
-        &pubkey_hex,
-        Some(lifecycle_revision),
-        Some(peer_id),
+        ParticipantLifecycle {
+            kind: Kind::Custom(48101),
+            participant_pubkey: &pubkey_hex,
+            roster_revision: Some(lifecycle_revision),
+            admission_id: Some(peer_id),
+        },
     )
     .await;
 
@@ -872,12 +874,14 @@ async fn handle_active_audio_connection(
     emit_participant_event(
         &state,
         &tenant,
-        Kind::Custom(48102),
         channel_id,
         parent_id_for_event,
-        &pubkey_hex,
-        removal_revision,
-        Some(peer_id),
+        ParticipantLifecycle {
+            kind: Kind::Custom(48102),
+            participant_pubkey: &pubkey_hex,
+            roster_revision: removal_revision,
+            admission_id: Some(peer_id),
+        },
     )
     .await;
 
@@ -903,12 +907,14 @@ async fn handle_active_audio_connection(
                 emit_participant_event(
                     &state,
                     &tenant,
-                    Kind::Custom(48103),
                     channel_id,
                     parent_id_for_event,
-                    &pubkey_hex,
-                    None,
-                    None,
+                    ParticipantLifecycle {
+                        kind: Kind::Custom(48103),
+                        participant_pubkey: &pubkey_hex,
+                        roster_revision: None,
+                        admission_id: None,
+                    },
                 )
                 .await;
             }
@@ -1304,16 +1310,27 @@ async fn ensure_membership(
     Err("not a member".into())
 }
 
+#[derive(Clone, Copy)]
+struct ParticipantLifecycle<'a> {
+    kind: Kind,
+    participant_pubkey: &'a str,
+    roster_revision: Option<u64>,
+    admission_id: Option<Uuid>,
+}
+
 async fn emit_participant_event(
     state: &AppState,
     tenant: &TenantContext,
-    kind: Kind,
     channel_id: Uuid,
     parent_channel_id: Uuid,
-    participant_pubkey: &str,
-    roster_revision: Option<u64>,
-    admission_id: Option<Uuid>,
+    lifecycle: ParticipantLifecycle<'_>,
 ) {
+    let ParticipantLifecycle {
+        kind,
+        participant_pubkey,
+        roster_revision,
+        admission_id,
+    } = lifecycle;
     let content = match (roster_revision, admission_id) {
         (Some(revision), Some(admission_id)) => serde_json::json!({
             "ephemeral_channel_id": channel_id.to_string(),

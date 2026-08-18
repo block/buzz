@@ -345,6 +345,7 @@ final class MobileHuddleController extends Notifier<bool> {
   }) async {
     final actions = ref.read(channelActionsProvider);
     final humansRemaining = await humanCount;
+    if (admissionToken.epoch != _admissionEpoch) return;
     final currentSession = ref.read(huddleSessionProvider);
     if (currentSession.isInSession &&
         currentSession.ephemeralChannelId == backingChannelId) {
@@ -360,6 +361,12 @@ final class MobileHuddleController extends Notifier<bool> {
           ephemeralChannelId: backingChannelId,
         );
       } catch (_) {}
+      if (admissionToken.epoch != _admissionEpoch) return;
+      final resumedSession = ref.read(huddleSessionProvider);
+      if (resumedSession.isInSession &&
+          resumedSession.ephemeralChannelId == backingChannelId) {
+        return;
+      }
       try {
         await actions.archiveChannel(backingChannelId);
       } catch (_) {}

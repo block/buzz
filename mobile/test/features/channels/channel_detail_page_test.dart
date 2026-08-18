@@ -4822,6 +4822,79 @@ void main() {
     );
 
     testWidgets(
+      'last-human leave superseded by same-Huddle rejoin cannot archive it',
+      (tester) async {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final endPublishGate = Completer<void>();
+        final media = Queue<_HuddleTestMedia>.of([
+          _HuddleTestMedia(),
+          _HuddleTestMedia(),
+        ]);
+        final transports = Queue<_HuddleTestTransport>.of([
+          _HuddleTestTransport(),
+          _HuddleTestTransport(),
+        ]);
+        final relaySession = _ReconnectingRelaySession(
+          huddleEndPublishGate: endPublishGate.future,
+        );
+        String? archivedChannelId;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'last-human-rejoin',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {'self': UserProfile(pubkey: 'self')},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: relaySession,
+            huddleCurrentPubkey: 'self',
+            huddleHumanCountLoader: (_) async => 1,
+            huddleMediaFactory: media.removeFirst,
+            huddleTransportFactory: (_) => transports.removeFirst(),
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onArchiveChannel: (channelId) async =>
+                  archivedChannelId = channelId,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final controller = container.read(
+          mobileHuddleControllerProvider.notifier,
+        );
+        final staleLeave = controller.leave();
+        await relaySession.huddleEndPublishStarted.future;
+        final rejoin = controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: _huddleChannelId,
+          startedBy: 'self',
+          startedEventId: 'last-human-rejoin',
+        );
+        endPublishGate.complete();
+        await staleLeave;
+        await rejoin;
+        await tester.pump();
+
+        expect(relaySession.publishedKinds, contains(EventKind.huddleEnded));
+        expect(archivedChannelId, isNull);
+        expect(container.read(huddleSessionProvider).isConnected, isTrue);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 100));
+      },
+    );
+
+    testWidgets(
       'creator end publish superseded by rejoin cannot archive new admission',
       (tester) async {
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;

@@ -229,7 +229,21 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
 
     final hiddenDmIds = await _fetchHiddenDmIds(session, myPk);
-    final huddleBackingIds = await _fetchHuddleBackingIds(session, channelIds);
+    // Fetch the authoritative membership snapshots before filtering Huddle
+    // backing channels. The relay-signed kind:39000 metadata identifies the
+    // relay, not the channel creator; the owner role in kind:39002 is the
+    // canonical creator identity used to reject forged Huddle links.
+    final memberEvents = await session.fetchHistory(
+      NostrFilter(
+        kinds: const [39002],
+        tags: {'#d': channelIds},
+        limit: channelIds.length,
+      ),
+    );
+    final huddleBackingIds = _huddleBackingIds(
+      await _fetchHuddleStarts(session, channelIds),
+      memberEvents,
+    );
 
     final channels = <Channel>[];
     for (final event in dedupedMetas) {
@@ -252,14 +266,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       channels.add(channel);
     }
 
-    // Batch-fetch member counts via kind:39002 membership events.
-    final memberEvents = await session.fetchHistory(
-      NostrFilter(
-        kinds: const [39002],
-        tags: {'#d': channelIds},
-        limit: channelIds.length,
-      ),
-    );
+    // Use the membership snapshots already fetched above for both Huddle
+    // linkage validation and member-count hydration.
     if (memberEvents.isNotEmpty) _cacheMemberSnapshots(memberEvents);
     final memberCounts = <String, int>{};
     for (final event in memberEvents) {
@@ -484,14 +492,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
   }
 
-  Future<Set<String>> _fetchHuddleBackingIds(
+  Future<List<NostrEvent>> _fetchHuddleStarts(
     RelaySessionNotifier session,
     List<String> parentChannelIds,
   ) async {
-    if (parentChannelIds.isEmpty) return const {};
+    if (parentChannelIds.isEmpty) return const [];
     try {
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      final events = await session.fetchHistory(
+      return await session.fetchHistory(
         NostrFilter(
           kinds: const [EventKind.huddleStarted],
           tags: {'#h': parentChannelIds},
@@ -499,12 +507,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           limit: 500,
         ),
       );
-      return {for (final event in events) ?_huddleBackingId(event.content)};
     } catch (error) {
       debugPrint(
         '[ChannelsNotifier] Huddle backing-channel query failed: $error',
       );
-      return const {};
+      return const [];
     }
   }
 
@@ -965,6 +972,33 @@ Set<String> _readRootIdSet(String? raw) {
 }
 
 String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
+
+Set<String> _huddleBackingIds(
+  Iterable<NostrEvent> starts,
+  Iterable<NostrEvent> membershipSnapshots,
+) {
+  final ownersByChannelId = <String, Set<String>>{};
+  for (final snapshot in membershipSnapshots) {
+    if (snapshot.kind != 39002) continue;
+    final channelId = snapshot.getTagValue('d');
+    if (channelId == null) continue;
+    ownersByChannelId[channelId] = {
+      for (final member in membersFromEvent(snapshot))
+        if (member.role == 'owner') member.pubkey.toLowerCase(),
+    };
+  }
+  final backingIds = <String>{};
+  for (final start in starts) {
+    final backingChannelId = _huddleBackingId(start.content);
+    if (backingChannelId != null &&
+        (ownersByChannelId[backingChannelId] ?? const {}).contains(
+          start.pubkey.toLowerCase(),
+        )) {
+      backingIds.add(backingChannelId);
+    }
+  }
+  return backingIds;
+}
 
 String? _huddleBackingId(String content) {
   try {

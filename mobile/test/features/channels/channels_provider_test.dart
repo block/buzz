@@ -422,7 +422,7 @@ void main() {
       final session = _FakeRelaySession(
         memberships: [
           _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
+          _membership(_channelB, myPk, ownerPubkey: myPk),
         ],
         metadata: [
           _meta(id: _channelA, name: 'general'),
@@ -453,6 +453,47 @@ void main() {
       final channels = await container.read(channelsProvider.future);
 
       expect(channels.map((channel) => channel.id), [_channelA]);
+    },
+  );
+
+  test(
+    'forged Huddle links do not hide unrelated one-hour private streams',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk, ownerPubkey: 'actual-owner'),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(
+            id: _channelB,
+            name: 'private-hour-stream',
+            ttlSeconds: 3600,
+            visibility: 'private',
+          ),
+        ],
+        huddleStarts: [
+          NostrEvent(
+            id: 'forged-huddle-start',
+            pubkey: myPk,
+            createdAt: now,
+            kind: EventKind.huddleStarted,
+            tags: const [
+              ['h', _channelA],
+            ],
+            content: '{"ephemeral_channel_id":"$_channelB"}',
+            sig: 'sig',
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+
+      expect(channels.map((channel) => channel.id), contains(_channelB));
     },
   );
 
@@ -706,6 +747,7 @@ NostrEvent _membership(
   String channelId,
   String pubkey, {
   String? additionalPubkey,
+  String? ownerPubkey,
 }) => NostrEvent(
   id: 'mem-$channelId',
   pubkey: 'creator',
@@ -713,7 +755,8 @@ NostrEvent _membership(
   kind: 39002,
   tags: [
     ['d', channelId],
-    ['p', pubkey],
+    if (ownerPubkey != null) ['p', ownerPubkey, '', 'owner'],
+    if (ownerPubkey == null || ownerPubkey != pubkey) ['p', pubkey],
     if (additionalPubkey != null) ['p', additionalPubkey],
   ],
   content: '',
@@ -846,6 +889,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyFilters.add(filter);
+    if (filter.kinds.contains(39002) && filter.tags['#d'] != null) {
+      final ids = (filter.tags['#d'] ?? const <String>[]).toSet();
+      return memberships
+          .where((event) => ids.contains(event.getTagValue('d')))
+          .toList();
+    }
     if (filter.kinds.contains(39002) && filter.tags['#p'] != null) {
       if (membershipFailures > 0) {
         membershipFailures--;
