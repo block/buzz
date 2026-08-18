@@ -523,11 +523,55 @@ fn escape_md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
+/// Whether a record carries a well-formed identity that could be addressed.
+///
+/// This is a defensive check on the renderer, not the fix for any reported
+/// symptom: `load_managed_agents` already drops rows with an empty pubkey
+/// before regeneration reaches here — in the unified store an empty pubkey is
+/// what marks a key-less agent *definition*, which `load_agent_definitions`
+/// selects on. Keeping the check means a future caller that hands over raw
+/// store rows cannot publish an address that goes nowhere, and requiring a
+/// 64-character hex identity rather than merely a non-empty string means a
+/// truncated or garbage value is caught with it.
+fn is_addressable(agent: &ManagedAgentRecord) -> bool {
+    let pubkey = agent.pubkey.trim();
+    !agent.name.trim().is_empty()
+        && pubkey.len() == 64
+        && pubkey.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The key a `@mention` resolves on: names are matched case-insensitively and
+/// without surrounding whitespace.
+fn address_key(agent: &ManagedAgentRecord) -> String {
+    agent.name.trim().to_lowercase()
+}
+
 pub fn render_dynamic_section(
     personas: &[AgentDefinition],
     agents: &[ManagedAgentRecord],
     relay_url: &str,
 ) -> String {
+    let agents: Vec<&ManagedAgentRecord> = agents
+        .iter()
+        .filter(|agent| is_addressable(agent))
+        .collect();
+
+    // Creating an agent under an existing name mints a new keypair instead of
+    // reusing the one already bound to that name, so a registry can hold four
+    // `Coder` rows with four different pubkeys (#5786). Rendered plainly, that
+    // is four identical `@Coder` addresses: an agent reading AGENTS.md is told
+    // to address a name that resolves to none of them in particular.
+    //
+    // The rows stay. They are distinct identities and collapsing them would
+    // hide agents that really are deployed. What changes is the address cell,
+    // which now says the name is ambiguous and carries the pubkey prefix that
+    // tells the duplicates apart.
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for agent in &agents {
+        *name_counts.entry(address_key(agent)).or_insert(0) += 1;
+    }
+
     let active_agents = if agents.is_empty() {
         "## Active Agents\n\n*(No agents deployed yet. Add agents in the Buzz desktop app.)*"
             .to_string()
@@ -544,7 +588,16 @@ pub fn render_dynamic_section(
                 .unwrap_or("—");
             let name = escape_md_cell(&agent.name);
             let role_escaped = escape_md_cell(role);
-            table.push_str(&format!("\n| {name} | {role_escaped} | @{name} |"));
+            let sharing = name_counts.get(&address_key(agent)).copied().unwrap_or(1);
+            let address = if sharing > 1 {
+                let short = &agent.pubkey.trim()[..8];
+                format!(
+                    "@{name} — ambiguous: {sharing} agents share this name (this one is {short}…)"
+                )
+            } else {
+                format!("@{name}")
+            };
+            table.push_str(&format!("\n| {name} | {role_escaped} | {address} |"));
         }
         table
     };
