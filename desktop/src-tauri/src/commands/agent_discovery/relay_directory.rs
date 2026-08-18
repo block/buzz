@@ -77,10 +77,22 @@ async fn query_all_relay_pages(
     }
 }
 
+fn owner_only_relay_directory() -> bool {
+    crate::managed_agents::owner_only_access_build()
+}
+
+fn retain_verified_owner(
+    verified_owners: &mut std::collections::HashMap<String, String>,
+    required_owner: &str,
+) {
+    verified_owners.retain(|_, owner| owner.eq_ignore_ascii_case(required_owner));
+}
+
 pub(crate) async fn list_relay_agents_for_state(
     state: &AppState,
 ) -> Result<Vec<RelayAgentInfo>, String> {
     let viewer_pubkey = current_user_pubkey(state)?;
+    let owner_only = owner_only_relay_directory();
     let relay_pubkey = identity_archive::fetch_relay_self(state)
         .await?
         .ok_or_else(|| "relay agent membership authority is unavailable".to_string())?;
@@ -128,7 +140,14 @@ pub(crate) async fn list_relay_agents_for_state(
     // query. Each exact `(owner, d=agent)` filter returns at most one current
     // replaceable event, so forged 30177 coordinates cannot amplify or crowd
     // the authentic policy out of a bounded result page.
-    let verified_owners = nostr_convert::verified_agent_owners_from_profiles(&profile_events);
+    let mut verified_owners = nostr_convert::verified_agent_owners_from_profiles(&profile_events);
+    // The internal capability narrows the remote directory to cryptographically
+    // verified agents owned by the active user. Same-owner siblings remain
+    // mentionable because they are inside the harness's owner-only boundary;
+    // all cross-owner coordinates are discarded before policy lookup.
+    if owner_only {
+        retain_verified_owner(&mut verified_owners, &viewer_pubkey);
+    }
     let managed_filters = managed_policy_filters(&candidate_pubkeys, &verified_owners);
     let mut managed_agent_events = Vec::new();
     for filters in managed_filters.chunks(RELAY_FILTER_BATCH_SIZE) {
@@ -144,6 +163,14 @@ pub(crate) async fn list_relay_agents_for_state(
         &managed_agent_events,
         &profile_events,
     );
+    if owner_only {
+        agents.retain(|agent| {
+            agent
+                .owner_pubkey
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(&viewer_pubkey))
+        });
+    }
     agents.retain(|agent| member_agent_channel_ids.contains_key(&agent.pubkey));
     for agent in &mut agents {
         agent.channel_ids = member_agent_channel_ids
@@ -162,6 +189,25 @@ pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_only_directory_keeps_only_verified_same_owner_coordinates() {
+        let viewer = "a".repeat(64);
+        let other_owner = "b".repeat(64);
+        let same_owner_agent = "c".repeat(64);
+        let other_owner_agent = "d".repeat(64);
+        let mut owners = std::collections::HashMap::from([
+            (same_owner_agent.clone(), viewer.to_uppercase()),
+            (other_owner_agent, other_owner),
+        ]);
+
+        retain_verified_owner(&mut owners, &viewer);
+
+        assert_eq!(
+            owners,
+            std::collections::HashMap::from([(same_owner_agent, viewer.to_uppercase())])
+        );
+    }
 
     #[test]
     fn exact_author_queries_prevent_noisy_agent_crowd_out() {

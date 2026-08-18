@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::Serialize;
 use serde_json::Value;
 use tauri::State;
@@ -103,34 +105,73 @@ pub async fn get_channel_workflows(
     Ok(events.iter().map(workflow_from_event).collect())
 }
 
-/// Fetch workflows across many channels in a single relay round-trip.
+// Keep this aligned with the relay's aggregate explicit-`#h` request bound.
+// Each filter below carries exactly one explicit value so old relays retain the
+// known-compatible shape while current relays cannot reject large memberships.
+const WORKFLOW_QUERY_CHANNEL_BATCH_SIZE: usize = 128;
+
+/// Fetch workflows across many channels using bounded relay round-trips.
 ///
 /// The Workflows overview screen previously issued one `get_channel_workflows`
 /// query per member channel (`Promise.all` fanout in `WorkflowsView`), i.e. N
-/// relay POSTs. A nostr `#h` filter matches ANY of its listed values, so one
-/// query with all channel ids returns the same set. Each `WorkflowWire` carries
-/// its own `channel_id` (from the event's `h` tag), so the frontend can still
-/// group results by channel. Neither this nor the per-channel command sets a
-/// `limit`, so batching does not change result completeness.
+/// relay POSTs. This sends one single-channel filter per channel, in requests of
+/// at most 128 filters. Using one multi-value `#h` filter is equivalent under
+/// NIP-01, but older relays incorrectly narrowed that shape to its first
+/// channel. Each `WorkflowWire` carries its own `channel_id` (from the event's
+/// `h` tag), so the frontend can still group results by channel. Neither this
+/// nor the per-channel command sets a `limit`, so batching does not change
+/// result completeness. Results are deduplicated by signed event ID in case a
+/// caller supplies duplicate channel IDs.
 #[tauri::command]
 pub async fn get_channels_workflows(
     channel_ids: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkflowWire>, String> {
-    if channel_ids.is_empty() {
-        return Ok(Vec::new());
+    let filter_batches = channel_workflow_filter_batches(channel_ids)?;
+    let mut seen_event_ids = HashSet::new();
+    let mut workflows = Vec::new();
+
+    for filters in filter_batches {
+        let events = query_relay(&state, &filters).await?;
+        append_unique_workflows(&mut workflows, &mut seen_event_ids, &events);
     }
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [30620],
-            "#h": channel_ids,
-        })],
-    )
-    .await?;
+    Ok(workflows)
+}
 
-    Ok(events.iter().map(workflow_from_event).collect())
+fn append_unique_workflows(
+    workflows: &mut Vec<WorkflowWire>,
+    seen_event_ids: &mut HashSet<nostr::EventId>,
+    events: &[nostr::Event],
+) {
+    workflows.extend(
+        events
+            .iter()
+            .filter(|event| seen_event_ids.insert(event.id))
+            .map(workflow_from_event),
+    );
+}
+
+fn channel_workflow_filter_batches(channel_ids: Vec<String>) -> Result<Vec<Vec<Value>>, String> {
+    let filters = channel_workflow_filters(channel_ids)?;
+    Ok(filters
+        .chunks(WORKFLOW_QUERY_CHANNEL_BATCH_SIZE)
+        .map(<[Value]>::to_vec)
+        .collect())
+}
+
+fn channel_workflow_filters(channel_ids: Vec<String>) -> Result<Vec<Value>, String> {
+    channel_ids
+        .into_iter()
+        .map(|channel_id| {
+            let channel_id = uuid::Uuid::parse_str(channel_id.trim())
+                .map_err(|_| "invalid channel id".to_string())?;
+            Ok(serde_json::json!({
+                "kinds": [30620],
+                "#h": [channel_id.to_string()],
+            }))
+        })
+        .collect()
 }
 
 #[tauri::command]

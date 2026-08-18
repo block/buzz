@@ -255,8 +255,14 @@ fn reconcile_inbound_persona_event_blocking(
         }
         KIND_TEAM => {
             let mut teams = load_teams(&app)?;
-            apply_inbound_team(&mut teams, d_tag, team_content_from_event(&event)?);
-            save_teams(&app, &teams)?;
+            commit_inbound_team(
+                &mut teams,
+                d_tag,
+                team_content_from_event(&event)?,
+                |teams| save_teams(&app, teams),
+                || load_managed_agents(&app),
+                |records| save_managed_agents(&app, records),
+            )?;
         }
         KIND_MANAGED_AGENT => {
             let mut agents = load_managed_agents(&app)?;
@@ -579,9 +585,57 @@ fn apply_inbound_managed_agent(
             &previous_allowlist,
             local.respond_to,
             &local.respond_to_allowlist,
+            crate::managed_agents::owner_only_access_build(),
         );
     }
     false
+}
+
+/// In-memory core of the inbound `KIND_TEAM` reconcile: capture the matched
+/// team's roster *before* applying the inbound projection, apply it, persist
+/// teams authoritatively, then propagate the prior→current membership delta to
+/// live instances best-effort — the same binding semantics the local
+/// create/update commands use. Without this, a 30176 team edit from another
+/// device lands on `teams.json` but never touches `ManagedAgentRecord.team_id`:
+/// an added persona's running instances stay unbound (member in roster, not in
+/// behavior) and a removed persona's instances keep drawing the old team's
+/// instructions at spawn until restart.
+///
+/// A no-match insert has no prior roster, so its whole roster is the added
+/// delta — symmetric with `commit_team_create`. Injected persistence keeps it
+/// `AppHandle`-free so the prior-roster capture and delta direction are
+/// unit-testable; a `persist_teams` error propagates, agent IO is best-effort
+/// (mirrors the local command path: the authoritative team write already
+/// landed, and boot repair is the designed retry for a stale binding).
+fn commit_inbound_team(
+    teams: &mut Vec<TeamRecord>,
+    d_tag: String,
+    inbound: TeamEventContent,
+    persist_teams: impl FnOnce(&[TeamRecord]) -> Result<(), String>,
+    load_agents: impl FnOnce() -> Result<Vec<ManagedAgentRecord>, String>,
+    save_agents: impl FnOnce(&[ManagedAgentRecord]) -> Result<(), String>,
+) -> Result<(), String> {
+    let team_id = d_tag.clone();
+    let previous_persona_ids = teams
+        .iter()
+        .find(|record| record.id == team_id)
+        .map(|record| record.persona_ids.clone())
+        .unwrap_or_default();
+    apply_inbound_team(teams, d_tag, inbound);
+    let current_persona_ids = teams
+        .iter()
+        .find(|record| record.id == team_id)
+        .map(|record| record.persona_ids.clone())
+        .unwrap_or_default();
+    persist_teams(teams)?;
+    crate::commands::teams::propagate_membership_best_effort(
+        &team_id,
+        &previous_persona_ids,
+        &current_persona_ids,
+        load_agents,
+        save_agents,
+    );
+    Ok(())
 }
 
 /// Merge an inbound kind:30176 team projection into the local set.
