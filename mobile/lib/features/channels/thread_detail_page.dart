@@ -43,6 +43,7 @@ part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
+part 'thread_detail_page/avatar.dart';
 
 /// Full-screen thread detail page.
 ///
@@ -72,6 +73,8 @@ class ThreadDetailPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
+    final composerFocusNode = useFocusNode();
+    final restoreComposerFocus = useRef<VoidCallback?>(null);
     final settledImeBottomInset = useState(
       usesFixedAndroidImeViewport
           ? appView.viewInsets.bottom / appView.devicePixelRatio
@@ -635,6 +638,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                                   isMember: isMember,
                                   isArchived: isArchived,
                                   isThreadHead: true,
+                                  composerFocusNode: composerFocusNode,
+                                  restoreComposerFocus: () =>
+                                      restoreComposerFocus.value?.call(),
                                 ),
                                 Padding(
                                   padding: const EdgeInsets.symmetric(
@@ -714,6 +720,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                                 allMessages: allMsgs,
                                 isMember: isMember,
                                 isArchived: isArchived,
+                                composerFocusNode: composerFocusNode,
+                                restoreComposerFocus: () =>
+                                    restoreComposerFocus.value?.call(),
                               ),
                               if (nestedSummary != null)
                                 _NestedThreadSummaryRow(
@@ -750,6 +759,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                       _ThreadTypingIndicator(entries: threadTyping),
                       ComposeBar(
                         channelId: channelId,
+                        focusNode: composerFocusNode,
+                        onFocusRestorerChanged: (restoreFocus) =>
+                            restoreComposerFocus.value = restoreFocus,
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,

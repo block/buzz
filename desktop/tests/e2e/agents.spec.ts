@@ -237,14 +237,14 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   await page.getByTestId("open-agents-view").click();
 
   await expect(page.getByTestId("agents-library-personas")).toBeVisible();
-  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
+  for (const personaName of ["Fizz", "Honey", "Pollen"]) {
     await expect(page.getByTestId("agents-library-personas")).toContainText(
       personaName,
     );
   }
 
   await openPersonaCatalog(page);
-  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
+  for (const personaName of ["Fizz", "Honey", "Pollen"]) {
     await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
       personaName,
     );

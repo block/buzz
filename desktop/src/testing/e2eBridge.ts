@@ -113,6 +113,7 @@ type MockManagedAgentRuntimeSeed = {
 
 type MockRelayAgentSeed = {
   pubkey: string;
+  ownerPubkey?: string | null;
   name: string;
   agentType?: string;
   capabilities?: string[];
@@ -236,6 +237,8 @@ type E2eConfig = {
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
+    /** When set, workflow updates fail with this message. */
+    workflowUpdateError?: string;
     /** When set, the `delete_custom_harness` mock command throws with this message. */
     deleteCustomHarnessError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
@@ -295,6 +298,8 @@ type E2eConfig = {
     relayAgents?: MockRelayAgentSeed[];
     /** Reject successive relay-agent directory reads, then resume. */
     relayAgentListErrors?: (string | null)[];
+    /** Pubkeys omitted only from targeted send-time authorization checks. */
+    relayAgentRevalidationRevokedPubkeys?: string[];
     /** Native-like huddle state seeded from authoritative role-bearing membership. */
     huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
@@ -406,6 +411,10 @@ type E2eConfig = {
     nostrBindSignDelayMs?: number;
     /** Reject successive mock WebSocket connect attempts, then resume. */
     websocketConnectErrors?: string[];
+    /** Deliver AUTH synchronously, before the mock connect command resolves. */
+    websocketAuthBeforeConnectResolves?: boolean;
+    /** Stall the first AUTH signing command forever; later attempts complete. */
+    stallFirstAuthSigning?: boolean;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -849,6 +858,7 @@ type RawSendChannelMessageResponse = {
 
 type RawRelayAgent = {
   pubkey: string;
+  owner_pubkey?: string | null;
   name: string;
   agent_type: string;
   channels: string[];
@@ -2322,6 +2332,7 @@ function resetMockRelayAgents(config?: E2eConfig) {
     });
     mockRelayAgents.push({
       pubkey: seed.pubkey,
+      owner_pubkey: seed.ownerPubkey ?? null,
       name: seed.name,
       agent_type: seed.agentType ?? "goose",
       channels: channels.map((channel) => channel.name),
@@ -2406,9 +2417,9 @@ function resetMockPersonas(config?: E2eConfig) {
     },
     {
       id: "builtin:bumble",
-      display_name: "Bumble",
+      display_name: "Pollen",
       avatar_url: null,
-      system_prompt: "You are Bumble.",
+      system_prompt: "You are Pollen.",
     },
   ];
   mockPersonas = builtInPersonas.map((persona) => ({
@@ -3055,6 +3066,7 @@ const mockAuthResponses: Array<{ success: boolean; message: string }> = [];
 const mockChannelHistoryCloses: string[] = [];
 let mockWebsocketUnavailable = false;
 const relayWebsocketConnectAttemptStarts: number[] = [];
+let mockAuthSigningAttempts = 0;
 let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
@@ -3356,6 +3368,7 @@ let mockRelayAgents: RawRelayAgent[] = defaultMockRelayAgents.map((agent) => ({
 
 type MockWorkflow = {
   id: string;
+  revision: string;
   name: string;
   owner_pubkey: string;
   channel_id: string | null;
@@ -3443,6 +3456,7 @@ function handleCreateWorkflow(args: {
       : `workflow_${mockWorkflowIdCounter}`;
   const workflow: MockWorkflow = {
     id: `mock-wf-${mockWorkflowIdCounter}`,
+    revision: `mock-revision-${mockWorkflowIdCounter}-1`,
     name,
     owner_pubkey: MOCK_IDENTITY_PUBKEY,
     channel_id: args.channelId,
@@ -3466,13 +3480,22 @@ function handleCreateWorkflow(args: {
 function handleUpdateWorkflow(args: {
   workflowId: string;
   yamlDefinition: string;
+  expectedRevision: string;
 }) {
   const workflow = mockWorkflows.find((w) => w.id === args.workflowId);
   if (!workflow) throw new Error(`Workflow ${args.workflowId} not found`);
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowUpdateError;
+  if (configuredError) throw new Error(configuredError);
+  if (workflow.revision !== args.expectedRevision) {
+    throw new Error(
+      "workflow changed since it was loaded; refresh and try again",
+    );
+  }
   const definition = parseWorkflowDefinition(args.yamlDefinition);
   if (typeof definition.name === "string") workflow.name = definition.name;
   workflow.definition = definition;
   workflow.updated_at = Math.floor(Date.now() / 1000);
+  workflow.revision = `mock-revision-${workflow.id}-${workflow.updated_at}-${Math.random()}`;
 
   const trigger = definition.trigger as Record<string, unknown> | undefined;
   return {
@@ -9739,9 +9762,14 @@ async function connectMockSocket(args: { onMessage: unknown }) {
     subscriptions: new Map(),
   });
 
-  window.setTimeout(() => {
+  if (getConfig()?.mock?.websocketAuthBeforeConnectResolves) {
     sendWsText(handler, ["AUTH", `mock-challenge-${wsId}`]);
-  }, 0);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+  } else {
+    window.setTimeout(() => {
+      sendWsText(handler, ["AUTH", `mock-challenge-${wsId}`]);
+    }, 0);
+  }
 
   return wsId;
 }
@@ -10230,6 +10258,7 @@ export function maybeInstallE2eTauriMocks() {
   mockAuthResponses.length = 0;
   mockChannelHistoryCloses.length = 0;
   relayWebsocketConnectAttemptStarts.length = 0;
+  mockAuthSigningAttempts = 0;
   deferredSendMessageLiveEchoes.length = 0;
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
@@ -12197,6 +12226,27 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_relay_agents":
         return handleListRelayAgents(activeConfig);
+      case "revalidate_relay_agents": {
+        const agents = await handleListRelayAgents(activeConfig);
+        const { pubkeys, channelId } = payload as {
+          pubkeys: string[];
+          channelId?: string;
+        };
+        const requested = new Set(
+          pubkeys.map((pubkey) => pubkey.toLowerCase()),
+        );
+        const revoked = new Set(
+          (activeConfig?.mock?.relayAgentRevalidationRevokedPubkeys ?? []).map(
+            (pubkey) => pubkey.toLowerCase(),
+          ),
+        );
+        return agents.filter(
+          (agent) =>
+            requested.has(agent.pubkey.toLowerCase()) &&
+            !revoked.has(agent.pubkey.toLowerCase()) &&
+            (!channelId || agent.channel_ids.includes(channelId)),
+        );
+      }
       case "list_personas":
         return handleListPersonas();
       case "create_persona":
@@ -13092,6 +13142,13 @@ export function maybeInstallE2eTauriMocks() {
       case "nip44_decrypt_from_self":
         return (payload as { ciphertext: string }).ciphertext;
       case "create_auth_event":
+        mockAuthSigningAttempts++;
+        if (
+          getConfig()?.mock?.stallFirstAuthSigning &&
+          mockAuthSigningAttempts === 1
+        ) {
+          return new Promise<string>(() => {});
+        }
         if (identity) {
           return JSON.stringify(
             await signWithIdentity(identity, {

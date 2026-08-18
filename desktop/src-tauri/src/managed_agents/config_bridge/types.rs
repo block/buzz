@@ -175,6 +175,25 @@ pub struct RuntimeConfigSurface {
     pub advanced: Vec<ConfigField>,
     pub extensions: Vec<ExtensionEntry>,
     pub sources: ConfigSourceReport,
+    /// #3493: `true` when the panel is reading from a user-set `CLAUDE_CONFIG_DIR`
+    /// rather than the default `~/.claude/`. Used to show the Keychain caveat
+    /// note in the panel: a custom config dir means a fresh Keychain namespace
+    /// (hash-suffixed), so the agent will be logged out unless the user also
+    /// manages `CLAUDE_SECURESTORAGE_CONFIG_DIR`.
+    #[serde(default)]
+    pub claude_config_dir_custom: bool,
+    /// B5: the real `configId` for the `thought_level` ACP config option,
+    /// as advertised by the adapter in `session/new`. Present only for claude
+    /// runtimes after the first session is created. The UI uses this to send
+    /// `set_config_option` without hardcoding the configId.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_config_id: Option<String>,
+    /// B5/I-7: the adapter-advertised option values for the `thought_level`
+    /// config option. Present when `effort_config_id` is Some. The UI renders
+    /// these instead of hardcoded low/medium/high so model-specific option sets
+    /// are reflected correctly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effort_options: Vec<AcpConfigOptionValue>,
 }
 
 /// Raw config values extracted from a runtime's config file.

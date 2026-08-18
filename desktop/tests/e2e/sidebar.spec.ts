@@ -531,6 +531,75 @@ test("aligns the sidebar search with the channel title outside the Buzz theme", 
   expect(Math.abs(searchCenter - channelTitleCenter)).toBeLessThanOrEqual(2);
 });
 
+test("scales the sidebar backward while its chrome closes", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const sidebar = page.getByTestId("app-sidebar");
+  const sidebarSurface = sidebar.locator("[data-sidebar-transition-content]");
+  await expect(sidebarSurface).toHaveCSS("opacity", "1");
+  await expect(sidebarSurface).toHaveCSS("scale", "none");
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+
+  await expect(sidebarSurface).toHaveCSS("opacity", "0");
+  await expect(sidebar).toHaveCSS("pointer-events", "none");
+  await expect(sidebar).toHaveCSS("overflow", "visible");
+  await expect(sidebar.locator(':scope > [data-sidebar="sidebar"]')).toHaveCSS(
+    "background-color",
+    await sidebarSurface.evaluate((element) => {
+      const sidebarElement = element.closest('[data-sidebar="sidebar"]');
+      if (!(sidebarElement instanceof HTMLElement)) return "";
+      return getComputedStyle(sidebarElement).backgroundColor;
+    }),
+  );
+  await expect(sidebarSurface).toHaveCSS("scale", "0.95");
+  await expect(sidebarSurface).toHaveCSS("translate", "24px");
+  const transformOrigin = await sidebarSurface.evaluate(
+    (element) => getComputedStyle(element).transformOrigin,
+  );
+  const [originX, originY] = transformOrigin.split(" ").map(Number.parseFloat);
+  const surfaceWidth = await sidebarSurface.evaluate(
+    (element) => element.clientWidth,
+  );
+  expect(Math.abs(originX - surfaceWidth / 2)).toBeLessThan(0.5);
+  expect(originY).toBe(0);
+  await expect(sidebarSurface).toHaveCSS(
+    "transition-property",
+    "opacity, scale, translate",
+  );
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0.2s");
+  await expect(sidebarSurface).toHaveCSS(
+    "transition-timing-function",
+    "linear",
+  );
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await expect(sidebarSurface).toHaveCSS("opacity", "1");
+  await expect(sidebar).toHaveCSS("pointer-events", "auto");
+  await expect(sidebarSurface).toHaveCSS("scale", "none");
+});
+
+test("disables the sidebar collapse transition for reduced motion", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+
+  const sidebarSurface = page
+    .getByTestId("app-sidebar")
+    .locator("[data-sidebar-transition-content]");
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0s");
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+
+  await expect(sidebarSurface).toHaveCSS("opacity", "0");
+  await expect(sidebarSurface).toHaveCSS("scale", "0.95");
+  await expect(sidebarSurface).toHaveCSS("translate", "24px");
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0s");
+});
+
 test("sidebar rail resizes without toggling the sidebar", async ({ page }) => {
   await page.goto("/");
   const rail = page.getByRole("button", { name: "Resize sidebar" });
