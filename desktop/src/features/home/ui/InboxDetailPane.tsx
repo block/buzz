@@ -622,7 +622,7 @@ function InboxMessageDetailPane({
                 </div>
               </div>
 
-              <TooltipProvider delayDuration={200}>
+              <TooltipProvider>
                 <div className="flex shrink-0 items-center gap-1">
                   <UpdateIndicator />
                   {canOpenChannel && contextChannelId ? (
