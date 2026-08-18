@@ -86,6 +86,14 @@ type MockCommandAvailability = {
 export type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  codexTaskBinding?: {
+    taskId: string;
+    threadName: string;
+    workspace: string;
+    updatedAt: string;
+    model?: string | null;
+    appServerUrl?: string | null;
+  };
   avatarUrl?: string | null;
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
@@ -845,6 +853,14 @@ type RawRelayAgent = {
 type RawManagedAgent = {
   pubkey: string;
   name: string;
+  codex_task_binding?: {
+    task_id: string;
+    thread_name: string;
+    workspace: string;
+    updated_at: string;
+    model?: string | null;
+    app_server_url?: string | null;
+  } | null;
   persona_id: string | null;
   /** Record-level harness/runtime pin (`null` when inheriting from the persona). */
   runtime: string | null;
@@ -1682,6 +1698,9 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
   return {
     pubkey: agent.pubkey,
     name: agent.name,
+    codex_task_binding: agent.codex_task_binding
+      ? { ...agent.codex_task_binding }
+      : null,
     persona_id: agent.persona_id,
     runtime: agent.runtime ?? null,
     relay_url: agent.relay_url,
@@ -2235,6 +2254,16 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
   return {
     pubkey: seed.pubkey,
     name: seed.name,
+    codex_task_binding: seed.codexTaskBinding
+      ? {
+          task_id: seed.codexTaskBinding.taskId,
+          thread_name: seed.codexTaskBinding.threadName,
+          workspace: seed.codexTaskBinding.workspace,
+          updated_at: seed.codexTaskBinding.updatedAt,
+          model: seed.codexTaskBinding.model ?? null,
+          app_server_url: seed.codexTaskBinding.appServerUrl ?? null,
+        }
+      : null,
     persona_id: seed.personaId ?? null,
     // Native serde always emits this key (`null` when unpinned) — the bridge
     // must mirror the wire shape, not omit the key.
@@ -9049,12 +9078,22 @@ async function resolveMockUploadDescriptorForBytes(
           ? "gif"
           : normalizedFilename.endsWith(".webp")
             ? "webp"
-            : "bin";
+            : (/\.([a-z0-9]{1,16})$/i.exec(normalizedFilename)?.[1] ?? "bin");
   const type = isAgentJson
     ? "application/json"
-    : extension === "bin"
-      ? "application/octet-stream"
-      : `image/${extension === "jpg" ? "jpeg" : extension}`;
+    : extension === "md"
+      ? "text/markdown"
+      : extension === "txt"
+        ? "text/plain"
+        : extension === "csv"
+          ? "text/csv"
+          : extension === "pdf"
+            ? "application/pdf"
+            : extension === "zip"
+              ? "application/zip"
+              : ["png", "jpg", "gif", "webp"].includes(extension)
+                ? `image/${extension === "jpg" ? "jpeg" : extension}`
+                : "application/octet-stream";
   return {
     url: `${getRelayHttpUrl(config)}/media/${sha256}.${extension}`,
     sha256,

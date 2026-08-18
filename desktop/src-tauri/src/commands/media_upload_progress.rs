@@ -1,3 +1,4 @@
+use base64::Engine;
 use std::{
     collections::HashMap,
     sync::{LazyLock, Mutex},
@@ -42,6 +43,7 @@ pub(super) struct UploadAttempt<'a> {
     pub auth_header: &'a str,
     pub mime: &'a str,
     pub sha256: &'a str,
+    pub filename: Option<&'a str>,
     pub body: bytes::Bytes,
     pub progress: Option<&'a (tauri::AppHandle, String)>,
     pub cancellation: Option<&'a CancellationToken>,
@@ -56,16 +58,23 @@ pub(super) async fn send_upload_attempt(
         auth_header,
         mime,
         sha256,
+        filename,
         body,
         progress,
         cancellation,
     } = attempt;
-    let req = state
+    let mut req = state
         .http_client
         .put(url)
         .header("Authorization", auth_header)
         .header("Content-Type", mime)
         .header("X-SHA-256", sha256);
+    if let Some(name) = filename {
+        req = req.header(
+            "X-Buzz-Filename",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name),
+        );
+    }
 
     let response = if let Some((app, progress_id)) = progress {
         let app = app.clone();

@@ -416,12 +416,13 @@ pub(crate) async fn upload_image_bytes(
         return Err("profile avatar must be an image".to_string());
     }
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, state, None, None).await
+    do_upload(body, &mime, None, state, None, None).await
 }
 
 async fn do_upload(
     body: Vec<u8>,
     mime: &str,
+    filename: Option<&str>,
     state: &AppState,
     progress: Option<(tauri::AppHandle, String)>,
     cancellation: Option<&CancellationToken>,
@@ -457,6 +458,7 @@ async fn do_upload(
             auth_header: &auth_header,
             mime,
             sha256: &sha256,
+            filename,
             body: body.clone(),
             progress: progress.as_ref(),
             cancellation,
@@ -471,6 +473,7 @@ async fn do_upload(
                 auth_header: &auth_header,
                 mime,
                 sha256: &sha256,
+                filename,
                 body,
                 progress: progress.as_ref(),
                 cancellation,
@@ -521,7 +524,13 @@ pub async fn upload_media(
 
     let mime = detect_and_validate_mime(&body)?;
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, &state, None, None).await
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_filename);
+    let mut descriptor = do_upload(body, &mime, filename.as_deref(), &state, None, None).await?;
+    descriptor.filename = filename;
+    Ok(descriptor)
 }
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
@@ -602,9 +611,13 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state, progress, None).await?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_filename);
+    let mut descriptor = do_upload(body, &mime, filename.as_deref(), state, progress, None).await?;
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", state, None, None).await {
+        match do_upload(poster, "image/jpeg", None, state, None, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
@@ -780,11 +793,20 @@ pub(super) async fn upload_media_bytes_inner(
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err("upload cancelled".to_string());
     }
-    let mut descriptor = do_upload(body, &mime, &state, progress, cancellation).await?;
+    let sanitized_filename = filename.as_deref().map(sanitize_filename);
+    let mut descriptor = do_upload(
+        body,
+        &mime,
+        sanitized_filename.as_deref(),
+        &state,
+        progress,
+        cancellation,
+    )
+    .await?;
 
     emit_media_upload_phase(&app, progress_id.as_deref(), "finishing");
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", &state, None, cancellation).await {
+        match do_upload(poster, "image/jpeg", None, &state, None, cancellation).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }

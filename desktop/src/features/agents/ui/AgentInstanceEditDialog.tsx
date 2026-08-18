@@ -115,6 +115,7 @@ export function AgentInstanceEditDialog({
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
   const startMutation = useStartManagedAgentMutation();
+  const isCodexTaskBound = agent.codexTaskBinding != null;
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
@@ -201,9 +202,11 @@ export function AgentInstanceEditDialog({
       setIsAvatarUploadPending(false);
       setIsAddHarnessOpen(false);
       runtimeTouched.current = false;
-      const matched =
-        runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
-        runtimes.find((r) => r.id === agent.agentCommand.trim());
+      const matched = isCodexTaskBound
+        ? runtimes.find((r) => r.id === "codex")
+        : (runtimes.find(
+            (r) => r.command?.trim() === agent.agentCommand.trim(),
+          ) ?? runtimes.find((r) => r.id === agent.agentCommand.trim()));
       setSelectedRuntimeId(matched ? matched.id : "custom");
       updateMutation.reset();
     }
@@ -214,13 +217,15 @@ export function AgentInstanceEditDialog({
     if (!open || runtimeTouched.current || runtimes.length === 0) {
       return;
     }
-    const matched =
-      runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
-      runtimes.find((r) => r.id === agent.agentCommand.trim());
+    const matched = isCodexTaskBound
+      ? runtimes.find((r) => r.id === "codex")
+      : (runtimes.find(
+          (r) => r.command?.trim() === agent.agentCommand.trim(),
+        ) ?? runtimes.find((r) => r.id === agent.agentCommand.trim()));
     if (matched) {
       setSelectedRuntimeId(matched.id);
     }
-  }, [open, runtimes, agent.agentCommand]);
+  }, [open, runtimes, agent.agentCommand, isCodexTaskBound]);
 
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
@@ -260,18 +265,20 @@ export function AgentInstanceEditDialog({
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
   const originalRuntimeSupportsProvider = React.useMemo(() => {
+    if (isCodexTaskBound) return false;
     const originalCommand = originalAgentCommand.trim();
     const matched =
       runtimes.find((r) => r.command?.trim() === originalCommand) ??
       runtimes.find((r) => r.id === originalCommand);
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
-  }, [runtimes, originalAgentCommand]);
+  }, [runtimes, originalAgentCommand, isCodexTaskBound]);
 
   // The runtime id active after submit. Inheriting resolves from the LINKED PERSONA's runtime
   // (that is what runs once the override is cleared, not the current override).
   // Falls back to dual-match (command path, then id) when no persona or its runtime is unset.
   // This single prospective id feeds BOTH the block-save gate and submit so they always agree.
   const prospectiveRuntimeId = React.useMemo(() => {
+    if (isCodexTaskBound) return "codex";
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
     }
@@ -297,6 +304,7 @@ export function AgentInstanceEditDialog({
     agent.agentCommand,
     selectedRuntime?.id,
     selectedRuntimeId,
+    isCodexTaskBound,
   ]);
 
   const llmProviderFieldVisible =
@@ -955,7 +963,7 @@ export function AgentInstanceEditDialog({
                 Provider
               </label>
               <PersonaDropdownField
-                disabled={updateMutation.isPending}
+                disabled={isCodexTaskBound || updateMutation.isPending}
                 id="edit-agent-runtime"
                 onValueChange={handleRuntimeDropdownChange}
                 options={runtimeDropdownOptions}

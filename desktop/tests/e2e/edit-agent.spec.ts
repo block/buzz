@@ -41,7 +41,10 @@ const PERSONA_ID = "persona-edit-e2e";
  * panel (agents view → agent card → Edit quick action) — EditAgentDialog's
  * only mount path.
  */
-async function openEditDialog(page: import("@playwright/test").Page) {
+async function openEditDialog(
+  page: import("@playwright/test").Page,
+  options: { expectProvider?: boolean } = {},
+) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
 
@@ -59,10 +62,12 @@ async function openEditDialog(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("edit-agent-dialog")).toBeVisible({
     timeout: 10_000,
   });
-  // Provider field visible = runtime catalog loaded and form settled.
-  await expect(page.locator("#edit-agent-llm-provider")).toBeVisible({
-    timeout: 10_000,
-  });
+  if (options.expectProvider ?? true) {
+    // Provider field visible = runtime catalog loaded and form settled.
+    await expect(page.locator("#edit-agent-llm-provider")).toBeVisible({
+      timeout: 10_000,
+    });
+  }
 }
 
 /**
@@ -105,6 +110,40 @@ test.describe("agent definition dialog", () => {
 });
 
 test.describe("edit agent dialog", () => {
+  test("Codex chat agents save without an LLM provider", async ({ page }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          runtime: "goose",
+          status: "stopped",
+          channelNames: ["agents"],
+          codexTaskBinding: {
+            taskId: "019ca4f0-0000-7000-8000-000000000001",
+            threadName: "Codex chat task",
+            workspace: "C:\\repo",
+            updatedAt: "2026-08-18T00:00:00.000Z",
+            model: "gpt-5.5",
+            appServerUrl: "http://127.0.0.1:45000",
+          },
+        },
+      ],
+    });
+
+    await openEditDialog(page, { expectProvider: false });
+
+    await expect(page.locator("#edit-agent-runtime")).toContainText("Codex");
+    await expect(page.locator("#edit-agent-runtime")).toBeDisabled();
+    await expect(page.locator("#edit-agent-llm-provider")).not.toBeVisible();
+    await page.locator("#edit-agent-name").fill("Codex Agent Renamed");
+
+    const submit = page.getByTestId("edit-agent-dialog-submit");
+    await expect(submit).toBeEnabled();
+    await submit.click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+  });
+
   test("owner-only-access build shows a disabled owner-only access control with an explanation", async ({
     page,
   }) => {

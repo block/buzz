@@ -1193,6 +1193,7 @@ impl BuzzClient {
                 let url = url.clone();
                 let mime = mime.clone();
                 let sha256 = sha256.clone();
+                let filename = filename.clone();
                 async move {
                     let auth_header =
                         sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
@@ -1204,6 +1205,11 @@ impl BuzzClient {
                                 .header("Authorization", auth_header)
                                 .header("Content-Type", &mime)
                                 .header("X-SHA-256", &sha256)
+                                .header(
+                                    "X-Buzz-Filename",
+                                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                        .encode(&filename),
+                                )
                                 .body(upload_body),
                         )
                         .send()
@@ -1244,6 +1250,7 @@ impl BuzzClient {
                 let legacy_url = legacy_url.clone();
                 let mime = mime.clone();
                 let sha256 = sha256.clone();
+                let filename = filename.clone();
                 async move {
                     let auth_header =
                         sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
@@ -1255,6 +1262,11 @@ impl BuzzClient {
                                 .header("Authorization", auth_header)
                                 .header("Content-Type", &mime)
                                 .header("X-SHA-256", &sha256)
+                                .header(
+                                    "X-Buzz-Filename",
+                                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                        .encode(&filename),
+                                )
                                 .body(upload_body),
                         )
                         .send()

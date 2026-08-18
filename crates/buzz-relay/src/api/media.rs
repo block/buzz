@@ -322,6 +322,19 @@ pub async fn upload_blob(
     body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
     let attribution = upload_attribution(&state, &auth, &headers).await;
+    // Optional client filename is transport metadata only. It is base64url
+    // encoded so Unicode names remain valid HTTP header values; the media
+    // validator accepts only a short safe extension and never trusts this for
+    // MIME or executable-content decisions.
+    let filename = headers
+        .get("x-buzz-filename")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(value)
+                .ok()
+        })
+        .and_then(|bytes| String::from_utf8(bytes).ok());
 
     let serving_write =
         buzz_deletion::acquire_serving_write(&state.db, auth.tenant.community(), "media_upload")
@@ -416,6 +429,7 @@ pub async fn upload_blob(
                         &auth.tenant,
                         &auth.auth_event,
                         bytes,
+                        filename.as_deref(),
                         attribution,
                     )
                     .await?

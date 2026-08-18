@@ -172,6 +172,21 @@ pub fn validate_file_content(
     bytes: &[u8],
     config: &MediaConfig,
 ) -> Result<(String, String), MediaError> {
+    validate_file_content_with_filename(bytes, config, None)
+}
+
+/// Validate a generic file and, when it has no detectable magic bytes, retain
+/// the caller's safe filename extension for the content-addressed URL.
+///
+/// The filename is presentation metadata only: MIME detection and the deny
+/// list below remain authoritative. Only a short ASCII extension is accepted,
+/// so a client cannot inject path separators or control characters into the
+/// storage key.
+pub fn validate_file_content_with_filename(
+    bytes: &[u8],
+    config: &MediaConfig,
+    filename: Option<&str>,
+) -> Result<(String, String), MediaError> {
     // 1. Size cap.
     if bytes.len() as u64 > config.max_file_bytes {
         return Err(MediaError::FileTooLarge {
@@ -214,8 +229,24 @@ pub fn validate_file_content(
                 .unwrap_or_else(|| kind.extension().to_string());
             Ok((mime, ext))
         }
-        None => Ok(("application/octet-stream".to_string(), "bin".to_string())),
+        None => Ok((
+            "application/octet-stream".to_string(),
+            safe_filename_extension(filename)
+                .unwrap_or("bin")
+                .to_string(),
+        )),
     }
+}
+
+fn safe_filename_extension(filename: Option<&str>) -> Option<&str> {
+    let extension = filename?.rsplit(['/', '\\']).next()?.rsplit_once('.')?.1;
+    if extension.is_empty() || extension.len() > 16 {
+        return None;
+    }
+    extension
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric())
+        .then_some(extension)
 }
 
 /// Whether a stored blob should be served inline (rendered in the client) or as
@@ -2595,6 +2626,24 @@ mod tests {
         let (mime, ext) = validate_file_content(b"hello, this is a text file\n", &config).unwrap();
         assert_eq!(mime, "application/octet-stream");
         assert_eq!(ext, "bin");
+    }
+
+    #[test]
+    fn test_validate_file_plaintext_preserves_safe_filename_extension() {
+        let config = test_config();
+        let (mime, ext) = validate_file_content_with_filename(
+            b"# release notes\n",
+            &config,
+            Some("release-notes.md"),
+        )
+        .unwrap();
+        assert_eq!(mime, "application/octet-stream");
+        assert_eq!(ext, "md");
+
+        let (_, fallback) =
+            validate_file_content_with_filename(b"data", &config, Some("../../payload.bad-ext!"))
+                .unwrap();
+        assert_eq!(fallback, "bin");
     }
 
     #[test]

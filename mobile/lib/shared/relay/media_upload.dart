@@ -451,6 +451,7 @@ class MediaUploadService {
       bytes,
       mimeType: 'application/octet-stream',
       allowGenericFile: true,
+      filename: _safeAttachmentFilename(pickedFile.name),
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
@@ -491,6 +492,7 @@ class MediaUploadService {
     Uint8List bytes, {
     required String mimeType,
     bool allowGenericFile = false,
+    String? filename,
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
@@ -506,6 +508,7 @@ class MediaUploadService {
       bytes: bytes,
       mimeType: mimeType,
       sha256: sha256,
+      filename: filename,
       path: _mediaUploadPath,
       onProgress: onProgress,
       cancellationToken: cancellationToken,
@@ -516,6 +519,7 @@ class MediaUploadService {
         bytes: bytes,
         mimeType: mimeType,
         sha256: sha256,
+        filename: filename,
         path: _legacyMediaUploadPath,
         onProgress: onProgress,
         cancellationToken: cancellationToken,
@@ -542,6 +546,7 @@ class MediaUploadService {
     required String mimeType,
     required String sha256,
     required String path,
+    String? filename,
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
@@ -553,7 +558,11 @@ class MediaUploadService {
     );
     request.contentLength = bytes.length;
     request.headers.addAll(
-      _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
+      _buildUploadHeaders(
+        mimeType: mimeType,
+        sha256: sha256,
+        filename: filename,
+      ),
     );
     final writeRequest = request.sink
         .addStream(_uploadByteStream(bytes, onProgress))
@@ -573,12 +582,18 @@ class MediaUploadService {
   Map<String, String> _buildUploadHeaders({
     required String mimeType,
     required String sha256,
+    String? filename,
   }) {
     final headers = <String, String>{
       'Authorization': _buildUploadAuthHeader(sha256),
       'Content-Type': mimeType,
       'X-SHA-256': sha256,
     };
+    if (filename != null && filename.isNotEmpty) {
+      headers['X-Buzz-Filename'] = base64Url
+          .encode(utf8.encode(filename))
+          .replaceAll('=', '');
+    }
     return headers;
   }
 

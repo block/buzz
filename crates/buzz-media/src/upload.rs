@@ -13,7 +13,7 @@ use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
-    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
+    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content_with_filename,
     validate_video_file,
 };
 
@@ -248,6 +248,7 @@ pub async fn process_file_upload(
     ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
+    filename: Option<&str>,
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
@@ -259,7 +260,10 @@ pub async fn process_file_upload(
             body,
             attribution,
         },
-        |bytes, cfg| validate_file_content(bytes, cfg),
+        {
+            let filename = filename.map(str::to_owned);
+            move |bytes, cfg| validate_file_content_with_filename(bytes, cfg, filename.as_deref())
+        },
         |input| async move {
             // Minimal sidecar — no thumbnail/dim/blurhash/duration for generic files.
             let meta = BlobMeta {
