@@ -1,25 +1,8 @@
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
-
-/// Await a knowledge-admission refresh before creating or polling an agent
-/// operation. The closure matters for operations such as `spawn_blocking`,
-/// which begin work as soon as they are created rather than when awaited.
-pub(crate) async fn after_refresh<Refresh, Operation, OperationFuture, Output>(
-    refresh: Refresh,
-    operation: Operation,
-) -> Output
-where
-    Refresh: Future<Output = ()>,
-    Operation: FnOnce() -> OperationFuture,
-    OperationFuture: Future<Output = Output>,
-{
-    refresh.await;
-    operation().await
-}
 
 pub(crate) struct CommandAdviserBackgroundServices {
     memory_sync: Option<Arc<crate::command_services::memory::MemorySyncScheduler>>,
@@ -96,30 +79,5 @@ pub(crate) fn migrate_command_team_parallelism(app: &AppHandle) {
         Err(error) => {
             eprintln!("buzz-desktop: Command Team parallelism migration failed: {error}");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use super::after_refresh;
-
-    #[tokio::test]
-    async fn knowledge_refresh_completes_before_agent_operation() {
-        let refreshed = AtomicBool::new(false);
-
-        let result = after_refresh(
-            async {
-                refreshed.store(true, Ordering::Release);
-            },
-            || async {
-                assert!(refreshed.load(Ordering::Acquire));
-                "restored"
-            },
-        )
-        .await;
-
-        assert_eq!(result, "restored");
     }
 }

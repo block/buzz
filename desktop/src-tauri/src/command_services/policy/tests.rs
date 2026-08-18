@@ -673,6 +673,31 @@ fn catalog_evidence_policy_binds_each_integration_to_its_active_identity() {
 }
 
 #[test]
+fn trusted_lan_catalog_uses_the_existing_loopback_memory_and_rag_contracts() {
+    let catalog = trusted_lan_runtime_catalog(
+        "http://127.0.0.1:18006/mcp",
+        "http://127.0.0.1:8005/mcp/",
+        &"a".repeat(64),
+    )
+    .expect("trusted LAN catalog");
+    let integrations: Value =
+        serde_json::from_str(&catalog.integrations_json).expect("integration JSON");
+    assert_eq!(integrations[0]["server_label"], "memory");
+    assert_eq!(integrations[0]["server_url"], "http://127.0.0.1:18006/mcp");
+    assert_eq!(integrations[1]["server_label"], "rag");
+    assert_eq!(integrations[1]["server_url"], "http://127.0.0.1:8005/mcp/");
+    assert!(integrations[1]["allowed_tools"]
+        .as_array()
+        .expect("RAG tools")
+        .contains(&json!("search_knowledge_base")));
+
+    let policy: Value = serde_json::from_str(&catalog.evidence_policy_json).expect("policy JSON");
+    assert_eq!(policy["mode"], "trusted_lan");
+    assert_eq!(policy["services"][0]["active_identity"], "node:trusted-lan");
+    assert_eq!(policy["services"][1]["active_identity"], "a".repeat(64));
+}
+
+#[test]
 fn rejects_catalog_mismatch_and_dangerous_requested_tools() {
     let mut candidate = admitted_service(KnowledgeServiceKind::Memory);
     candidate

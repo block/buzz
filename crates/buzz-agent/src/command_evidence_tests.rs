@@ -439,3 +439,49 @@ fn command_evidence_gate_rejects_stale_conflicted_and_outside_apple_file_allowli
         Err(EvidenceRejection::OutsideAllowlist)
     );
 }
+
+#[test]
+fn trusted_lan_mode_accepts_bounded_legacy_rag_but_keeps_the_tool_allowlist() {
+    let gate = CommandEvidenceGate::parse(
+        Some(
+            &json!({
+                "version": 1,
+                "mode": "trusted_lan",
+                "maximum_evidence_age_seconds": 86400,
+                "services": [{
+                    "server_label": "rag",
+                    "kind": "rag",
+                    "active_identity": "a".repeat(64)
+                }],
+                "allowed_apple_ids": [],
+                "allowed_file_paths": []
+            })
+            .to_string(),
+        ),
+        &BTreeMap::from([(
+            "rag".to_string(),
+            BTreeSet::from(["search_knowledge_base".to_string()]),
+        )]),
+    )
+    .expect("trusted LAN policy");
+    let legacy = json!({
+        "query": "ANZAC Class Frigate FFH pivot point",
+        "total": 1,
+        "results": [{
+            "point_id": "249238f3-a746-5ac3-87c1-b213f815e4e6",
+            "doc_name": "ANZAC Class Ship Handling Guide 2014.pdf",
+            "collection": "navy-publications",
+            "page_no": 5,
+            "text": "The pivot point in an FFH making headway is the Bridge pelorus."
+        }]
+    });
+
+    assert_eq!(
+        gate.validate_tool_call(&call("rag", "search_knowledge_base", legacy.clone())),
+        Ok(())
+    );
+    assert_eq!(
+        gate.validate_tool_call(&call("rag", "delete_document", legacy)),
+        Err(EvidenceRejection::UntrustedService)
+    );
+}

@@ -391,7 +391,11 @@ async fn test_unsupported_content_block() {
             "session/prompt",
             json!({
                 "sessionId": sid,
-                "prompt": [{ "type": "image", "data": "..." }],
+                "prompt": [{
+                    "type": "image",
+                    "data": "...",
+                    "mimeType": "image/png"
+                }],
             }),
         )
         .await;
@@ -400,7 +404,7 @@ async fn test_unsupported_content_block() {
     assert!(resp["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("unsupported content block"));
+        .contains("image input is available only through the LM Studio native runtime"));
 
     h.shutdown().await;
 }
