@@ -9,7 +9,8 @@ use buzz_core_pkg::pairing::types::{AbortReason, PayloadType};
 use futures_util::{SinkExt, StreamExt};
 use nostr::ToBech32;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
@@ -274,13 +275,13 @@ pub async fn cancel_pairing(pairing: State<'_, PairingHandle>) -> Result<(), Str
     Ok(())
 }
 
-async fn pairing_ws_task(
+async fn pairing_ws_task<R: Runtime>(
     relay_url: String,
     session: Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: PairingTaskContext,
     cancel: CancellationToken,
     mut outbound_rx: mpsc::Receiver<String>,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) {
     if let Err(e) = pairing_ws_task_inner(
         &relay_url,
@@ -299,17 +300,33 @@ async fn pairing_ws_task(
     clear_pairing_session_if_current(&session, &context.generation, context.task_generation).await;
 }
 
-async fn pairing_ws_task_inner(
+async fn pairing_ws_task_inner<R: Runtime>(
     relay_url: &str,
     session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
     context: &PairingTaskContext,
     cancel: &CancellationToken,
     outbound_rx: &mut mpsc::Receiver<String>,
-    app: &AppHandle,
+    app: &AppHandle<R>,
 ) -> Result<(), String> {
     let (ws, _) = connect_async(relay_url)
         .await
         .map_err(|e| format!("WebSocket connection failed: {e}"))?;
+    pairing_ws_task_on_socket(ws, relay_url, session, context, cancel, outbound_rx, app).await
+}
+
+async fn pairing_ws_task_on_socket<R, S>(
+    ws: tokio_tungstenite::WebSocketStream<S>,
+    relay_url: &str,
+    session: &Arc<tokio::sync::Mutex<Option<PairingSession>>>,
+    context: &PairingTaskContext,
+    cancel: &CancellationToken,
+    outbound_rx: &mut mpsc::Receiver<String>,
+    app: &AppHandle<R>,
+) -> Result<(), String>
+where
+    R: Runtime,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (mut write, mut read) = ws.split();
 
     // Start the hard timeout as soon as the transport is live so NIP-42 and
@@ -466,8 +483,8 @@ async fn pairing_ws_task_inner(
     Ok(())
 }
 
-async fn import_recovered_identity(
-    app: &AppHandle,
+async fn import_recovered_identity<R: Runtime>(
+    app: &AppHandle<R>,
     nsec: Zeroizing<String>,
     generation: &Arc<AtomicU64>,
     generation_fence: &Arc<std::sync::Mutex<()>>,
@@ -538,11 +555,11 @@ fn recovery_result_after_completion(
     imported
 }
 
-fn finish_recovery(
+fn finish_recovery<R: Runtime>(
     imported: Result<(), String>,
     completion_result: Result<(), String>,
     context: &PairingTaskContext,
-    app: &AppHandle,
+    app: &AppHandle<R>,
 ) -> Result<(), String> {
     if !pairing_task_is_current(&context.generation, context.task_generation) {
         return Ok(());
