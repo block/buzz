@@ -49,7 +49,7 @@ part 'thread_detail_page/thread_message.dart';
 const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
 const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
-const _landingHighlightOpacity = 0.12 * 0.4;
+const _landingHighlightOpacity = 0.12;
 
 /// Full-screen thread detail page.
 ///

@@ -4390,7 +4390,7 @@ void main() {
                   .decoration
               as BoxDecoration;
       expect(enteringDecoration.color!.a, greaterThan(0));
-      expect(enteringDecoration.color!.a, lessThan(0.12 * 0.4));
+      expect(enteringDecoration.color!.a, lessThan(0.12));
 
       await tester.pump(const Duration(milliseconds: 150));
       final visibleDecoration =
@@ -4400,7 +4400,7 @@ void main() {
                   )
                   .decoration
               as BoxDecoration;
-      expect(visibleDecoration.color!.a, closeTo(0.12 * 0.4, 0.001));
+      expect(visibleDecoration.color!.a, closeTo(0.12, 0.001));
     });
 
     testWidgets('waits for a delayed target jump before highlighting', (
@@ -4485,7 +4485,7 @@ void main() {
       final enteringDecoration =
           tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
       expect(enteringDecoration.color!.a, greaterThan(0));
-      expect(enteringDecoration.color!.a, lessThan(0.12 * 0.4));
+      expect(enteringDecoration.color!.a, lessThan(0.12));
     });
 
     testWidgets('waits for a retry before jumping to a hydrated target', (
@@ -4654,7 +4654,7 @@ void main() {
       final highlightedDecoration =
           tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
       expect(highlightedDecoration.color!.a, greaterThan(0));
-      expect(highlightedDecoration.color!.a, lessThan(0.12 * 0.4));
+      expect(highlightedDecoration.color!.a, lessThan(0.12));
     });
 
     testWidgets('opens a nested reply in its direct-parent thread', (
@@ -4717,7 +4717,7 @@ void main() {
       final decoration = highlighted.decoration as BoxDecoration;
       final initialHighlight = decoration.color!;
       expect(initialHighlight, isNot(Colors.transparent));
-      expect(initialHighlight.a, closeTo(0.12 * 0.4, 0.001));
+      expect(initialHighlight.a, closeTo(0.12, 0.001));
 
       await tester.pump(const Duration(milliseconds: 2999));
       final heldDecoration =
