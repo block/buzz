@@ -11,6 +11,7 @@ mod queue;
 mod relay;
 mod setup_mode;
 mod usage;
+mod wake_ticket;
 
 pub use usage::TurnUsage;
 
@@ -46,6 +47,7 @@ use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+use wake_ticket::WakeTicketStore;
 
 /// Check if argv[1] matches a subcommand name, before any clap parsing.
 ///
@@ -286,6 +288,116 @@ pub(crate) async fn is_dm_channel(
     }
 }
 
+/// Re-validate that this agent is still a member of `channel_id`, for
+/// wake-ticket boot replay (`PLANS/WAKE_TICKET_SPEC.md` §Gate: "Replay
+/// re-validates membership + author gate. Fail → drop.").
+///
+/// Queries kind:39002 (NIP-29 group members) scoped to both this pubkey and
+/// the one channel — the same shape as `HarnessRelay::discover_channels`'s
+/// Step 1, narrowed so replay doesn't refetch the whole membership set per
+/// ticket.
+///
+/// Returns `None` on a transport/query failure rather than fail-closing to
+/// "not a member". `drop` on this path is meant for a *confirmed* deny — the
+/// bounce a wake ticket exists to survive is often network-adjacent (Railway
+/// blip, DNS hiccup), and a transient REST failure at boot must not
+/// permanently delete work that a moment's retry (next boot) could recover.
+/// Callers treat `None` as "skip this boot, leave the ticket as-is".
+async fn is_still_member(
+    channel_id: Uuid,
+    pubkey_hex: &str,
+    rest: &relay::RestClient,
+) -> Option<bool> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(p_tag, [pubkey_hex.to_string()])
+        .custom_tags(d_tag, [channel_id.to_string()]);
+
+    match rest.query(&[filter]).await {
+        Ok(v) => Some(v.as_array().is_some_and(|arr| !arr.is_empty())),
+        Err(e) => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                error = %e,
+                "wake-ticket replay: membership check failed — skipping this boot (not a confirmed deny)"
+            );
+            None
+        }
+    }
+}
+
+/// Outcome of re-validating one wake ticket at boot, before it's pushed back
+/// into the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayDecision {
+    /// Confirmed member + confirmed author-allowed: push into the queue.
+    Push,
+    /// Confirmed deny (definite not-a-member, or the author gate rejects a
+    /// resolved, non-uncertain channel type): drop, never replay again.
+    Drop,
+    /// A dependency (channel-type resolution or the membership query)
+    /// couldn't be confirmed this boot — leave the ticket exactly as it was
+    /// (`open`/`claimed`) and simply don't push it. It's retried in full on
+    /// the next boot, same as if this boot never ran.
+    SkipThisBoot,
+}
+
+/// Re-validate one wake ticket at boot: still a channel member, and the
+/// author gate still admits this event's author. See `ReplayDecision` for
+/// what each outcome means and `is_still_member` for why a transport failure
+/// is `SkipThisBoot`, not `Drop`.
+///
+/// Channel-type resolution failure is the same story as the membership
+/// query: `ChannelInfoResolver::resolve` returning `None` means "couldn't
+/// fetch metadata this boot" (see its own fail-closed-to-DM behavior, which
+/// is intentional for the *live* author gate — but here, tying that
+/// unresolved state to `is_dm=true` would run `author_allowed` under DM
+/// rules against a channel that probably isn't one, and drop a normal
+/// mention because of a metadata fetch blip). Resolve it explicitly instead
+/// of going through `is_dm_channel`, and treat "unresolved" as uncertain.
+async fn validate_ticket_for_replay(
+    ticket: &wake_ticket::Ticket,
+    respond_to: &RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+    pubkey_hex: &str,
+    owner_cache: &OwnerCache,
+    channel_info: &pool::ChannelInfoResolver,
+    rest: &relay::RestClient,
+) -> ReplayDecision {
+    let is_dm = match channel_info.resolve(ticket.channel_id).await {
+        Some(info) => info.channel_type == "dm",
+        None => return ReplayDecision::SkipThisBoot,
+    };
+
+    let author = ticket.event.pubkey.to_hex();
+    match author_allowed_for_replay(
+        respond_to,
+        respond_to_allowlist,
+        &author,
+        is_dm,
+        owner_cache,
+        rest,
+    )
+    .await
+    {
+        Some(true) => {}
+        Some(false) => return ReplayDecision::Drop,
+        None => return ReplayDecision::SkipThisBoot,
+    }
+
+    match is_still_member(ticket.channel_id, pubkey_hex, rest).await {
+        Some(true) => ReplayDecision::Push,
+        Some(false) => ReplayDecision::Drop,
+        None => ReplayDecision::SkipThisBoot,
+    }
+}
+
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
 async fn check_sibling_via_profile(
@@ -308,6 +420,18 @@ async fn check_sibling_via_profile(
         _ => return false, // timeout or error — fail closed
     };
 
+    extract_verified_sibling(&resp, author, expected_owner)
+}
+
+/// Extract and cryptographically verify a NIP-OA sibling attestation from an
+/// already-fetched kind:0 profile query response. Pure — no network, no
+/// error-vs-empty distinction to make. Shared by [`check_sibling_via_profile`]
+/// (live path, its caller fails closed to `false` on any non-match) and
+/// [`check_sibling_via_profile_for_replay`] (wake-ticket boot replay,
+/// tri-state) so the tag-parsing / signature-verification logic has exactly
+/// one implementation — the two callers differ only in how they got `resp`
+/// and what an *absence* of a valid tag means for their caller.
+fn extract_verified_sibling(resp: &serde_json::Value, author: &str, expected_owner: &str) -> bool {
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
@@ -359,6 +483,111 @@ async fn check_sibling_via_profile(
     }
 
     false
+}
+
+/// Replay-only counterpart to [`check_sibling_via_profile`]: same query,
+/// same NIP-OA verification via [`extract_verified_sibling`], but
+/// distinguishes a transport/timeout failure (`None` — couldn't check, not a
+/// confirmed answer) from a completed query that simply found no valid
+/// sibling attestation (`Some(false)` — a real, confirmed no).
+///
+/// Per `PLANS/WAKE_TICKET_SPEC.md` §Gate (Oksana, 2026-08-15, second pass):
+/// this is the path Zar's actual traffic hits — sibling agents, not the
+/// owner directly — so a Railway blink landing on *this* query was deleting
+/// tickets just as surely as the membership/channel-type checks. The live
+/// [`check_sibling_via_profile`] intentionally keeps failing closed to
+/// `false` for the live turn-firing decision; that tradeoff is untouched.
+async fn check_sibling_via_profile_for_replay(
+    author: &str,
+    expected_owner: &str,
+    rest_client: &relay::RestClient,
+) -> Option<bool> {
+    let author_pk = match nostr::PublicKey::from_hex(author) {
+        Ok(pk) => pk,
+        // Malformed pubkey isn't a transport problem — it can never resolve
+        // to a valid sibling attestation no matter how many times we ask.
+        Err(_) => return Some(false),
+    };
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .author(author_pk)
+        .limit(1);
+
+    let resp = match tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter]))
+        .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(_)) | Err(_) => return None, // timeout or query error — unknown, not confirmed
+    };
+
+    Some(extract_verified_sibling(&resp, author, expected_owner))
+}
+
+/// Replay-only counterpart to [`is_owner_or_sibling`]. See
+/// [`check_sibling_via_profile_for_replay`] for why this distinguishes
+/// "couldn't check" from "confirmed no". A confirmed result (owner, cache
+/// hit, or a completed profile query) is cached the same way the live path
+/// caches it — `None` results are never cached, so the next ticket (or the
+/// next boot) gets a fresh attempt instead of a pinned unknown.
+async fn is_owner_or_sibling_for_replay(
+    author: &str,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> Option<bool> {
+    let my_owner = match owner_cache.get() {
+        Some(o) => o,
+        // No owner configured is a confirmed, static fact — not a transport
+        // problem — so this fails closed exactly like the live path.
+        None => return Some(false),
+    };
+
+    if author == my_owner {
+        return Some(true);
+    }
+
+    if let Some(cached) = owner_cache.is_known_sibling(author) {
+        return Some(cached);
+    }
+
+    let is_sibling = check_sibling_via_profile_for_replay(author, my_owner, rest_client).await;
+    if let Some(confirmed) = is_sibling {
+        owner_cache.cache_sibling(author.to_string(), confirmed);
+    }
+    is_sibling
+}
+
+/// Replay-only counterpart to [`author_allowed`] — same decision tree
+/// (owner ∪ allowlist ∪ siblings, DM hardening), but every network-backed
+/// leaf can return "unknown" instead of being forced to a boolean. See
+/// [`ReplayDecision`] for how callers use `None` here.
+async fn author_allowed_for_replay(
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    author: &str,
+    is_dm: bool,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> Option<bool> {
+    if is_dm {
+        return match respond_to {
+            RespondTo::Nobody => Some(false),
+            _ => is_owner_or_sibling_for_replay(author, owner_cache, rest_client).await,
+        };
+    }
+    match respond_to {
+        RespondTo::Anyone => Some(true),
+        RespondTo::Nobody => Some(false),
+        RespondTo::OwnerOnly => {
+            is_owner_or_sibling_for_replay(author, owner_cache, rest_client).await
+        }
+        RespondTo::Allowlist => {
+            if allowlist.contains(author) {
+                Some(true)
+            } else {
+                is_owner_or_sibling_for_replay(author, owner_cache, rest_client).await
+            }
+        }
+    }
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -1973,6 +2202,114 @@ async fn tokio_main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
+    // ── Wake-ticket store + boot replay ─────────────────────────────────────
+    //
+    // Must run before `HarnessRelay::connect()` / `set_startup_watermark()`
+    // below — see `PLANS/WAKE_TICKET_SPEC.md` §Gate ("Snapshot, not
+    // REQ-by-id"). Replayed events need to already be in `queue` before the
+    // relay subscribes, so the connect-time watermark can never treat them
+    // as pre-history; `seed_seen_ids` (sent right after connect, before any
+    // channel subscribe) needs their ids ready by then too. `queue` itself
+    // therefore also moves up from its old post-connect declaration.
+    let wake_tickets: Option<Arc<WakeTicketStore>> = match &config.wake_ticket_dir {
+        Some(dir) => match WakeTicketStore::open(dir) {
+            Ok(store) => Some(Arc::new(store)),
+            Err(e) => {
+                // Lock-fail / unavailable dir is fatal: dual-run of the same
+                // identity against the same ticket dir is a crash, not a race.
+                anyhow::bail!("wake-ticket store at {} failed to open: {e}", dir.display());
+            }
+        },
+        None => None,
+    };
+
+    let dedup_mode = config.dedup_mode;
+    let mut queue =
+        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let mut wake_ticket_replay_seen_ids: Vec<String> = Vec::new();
+
+    if let Some(store) = &wake_tickets {
+        let mut pending = store.pending_for_replay();
+        // Deterministic order: oldest mention first, so a crash-loop doesn't
+        // keep reshuffling replay order and starve an old ticket.
+        pending.sort_by_key(|t| t.created_at);
+
+        if !pending.is_empty() {
+            // Lightweight, pre-connect REST client sharing this run's HTTP
+            // credentials — mirrors `HarnessRelay::rest_client()`, but no
+            // `HarnessRelay` exists yet this early in boot.
+            let replay_rest_client = relay::RestClient {
+                http: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .connect_timeout(std::time::Duration::from_secs(5))
+                    .build()
+                    .map_err(|e| {
+                        anyhow::anyhow!("wake-ticket replay: failed to build HTTP client: {e}")
+                    })?,
+                base_url: relay::relay_ws_to_http(&config.relay_url),
+                keys: config.keys.clone(),
+                auth_tag_json: relay_auth_tag
+                    .as_ref()
+                    .and_then(|t| serde_json::to_string(t.as_slice()).ok()),
+            };
+            let replay_owner_cache = OwnerCache::new(resolve_agent_owner(&config));
+            let replay_channel_info =
+                pool::ChannelInfoResolver::new(HashMap::new(), replay_rest_client.clone());
+
+            let mut replayed = 0usize;
+            let mut dropped = 0usize;
+            let mut skipped = 0usize;
+            for ticket in pending {
+                match validate_ticket_for_replay(
+                    &ticket,
+                    &config.respond_to,
+                    &config.respond_to_allowlist,
+                    &pubkey_hex,
+                    &replay_owner_cache,
+                    &replay_channel_info,
+                    &replay_rest_client,
+                )
+                .await
+                {
+                    ReplayDecision::Drop => {
+                        tracing::info!(
+                            event_id = %ticket.event_id,
+                            channel_id = %ticket.channel_id,
+                            "wake-ticket replay: confirmed deny — dropping"
+                        );
+                        store.drop_unvalidated(&ticket.event_id);
+                        dropped += 1;
+                    }
+                    ReplayDecision::SkipThisBoot => {
+                        tracing::info!(
+                            event_id = %ticket.event_id,
+                            channel_id = %ticket.channel_id,
+                            "wake-ticket replay: re-validation inconclusive (transport/query \
+                             failure) — leaving ticket as-is, retrying next boot"
+                        );
+                        skipped += 1;
+                    }
+                    ReplayDecision::Push => {
+                        queue.push(QueuedEvent {
+                            channel_id: ticket.channel_id,
+                            event: ticket.event.clone(),
+                            received_at: std::time::Instant::now(),
+                            prompt_tag: ticket.prompt_tag.clone(),
+                        });
+                        wake_ticket_replay_seen_ids.push(ticket.event_id.clone());
+                        replayed += 1;
+                    }
+                }
+            }
+            tracing::info!(
+                replayed,
+                dropped,
+                skipped,
+                "wake-ticket boot replay complete"
+            );
+        }
+    }
+
     let mut relay =
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
@@ -1984,6 +2321,16 @@ async fn tokio_main() -> Result<()> {
     // protection, which is the same as the pre-fix behaviour).
     if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
         tracing::warn!("failed to set startup watermark: {e}");
+    }
+
+    // Seed seen_ids for every wake-ticket event replayed above, before any
+    // channel subscription is sent — otherwise the 5s subscribe-window dedup
+    // cannot tell a replayed ticket apart from a genuine live re-delivery of
+    // the same event and would hand it to the agent twice.
+    if !wake_ticket_replay_seen_ids.is_empty() {
+        if let Err(e) = relay.seed_seen_ids(wake_ticket_replay_seen_ids).await {
+            tracing::warn!("failed to seed seen_ids from wake-ticket replay: {e}");
+        }
     }
 
     tracing::info!("connected to relay at {}", config.relay_url);
@@ -2147,9 +2494,6 @@ async fn tokio_main() -> Result<()> {
     }
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
-    let dedup_mode = config.dedup_mode;
-    let mut queue =
-        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -2207,6 +2551,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        wake_tickets: wake_tickets.clone(),
     });
 
     if !config.memory_enabled {
@@ -2693,6 +3038,12 @@ async fn tokio_main() -> Result<()> {
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
+                                    if let Some(store) = &ctx.wake_tickets {
+                                        // Channel-removed: drop, never replay
+                                        // (gate §Gate — dead-letter / auth-fail /
+                                        // channel-removed all drop, keep for audit).
+                                        store.mark_drop(&drained_ids);
+                                    }
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2930,6 +3281,26 @@ async fn tokio_main() -> Result<()> {
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
                             });
+                            // Wake ticket: durable `open` record, written only for
+                            // events the in-memory queue actually accepted (a
+                            // Drop-mode discard for an in-flight channel is not a
+                            // ticket — see `EventQueue::push`). Uses `event_for_steer`
+                            // (already cloned above) since `buzz_event.event` was
+                            // just moved into the queue push.
+                            if accepted {
+                                if let Some(store) = &ctx.wake_tickets {
+                                    store.write_open(
+                                        &event_for_steer,
+                                        buzz_event.channel_id,
+                                        &pubkey_hex,
+                                        &prompt_tag_for_steer,
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs(),
+                                    );
+                                }
+                            }
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
                             // Fire-and-forget: on rare fast-failure paths the
@@ -3167,6 +3538,7 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
+                    ctx.wake_tickets.as_deref(),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3840,6 +4212,11 @@ fn dispatch_pending(
         };
         tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
 
+        if let Some(store) = &ctx.wake_tickets {
+            let ids: Vec<String> = batch.events.iter().map(|e| e.event.id.to_hex()).collect();
+            store.mark_claimed(&ids);
+        }
+
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
@@ -3969,6 +4346,7 @@ fn handle_prompt_result(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
+    wake_tickets: Option<&wake_ticket::WakeTicketStore>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -4005,6 +4383,17 @@ fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    // Wake-ticket fate, decided alongside the batch's requeue/dead-letter
+    // fate below (same branches, same reasoning) rather than re-derived from
+    // `result.outcome` afterward — `result.batch` is `None` on `Ok` (nothing
+    // to requeue) and also `None` in `DedupMode::Drop` regardless of
+    // outcome, so "was this batch actually dead-lettered" can only be
+    // answered inside this match, not reconstructed from the outcome alone.
+    // `true` = every ticket still `claimed` for this channel becomes `drop`
+    // (dead-lettered / auth-failed / channel-removed — never replayed).
+    // `false` leaves tickets as-is (open/claimed) unless the `Ok` path below
+    // separately marks them `done`.
+    let mut should_drop_tickets = false;
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -4053,6 +4442,7 @@ fn handle_prompt_result(
                 );
                 spawn_failure_notice(rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+                should_drop_tickets = true;
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -4071,6 +4461,7 @@ fn handle_prompt_result(
                     );
                     spawn_failure_notice(rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
+                    should_drop_tickets = true;
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
@@ -4089,6 +4480,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                should_drop_tickets = true;
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4103,6 +4495,7 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                should_drop_tickets = true;
             }
         } else {
             tracing::debug!(
@@ -4111,11 +4504,43 @@ fn handle_prompt_result(
                 "dropping failed batch for removed channel"
             );
             hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
+            should_drop_tickets = true;
         }
     }
 
     match &result.source {
-        PromptSource::Channel(ch) => queue.mark_complete(*ch),
+        PromptSource::Channel(ch) => {
+            queue.mark_complete(*ch);
+            // `done`/`drop` predicate — see `PLANS/WAKE_TICKET_SPEC.md` §Gate
+            // ("`mark_complete` is not `done`"). Looked up by channel rather
+            // than threaded from the dispatched batch: `result.batch` is
+            // `None` on the `Ok` path (nothing to requeue) and always `None`
+            // in `DedupMode::Drop`, so it cannot carry the completed event
+            // ids here. This is still exactly *this* batch's ids, not
+            // "every claimed ticket on the channel ever": only one batch can
+            // be claimed/in-flight per channel at a time (`flush_next` only
+            // picks non-in-flight channels), so whatever is `Claimed` for
+            // `ch` right now is precisely what this turn was dispatched with.
+            //
+            // Marking `done` does NOT wait for the channel's queue to drain.
+            // A later event (B) arriving mid-turn and still being queued when
+            // this turn (A) completes does not mean A is unfinished — it
+            // means B is separate, still-`open` work. Gating `done` on an
+            // empty queue left A `claimed` indefinitely whenever traffic kept
+            // arriving, so a bounce mid-queue replayed an already-completed
+            // turn a second time — the exact `01fa1107` class this ticket
+            // exists to prevent (caught in review, not shipped).
+            if let Some(store) = wake_tickets {
+                if should_drop_tickets {
+                    store.mark_drop(&store.claimed_event_ids_for_channel(*ch));
+                } else if matches!(result.outcome, PromptOutcome::Ok(_)) {
+                    store.mark_done(&store.claimed_event_ids_for_channel(*ch));
+                }
+                // Cancelled/CancelDrainTimeout/requeued-with-budget-remaining/
+                // pool-exhausted/panic: leave tickets `open` or `claimed` —
+                // the work is still pending, not lost and not finished.
+            }
+        }
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
 
@@ -7153,6 +7578,7 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            wake_ticket_dir: None,
         }
     }
 
@@ -7376,6 +7802,7 @@ mod error_outcome_emission_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            wake_ticket_dir: None,
         }
     }
 
@@ -7481,6 +7908,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
@@ -7551,6 +7979,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
             None,
         );
@@ -7667,6 +8096,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
@@ -7729,6 +8159,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -7897,6 +8328,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                None,
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -7986,6 +8418,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                None,
                 None,
                 None,
             );
@@ -8094,6 +8527,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                None,
             );
             (
                 queue.pending_channels(),
@@ -8185,6 +8619,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -8279,6 +8714,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -8395,6 +8831,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -8528,6 +8965,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -8712,6 +9150,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         // The batch must not be requeued: pending_channels returns 0.
@@ -8798,6 +9237,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
+            None,
         );
 
         // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
@@ -8810,6 +9250,397 @@ mod error_outcome_emission_tests {
             queue.queued_event_count(&channel_id),
             1,
             "non-auth application error must preserve the event for retry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod wake_ticket_wiring_tests {
+    //! Tests the wake-ticket wiring inside `handle_prompt_result` and the
+    //! boot-replay validation helpers — the state-machine driving logic that
+    //! `wake_ticket::tests` (store-only) can't reach. Added per Oksana's
+    //! 2026-08-15 review of PR #5940 (block/buzz), which found two real bugs
+    //! here: `done` gated on empty queue depth (left an already-completed
+    //! batch `claimed` forever whenever more traffic kept arriving — a
+    //! guaranteed duplicate replay on the next bounce), and replay
+    //! re-validation treating a REST transport failure as a confirmed deny
+    //! (permanently deleting work over a network blip). See
+    //! `PLANS/WAKE_TICKET_SPEC.md` §Gate.
+
+    use super::*;
+    use crate::pool::{AgentPool, PromptOutcome, PromptResult, PromptSource, TimeoutKind};
+    use crate::queue::{BatchEvent, FlushBatch};
+    use crate::wake_ticket::{TicketState, WakeTicketStore};
+    use nostr::{EventBuilder, Keys, Kind};
+    use std::collections::HashSet;
+
+    fn test_config() -> Config {
+        Config {
+            keys: nostr::Keys::generate(),
+            relay_url: "ws://localhost:3000".into(),
+            agent_command: "true".into(),
+            agent_args: vec![],
+            mcp_command: "test-mcp-server".into(),
+            idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
+            max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            agents: 1,
+            heartbeat_interval_secs: 0,
+            turn_liveness_secs: 10,
+            heartbeat_prompt: None,
+            system_prompt: None,
+            team_instructions: None,
+            initial_message: None,
+            subscribe_mode: config::SubscribeMode::All,
+            dedup_mode: config::DedupMode::Queue,
+            multiple_event_handling: config::MultipleEventHandling::Queue,
+            ignore_self: true,
+            kinds_override: None,
+            channels_override: None,
+            no_mention_filter: false,
+            config_path: std::path::PathBuf::from("./buzz-acp.toml"),
+            context_message_limit: 12,
+            max_turns_per_session: 0,
+            presence_enabled: true,
+            typing_enabled: true,
+            memory_enabled: false,
+            model: None,
+            session_title: None,
+            permission_mode: config::PermissionMode::BypassPermissions,
+            respond_to: config::RespondTo::Anyone,
+            respond_to_allowlist: HashSet::new(),
+            allowed_respond_to: vec![],
+            persona_env_vars: vec![],
+            has_generated_codex_config: false,
+            relay_observer: false,
+            exit_after_inactivity_secs: 0,
+            lazy_pool: false,
+            idle_pool_sleep_secs: 0,
+            agent_owner: None,
+            no_base_prompt: false,
+            base_prompt_content: None,
+            wake_ticket_dir: None,
+        }
+    }
+
+    async fn dummy_agent(index: usize) -> OwnedAgent {
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn cat as inert agent"),
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        }
+    }
+
+    fn signed_event(content: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    /// Drive `outcome` (and optionally a dispatched `batch`) through
+    /// `handle_prompt_result` for `channel_id`, with `store` wired in as the
+    /// wake-ticket store.
+    async fn run_result(
+        store: &WakeTicketStore,
+        channel_id: Uuid,
+        outcome: PromptOutcome,
+        batch: Option<FlushBatch>,
+    ) {
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".into(),
+            outcome,
+            batch,
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+            Some(store),
+        );
+    }
+
+    /// Oksana's repro, verbatim: "A in flight, B arrives, A completes Ok,
+    /// bounce. A is still `claimed`. Replay. Second turn." Gating `done` on
+    /// an empty queue left A `claimed` forever whenever traffic kept
+    /// arriving — the fix marks exactly the completed batch's ids `done`,
+    /// regardless of what else is queued.
+    #[tokio::test]
+    async fn ok_with_more_events_queued_still_marks_this_batch_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WakeTicketStore::open(tmp.path()).unwrap();
+        let channel_id = Uuid::new_v4();
+        let pubkey = Keys::generate().public_key().to_hex();
+
+        let event_a = signed_event("a");
+        let event_b = signed_event("b");
+        store.write_open(&event_a, channel_id, &pubkey, "@mention", 1);
+        store.write_open(&event_b, channel_id, &pubkey, "@mention", 2);
+        // A was dispatched and claimed; B arrived afterward and is still open
+        // — only one batch can be claimed/in-flight per channel at a time.
+        store.mark_claimed(&[event_a.id.to_hex()]);
+
+        run_result(
+            &store,
+            channel_id,
+            PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            None,
+        )
+        .await;
+
+        let tickets = store.pending_for_replay();
+        assert!(
+            !tickets.iter().any(|t| t.event_id == event_a.id.to_hex()),
+            "A must be done (compacted away), not left claimed just because B is still queued"
+        );
+        let b = tickets
+            .iter()
+            .find(|t| t.event_id == event_b.id.to_hex())
+            .expect("B must still be a replay candidate — it was never claimed or completed");
+        assert_eq!(
+            b.state,
+            TicketState::Open,
+            "B is separate, unrelated work — completing A must not touch it"
+        );
+    }
+
+    /// `mark_complete` runs on every outcome, including a requeued failure —
+    /// it is a lock release, not a completion signal. Only `PromptOutcome::Ok`
+    /// may mark `done`.
+    #[tokio::test]
+    async fn requeued_failure_leaves_ticket_claimed_not_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WakeTicketStore::open(tmp.path()).unwrap();
+        let channel_id = Uuid::new_v4();
+        let pubkey = Keys::generate().public_key().to_hex();
+        let event = signed_event("hi");
+        store.write_open(&event, channel_id, &pubkey, "@mention", 1);
+        store.mark_claimed(&[event.id.to_hex()]);
+
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: event.clone(),
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        // AgentExited on a fresh channel: queue.requeue() succeeds (well
+        // under MAX_RETRIES) rather than dead-lettering. mark_complete still
+        // runs unconditionally — that alone must not mark `done`.
+        run_result(&store, channel_id, PromptOutcome::AgentExited, Some(batch)).await;
+
+        let tickets = store.pending_for_replay();
+        let ticket = tickets
+            .iter()
+            .find(|t| t.event_id == event.id.to_hex())
+            .expect("must still be a replay candidate — mark_complete alone is not done");
+        assert_eq!(ticket.state, TicketState::Claimed);
+    }
+
+    /// Sanity check that `drop` still fires for a genuine dead-letter now
+    /// that `done` no longer gates on queue depth.
+    #[tokio::test]
+    async fn dead_lettered_failure_drops_ticket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = WakeTicketStore::open(tmp.path()).unwrap();
+        let channel_id = Uuid::new_v4();
+        let pubkey = Keys::generate().public_key().to_hex();
+        let event = signed_event("hi");
+        store.write_open(&event, channel_id, &pubkey, "@mention", 1);
+        store.mark_claimed(&[event.id.to_hex()]);
+
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: event.clone(),
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        run_result(
+            &store,
+            channel_id,
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false,
+            }),
+            Some(batch),
+        )
+        .await;
+
+        assert!(
+            store.pending_for_replay().is_empty(),
+            "dead-lettered ticket must not be a replay candidate"
+        );
+    }
+
+    /// A `RestClient` that always fails to connect (nothing listens on this
+    /// reserved port) — the transport-failure case, not a confirmed deny.
+    fn unreachable_rest_client() -> relay::RestClient {
+        relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:1".into(),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn is_still_member_query_failure_is_unknown_not_denied() {
+        let result = is_still_member(Uuid::new_v4(), "deadbeef", &unreachable_rest_client()).await;
+        assert_eq!(
+            result, None,
+            "a transport failure must not be reported as a confirmed non-member"
+        );
+    }
+
+    /// Oksana's second-pass finding: Zar's actual traffic is other agents
+    /// (siblings), not the owner directly, so a blink on the sibling
+    /// profile-lookup query — not just the membership/channel-type checks —
+    /// was silently deleting tickets. `is_owner_or_sibling_for_replay` must
+    /// distinguish "couldn't check" from "confirmed not a sibling", the same
+    /// way `is_still_member` already does for membership.
+    #[tokio::test]
+    async fn owner_only_author_skips_on_unreachable_relay_not_denied() {
+        // Must be syntactically valid hex — a malformed pubkey is a
+        // *confirmed* non-sibling (nothing to retry), not a transport
+        // failure, and would short-circuit before ever reaching the network.
+        let owner = Keys::generate().public_key().to_hex();
+        let other_agent = Keys::generate().public_key().to_hex();
+        let owner_cache = OwnerCache::new(Some(owner));
+        let result =
+            is_owner_or_sibling_for_replay(&other_agent, &owner_cache, &unreachable_rest_client())
+                .await;
+        assert_eq!(
+            result, None,
+            "a transport failure on the sibling-profile query must not be reported as a \
+             confirmed non-sibling — this is the exact path Zar's real traffic hits"
+        );
+
+        let decision = author_allowed_for_replay(
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            &other_agent,
+            false,
+            &owner_cache,
+            &unreachable_rest_client(),
+        )
+        .await;
+        assert_eq!(
+            decision, None,
+            "author_allowed_for_replay must propagate the sibling-lookup uncertainty, not \
+             collapse it to a deny"
+        );
+    }
+
+    /// Cached siblinghood never needs the network — pinning this documents
+    /// why the fix above doesn't cost every replayed ticket a fresh query.
+    #[tokio::test]
+    async fn cached_sibling_result_is_confirmed_without_network() {
+        let owner_cache = OwnerCache::new(Some("owner-pubkey".into()));
+        owner_cache.cache_sibling("known-sibling".into(), true);
+        owner_cache.cache_sibling("known-stranger".into(), false);
+
+        assert_eq!(
+            is_owner_or_sibling_for_replay(
+                "known-sibling",
+                &owner_cache,
+                &unreachable_rest_client()
+            )
+            .await,
+            Some(true)
+        );
+        assert_eq!(
+            is_owner_or_sibling_for_replay(
+                "known-stranger",
+                &owner_cache,
+                &unreachable_rest_client()
+            )
+            .await,
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_ticket_for_replay_skips_on_unreachable_relay() {
+        let rest = unreachable_rest_client();
+        let channel_id = Uuid::new_v4();
+        let channel_info = pool::ChannelInfoResolver::new(HashMap::new(), rest.clone());
+        let owner_cache = OwnerCache::new(None);
+        let event = signed_event("hi");
+        let ticket = wake_ticket::Ticket {
+            event_id: event.id.to_hex(),
+            channel_id,
+            created_at: event.created_at.as_secs(),
+            pubkey: event.pubkey.to_hex(),
+            seen_at: 1,
+            state: TicketState::Open,
+            event,
+            prompt_tag: "@mention".into(),
+        };
+
+        let decision = validate_ticket_for_replay(
+            &ticket,
+            &RespondTo::Anyone,
+            &HashSet::new(),
+            "deadbeef",
+            &owner_cache,
+            &channel_info,
+            &rest,
+        )
+        .await;
+
+        assert_eq!(
+            decision,
+            ReplayDecision::SkipThisBoot,
+            "an unreachable relay must not be treated as a confirmed deny — the ticket must \
+             survive to try again next boot, not be permanently deleted over a network blip"
         );
     }
 }
