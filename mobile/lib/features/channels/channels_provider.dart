@@ -12,6 +12,7 @@ import 'channel.dart';
 import 'channel_management_provider.dart'
     show ChannelMember, channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
+import 'huddle_channel_filter.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
@@ -240,7 +241,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         limit: channelIds.length,
       ),
     );
-    final huddleBackingIds = _huddleBackingIds(
+    final huddleBackingIds = huddleBackingChannelIds(
       await _fetchHuddleStarts(session, channelIds),
       memberEvents,
     );
@@ -972,42 +973,3 @@ Set<String> _readRootIdSet(String? raw) {
 }
 
 String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
-
-Set<String> _huddleBackingIds(
-  Iterable<NostrEvent> starts,
-  Iterable<NostrEvent> membershipSnapshots,
-) {
-  final ownersByChannelId = <String, Set<String>>{};
-  for (final snapshot in membershipSnapshots) {
-    if (snapshot.kind != 39002) continue;
-    final channelId = snapshot.getTagValue('d');
-    if (channelId == null) continue;
-    ownersByChannelId[channelId] = {
-      for (final member in membersFromEvent(snapshot))
-        if (member.role == 'owner') member.pubkey.toLowerCase(),
-    };
-  }
-  final backingIds = <String>{};
-  for (final start in starts) {
-    final backingChannelId = _huddleBackingId(start.content);
-    if (backingChannelId != null &&
-        (ownersByChannelId[backingChannelId] ?? const {}).contains(
-          start.pubkey.toLowerCase(),
-        )) {
-      backingIds.add(backingChannelId);
-    }
-  }
-  return backingIds;
-}
-
-String? _huddleBackingId(String content) {
-  try {
-    final decoded = jsonDecode(content);
-    if (decoded is! Map) return null;
-    final value = decoded['ephemeral_channel_id'];
-    if (value is! String || value.isEmpty) return null;
-    return value;
-  } catch (_) {
-    return null;
-  }
-}

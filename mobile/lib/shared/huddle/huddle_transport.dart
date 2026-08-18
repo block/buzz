@@ -212,7 +212,9 @@ final class HuddleTransport implements HuddleTransportClient {
       HuddleTransportState(
         phase: HuddleTransportPhase.connecting,
         localPeerIndex: _state.localPeerIndex,
-        rosterRevision: _state.rosterRevision,
+        // Roster revisions are scoped to one relay process/room lifetime. A
+        // fresh socket admission establishes a new authoritative baseline.
+        rosterRevision: null,
         peers: _state.peers,
       ),
     );

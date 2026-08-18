@@ -497,6 +497,67 @@ void main() {
     },
   );
 
+  test('re-admission accepts a lower revision after relay restart', () async {
+    final firstChannel = _ControlledWebSocketChannel();
+    final secondChannel = _ControlledWebSocketChannel();
+    var connection = 0;
+    final transport = HuddleTransport(
+      parameters: HuddleConnectionParameters(
+        relayWebSocketUrl: 'wss://buzz.example',
+        nsec: _privateKey,
+        parentChannelId: _parentChannelId,
+        ephemeralChannelId: _ephemeralChannelId,
+      ),
+      channelFactory: (_) => connection++ == 0 ? firstChannel : secondChannel,
+      connectTimeout: const Duration(seconds: 1),
+      handshakeTimeout: const Duration(seconds: 1),
+    );
+    addTearDown(transport.dispose);
+    await _connect(
+      firstChannel,
+      transport,
+      revision: 9,
+      peers: const [
+        {'pubkey': 'stale', 'peer_index': 4},
+      ],
+    );
+
+    firstChannel.emitError(StateError('relay restarted'));
+    await _waitForPhase(transport, HuddleTransportPhase.failed);
+    final reconnect = transport.connect();
+    await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
+    secondChannel.emitText(
+      jsonEncode({'type': 'challenge', 'challenge': 'reconnect'}),
+    );
+    await _waitForPhase(transport, HuddleTransportPhase.authenticating);
+    secondChannel.emitText(
+      jsonEncode({
+        'type': 'joined',
+        'revision': 1,
+        'pubkey': 'self',
+        'peer_index': 3,
+        'peers': [
+          {'pubkey': 'fresh', 'peer_index': 4},
+          {'pubkey': 'self', 'peer_index': 3},
+        ],
+      }),
+    );
+    await reconnect;
+
+    expect(transport.state.rosterRevision, 1);
+    expect(transport.state.peers[4]?.pubkey, 'fresh');
+    secondChannel.emitText(
+      jsonEncode({
+        'type': 'joined',
+        'revision': 2,
+        'pubkey': 'next',
+        'peer_index': 5,
+      }),
+    );
+    await _waitForRevision(transport, 2);
+    expect(transport.state.peers[5]?.pubkey, 'next');
+  });
+
   test(
     'intentional disconnect reaches disconnected without an error',
     () async {

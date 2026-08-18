@@ -8,6 +8,7 @@ import 'community_storage.dart';
 
 final class CommunityTransitionCoordinator {
   final Map<Object, Future<void> Function()> _callbacks = {};
+  Future<void>? _inFlight;
 
   void Function() register(Future<void> Function() callback) {
     final owner = Object();
@@ -15,7 +16,19 @@ final class CommunityTransitionCoordinator {
     return () => _callbacks.remove(owner);
   }
 
-  Future<void> run() async {
+  Future<void> run() {
+    final inFlight = _inFlight;
+    if (inFlight != null) return inFlight;
+
+    final run = _runCallbacks();
+    _inFlight = run;
+    run.whenComplete(() {
+      if (identical(_inFlight, run)) _inFlight = null;
+    });
+    return run;
+  }
+
+  Future<void> _runCallbacks() async {
     await Future.wait(
       _callbacks.values.map((callback) async {
         try {
