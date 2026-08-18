@@ -252,6 +252,7 @@ pub fn build_managed_agent_summary(
             &teams,
             &key.relay_url,
             global_config,
+            super::owner_only_access_build(),
         );
         (runtime, current)
     });
@@ -857,6 +858,7 @@ pub fn spawn_agent_child(
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),
             provider: effective_provider.as_deref(),
+            enforced_owner_only: super::owner_only_access_build(),
         },
     );
 
