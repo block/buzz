@@ -49,10 +49,8 @@ import { ProjectCommitDetailPanel } from "./ProjectCommitDetailPanel";
 import { ActivityPanel, ContributorsPanel } from "./ProjectDetailFeedPanels";
 import { ProjectIssuesPanel } from "./ProjectIssuesPanel";
 import type { OpenMergeRecoveryTerminal } from "./MergePullRequestButton";
-import {
-  type GitDataState,
-  ProjectOverviewPanel,
-} from "./ProjectOverviewPanel";
+import { projectGitDataState } from "@/features/projects/lib/projectGitDataState";
+import { ProjectOverviewPanel } from "./ProjectOverviewPanel";
 import {
   PullRequestDetailHeader,
   PullRequestMetaRail,
@@ -197,13 +195,12 @@ export function WorkspaceTabs({
     repoSource === "remote" && repoHost.kind === "external"
       ? repoHost.host
       : undefined;
-  const gitDataState: GitDataState = displayedSnapshotLoading
-    ? "checking"
-    : externalHost || displayedSnapshotError || !displayedSnapshot
-      ? "unavailable"
-      : files.length === 0
-        ? "empty"
-        : "available";
+  const gitDataState = projectGitDataState({
+    error: displayedSnapshotError,
+    fileCount: files.length,
+    hasSnapshot: Boolean(displayedSnapshot),
+    loading: displayedSnapshotLoading,
+  });
   // The relay masks channel-ACL denials as 404 (anti-enumeration), so a
   // "missing" git result is re-classified with the repository's channel
   // binding and the viewer's memberships before it reaches the UI copy.
@@ -504,7 +501,6 @@ export function WorkspaceTabs({
             </div>
           </div>
         ) : null}
-
         <TabsContent className="m-0" value="overview">
           <ProjectOverviewPanel
             accessChannelId={project.channelId}
@@ -609,9 +605,10 @@ export function WorkspaceTabs({
             isLoading={displayedSnapshotLoading}
             profiles={profiles}
             snapshot={displayedSnapshot}
+            sourceControls={sourceControls}
             unavailableMessage={
-              externalHost
-                ? `Not mirrored on Buzz. Repository files are hosted on ${externalHost}.`
+              gitDataState === "unavailable" && externalHost
+                ? `Could not read ${externalHost} yet. Clone locally to browse offline, or retry if the remote is public.`
                 : undefined
             }
           />

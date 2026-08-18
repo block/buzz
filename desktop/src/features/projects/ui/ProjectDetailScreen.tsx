@@ -257,7 +257,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     activeBranch,
     selectedTag ? null : selectedBranchPullRequest,
     activeTag,
-    repoRemote.host.kind === "buzz",
+    repoRemote.host.kind === "buzz" ||
+      (repoRemote.host.kind === "external" &&
+        repoRemote.host.host === "github.com"),
   );
   const repoDiffQuery = useProjectRepoDiffQuery(
     repository,
