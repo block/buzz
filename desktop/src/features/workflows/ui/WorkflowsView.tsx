@@ -12,7 +12,6 @@ import {
 } from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
-import { WorkflowDetailDialog } from "@/features/workflows/ui/WorkflowDetailDialog";
 import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
 import { WorkflowUnavailableDialog } from "@/features/workflows/ui/WorkflowUnavailableDialog";
 import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
@@ -303,17 +302,7 @@ export function WorkflowsView({
         </div>
       </div>
 
-      {editor?.mode === "detail" && editorWorkflow ? (
-        <WorkflowDetailDialog
-          channels={channels}
-          onEditWorkflow={onEditWorkflow}
-          onOpenChange={(open) => {
-            if (!open) onCloseEditor();
-          }}
-          open
-          workflow={editorWorkflow}
-        />
-      ) : editor && editor.mode !== "detail" && canOpenEditor ? (
+      {editor && canOpenEditor ? (
         <WorkflowDialog
           channels={memberChannels}
           key={
@@ -321,7 +310,7 @@ export function WorkflowsView({
               ? editor.mode
               : `${editor.mode}:${editor.workflowId}`
           }
-          mode={editor.mode}
+          mode={editor.mode === "detail" ? "edit" : editor.mode}
           onDeleteWorkflow={handleDelete}
           onDuplicateWorkflow={onDuplicateWorkflow}
           onEditWorkflow={onEditWorkflow}

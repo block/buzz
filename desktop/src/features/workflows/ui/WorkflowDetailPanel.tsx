@@ -70,7 +70,11 @@ export function WorkflowDetailPanel({
 
   return (
     <div
-      className="flex h-full flex-col border-l bg-background pt-4"
+      className={
+        showHeader
+          ? "flex h-full flex-col border-l bg-background pt-4"
+          : "flex h-full flex-col"
+      }
       data-testid="workflow-detail-panel"
     >
       {showHeader ? (
@@ -154,7 +158,11 @@ export function WorkflowDetailPanel({
         data-scroll-restoration-id={`workflow-detail:${workflowId}`}
       >
         {workflow ? (
-          <div className="space-y-4 p-4">
+          <div
+            className={
+              showHeader ? "space-y-4 p-4" : "space-y-4 px-5 pb-5 pt-2"
+            }
+          >
             {showDefinition ? (
               <div>
                 <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -167,9 +175,11 @@ export function WorkflowDetailPanel({
             ) : null}
 
             <div>
-              <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Run History
-              </h4>
+              {showHeader ? (
+                <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Run History
+                </h4>
+              ) : null}
               {runsQuery.isError ? (
                 <div
                   className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
@@ -309,7 +319,11 @@ export function WorkflowDetailPanel({
             <p className="text-sm text-red-400">Failed to load workflow</p>
           </div>
         ) : (
-          <div className="space-y-4 p-4">
+          <div
+            className={
+              showHeader ? "space-y-4 p-4" : "space-y-4 px-5 pb-5 pt-2"
+            }
+          >
             <div>
               <Skeleton className="mb-2 h-4 w-28" />
               <Skeleton className="h-40 w-full rounded-xl" />

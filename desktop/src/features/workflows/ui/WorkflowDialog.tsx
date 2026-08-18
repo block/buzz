@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, Code, Pencil, X } from "lucide-react";
+import { Check, Code, History, Pencil, X } from "lucide-react";
 import { useBlocker } from "@tanstack/react-router";
 import { isMap, parseDocument, stringify as yamlStringify } from "yaml";
 
@@ -33,6 +33,7 @@ import {
 import { Input } from "@/shared/ui/input";
 import { ChannelCombobox } from "./ChannelCombobox";
 import { WorkflowActionsMenu } from "./WorkflowActionsMenu";
+import { WorkflowDetailPanel } from "./WorkflowDetailPanel";
 import {
   WorkflowFormBuilder,
   type WorkflowEditorMode,
@@ -273,6 +274,7 @@ export function WorkflowDialog({
     null,
   );
   const [workflowNameEditing, setWorkflowNameEditing] = React.useState(false);
+  const [historyOpen, setHistoryOpen] = React.useState(false);
   const [channelAutoOpenPending, setChannelAutoOpenPending] = React.useState(
     mode === "create" && !channelId,
   );
@@ -558,15 +560,30 @@ export function WorkflowDialog({
             </div>
             <div className="flex items-center gap-2">
               {mode === "edit" && workflowSnapshot ? (
-                <WorkflowActionsMenu
-                  isEnabled={workflowEnabled}
-                  isTogglingEnabled={mutation.isPending || !canEditWorkflowName}
-                  onDelete={() => onDeleteWorkflow(workflowSnapshot)}
-                  onDuplicate={() => onDuplicateWorkflow(workflowSnapshot.id)}
-                  onEdit={() => onEditWorkflow(workflowSnapshot.id)}
-                  onToggleEnabled={handleToggleWorkflowEnabled}
-                  onTrigger={() => onTriggerWorkflow(workflowSnapshot.id)}
-                />
+                <>
+                  <Button
+                    aria-pressed={historyOpen}
+                    className="h-8 gap-1.5"
+                    onClick={() => setHistoryOpen((value) => !value)}
+                    size="sm"
+                    type="button"
+                    variant={historyOpen ? "secondary" : "outline"}
+                  >
+                    <History className="h-4 w-4" />
+                    Run history
+                  </Button>
+                  <WorkflowActionsMenu
+                    isEnabled={workflowEnabled}
+                    isTogglingEnabled={
+                      mutation.isPending || !canEditWorkflowName
+                    }
+                    onDelete={() => onDeleteWorkflow(workflowSnapshot)}
+                    onDuplicate={() => onDuplicateWorkflow(workflowSnapshot.id)}
+                    onEdit={() => onEditWorkflow(workflowSnapshot.id)}
+                    onToggleEnabled={handleToggleWorkflowEnabled}
+                    onTrigger={() => onTriggerWorkflow(workflowSnapshot.id)}
+                  />
+                </>
               ) : null}
               <DialogClose asChild>
                 <Button
@@ -586,6 +603,15 @@ export function WorkflowDialog({
             <WorkflowFormBuilder
               channels={channels}
               disabled={mutation.isPending}
+              historyPanel={
+                historyOpen && workflowSnapshot ? (
+                  <WorkflowDetailPanel
+                    showDefinition={false}
+                    showHeader={false}
+                    workflowId={workflowSnapshot.id}
+                  />
+                ) : null
+              }
               mode={editorMode}
               nameLeadingContainer={mode === "edit" ? null : nameLeadingElement}
               onChange={(yaml) => {
@@ -593,6 +619,7 @@ export function WorkflowDialog({
                 yamlDefinitionRef.current = yaml;
                 setYamlDefinition(yaml);
               }}
+              onHistoryClose={() => setHistoryOpen(false)}
               onSelectedNodeChange={onEditorPaneChange}
               parseError={editorParseError}
               ref={formBuilderRef}
