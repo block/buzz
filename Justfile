@@ -331,6 +331,17 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # buzz-relay router/NIP-11 unit tests: infra-free in-process axum +
+        # tower coverage — CORS conformance on the NIP-11 relay information
+        # document (it stays readable cross-origin under a BUZZ_CORS_ORIGINS
+        # allowlist without widening the authenticated surface), trace-span
+        # propagation, and the WebSocket frame limit. The rest of buzz-relay's
+        # --lib set is Postgres/Redis-backed and is selected explicitly by the
+        # backend integration job, so select the infra-free modules here rather
+        # than the whole package. Without this step the archive builds these
+        # tests and nothing executes them.
+        cargo nextest run -p buzz-relay --lib \
+            -E 'test(/^router::tests/) or test(/^nip11::tests/)'
     else
         ./scripts/run-tests.sh unit
     fi
