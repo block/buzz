@@ -5,10 +5,106 @@
 //! keyed on `(kind, pubkey, d_tag)`, replacing only on a newer-or-equal
 //! `created_at` for NIP-33 latest-wins semantics.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
+use tauri::AppHandle;
+
+use crate::app_state::AppState;
+
+mod legacy_migration;
+pub use legacy_migration::migrate_legacy_retention_db;
+
+/// Durable event-retention scope for one community relay and owner identity.
+///
+/// Persona, team, and managed-agent definitions are workspace-global, but
+/// their relay heads and pending publications are not. Keeping a separate
+/// database per `(relay_url, owner_pubkey)` prevents a pending write created in
+/// community A from being drained into community B after a workspace switch.
+pub struct RetentionScope {
+    pub db_path: PathBuf,
+    pub relay_url: String,
+    pub owner_keys: nostr::Keys,
+}
+
+/// Decide whether `scope` — the workspace's active retention scope — is the one
+/// that owns an event delivered by `arrival_relay_url`.
+///
+/// Inbound reconcile resolves its retention database when it PROCESSES an event,
+/// while the event belongs to the community that DELIVERED it. `None` means a
+/// workspace switch happened in between and the caller must drop the event
+/// rather than file community A's event into community B's store.
+///
+/// The comparison goes through the same normalization
+/// [`scoped_retention_db_path`] hashes, so "same relay" can never disagree with
+/// "same database".
+pub fn scope_for_arrival(scope: RetentionScope, arrival_relay_url: &str) -> Option<RetentionScope> {
+    let same_scope =
+        normalized_relay_scope(&scope.relay_url) == normalized_relay_scope(arrival_relay_url);
+    same_scope.then_some(scope)
+}
+
+/// Relay-URL form that identifies a retention scope: equivalent workspace URLs
+/// (surrounding space, trailing slash) must resolve to one scope.
+fn normalized_relay_scope(relay_url: &str) -> &str {
+    relay_url.trim().trim_end_matches('/')
+}
+
+/// Resolve the retention database path for a relay + owner pair.
+///
+/// The normalized scope is hashed so relay URLs never become path components.
+/// Trimming a trailing slash keeps equivalent workspace URLs on one scope.
+pub fn scoped_retention_db_path(base_dir: &Path, relay_url: &str, owner_pubkey: &str) -> PathBuf {
+    let normalized_relay = normalized_relay_scope(relay_url);
+    let mut hasher = Sha256::new();
+    hasher.update(owner_pubkey.trim().to_ascii_lowercase().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(normalized_relay.as_bytes());
+    let scope_id = hex::encode(hasher.finalize());
+    base_dir.join("retention").join(format!("{scope_id}.db"))
+}
+
+/// Snapshot the active relay + owner and resolve their durable event store.
+///
+/// Callers keep the returned relay and keys alongside the path whenever work
+/// crosses an `.await`; a later workspace switch cannot retarget that work.
+pub fn active_retention_scope(app: &AppHandle, state: &AppState) -> Result<RetentionScope, String> {
+    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let owner_keys = state.signing_keys()?;
+    let base_dir = super::managed_agents_base_dir(app)?;
+    let db_path =
+        scoped_retention_db_path(&base_dir, &relay_url, &owner_keys.public_key().to_hex());
+    let parent = db_path
+        .parent()
+        .ok_or_else(|| "retention scope path has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create retention scope directory: {error}"))?;
+    Ok(RetentionScope {
+        db_path,
+        relay_url,
+        owner_keys,
+    })
+}
+
+/// Snapshot the active relay + owner, but only when it is the scope that owns
+/// events delivered by `arrival_relay_url`.
+///
+/// Resolving the scope and matching it in one step is what closes the gap: the
+/// returned scope is both the one that will be written to and the one the event
+/// arrived on. `Ok(None)` means the arrival community is no longer active and
+/// the caller must drop the event — see [`scope_for_arrival`].
+pub fn arrival_retention_scope(
+    app: &AppHandle,
+    state: &AppState,
+    arrival_relay_url: &str,
+) -> Result<Option<RetentionScope>, String> {
+    Ok(scope_for_arrival(
+        active_retention_scope(app, state)?,
+        arrival_relay_url,
+    ))
+}
 
 /// A retained persona event row.
 #[derive(Debug, Clone)]
@@ -165,21 +261,32 @@ pub enum InboundOutcome {
 ///   pending row intact so the flush republishes and the relay resolves
 ///   last-writer-wins. (A re-received echo at equal time is also a no-op.)
 /// - Inbound older: skip — nothing to change.
-pub fn retain_inbound_event(
+///
+/// Decide whether an inbound event is newer than the retained coordinate without
+/// mutating retention. Callers that must update another durable store first use
+/// this preflight, apply that store change, and only then commit with
+/// [`retain_inbound_event`].
+pub fn inbound_event_outcome(
     conn: &Connection,
     event: &RetainedEvent,
 ) -> Result<InboundOutcome, String> {
     let existing = get_retained_event(conn, event.kind, &event.pubkey, &event.d_tag)?;
-
-    let apply = match &existing {
-        None => true,
-        Some(row) if event.created_at > row.created_at => true,
+    Ok(match existing {
+        None => InboundOutcome::Applied,
+        Some(row) if event.created_at > row.created_at => InboundOutcome::Applied,
         // Equal or older: skip. Equal time may collide with a pending local
         // edit, so we never clear its `pending_sync`; older is stale.
-        Some(_) => false,
-    };
+        Some(_) => InboundOutcome::Skipped,
+    })
+}
 
-    if !apply {
+pub fn retain_inbound_event(
+    conn: &Connection,
+    event: &RetainedEvent,
+) -> Result<InboundOutcome, String> {
+    let outcome = inbound_event_outcome(conn, event)?;
+
+    if outcome == InboundOutcome::Skipped {
         return Ok(InboundOutcome::Skipped);
     }
 
@@ -369,6 +476,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retention_scope_is_stable_and_separates_relay_and_owner() {
+        let base = Path::new("/tmp/buzz-retention-test");
+        let owner_a = "a".repeat(64);
+        let owner_b = "b".repeat(64);
+        let community_a = scoped_retention_db_path(base, "wss://a.example/", &owner_a);
+        assert_eq!(
+            community_a,
+            scoped_retention_db_path(base, "wss://a.example", &owner_a)
+        );
+        assert_ne!(
+            community_a,
+            scoped_retention_db_path(base, "wss://b.example", &owner_a)
+        );
+        assert_ne!(
+            community_a,
+            scoped_retention_db_path(base, "wss://a.example", &owner_b)
+        );
+    }
+
+    #[test]
+    fn test_arrival_relay_matching_agrees_with_database_identity() {
+        let base = Path::new("/tmp/buzz-retention-test");
+        let keys = nostr::Keys::generate();
+        let owner = keys.public_key().to_hex();
+        let scope = |relay: &str| RetentionScope {
+            db_path: scoped_retention_db_path(base, relay, &owner),
+            relay_url: relay.to_string(),
+            owner_keys: keys.clone(),
+        };
+        let community_a = scoped_retention_db_path(base, "wss://a.example", &owner);
+
+        // "Same relay" and "same database" must never disagree: every URL the
+        // match accepts has to hash to the scope's own db path, and every URL it
+        // rejects has to hash somewhere else.
+        for equivalent in ["wss://a.example", "wss://a.example/", " wss://a.example "] {
+            assert_eq!(
+                scope_for_arrival(scope("wss://a.example"), equivalent).map(|scope| scope.db_path),
+                Some(community_a.clone()),
+                "{equivalent}"
+            );
+            assert_eq!(
+                scoped_retention_db_path(base, equivalent, &owner),
+                community_a,
+                "{equivalent}"
+            );
+        }
+
+        assert!(
+            scope_for_arrival(scope("wss://b.example"), "wss://a.example").is_none(),
+            "an event from community A must not be filed while community B is active"
+        );
+        assert_ne!(
+            scoped_retention_db_path(base, "wss://b.example", &owner),
+            community_a
+        );
+    }
+
+    #[test]
     fn concurrent_open_waits_for_initialization_lock() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("retention.db");
@@ -397,6 +562,37 @@ mod tests {
             raw_event: r#"{"id":"..."}"#.to_string(),
             pending_sync: true,
         }
+    }
+
+    #[test]
+    fn inbound_preflight_does_not_consume_event_before_commit() {
+        let conn = test_db();
+        let mut inbound = sample_event();
+        inbound.pending_sync = false;
+
+        assert_eq!(
+            inbound_event_outcome(&conn, &inbound).unwrap(),
+            InboundOutcome::Applied
+        );
+        assert!(
+            get_retained_event(&conn, inbound.kind, &inbound.pubkey, &inbound.d_tag)
+                .unwrap()
+                .is_none()
+        );
+        // A failed store/runtime apply can replay the same head because the
+        // preflight did not advance retention.
+        assert_eq!(
+            inbound_event_outcome(&conn, &inbound).unwrap(),
+            InboundOutcome::Applied
+        );
+        assert_eq!(
+            retain_inbound_event(&conn, &inbound).unwrap(),
+            InboundOutcome::Applied
+        );
+        assert_eq!(
+            inbound_event_outcome(&conn, &inbound).unwrap(),
+            InboundOutcome::Skipped
+        );
     }
 
     #[test]

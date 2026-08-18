@@ -17,6 +17,8 @@ pub mod api_token;
 pub mod archived_identities;
 /// Channel and membership persistence.
 pub mod channel;
+/// Durable whole-community deletion lifecycle and PostgreSQL adapter.
+pub mod deletion;
 /// Direct message channel persistence.
 pub mod dm;
 /// Database error types.
@@ -55,8 +57,9 @@ pub mod user;
 pub mod workflow;
 
 pub use error::{DbError, Result};
-pub use event::{EventQuery, ReactionEventInsertOutcome};
+pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgConnection, PgPoolOptions};
 use sqlx::{Connection, PgPool, QueryBuilder, Row};
@@ -98,6 +101,21 @@ fn event_replacement_lock_key(
 /// Uses `INSERT ... ON CONFLICT DO NOTHING` so duplicate inserts are silently skipped.
 pub async fn insert_mentions(
     pool: &PgPool,
+    community_id: CommunityId,
+    event: &nostr::Event,
+    channel_id: Option<Uuid>,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Insert mention rows on the caller's transaction. Replacement writes use
+/// this so the authoritative event and its discovery index commit or roll back
+/// as one unit.
+async fn insert_mentions_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     community_id: CommunityId,
     event: &nostr::Event,
     channel_id: Option<Uuid>,
@@ -147,24 +165,31 @@ pub async fn insert_mentions(
         return Ok(());
     }
 
-    // Single multi-row INSERT ... ON CONFLICT DO NOTHING — one round-trip regardless of mention count.
-    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "INSERT INTO event_mentions \
-         (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
-    );
+    // Multi-row INSERT ... ON CONFLICT DO NOTHING, chunked to stay under
+    // Postgres's 65,535 bind-parameter statement cap (6 binds per row caps a
+    // single statement at ~10.9k rows). Relay-signed kind 39002 rosters carry
+    // one p-tag per channel member and can exceed that. The caller owns the
+    // transaction so all chunks share its commit boundary.
+    const MENTION_INSERT_CHUNK_ROWS: usize = 5_000;
+    for chunk in valid_pubkeys.chunks(MENTION_INSERT_CHUNK_ROWS) {
+        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
+        );
 
-    qb.push_values(&valid_pubkeys, |mut b, pubkey| {
-        b.push_bind(community_id.as_uuid())
-            .push_bind(pubkey.as_str())
-            .push_bind(event_id_bytes.as_slice())
-            .push_bind(created_at)
-            .push_bind(channel_id)
-            .push_bind(kind as i32);
-    });
+        qb.push_values(chunk, |mut b, pubkey| {
+            b.push_bind(community_id.as_uuid())
+                .push_bind(pubkey.as_str())
+                .push_bind(event_id_bytes.as_slice())
+                .push_bind(created_at)
+                .push_bind(channel_id)
+                .push_bind(kind as i32);
+        });
 
-    qb.push(" ON CONFLICT DO NOTHING");
+        qb.push(" ON CONFLICT DO NOTHING");
 
-    qb.build().execute(pool).await?;
+        qb.build().execute(&mut **tx).await?;
+    }
     Ok(())
 }
 
@@ -181,12 +206,290 @@ pub struct Db {
     /// route here (see [`Db::read`]); locks, transactions, and anything
     /// consistency-critical stays on `pool`.
     pub(crate) read_pool: Option<PgPool>,
+    /// Maximum connections configured for the read-replica pool (from
+    /// [`DbConfig::read_max_connections`], defaulting to the writer's
+    /// sizing). Kept separately from `max_connections` so
+    /// [`Db::read_pool_stats`] reports the reader's own ceiling — a
+    /// utilisation gauge derived from the writer's max would understate
+    /// reader saturation by exactly the ratio of the two pool sizes.
+    pub(crate) read_max_connections: u32,
     /// Freshness fence gating cursor-page routing to the replica.
     ///
     /// Starts closed; a background probe ([`replica_fence::run_probe`])
-    /// advances it after each verified writer→replica LSN handshake. When
-    /// closed or stale, every cursor page routes to the writer.
+    /// commits heartbeat tokens and retains proof entries. Routing proves
+    /// coverage per request on the serving reader session; when the ring is
+    /// empty or stale, every routed read stays on the writer.
     pub(crate) fence: std::sync::Arc<replica_fence::ReplicaFence>,
+    /// Bounded-staleness routing budget `B`: a read routed under
+    /// [`RoutePredicate::Bounded`] may be served from a proved replica
+    /// session only when the proved heartbeat entry is at most this old.
+    /// `None` disables the bounded arm entirely (the rollout default) —
+    /// bounded-stale read semantics are a product decision, not an
+    /// invariant, so the gate ships off.
+    pub(crate) replica_read_max_age: Option<Duration>,
+    /// Whether the reader endpoint supports the Aurora PostgreSQL identity
+    /// function ([`replica_fence::AURORA_IDENTITY_FN`]) — probed
+    /// once per process on the first routed read (on a plain autocommit
+    /// checkout, outside any request transaction) and cached. Unset means
+    /// not yet probed (or the probe hit a transient error and will retry).
+    /// Shared across `Db` clones.
+    pub(crate) reader_aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+}
+
+/// The session that served (or will serve) a routed read, so follow-up
+/// queries in the same request (the channel-window aux closure) run on the
+/// **same proved snapshot** — a different pooled reader session may sit at a
+/// different replay position, and even the same connection advances its
+/// snapshot between autocommit statements.
+///
+/// `Replica` holds the request's `REPEATABLE READ, READ ONLY` transaction:
+/// the heartbeat observation was its first statement, so the snapshot the
+/// proof was taken against is exactly the snapshot every follow-up sees.
+/// Dropping the session rolls the read-only transaction back and returns
+/// the connection to the pool.
+///
+/// `Writer` carries the writer pool: follow-ups there are authoritative by
+/// construction and need no session pinning.
+pub struct ReadSession {
+    inner: ReadSessionInner,
+}
+
+enum ReadSessionInner {
+    /// The proved replica request transaction (snapshot-anchored), plus the
+    /// writer pool so a mid-request replica failure (e.g. a hot-standby
+    /// recovery conflict cancelling the held snapshot) degrades the session
+    /// to the writer instead of surfacing an error: degraded capacity,
+    /// never holes — and never a 500 the writer could have served.
+    Replica {
+        tx: sqlx::Transaction<'static, sqlx::Postgres>,
+        writer: PgPool,
+    },
+    /// The writer pool (cheap clone; Arc-backed).
+    Writer(PgPool),
+}
+
+impl ReadSession {
+    /// Query events on this session (see [`Db::query_events`]).
+    ///
+    /// If the proved replica transaction fails mid-request, the session
+    /// permanently degrades to the writer and the query is re-run there.
+    /// The writer is always at or ahead of any replica replay position, so
+    /// the degraded follow-up can only observe *more* than the proof-time
+    /// snapshot, never less — fresher aux rows, the same failure semantics
+    /// as a request that routed to the writer to begin with.
+    #[datastore_span(name = "read_session_query_events", system = "postgresql")]
+    pub async fn query_events(&mut self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        let degraded = match &mut self.inner {
+            ReadSessionInner::Replica { tx, writer } => {
+                match event::query_events_on(tx, q).await {
+                    Ok(rows) => return Ok(rows),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "replica session query failed mid-request; degrading to writer"
+                        );
+                        // Deliberately not a `buzz_db_route_decision` event:
+                        // the page's route was already recorded, and the
+                        // offload metric must stay one-event-per-request.
+                        metrics::counter!("buzz_db_read_session_degraded").increment(1);
+                        writer.clone()
+                    }
+                }
+            }
+            ReadSessionInner::Writer(pool) => return event::query_events(pool, q).await,
+        };
+        // Replacing the inner drops the replica transaction (rolling it
+        // back and returning the reader connection to its pool).
+        self.inner = ReadSessionInner::Writer(degraded.clone());
+        event::query_events(&degraded, q).await
+    }
+
+    /// Whether this session is a proved replica connection (observability).
+    pub fn is_replica(&self) -> bool {
+        matches!(self.inner, ReadSessionInner::Replica { .. })
+    }
+}
+
+/// Where one routed read is served (see [`Db::route_read`]).
+enum RouteDecision {
+    /// A reader request transaction whose first-statement heartbeat
+    /// observation proved this fence entry — the page runs inside it. The
+    /// `&'static str` is the metric reason (`covered`/`fresh`); the caller
+    /// records the route only once the page is actually served from the
+    /// replica, so a post-verification writer re-run or a mid-query replica
+    /// failure emits exactly one `buzz_db_route_decision` event per request
+    /// (the offload percentage is read straight off `decision="replica"`).
+    Replica(
+        sqlx::Transaction<'static, sqlx::Postgres>,
+        replica_fence::TokenEntry,
+        &'static str,
+    ),
+    /// Fail closed: serve from the writer pool (already recorded).
+    Writer,
+}
+
+/// The ONLY place [`route_proof::ChannelScoped`] can be constructed. A
+/// crate-root tuple struct would be mintable via `ChannelScoped(())` from
+/// every descendant module — tuple-struct field privacy is module-scoped —
+/// so the token lives in its own module and E0423 enforces the invariant.
+mod route_proof {
+    use uuid::Uuid;
+
+    /// Proof that a query/page can only return rows with
+    /// `channel_id IS NOT NULL` — the domain of the commit-time floor guard
+    /// (migration 0021). `channel_ids` (retains channel-NULL rows) and
+    /// `global_only = false` are explicitly NOT proofs.
+    ///
+    /// Each constructor keys off *how* its path proves channel-bearing-ness:
+    /// a pinned query filter, a bare `Uuid` argument, or a `NOT NULL` column
+    /// reached through an inner join. Do not add a universal constructor
+    /// callers reshape their inputs to fit, and never fabricate a throwaway
+    /// `EventQuery` purely to mint a token — the proof must be the SQL's
+    /// shape, not "someone assembled a struct".
+    #[derive(Clone, Copy)]
+    pub(crate) struct ChannelScoped(());
+
+    impl ChannelScoped {
+        /// Constructor 1: the query pins a single channel
+        /// (`EventQuery.channel_id = Some(_)`, compiled to a
+        /// `channel_id = $n` predicate). This proof covers BOTH query
+        /// builders — the SELECT builder (`event::query_events_on`) and the
+        /// COUNT builder (`event::count_events`) pin identically; if the
+        /// two ever drift, this comment is a lie and the routed COUNT seam
+        /// is unsound.
+        /// Sound under conjunction: any additional clause (e.g.
+        /// `channel_ids`, which alone retains channel-NULL rows) is ANDed,
+        /// and `channel_id = <uuid>` never matches NULL — the pin strictly
+        /// narrows and cannot be widened back out to global rows.
+        pub(crate) fn from_pinned_channel(q: &crate::event::EventQuery) -> Option<Self> {
+            q.channel_id.map(|_| ChannelScoped(()))
+        }
+
+        /// Constructor 2 (thread pages): the page is an inner JOIN from
+        /// `thread_metadata` to `events`, and `thread_metadata.channel_id`
+        /// is `UUID NOT NULL` — every writer that creates a row passes a
+        /// concrete channel (`ThreadMetadataParams.channel_id: Uuid`,
+        /// non-Option). Channel-bearing by construction of the join, not by
+        /// query predicate.
+        pub(crate) fn from_thread_metadata_join() -> Self {
+            ChannelScoped(())
+        }
+
+        /// Constructor 3 (channel windows): the channel arrives as a bare
+        /// `Uuid` argument and the SQL binds it unconditionally
+        /// (`e.channel_id = $2` in `get_channel_window_on`); every served
+        /// row is channel-bearing. No `EventQuery` exists on this path.
+        pub(crate) fn from_channel_id(_channel_id: Uuid) -> Self {
+            ChannelScoped(())
+        }
+    }
+}
+use route_proof::ChannelScoped;
+
+/// The predicate one routed read must satisfy (see [`Db::route_read`]).
+///
+/// Discipline: no `Default`, no `Deserialize`, stays non-`pub` — any of
+/// those re-opens the [`ChannelScoped`] mint.
+enum RoutePredicate {
+    /// Bounded staleness: the proved entry must be within the configured
+    /// read budget `B` (default off). Bounds TIME — the page misses at most
+    /// the freshest `B` of writes. Sound for ANY query shape, including
+    /// global (channel-NULL) rows: it relies only on heartbeat commit order,
+    /// not the floor guard.
+    Bounded,
+    /// Completeness: the proved wall must cover the page's upper bound.
+    /// Bounds CONTENT — every row at/below `upper` is present, meaningful
+    /// even when the cursor is hours old, where `B`-freshness says nothing.
+    /// Sound ONLY on the floor guard's domain (channel-bearing rows), hence
+    /// the proof token. `upper` is non-optional: the no-upper-bound
+    /// post-verifying case is [`RoutePredicate::CoveredPostVerified`].
+    ///
+    /// Bounds INSERT-completeness only — "no missing rows", not "no extra
+    /// rows". Soft deletes are `UPDATE .. SET deleted_at` commits outside
+    /// the floor guard and never touch `created_at`, so a covered page can
+    /// briefly serve a row the writer already excludes; deletion visibility
+    /// is bounded by replication lag under `FENCE_STALENESS` (30s), not by
+    /// `upper` or `B`. Do not extend the covered arm to a surface that
+    /// cannot absorb extra rows (this is why the routed COUNT seam is
+    /// bounded-only).
+    Covered {
+        upper: DateTime<Utc>,
+        /// Never read — the field exists so constructing this variant
+        /// requires minting the token through `route_proof`.
+        #[allow(dead_code)]
+        proof: ChannelScoped,
+    },
+    /// Forward-walking thread pages: no upper bound is derivable from the
+    /// cursor; the caller post-verifies the served rows against the proved
+    /// wall (full page + tail at/below the wall, else re-run on the writer).
+    /// Only the thread path constructs this — a general routed caller does
+    /// no post-verification and must never self-certify.
+    CoveredPostVerified {
+        #[allow(dead_code)]
+        proof: ChannelScoped,
+    },
+    /// Either arm admits, covered tried first (it has no budget dependence).
+    /// For general routed reads that are channel-pinned AND carry an
+    /// `until` upper bound.
+    BoundedOrCovered {
+        upper: DateTime<Utc>,
+        /// Never read — see [`RoutePredicate::Covered::proof`].
+        #[allow(dead_code)]
+        proof: ChannelScoped,
+    },
+}
+
+impl RoutePredicate {
+    /// A channel-window request: cursor pages are covered-only — for deep
+    /// keyset pages only coverage answers "have all rows below the cursor
+    /// replayed?" — and a head fetch is bounded. The channel id is the
+    /// bare-`Uuid` proof that the window SQL pins a channel.
+    fn from_channel_cursor(channel_id: Uuid, cursor: &Option<(DateTime<Utc>, Vec<u8>)>) -> Self {
+        match cursor {
+            Some((ts, _)) => RoutePredicate::Covered {
+                upper: *ts,
+                proof: ChannelScoped::from_channel_id(channel_id),
+            },
+            None => RoutePredicate::Bounded,
+        }
+    }
+
+    /// General entry point for the routed query seams: derives the strongest
+    /// sound predicate from the query shape. Never produces a covered arm
+    /// without both a channel-scope proof AND a real upper bound.
+    ///
+    /// `routing_enabled` is whether `BUZZ_REPLICA_READ_MAX_AGE_MS` is set
+    /// (non-zero). When it is NOT, this returns `Bounded` — which the zero
+    /// budget then fails closed — so the new seams are genuinely dark at
+    /// the deploy default even for channel-pinned queries carrying `until`.
+    /// Without this gate, `BoundedOrCovered` would take the covered arm
+    /// (which has no budget dependence) and route on day one with no env
+    /// var set and no kill switch short of removing the replica URL
+    /// (Dawn's covered-at-zero-budget catch). The pre-existing cursor
+    /// paths (`Covered`/`CoveredPostVerified` from channel windows and
+    /// thread pages) intentionally still route at B=0 — status quo,
+    /// unchanged.
+    fn for_query(q: &event::EventQuery, routing_enabled: bool) -> Self {
+        if !routing_enabled {
+            return RoutePredicate::Bounded;
+        }
+        match (ChannelScoped::from_pinned_channel(q), q.until) {
+            (Some(proof), Some(upper)) => RoutePredicate::BoundedOrCovered { upper, proof },
+            _ => RoutePredicate::Bounded,
+        }
+    }
+}
+
+/// Map the configured read budget (`BUZZ_REPLICA_READ_MAX_AGE_MS`) to the
+/// runtime gate: `0` disables bounded-staleness routing; anything above the
+/// fence staleness gate is clamped to it (an entry older than the staleness
+/// gate never routes anyway, so a larger budget would only misrepresent the
+/// config).
+fn read_budget_from_ms(ms: u64) -> Option<Duration> {
+    match ms {
+        0 => None,
+        ms => Some(Duration::from_millis(ms).min(replica_fence::FENCE_STALENESS)),
+    }
 }
 
 /// Snapshot of Postgres connection pool utilisation.
@@ -232,6 +535,9 @@ pub struct DbConfig {
     pub read_database_url: Option<String>,
     /// Maximum number of connections in the pool.
     pub max_connections: u32,
+    /// Maximum connections in the read-replica pool (env
+    /// `BUZZ_DB_READ_POOL_SIZE`). `None` inherits [`Self::max_connections`].
+    pub read_max_connections: Option<u32>,
     /// Minimum number of idle connections to maintain.
     pub min_connections: u32,
     /// Seconds to wait when acquiring a connection before timing out.
@@ -240,6 +546,13 @@ pub struct DbConfig {
     pub max_lifetime_secs: u64,
     /// Seconds a connection may sit idle before being closed.
     pub idle_timeout_secs: u64,
+    /// Replica read budget `B` in milliseconds (bounded arm, env
+    /// `BUZZ_REPLICA_READ_MAX_AGE_MS`). `0` disables bounded-staleness
+    /// routing — the rollout default. Values above
+    /// [`replica_fence::FENCE_STALENESS`] are clamped to it: an entry older
+    /// than the staleness gate never routes anyway, so a larger budget
+    /// would only misrepresent the config.
+    pub replica_read_max_age_ms: u64,
 }
 
 impl Default for DbConfig {
@@ -251,10 +564,12 @@ impl Default for DbConfig {
             database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
             read_database_url: None,
             max_connections: 20,
+            read_max_connections: None,
             min_connections: 2,
             acquire_timeout_secs: 3,
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
+            replica_read_max_age_ms: 0,
         }
     }
 }
@@ -360,54 +675,147 @@ impl Db {
     /// `buzz.created_at_floor` GUC — this is what makes the replica fence
     /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
-        let pool = Self::connect_pool(config, &config.database_url, true).await?;
+        let pool = Self::connect_pool(config, &config.database_url).await?;
+        let read_max_connections = config
+            .read_max_connections
+            .unwrap_or(config.max_connections);
         let read_pool = match &config.read_database_url {
-            Some(url) => Some(Self::connect_pool(config, url, false).await?),
+            Some(url) => Some(Self::connect_read_pool(config, url, read_max_connections)?),
             None => None,
         };
+        let replica_read_max_age = read_budget_from_ms(config.replica_read_max_age_ms);
         Ok(Self {
             pool,
             max_connections: config.max_connections,
             read_pool,
+            read_max_connections,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+            replica_read_max_age,
+            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         })
     }
 
-    /// Connect one pool with the sizing knobs from `config`.
+    /// Connect the writer pool with all session-level safety premises.
     ///
-    /// `arm_floor_guard` sets the `buzz.created_at_floor` session GUC on
-    /// every connection, arming the deferred commit-time trigger from
-    /// migration 0021. Writer pools must arm it; replica pools are read-only
-    /// so the trigger never fires there.
-    async fn connect_pool(config: &DbConfig, url: &str, arm_floor_guard: bool) -> Result<PgPool> {
-        let mut options = PgPoolOptions::new()
+    /// SQLx stores one `after_connect` hook, so the floor guard and transaction
+    /// isolation assertion must remain in this single closure. Registering a
+    /// second hook replaces the first and silently disarms the floor trigger.
+    async fn connect_pool(config: &DbConfig, url: &str) -> Result<PgPool> {
+        let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-            .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
-        if arm_floor_guard {
-            options = options.after_connect(|conn, _meta| {
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .after_connect(|conn, _meta| {
                 Box::pin(async move {
                     // `SET` cannot take bind parameters; `set_config` can.
                     sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
                         .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
-                        .execute(conn)
+                        .execute(&mut *conn)
                         .await?;
+                    let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+                        .fetch_one(&mut *conn)
+                        .await?;
+                    if isolation != "read committed" {
+                        return Err(sqlx::Error::Configuration(
+                            format!(
+                                "writer pool requires READ COMMITTED transaction isolation, got {isolation}"
+                            )
+                            .into(),
+                        ));
+                    }
                     Ok(())
                 })
             });
-        }
         Ok(options.connect(url).await?)
+    }
+
+    /// Reader acquire timeout — deliberately far below the writer's
+    /// (seconds-denominated) timeout. Failing closed to the writer must be
+    /// fast: a saturated reader pool that made routed reads wait the full
+    /// writer-style timeout would add dead latency during exactly the load
+    /// spike the offload exists for. A miss here surfaces as
+    /// `writer/reader_acquire_timeout` (see [`Db::proved_reader`] for why
+    /// the reason names the mechanism rather than a diagnosis).
+    const READER_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
+
+    /// Connect the read-replica pool **lazily** — no connection is
+    /// attempted at construction, so a reader that is down at boot cannot
+    /// crash the relay (it starts all-writer with the fence closed and
+    /// recovers when the replica returns).
+    ///
+    /// `min_connections` is pinned to 0 explicitly: sqlx's lazy pool still
+    /// spawns an eager background connect task to satisfy a nonzero
+    /// minimum, which would reintroduce boot-time reader dial attempts (and
+    /// their log noise) that "lazy" is meant to avoid. With 0, connections
+    /// are dialed only on first acquire; the ~10-minute reaper never tops
+    /// the pool back up, which is fine — routed reads re-fill it on demand.
+    ///
+    /// No floor guard or writer-isolation assertion: replica sessions are
+    /// read-only, so the commit-time trigger from migration 0021 never fires
+    /// here and the write fence that depends on READ COMMITTED is never reached.
+    fn connect_read_pool(config: &DbConfig, url: &str, max_connections: u32) -> Result<PgPool> {
+        Ok(PgPoolOptions::new()
+            .max_connections(max_connections)
+            .min_connections(0)
+            .acquire_timeout(Self::READER_ACQUIRE_TIMEOUT)
+            .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .connect_lazy(url)?)
+    }
+
+    /// Spawn a one-shot reader reachability probe that only WARNs.
+    ///
+    /// With a lazy pool and `min_connections(0)`, nothing dials the replica
+    /// until the first routed read — so a misconfigured `READ_DATABASE_URL`
+    /// would otherwise be invisible until traffic arrives and quietly falls
+    /// back to the writer. This ping is the only boot-time reader-down
+    /// visibility; it must never gate startup or [`Db::spawn_fence_probe`].
+    ///
+    /// On success it also primes the Aurora identity capability cache
+    /// ([`Db::reader_aurora_identity`]) on the connection it already holds,
+    /// so the first routed read doesn't spend a second acquire (up to
+    /// another [`Db::READER_ACQUIRE_TIMEOUT`]) inside
+    /// [`Db::reader_aurora_capability_on`]. Prime failure is fine: the routed
+    /// path re-probes on the connection it already holds, so a failed prime
+    /// costs a round trip rather than a second acquire budget.
+    pub fn spawn_read_pool_boot_ping(&self) {
+        let Some(read_pool) = self.read_pool.clone() else {
+            return;
+        };
+        let aurora_identity = self.reader_aurora_identity.clone();
+        tokio::spawn(async move {
+            match read_pool.acquire().await {
+                Ok(mut conn) => {
+                    tracing::info!("read replica reachable at boot");
+                    match replica_fence::reader_supports_aurora_identity(&mut conn).await {
+                        Ok(supported) => {
+                            let _ = aurora_identity.set(supported);
+                        }
+                        Err(e) => tracing::debug!(
+                            error = %e,
+                            "aurora identity boot prime failed; first routed read will probe"
+                        ),
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    "read replica unreachable at boot; serving all-writer until it recovers: {e}"
+                ),
+            }
+        });
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
     pub fn from_pool(pool: PgPool) -> Self {
         Self {
             max_connections: pool.options().get_max_connections(),
+            read_max_connections: pool.options().get_max_connections(),
             pool,
             read_pool: None,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+            replica_read_max_age: None,
+            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -421,10 +829,19 @@ impl Db {
     pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
         Self {
             max_connections: pool.options().get_max_connections(),
+            read_max_connections: read_pool.options().get_max_connections(),
             pool,
             read_pool: Some(read_pool),
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+            replica_read_max_age: None,
+            reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Test hook: set the head-fetch routing budget (Predicate A), which
+    /// [`Db::from_pools`] leaves disabled.
+    pub fn set_replica_read_max_age_for_tests(&mut self, budget: Option<Duration>) {
+        self.replica_read_max_age = budget;
     }
 
     /// The freshness fence gating replica routing (see [`replica_fence`]).
@@ -438,7 +855,7 @@ impl Db {
     /// Ordering matters (Perci, PR #2084 review): this must run **after**
     /// the migration decision. On a relay with `BUZZ_AUTO_MIGRATE` off, the
     /// writer pool arms the GUC regardless, but if migration 0021 has not
-    /// been applied there is no trigger enforcing it — and an LSN probe
+    /// been applied there is no trigger enforcing it — and a heartbeat probe
     /// would open the fence over an unenforced floor. So the probe is gated
     /// on an unconditional two-part verification against the live schema:
     /// catalog shape ([`replica_fence::verify_floor_guard_catalog`]) and
@@ -449,14 +866,13 @@ impl Db {
     /// stays closed: every cursor page routes to the writer. The relay keeps
     /// serving — degraded capacity, never holes.
     pub async fn spawn_fence_probe(&self) -> Result<bool> {
-        let Some(read_pool) = &self.read_pool else {
+        if self.read_pool.is_none() {
             return Ok(false);
-        };
+        }
         replica_fence::verify_floor_guard_catalog(&self.pool).await?;
         replica_fence::verify_floor_guard_behavior(&self.pool).await?;
         tokio::spawn(replica_fence::run_probe(
             self.pool.clone(),
-            read_pool.clone(),
             std::sync::Arc::clone(&self.fence),
         ));
         Ok(true)
@@ -465,11 +881,13 @@ impl Db {
     /// The pool for lag-tolerant reads: the read replica when configured,
     /// otherwise the writer pool.
     ///
-    /// Routing contract — a query may use this pool only when a stale (bounded
-    /// replication lag) result is acceptable to its caller. Keyset-cursor
-    /// pagination over immutable history qualifies; head-of-channel fetches,
-    /// auth/membership checks, locks, and anything inside a transaction do not.
-    pub fn read(&self) -> &PgPool {
+    /// Removed as a public escape hatch (Dawn, review of 1b0aa0dfa): the
+    /// raw replica pool carries **no fence proof**, which is exactly the
+    /// bug class the routed-read machinery exists to eliminate. All replica
+    /// reads must go through [`Db::route_read`]-backed entry points; this
+    /// remains only for the fence's own plumbing tests.
+    #[cfg(test)]
+    fn read(&self) -> &PgPool {
         self.read_pool.as_ref().unwrap_or(&self.pool)
     }
 
@@ -478,7 +896,155 @@ impl Db {
         self.read_pool.is_some()
     }
 
+    /// Open a reader request transaction and complete the connection-local
+    /// half of the fence proof: `BEGIN ISOLATION LEVEL REPEATABLE READ, READ
+    /// ONLY`, then observe the heartbeat token/epoch as the transaction's
+    /// **first statement** — anchoring the snapshot every follow-up
+    /// statement (page, participants, aux closure) sees to exactly the
+    /// snapshot the proof was taken against — and resolve it against the
+    /// retained ring. Returns the open transaction together with the
+    /// strongest [`replica_fence::TokenEntry`] its observation supports, or
+    /// the fail-closed reason for route metrics.
+    ///
+    /// `REPEATABLE READ` is the strongest isolation a hot standby supports
+    /// (`SERIALIZABLE` is writer-only); `READ ONLY` documents intent and
+    /// rejects accidental writes. Everything but `Ok` fails closed — begin
+    /// failure, missing heartbeat row (migration not yet replayed there),
+    /// observation error, epoch mismatch, or a token below every retained
+    /// entry all route the request to the writer.
+    async fn proved_reader(
+        &self,
+        read_pool: &PgPool,
+    ) -> std::result::Result<
+        (
+            sqlx::Transaction<'static, sqlx::Postgres>,
+            replica_fence::TokenEntry,
+        ),
+        &'static str,
+    > {
+        // One checkout per routed read. The Aurora capability probe and the
+        // read-only transaction share a single `acquire()` so the request path
+        // spends exactly one READER_ACQUIRE_TIMEOUT budget. Probing through
+        // `read_pool` separately would spend a second budget whenever the
+        // capability is uncached — i.e. after a failed boot ping, which is
+        // precisely the reader-unavailable case the bound must hold for.
+        let conn = match read_pool.acquire().await {
+            Ok(conn) => conn,
+            Err(sqlx::Error::PoolTimedOut) => {
+                tracing::warn!("reader pool acquire timed out; routing to writer");
+                return Err("reader_acquire_timeout");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reader connection acquire failed; routing to writer");
+                return Err("reader_validation_error");
+            }
+        };
+        let mut conn = conn;
+        let aurora = self.reader_aurora_capability_on(&mut conn).await;
+        let mut tx = match sqlx::Transaction::begin(
+            conn,
+            Some(sqlx::SqlStr::from_static(
+                "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+            )),
+        )
+        .await
+        {
+            Ok(tx) => tx,
+            // The acquire miss gets its own reason code: the reader pool's
+            // short acquire timeout (READER_ACQUIRE_TIMEOUT) makes this the
+            // fast fail-closed path under load, and
+            // `buzz_db_route_decision{decision="writer",reason="reader_acquire_timeout"}`
+            // is the operator's alert signal for a struggling reader pool.
+            //
+            // The reason deliberately names the mechanism, not a diagnosis:
+            // `PoolTimedOut` proves only that no connection was handed out
+            // within the 150ms budget. That budget includes cold connect
+            // (TCP+TLS+auth), and sqlx's `size` counts in-flight dials, so
+            // this fires for slow connection establishment as well as for
+            // established-connection contention — and neither `size == 0`
+            // nor `size >= max` recovers the missing causal bit (in-flight
+            // dials hold a size slot, and a cold burst can push
+            // `active = size - idle` toward max with zero busy connections).
+            // Runbook: correlate with `buzz_db_read_pool_active` / `_max`
+            // and reader connection health/latency; high active suggests
+            // contention, but this metric alone does not distinguish
+            // contention from slow connects. Note the gauge is a coarse
+            // sample (BUZZ_POOL_METRICS_INTERVAL_SECS, default 10s) while
+            // the event it explains lasts ~150ms — a short burst may fall
+            // between samples entirely, so absence of elevated active is
+            // NOT evidence of a cold connect.
+            Err(sqlx::Error::PoolTimedOut) => {
+                tracing::warn!("reader pool acquire timed out; routing to writer");
+                return Err("reader_acquire_timeout");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reader transaction begin failed; routing to writer");
+                return Err("reader_validation_error");
+            }
+        };
+        let obs = match replica_fence::observe_heartbeat(&mut tx, aurora).await {
+            Ok(Some(observation)) => observation,
+            Ok(None) => return Err("reader_validation_error"),
+            Err(e) => {
+                tracing::warn!(error = %e, "heartbeat observation failed; routing to writer");
+                return Err("reader_validation_error");
+            }
+        };
+        match self.fence.resolve(obs.token, obs.epoch) {
+            replica_fence::ResolveOutcome::Proved(entry) => {
+                tracing::debug!(
+                    token = obs.token,
+                    proved_token = entry.token,
+                    backend = %obs.backend,
+                    "reader snapshot proved fence coverage"
+                );
+                Ok((tx, entry))
+            }
+            replica_fence::ResolveOutcome::EpochMismatch => Err("reader_validation_error"),
+            replica_fence::ResolveOutcome::TokenBehind => Err("reader_token_behind"),
+        }
+    }
+
+    /// Whether the reader endpoint supports the Aurora PostgreSQL identity
+    /// function ([`replica_fence::AURORA_IDENTITY_FN`]), probed
+    /// once per process and cached (see [`Db::reader_aurora_identity`]).
+    /// The probe runs on a plain autocommit checkout — never inside the
+    /// request transaction, where an undefined-function error would abort
+    /// it. Probe failure (acquire or transient) degrades to the plain
+    /// identity tuple for THIS request without caching, so a later request
+    /// retries; identity is evidence, never a routing gate.
+    /// Aurora capability on a connection the caller already holds, so the
+    /// routed path never spends a second acquire budget.
+    async fn reader_aurora_capability_on(
+        &self,
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+    ) -> bool {
+        if let Some(cached) = self.reader_aurora_identity.get() {
+            return *cached;
+        }
+        match replica_fence::reader_supports_aurora_identity(conn).await {
+            Ok(supported) => *self.reader_aurora_identity.get_or_init(|| supported),
+            Err(e) => {
+                tracing::debug!(error = %e, "aurora identity probe failed; will retry");
+                false
+            }
+        }
+    }
+
+    /// Record one route decision (Rev 2 observability): which path, where it
+    /// went, and why.
+    fn record_route(path: &'static str, decision: &'static str, reason: &'static str) {
+        metrics::counter!(
+            "buzz_db_route_decision",
+            "path" => path,
+            "decision" => decision,
+            "reason" => reason,
+        )
+        .increment(1);
+    }
+
     /// Run pending database migrations.
+    #[datastore_span(name = "migrate", system = "postgresql")]
     pub async fn migrate(&self) -> Result<()> {
         migration::run_migrations(&self.pool).await
     }
@@ -486,6 +1052,16 @@ impl Db {
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+    }
+
+    /// Validate the minimum deletion fence catalog required by serving paths.
+    pub async fn validate_deletion_serving_catalog(&self) -> Result<()> {
+        self.deletion_store().validate_serving_catalog().await
+    }
+
+    /// Validate the exact live community-deletion tenant catalog for destruction.
+    pub async fn validate_deletion_catalog(&self) -> Result<()> {
+        self.deletion_store().validate_catalog().await
     }
 
     /// Returns pool utilisation stats for metrics emission.
@@ -502,11 +1078,18 @@ impl Db {
     }
 
     /// Pool utilisation stats for the read-replica pool, when configured.
+    ///
+    /// `max` is the **reader's** ceiling ([`Db::read_max_connections`]), not
+    /// the writer's: `buzz_db_read_pool_active / buzz_db_read_pool_max` is
+    /// the operator's utilisation signal for tuning `BUZZ_DB_READ_POOL_SIZE`,
+    /// and deriving it from the writer's max would misreport saturation by
+    /// exactly the ratio of the two pool sizes — in the direction that hides
+    /// the problem.
     pub fn read_pool_stats(&self) -> Option<DbPoolStats> {
         self.read_pool.as_ref().map(|p| DbPoolStats {
             size: p.size(),
             idle: p.num_idle() as u32,
-            max: self.max_connections,
+            max: self.read_max_connections,
         })
     }
 
@@ -516,6 +1099,7 @@ impl Db {
     /// detached from the shared pool so a stable leader neither returns a locked
     /// session to other callers nor permanently consumes a pool slot. Dropping the
     /// guard closes the connection and releases the session-scoped lock.
+    #[datastore_span(name = "try_lock_usage_metrics", system = "postgresql")]
     pub async fn try_lock_usage_metrics(
         &self,
         lock_key: i64,
@@ -536,6 +1120,7 @@ impl Db {
 
     /// List reports for the deployment-global read-only admin plane.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "admin_list_reports", system = "postgresql")]
     pub async fn admin_list_reports(
         &self,
         community_id: Option<Uuid>,
@@ -562,6 +1147,7 @@ impl Db {
     }
 
     /// Fetch one report for the deployment-global read-only admin plane.
+    #[datastore_span(name = "admin_get_report", system = "postgresql")]
     pub async fn admin_get_report(
         &self,
         id: Uuid,
@@ -570,6 +1156,7 @@ impl Db {
     }
 
     /// List feedback for the deployment-global read-only admin plane.
+    #[datastore_span(name = "admin_list_feedback", system = "postgresql")]
     pub async fn admin_list_feedback(
         &self,
         limit: i64,
@@ -578,6 +1165,7 @@ impl Db {
     }
 
     /// Fetch one feedback submission for the deployment-global admin plane.
+    #[datastore_span(name = "admin_get_feedback", system = "postgresql")]
     pub async fn admin_get_feedback(
         &self,
         id: Uuid,
@@ -586,36 +1174,43 @@ impl Db {
     }
 
     /// Return total number of communities on this relay.
+    #[datastore_span(name = "usage_community_count", system = "postgresql")]
     pub async fn usage_community_count(&self) -> Result<i64> {
         usage::community_count(&self.pool).await
     }
 
     /// Return per-community user counts split by human/agent.
+    #[datastore_span(name = "usage_user_counts", system = "postgresql")]
     pub async fn usage_user_counts(&self) -> Result<Vec<usage::CommunityUserCounts>> {
         usage::user_counts(&self.pool).await
     }
 
     /// Return per-community channel counts by type.
+    #[datastore_span(name = "usage_channel_counts", system = "postgresql")]
     pub async fn usage_channel_counts(&self) -> Result<Vec<usage::CommunityChannelCount>> {
         usage::channel_counts(&self.pool).await
     }
 
     /// Return per-community kind=9 message counts.
+    #[datastore_span(name = "usage_message_counts", system = "postgresql")]
     pub async fn usage_message_counts(&self) -> Result<Vec<usage::CommunityMessageCount>> {
         usage::message_counts(&self.pool).await
     }
 
     /// Return per-community relay-member counts by role.
+    #[datastore_span(name = "usage_relay_member_counts", system = "postgresql")]
     pub async fn usage_relay_member_counts(&self) -> Result<Vec<usage::CommunityMemberCount>> {
         usage::relay_member_counts(&self.pool).await
     }
 
     /// Return per-community workflow counts by status.
+    #[datastore_span(name = "usage_workflow_counts", system = "postgresql")]
     pub async fn usage_workflow_counts(&self) -> Result<Vec<usage::CommunityWorkflowCount>> {
         usage::workflow_counts(&self.pool).await
     }
 
     /// Return per-community git-repo counts.
+    #[datastore_span(name = "usage_git_repo_counts", system = "postgresql")]
     pub async fn usage_git_repo_counts(&self) -> Result<Vec<usage::CommunityGitRepoCount>> {
         usage::git_repo_counts(&self.pool).await
     }
@@ -623,6 +1218,7 @@ impl Db {
     /// Return per-community distinct active-user counts for a given SQL interval.
     ///
     /// `interval_sql` must be a trusted literal such as `"1 day"` or `"7 days"`.
+    #[datastore_span(name = "usage_active_user_counts", system = "postgresql")]
     pub async fn usage_active_user_counts(
         &self,
         interval_sql: &'static str,
@@ -631,6 +1227,7 @@ impl Db {
     }
 
     /// Return per-community active-channel counts for a given SQL interval.
+    #[datastore_span(name = "usage_active_channel_counts", system = "postgresql")]
     pub async fn usage_active_channel_counts(
         &self,
         interval_sql: &'static str,
@@ -639,8 +1236,14 @@ impl Db {
     }
 
     /// Return all community id → host mappings.
+    #[datastore_span(name = "usage_community_hosts", system = "postgresql")]
     pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
         usage::community_hosts(&self.pool).await
+    }
+
+    /// Return the shared durable whole-community deletion adapter.
+    pub fn deletion_store(&self) -> deletion::DeletionStore {
+        deletion::DeletionStore::new(self.pool.clone())
     }
 
     /// Begin a database transaction for atomic multi-statement operations.
@@ -655,6 +1258,7 @@ impl Db {
     ///
     /// The caller owns host normalization and turns `None` into the fail-closed
     /// request/connection error. buzz-db only reads the durable host map.
+    #[datastore_span(name = "lookup_community_by_host", system = "postgresql")]
     pub async fn lookup_community_by_host(
         &self,
         normalized_host: &str,
@@ -665,6 +1269,8 @@ impl Db {
             FROM communities
             WHERE lower(host) = lower($1)
               AND archived_at IS NULL
+              AND deleted_at IS NULL
+              AND deletion_state = 'active'
             "#,
         )
         .bind(normalized_host)
@@ -684,9 +1290,10 @@ impl Db {
     }
 
     /// Returns whether a community id still exists in the active lifecycle state.
+    #[datastore_span(name = "is_community_active", system = "postgresql")]
     pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
         let active = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community_id.as_uuid())
         .fetch_one(&self.pool)
@@ -695,6 +1302,10 @@ impl Db {
     }
 
     /// Returns a community by host regardless of lifecycle state. Operator-plane only.
+    #[datastore_span(
+        name = "lookup_community_by_host_for_management",
+        system = "postgresql"
+    )]
     pub async fn lookup_community_by_host_for_management(
         &self,
         normalized_host: &str,
@@ -716,6 +1327,7 @@ impl Db {
     ///
     /// This is an operator-plane helper, not a tenant-scoped data-plane read:
     /// callers must gate it on deployment-level operator auth before exposing it.
+    #[datastore_span(name = "list_communities_owned_by", system = "postgresql")]
     pub async fn list_communities_owned_by(
         &self,
         owner_pubkey: &str,
@@ -761,6 +1373,7 @@ impl Db {
     /// fan out under *that* community rather than the deployment default. The
     /// community is authoritative; the host is read back for labelling only and
     /// is never used to re-derive the community.
+    #[datastore_span(name = "lookup_community_host", system = "postgresql")]
     pub async fn lookup_community_host(&self, community_id: CommunityId) -> Result<Option<String>> {
         let row = sqlx::query(
             r#"
@@ -768,6 +1381,8 @@ impl Db {
             FROM communities
             WHERE id = $1
               AND archived_at IS NULL
+              AND deleted_at IS NULL
+              AND deletion_state = 'active'
             "#,
         )
         .bind(community_id.as_uuid())
@@ -785,6 +1400,7 @@ impl Db {
     ///
     /// Set by relay admins/owners via the kind:9033 command; the value is
     /// validated and size-capped at that write path.
+    #[datastore_span(name = "get_community_icon", system = "postgresql")]
     pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
         let row = sqlx::query(
             r#"
@@ -805,6 +1421,7 @@ impl Db {
     }
 
     /// Sets or clears (`None`) the community's workspace icon.
+    #[datastore_span(name = "set_community_icon", system = "postgresql")]
     pub async fn set_community_icon(
         &self,
         community_id: CommunityId,
@@ -829,6 +1446,7 @@ impl Db {
     /// This is the startup/config seeding path for N=1 deployments. Migrations
     /// create the schema only; deployment-specific hosts are not hardcoded into
     /// schema history.
+    #[datastore_span(name = "ensure_configured_community", system = "postgresql")]
     pub async fn ensure_configured_community(
         &self,
         normalized_host: &str,
@@ -838,12 +1456,19 @@ impl Db {
             INSERT INTO communities (host)
             VALUES ($1)
             ON CONFLICT (lower(host)) DO UPDATE SET host = communities.host
+            WHERE communities.deletion_state = 'active'
+              AND communities.deleted_at IS NULL
             RETURNING id, host, (xmax = 0) AS created
             "#,
         )
         .bind(normalized_host)
-        .fetch_one(&self.pool)
-        .await?;
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            DbError::AccessDenied(format!(
+                "community host {normalized_host:?} is permanently tombstoned"
+            ))
+        })?;
 
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
@@ -861,6 +1486,7 @@ impl Db {
     /// Holds a per-owner advisory lock while enforcing the ownership limit.
     /// Identical create retries return the original record; host collisions and
     /// limit failures remain distinguishable to the operator API.
+    #[datastore_span(name = "create_community_with_owner", system = "postgresql")]
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
@@ -923,6 +1549,8 @@ impl Db {
                   AND lower(rm.pubkey) = lower($2)
                   AND rm.role = 'owner'
                   AND c.archived_at IS NULL
+                  AND c.deletion_state = 'active'
+                  AND c.deleted_at IS NULL
                 "#,
             )
             .bind(normalized_host)
@@ -946,6 +1574,7 @@ impl Db {
     }
 
     /// Idempotently archives a community when the asserted pubkey is its current owner.
+    #[datastore_span(name = "archive_community_owned_by", system = "postgresql")]
     pub async fn archive_community_owned_by(
         &self,
         normalized_host: &str,
@@ -961,6 +1590,8 @@ impl Db {
                  AND lower(rm.pubkey) = lower($2)
                  AND rm.role = 'owner'
                  AND lower(c.host) <> lower($3)
+                 AND c.deletion_state = 'active'
+                 AND c.deleted_at IS NULL
                RETURNING c.id, c.host, c.archived_at"#,
         )
         .bind(normalized_host)
@@ -979,6 +1610,7 @@ impl Db {
     }
 
     /// Idempotently restores a community when the asserted pubkey is its current owner.
+    #[datastore_span(name = "unarchive_community_owned_by", system = "postgresql")]
     pub async fn unarchive_community_owned_by(
         &self,
         normalized_host: &str,
@@ -992,6 +1624,8 @@ impl Db {
                  AND rm.community_id = c.id
                  AND lower(rm.pubkey) = lower($2)
                  AND rm.role = 'owner'
+                 AND c.deletion_state = 'active'
+                 AND c.deleted_at IS NULL
                RETURNING c.id, c.host"#,
         )
         .bind(normalized_host)
@@ -1011,6 +1645,7 @@ impl Db {
     ///
     /// Internal relay producers use this to derive tenant context from the row
     /// they are acting on, rather than falling back to an implicit default.
+    #[datastore_span(name = "community_of_channel", system = "postgresql")]
     pub async fn community_of_channel(&self, channel_id: Uuid) -> Result<Option<CommunityId>> {
         let row = sqlx::query(
             r#"
@@ -1049,6 +1684,7 @@ impl Db {
     /// are intentionally not present rather than mapped to a default —
     /// callers MUST treat "channel-id not in map" as a coverage breach,
     /// never as "use the resolved community".
+    #[datastore_span(name = "communities_of_channels", system = "postgresql")]
     pub async fn communities_of_channels(
         &self,
         channel_ids: &[Uuid],
@@ -1078,6 +1714,7 @@ impl Db {
     }
 
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
+    #[datastore_span(name = "insert_event", system = "postgresql")]
     pub async fn insert_event(
         &self,
         community_id: CommunityId,
@@ -1093,18 +1730,178 @@ impl Db {
         Ok(result)
     }
 
+    /// Insert an event while holding and validating an admitted serving-write
+    /// lease under the community ordering lock through commit.
+    ///
+    /// External side effects use a durable lease rather than one long-lived DB
+    /// transaction. Their final database mutation presents that exact lease so
+    /// it may finish during quiescing without admitting any new serving work.
+    pub async fn insert_event_with_serving_write_guard(
+        &self,
+        lease: &deletion::ServingWriteLease,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let community_id = lease.community_id;
+        let kind_u16 = event.kind.as_u16();
+        let kind_u32 = u32::from(kind_u16);
+        if kind_u32 == buzz_core::kind::KIND_AUTH {
+            return Err(DbError::AuthEventRejected);
+        }
+        if buzz_core::kind::is_ephemeral(kind_u32) {
+            return Err(DbError::EphemeralEventRejected(kind_u16));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        self.deletion_store()
+            .guard_transaction_with_serving_lease(&mut tx, lease)
+            .await?;
+        let result = event::insert_event_with_thread_metadata_tx(
+            &mut tx,
+            community_id,
+            event,
+            channel_id,
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        if result.1 {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
+    }
+
     /// Queries events matching the given filter parameters.
+    ///
+    /// Always reads from the WRITER pool. If the result influences a write
+    /// or a permission decision, this is the method to call. Display-path
+    /// callers that tolerate bounded staleness should use
+    /// [`Db::query_events_routed`] instead — converting a caller is an
+    /// explicit, per-callsite decision, never a change to this method.
+    #[datastore_span(name = "query_events", system = "postgresql")]
     pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
         event::query_events(&self.pool, q).await
     }
 
+    /// [`Db::query_events`] with replica routing — the opt-in fast path for
+    /// display reads.
+    ///
+    /// Rule of thumb: **if the result influences a write or a permission,
+    /// it reads from the writer** — do not convert such a caller to this
+    /// method. Every new caller must be added to the caller-classification
+    /// table in `PLANS/REPLICA_FULL_READ_ROUTING_DESIGN.md`.
+    ///
+    /// Routing derives the strongest sound predicate from the query shape
+    /// ([`RoutePredicate::for_query`]): a channel-pinned query with an
+    /// `until` upper bound may be served covered (provably complete below
+    /// the fence wall); anything else is bounded-staleness only. The whole
+    /// seam is gated on `BUZZ_REPLICA_READ_MAX_AGE_MS` (default off): when
+    /// unset, even covered-eligible queries stay on the writer, so merging
+    /// this seam is a true no-op until the budget is configured. Every
+    /// failure fails closed to the writer.
+    #[datastore_span(name = "query_events_routed", system = "postgresql")]
+    pub async fn query_events_routed(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        let predicate = RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
+        match self.route_read(path, predicate).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        // Mid-query replica failure: fail closed to the
+                        // writer rather than surfacing a routed error.
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::query_events(&self.pool, q).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::query_events(&self.pool, q).await,
+        }
+    }
+
+    /// [`Db::query_events_routed`] restricted to the BOUNDED arm — for
+    /// reads whose result feeds a COUNT rather than a displayed page.
+    ///
+    /// The covered arm bounds insert-completeness only; stale deletions can
+    /// briefly inflate the result set (see [`RoutePredicate::Covered`]). A
+    /// display page absorbs that per-row; a number derived from the rows
+    /// does not. Same classification-table requirement as
+    /// [`Db::query_events_routed`].
+    #[datastore_span(name = "query_events_routed_bounded", system = "postgresql")]
+    pub async fn query_events_routed_bounded(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::query_events(&self.pool, q).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::query_events(&self.pool, q).await,
+        }
+    }
+
     /// Count events matching the given query (NIP-45 COUNT support).
+    ///
+    /// Always reads from the WRITER pool — see [`Db::query_events`] for the
+    /// writer-vs-routed rule.
+    #[datastore_span(name = "count_events", system = "postgresql")]
     pub async fn count_events(&self, q: &EventQuery) -> Result<i64> {
         event::count_events(&self.pool, q).await
     }
 
+    /// [`Db::count_events`] with replica routing — same contract, rules,
+    /// and classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// Counts route on the BOUNDED arm only, never covered: the covered
+    /// arm bounds insert-completeness but not deletion visibility (soft
+    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// downstream per-row re-filter to absorb extra rows — a silently
+    /// inflated number for up to `FENCE_STALENESS` is a different product
+    /// statement than a page briefly showing a deleted row. `Bounded` ties
+    /// the error to the accepted budget `B`.
+    #[datastore_span(name = "count_events_routed", system = "postgresql")]
+    pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::count_events_on(&mut tx, q).await {
+                    Ok(count) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(count)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica count failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::count_events(&self.pool, q).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::count_events(&self.pool, q).await,
+        }
+    }
+
     /// Return whether a creator-signed huddle-start event links a parent
     /// channel to an ephemeral huddle channel.
+    #[datastore_span(name = "huddle_started_link_exists", system = "postgresql")]
     pub async fn huddle_started_link_exists(
         &self,
         community_id: CommunityId,
@@ -1127,6 +1924,7 @@ impl Db {
     /// Uses canonical NIP-16 ordering: `created_at DESC, id ASC`.
     /// This matches the write path in [`replace_addressable_event`] and handles
     /// historical duplicate survivors correctly.
+    #[datastore_span(name = "get_latest_global_replaceable", system = "postgresql")]
     pub async fn get_latest_global_replaceable(
         &self,
         community_id: CommunityId,
@@ -1139,6 +1937,7 @@ impl Db {
     /// Fetches a single non-deleted event by its raw ID bytes.
     ///
     /// Returns `None` if the event does not exist or has been soft-deleted.
+    #[datastore_span(name = "get_event_by_id", system = "postgresql")]
     pub async fn get_event_by_id(
         &self,
         community_id: CommunityId,
@@ -1148,6 +1947,7 @@ impl Db {
     }
 
     /// Fetches a single event by its raw ID bytes, **including soft-deleted rows**.
+    #[datastore_span(name = "get_event_by_id_including_deleted", system = "postgresql")]
     pub async fn get_event_by_id_including_deleted(
         &self,
         community_id: CommunityId,
@@ -1157,6 +1957,7 @@ impl Db {
     }
 
     /// Soft-deletes an event. Returns `Ok(true)` if deleted, `Ok(false)` if already deleted.
+    #[datastore_span(name = "soft_delete_event", system = "postgresql")]
     pub async fn soft_delete_event(
         &self,
         community_id: CommunityId,
@@ -1165,19 +1966,32 @@ impl Db {
         event::soft_delete_event(&self.pool, community_id, event_id).await
     }
 
-    /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`.
-    /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds.
+    /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`
+    /// when it is not newer than the deletion request.
+    /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds;
+    /// `deletion_created_at_secs` is the deletion event's `created_at`.
+    #[datastore_span(name = "soft_delete_by_coordinate", system = "postgresql")]
     pub async fn soft_delete_by_coordinate(
         &self,
         community_id: CommunityId,
         kind: i32,
         pubkey: &[u8],
         d_tag: &str,
+        deletion_created_at_secs: i64,
     ) -> Result<bool> {
-        event::soft_delete_by_coordinate(&self.pool, community_id, kind, pubkey, d_tag).await
+        event::soft_delete_by_coordinate(
+            &self.pool,
+            community_id,
+            kind,
+            pubkey,
+            d_tag,
+            deletion_created_at_secs,
+        )
+        .await
     }
 
     /// Atomically soft-delete an event and decrement thread reply counters.
+    #[datastore_span(name = "soft_delete_event_and_update_thread", system = "postgresql")]
     pub async fn soft_delete_event_and_update_thread(
         &self,
         community_id: CommunityId,
@@ -1196,6 +2010,7 @@ impl Db {
     }
 
     /// Returns the most recent `created_at` for a channel.
+    #[datastore_span(name = "get_last_message_at", system = "postgresql")]
     pub async fn get_last_message_at(
         &self,
         community_id: CommunityId,
@@ -1205,6 +2020,7 @@ impl Db {
     }
 
     /// Bulk-fetch the most recent `created_at` for a set of channel IDs.
+    #[datastore_span(name = "get_last_message_at_bulk", system = "postgresql")]
     pub async fn get_last_message_at_bulk(
         &self,
         community_id: CommunityId,
@@ -1214,6 +2030,7 @@ impl Db {
     }
 
     /// Batch-fetch non-deleted events by their raw IDs.
+    #[datastore_span(name = "get_events_by_ids", system = "postgresql")]
     pub async fn get_events_by_ids(
         &self,
         community_id: CommunityId,
@@ -1222,7 +2039,40 @@ impl Db {
         event::get_events_by_ids(&self.pool, community_id, ids).await
     }
 
+    /// [`Db::get_events_by_ids`] with replica routing — same contract and
+    /// classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// By-id fetches route on the BOUNDED arm only: an id list carries no
+    /// channel pin, so no fence floor can prove insert-completeness — the
+    /// covered arm is structurally unavailable. Used for FTS hit hydration,
+    /// where a missing row degrades to a skipped search hit downstream.
+    #[datastore_span(name = "get_events_by_ids_routed", system = "postgresql")]
+    pub async fn get_events_by_ids_routed(
+        &self,
+        path: &'static str,
+        community_id: CommunityId,
+        ids: &[&[u8]],
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match event::get_events_by_ids_on(&mut tx, community_id, ids).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        event::get_events_by_ids(&self.pool, community_id, ids).await
+                    }
+                }
+            }
+            RouteDecision::Writer => event::get_events_by_ids(&self.pool, community_id, ids).await,
+        }
+    }
+
     /// Exclusively claim a batch of due matcher jobs from one community.
+    #[datastore_span(name = "claim_due_push_match_batch", system = "postgresql")]
     pub async fn claim_due_push_match_batch(
         &self,
         limit: i64,
@@ -1232,6 +2082,7 @@ impl Db {
     }
 
     /// Load active endpoint-enabled leases eligible for push matching.
+    #[datastore_span(name = "active_push_match_leases", system = "postgresql")]
     pub async fn active_push_match_leases(
         &self,
         community: CommunityId,
@@ -1240,6 +2091,7 @@ impl Db {
     }
 
     /// Complete matcher jobs from one claimed batch while the fence holds.
+    #[datastore_span(name = "complete_push_match_batch", system = "postgresql")]
     pub async fn complete_push_match_batch(
         &self,
         community: CommunityId,
@@ -1250,6 +2102,7 @@ impl Db {
     }
 
     /// Release fenced matcher claims from one batch for retry.
+    #[datastore_span(name = "retry_push_match_batch", system = "postgresql")]
     pub async fn retry_push_match_batch(
         &self,
         community: CommunityId,
@@ -1261,11 +2114,13 @@ impl Db {
     }
 
     /// Delete exhausted matcher jobs (periodic sweep, off the claim path).
+    #[datastore_span(name = "reap_exhausted_push_matches", system = "postgresql")]
     pub async fn reap_exhausted_push_matches(&self) -> Result<u64> {
         push::reap_exhausted_matches(&self.pool).await
     }
 
     /// Idempotently enqueue a wake for a matched lease and event.
+    #[datastore_span(name = "enqueue_push_wake", system = "postgresql")]
     pub async fn enqueue_push_wake(
         &self,
         community: CommunityId,
@@ -1277,6 +2132,7 @@ impl Db {
     }
 
     /// Set-wise [`Self::enqueue_push_wake`]: one transaction per batch.
+    #[datastore_span(name = "enqueue_push_wakes", system = "postgresql")]
     pub async fn enqueue_push_wakes(
         &self,
         community: CommunityId,
@@ -1286,6 +2142,7 @@ impl Db {
     }
 
     /// Exclusively claim due wake jobs for one community.
+    #[datastore_span(name = "claim_due_push_wakes", system = "postgresql")]
     pub async fn claim_due_push_wakes(
         &self,
         community: CommunityId,
@@ -1296,6 +2153,7 @@ impl Db {
     }
 
     /// Revalidate a wake's claim, source event, and current lease before send.
+    #[datastore_span(name = "revalidate_push_wake", system = "postgresql")]
     pub async fn revalidate_push_wake(
         &self,
         community: CommunityId,
@@ -1306,6 +2164,7 @@ impl Db {
     }
 
     /// Mark a fenced wake claim delivered.
+    #[datastore_span(name = "complete_push_wake", system = "postgresql")]
     pub async fn complete_push_wake(
         &self,
         community: CommunityId,
@@ -1316,6 +2175,7 @@ impl Db {
     }
 
     /// Release a fenced wake claim for retry at the supplied time.
+    #[datastore_span(name = "retry_push_wake", system = "postgresql")]
     pub async fn retry_push_wake(
         &self,
         community: CommunityId,
@@ -1327,6 +2187,7 @@ impl Db {
     }
 
     /// Mark a fenced wake claim terminally failed.
+    #[datastore_span(name = "fail_push_wake", system = "postgresql")]
     pub async fn fail_push_wake(
         &self,
         community: CommunityId,
@@ -1337,6 +2198,7 @@ impl Db {
     }
 
     /// Disable an endpoint only if the specified lease generation is current.
+    #[datastore_span(name = "disable_push_endpoint", system = "postgresql")]
     pub async fn disable_push_endpoint(
         &self,
         community: CommunityId,
@@ -1356,6 +2218,7 @@ impl Db {
 
     /// Atomically persist a validated kind:30350 event and its effective lease.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "accept_push_lease_event", system = "postgresql")]
     pub async fn accept_push_lease_event(
         &self,
         community: CommunityId,
@@ -1378,6 +2241,7 @@ impl Db {
     }
 
     /// Atomically insert an event AND its thread metadata in a single transaction.
+    #[datastore_span(name = "insert_event_with_thread_metadata", system = "postgresql")]
     pub async fn insert_event_with_thread_metadata(
         &self,
         community_id: CommunityId,
@@ -1403,6 +2267,10 @@ impl Db {
 
     /// Atomically insert a kind:7 reaction event and its reaction row.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(
+        name = "insert_reaction_event_with_thread_metadata",
+        system = "postgresql"
+    )]
     pub async fn insert_reaction_event_with_thread_metadata(
         &self,
         community_id: CommunityId,
@@ -1437,6 +2305,7 @@ impl Db {
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_channel", system = "postgresql")]
     pub async fn create_channel(
         &self,
         community_id: CommunityId,
@@ -1464,6 +2333,7 @@ impl Db {
     ///
     /// Returns `(record, true)` if newly created, `(record, false)` if already exists.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_channel_with_id", system = "postgresql")]
     pub async fn create_channel_with_id(
         &self,
         community_id: CommunityId,
@@ -1490,6 +2360,7 @@ impl Db {
     }
 
     /// Fetches a channel record by ID.
+    #[datastore_span(name = "get_channel", system = "postgresql")]
     pub async fn get_channel(
         &self,
         community_id: CommunityId,
@@ -1499,6 +2370,7 @@ impl Db {
     }
 
     /// Returns the canvas content for a channel, if any.
+    #[datastore_span(name = "get_canvas", system = "postgresql")]
     pub async fn get_canvas(
         &self,
         community_id: CommunityId,
@@ -1508,6 +2380,7 @@ impl Db {
     }
 
     /// Sets or clears the canvas content for a channel.
+    #[datastore_span(name = "set_canvas", system = "postgresql")]
     pub async fn set_canvas(
         &self,
         community_id: CommunityId,
@@ -1518,6 +2391,7 @@ impl Db {
     }
 
     /// Adds a member to a channel.
+    #[datastore_span(name = "add_member", system = "postgresql")]
     pub async fn add_member(
         &self,
         community_id: CommunityId,
@@ -1538,6 +2412,7 @@ impl Db {
     }
 
     /// Removes a member from a channel.
+    #[datastore_span(name = "remove_member", system = "postgresql")]
     pub async fn remove_member(
         &self,
         community_id: CommunityId,
@@ -1549,6 +2424,7 @@ impl Db {
     }
 
     /// Returns `true` if the pubkey is an active member.
+    #[datastore_span(name = "is_member", system = "postgresql")]
     pub async fn is_member(
         &self,
         community_id: CommunityId,
@@ -1560,6 +2436,7 @@ impl Db {
 
     /// Return the active (channel, pubkey) membership pairs among the given
     /// sets, in one statement.
+    #[datastore_span(name = "membership_pairs", system = "postgresql")]
     pub async fn membership_pairs(
         &self,
         community_id: CommunityId,
@@ -1570,6 +2447,7 @@ impl Db {
     }
 
     /// Returns all active members of a channel.
+    #[datastore_span(name = "get_members", system = "postgresql")]
     pub async fn get_members(
         &self,
         community_id: CommunityId,
@@ -1579,6 +2457,7 @@ impl Db {
     }
 
     /// Returns active members for multiple channels in a single query.
+    #[datastore_span(name = "get_members_bulk", system = "postgresql")]
     pub async fn get_members_bulk(
         &self,
         community_id: CommunityId,
@@ -1588,6 +2467,7 @@ impl Db {
     }
 
     /// Get all channel IDs accessible to a pubkey.
+    #[datastore_span(name = "get_accessible_channel_ids", system = "postgresql")]
     pub async fn get_accessible_channel_ids(
         &self,
         community_id: CommunityId,
@@ -1597,6 +2477,7 @@ impl Db {
     }
 
     /// Lists channels, optionally filtered by visibility.
+    #[datastore_span(name = "list_channels", system = "postgresql")]
     pub async fn list_channels(
         &self,
         community_id: CommunityId,
@@ -1606,6 +2487,7 @@ impl Db {
     }
 
     /// Returns full channel records for all channels a user can access.
+    #[datastore_span(name = "get_accessible_channels", system = "postgresql")]
     pub async fn get_accessible_channels(
         &self,
         community_id: CommunityId,
@@ -1624,6 +2506,7 @@ impl Db {
     }
 
     /// Returns all bot-role members with their aggregated channel names in one community.
+    #[datastore_span(name = "get_bot_members", system = "postgresql")]
     pub async fn get_bot_members(
         &self,
         community_id: CommunityId,
@@ -1632,6 +2515,7 @@ impl Db {
     }
 
     /// Bulk-fetch user records by pubkey.
+    #[datastore_span(name = "get_users_bulk", system = "postgresql")]
     pub async fn get_users_bulk(
         &self,
         community_id: CommunityId,
@@ -1641,6 +2525,7 @@ impl Db {
     }
 
     /// Updates a channel's name and/or description.
+    #[datastore_span(name = "update_channel", system = "postgresql")]
     pub async fn update_channel(
         &self,
         community_id: CommunityId,
@@ -1651,6 +2536,7 @@ impl Db {
     }
 
     /// Sets the topic for a channel.
+    #[datastore_span(name = "set_topic", system = "postgresql")]
     pub async fn set_topic(
         &self,
         community_id: CommunityId,
@@ -1662,6 +2548,7 @@ impl Db {
     }
 
     /// Sets the purpose for a channel.
+    #[datastore_span(name = "set_purpose", system = "postgresql")]
     pub async fn set_purpose(
         &self,
         community_id: CommunityId,
@@ -1673,11 +2560,13 @@ impl Db {
     }
 
     /// Archives a channel.
+    #[datastore_span(name = "archive_channel", system = "postgresql")]
     pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
         channel::archive_channel(&self.pool, community_id, channel_id).await
     }
 
     /// Unarchives a channel.
+    #[datastore_span(name = "unarchive_channel", system = "postgresql")]
     pub async fn unarchive_channel(
         &self,
         community_id: CommunityId,
@@ -1687,6 +2576,7 @@ impl Db {
     }
 
     /// Soft-delete a channel.
+    #[datastore_span(name = "soft_delete_channel", system = "postgresql")]
     pub async fn soft_delete_channel(
         &self,
         community_id: CommunityId,
@@ -1696,6 +2586,7 @@ impl Db {
     }
 
     /// Returns the count of active members in a channel.
+    #[datastore_span(name = "get_member_count", system = "postgresql")]
     pub async fn get_member_count(
         &self,
         community_id: CommunityId,
@@ -1705,6 +2596,7 @@ impl Db {
     }
 
     /// Bulk-fetch member counts for a set of channel IDs.
+    #[datastore_span(name = "get_member_counts_bulk", system = "postgresql")]
     pub async fn get_member_counts_bulk(
         &self,
         community_id: CommunityId,
@@ -1714,6 +2606,7 @@ impl Db {
     }
 
     /// Get the active role of a pubkey in a channel.
+    #[datastore_span(name = "get_member_role", system = "postgresql")]
     pub async fn get_member_role(
         &self,
         community_id: CommunityId,
@@ -1724,6 +2617,7 @@ impl Db {
     }
 
     /// Archive ephemeral channels whose TTL deadline has passed.
+    #[datastore_span(name = "reap_expired_ephemeral_channels", system = "postgresql")]
     pub async fn reap_expired_ephemeral_channels(
         &self,
     ) -> Result<Vec<channel::ReapedEphemeralChannel>> {
@@ -1731,6 +2625,7 @@ impl Db {
     }
 
     /// Query due reminders ready for delivery.
+    #[datastore_span(name = "query_due_reminders", system = "postgresql")]
     pub async fn query_due_reminders(
         &self,
         now_secs: i64,
@@ -1740,6 +2635,7 @@ impl Db {
     }
 
     /// Atomically claim a due reminder for delivery (cross-pod dedup).
+    #[datastore_span(name = "claim_due_reminder", system = "postgresql")]
     pub async fn claim_due_reminder(
         &self,
         community_id: CommunityId,
@@ -1750,6 +2646,7 @@ impl Db {
     }
 
     /// Atomically claim a due reminder using a caller-supplied delivery stamp.
+    #[datastore_span(name = "claim_due_reminder_with_stamp", system = "postgresql")]
     pub async fn claim_due_reminder_with_stamp(
         &self,
         community_id: CommunityId,
@@ -1768,6 +2665,7 @@ impl Db {
     }
 
     /// Release a claimed due reminder after a publish failure.
+    #[datastore_span(name = "release_due_reminder", system = "postgresql")]
     pub async fn release_due_reminder(
         &self,
         community_id: CommunityId,
@@ -1790,11 +2688,13 @@ impl Db {
     /// Returns `true` if a new row was inserted (first time), `false` if it
     /// already existed. Callers use the `true` return to increment
     /// `buzz_users_created_total`.
+    #[datastore_span(name = "ensure_user", system = "postgresql")]
     pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
         user::ensure_user(&self.pool, community_id, pubkey).await
     }
 
     /// Get a single user record by pubkey.
+    #[datastore_span(name = "get_user", system = "postgresql")]
     pub async fn get_user(
         &self,
         community_id: CommunityId,
@@ -1804,6 +2704,7 @@ impl Db {
     }
 
     /// Update a user's profile fields.
+    #[datastore_span(name = "update_user_profile", system = "postgresql")]
     pub async fn update_user_profile(
         &self,
         community_id: CommunityId,
@@ -1826,6 +2727,7 @@ impl Db {
     }
 
     /// Look up a user by NIP-05 handle.
+    #[datastore_span(name = "get_user_by_nip05", system = "postgresql")]
     pub async fn get_user_by_nip05(
         &self,
         community_id: CommunityId,
@@ -1836,6 +2738,7 @@ impl Db {
     }
 
     /// Search users by display name, NIP-05 handle, or pubkey prefix.
+    #[datastore_span(name = "search_users", system = "postgresql")]
     pub async fn search_users(
         &self,
         community_id: CommunityId,
@@ -1847,6 +2750,7 @@ impl Db {
 
     /// Atomically set agent owner — only if no owner is currently assigned.
     /// Returns Ok(true) if set, Ok(false) if an owner already exists.
+    #[datastore_span(name = "set_agent_owner", system = "postgresql")]
     pub async fn set_agent_owner(
         &self,
         community_id: CommunityId,
@@ -1857,6 +2761,7 @@ impl Db {
     }
 
     /// Get the channel_add_policy and agent_owner_pubkey for a user.
+    #[datastore_span(name = "get_agent_channel_policy", system = "postgresql")]
     pub async fn get_agent_channel_policy(
         &self,
         community_id: CommunityId,
@@ -1866,6 +2771,7 @@ impl Db {
     }
 
     /// Check whether `actor_pubkey` is the agent owner of `target_pubkey`.
+    #[datastore_span(name = "is_agent_owner", system = "postgresql")]
     pub async fn is_agent_owner(
         &self,
         community_id: CommunityId,
@@ -1876,6 +2782,7 @@ impl Db {
     }
 
     /// Set the channel_add_policy for a user.
+    #[datastore_span(name = "set_channel_add_policy", system = "postgresql")]
     pub async fn set_channel_add_policy(
         &self,
         community_id: CommunityId,
@@ -1886,6 +2793,7 @@ impl Db {
     }
 
     /// Find an existing DM by its participant hash.
+    #[datastore_span(name = "find_dm_by_participants", system = "postgresql")]
     pub async fn find_dm_by_participants(
         &self,
         community_id: CommunityId,
@@ -1895,6 +2803,7 @@ impl Db {
     }
 
     /// Create or return an existing DM channel.
+    #[datastore_span(name = "create_dm", system = "postgresql")]
     pub async fn create_dm(
         &self,
         community_id: CommunityId,
@@ -1905,6 +2814,7 @@ impl Db {
     }
 
     /// List all DMs for a user.
+    #[datastore_span(name = "list_dms_for_user", system = "postgresql")]
     pub async fn list_dms_for_user(
         &self,
         community_id: CommunityId,
@@ -1916,6 +2826,7 @@ impl Db {
     }
 
     /// Open or retrieve a DM for the given participants.
+    #[datastore_span(name = "open_dm", system = "postgresql")]
     pub async fn open_dm(
         &self,
         community_id: CommunityId,
@@ -1929,6 +2840,7 @@ impl Db {
     ///
     /// The DM is not deleted — it can be restored by opening a new DM with
     /// the same participants.
+    #[datastore_span(name = "hide_dm", system = "postgresql")]
     pub async fn hide_dm(
         &self,
         community_id: CommunityId,
@@ -1939,6 +2851,7 @@ impl Db {
     }
 
     /// Unhide a DM channel for a specific user.
+    #[datastore_span(name = "unhide_dm", system = "postgresql")]
     pub async fn unhide_dm(
         &self,
         community_id: CommunityId,
@@ -1949,6 +2862,7 @@ impl Db {
     }
 
     /// List the channel IDs of all DMs the given user currently has hidden.
+    #[datastore_span(name = "list_hidden_dms", system = "postgresql")]
     pub async fn list_hidden_dms(
         &self,
         community_id: CommunityId,
@@ -1959,6 +2873,7 @@ impl Db {
 
     /// Insert thread metadata.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "insert_thread_metadata", system = "postgresql")]
     pub async fn insert_thread_metadata(
         &self,
         community_id: CommunityId,
@@ -1990,19 +2905,26 @@ impl Db {
 
     /// Fetch replies under a root event.
     ///
-    /// Routing: the head fetch (`cursor: None`) always reads the writer.
-    /// Cursor-bearing pages may read the replica pool when one is configured
-    /// AND the freshness fence is open ([`replica_fence`]). Thread pagination
-    /// walks forward from oldest to newest, so a replica page is served only
-    /// when it is provably complete:
+    /// Routing mirrors [`Db::get_channel_window_with_session`]: a head
+    /// fetch (`cursor: None`) is Predicate A (bounded staleness, gated by
+    /// the default-off head budget); cursor pages are Predicate B
+    /// (completeness). Thread pagination walks **forward** from oldest to
+    /// newest, so a cursor carries no upper bound — instead the served page
+    /// is post-verified against the wall the serving session proved:
     ///
     /// - an under-`limit` page is a candidate terminal page — the client
     ///   treats it as EOF, so it is re-run on the writer to keep the EOF
     ///   decision authoritative (a lagged replica could truncate the tail);
-    /// - a full page whose newest row exceeds the fence could straddle a row
-    ///   the replica has not replayed (commit order is not `created_at`
-    ///   order), so it is also re-run on the writer. Only a full page that
-    ///   sits entirely at or below the fence is served from the replica.
+    /// - a full page whose newest row exceeds the proved fence wall could
+    ///   straddle a row the session has not replayed (commit order is not
+    ///   `created_at` order), so it is also re-run on the writer. Only a
+    ///   full page that sits entirely at or below the proved wall is served
+    ///   from the replica.
+    ///
+    /// A head fetch routed under Predicate A skips the re-run: bounded
+    /// staleness (missing at most the freshest budget-window of replies) is
+    /// exactly the semantic the head gate accepts.
+    #[datastore_span(name = "get_thread_replies", system = "postgresql")]
     pub async fn get_thread_replies(
         &self,
         community_id: CommunityId,
@@ -2011,25 +2933,59 @@ impl Db {
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> Result<Vec<thread::ThreadReply>> {
-        if cursor.is_some() && self.has_read_pool() && self.fence.verified_through().is_some() {
-            let replies = thread::get_thread_replies(
-                self.read(),
+        let (path, predicate): (&'static str, RoutePredicate) = match cursor {
+            Some(_) => (
+                "thread_cursor",
+                RoutePredicate::CoveredPostVerified {
+                    proof: ChannelScoped::from_thread_metadata_join(),
+                },
+            ),
+            None => ("thread_head", RoutePredicate::Bounded),
+        };
+        if let RouteDecision::Replica(mut tx, entry, reason) =
+            self.route_read(path, predicate).await
+        {
+            match thread::get_thread_replies_on(
+                &mut tx,
                 community_id,
                 root_event_id,
                 depth_limit,
                 limit,
                 cursor,
             )
-            .await?;
-            let full = replies.len() >= limit as usize;
-            let below_fence = replies
-                .last()
-                .is_some_and(|tail| self.fence.covers(tail.created_at));
-            if full && below_fence {
-                return Ok(replies);
+            .await
+            {
+                Ok(replies) => {
+                    if cursor.is_none() {
+                        // Predicate A: bounded-stale head page, served as proved.
+                        Self::record_route(path, "replica", reason);
+                        return Ok(replies);
+                    }
+                    let full = replies.len() >= limit as usize;
+                    let below_fence = replies
+                        .last()
+                        .is_some_and(|tail| tail.created_at <= entry.fence_wall);
+                    if full && below_fence {
+                        Self::record_route(path, "replica", reason);
+                        return Ok(replies);
+                    }
+                    // Candidate terminal page, or page reaching above the
+                    // proved wall — verify against the writer. Recorded as
+                    // the request's ONLY route event: the replica leg was
+                    // discarded, so counting it would overstate offload.
+                    Self::record_route("thread_eof", "writer", "stale");
+                }
+                Err(e) => {
+                    // Mid-request replica failure (e.g. a hot-standby
+                    // recovery conflict) fails closed to the writer.
+                    tracing::warn!(
+                        error = %e,
+                        path,
+                        "replica thread query failed; re-running on writer"
+                    );
+                    Self::record_route(path, "writer", "replica_error");
+                }
             }
-            // Candidate terminal page, or page reaching above the fence —
-            // verify against the writer.
         }
         thread::get_thread_replies(
             &self.pool,
@@ -2043,6 +2999,7 @@ impl Db {
     }
 
     /// Fetch aggregated thread stats.
+    #[datastore_span(name = "get_thread_summary", system = "postgresql")]
     pub async fn get_thread_summary(
         &self,
         community_id: CommunityId,
@@ -2053,15 +3010,8 @@ impl Db {
 
     /// One channel window: top-level rows + summaries + server `has_more`.
     ///
-    /// Routing: the head fetch (`cursor: None`) always reads the writer — it
-    /// must include just-committed events. A cursor-bearing page scrolls
-    /// *backward* into history bounded above by the cursor timestamp
-    /// (`created_at < ts`, or `= ts` with the id tiebreak), so it may read
-    /// the replica when one is configured AND the freshness fence covers the
-    /// cursor timestamp: every row the page could contain is then provably
-    /// replayed on the replica ([`replica_fence`]). Pages whose cursor
-    /// reaches above the fence — the freshest sliver of history — stay on
-    /// the writer.
+    /// Convenience wrapper over [`Db::get_channel_window_with_session`] for
+    /// callers with no follow-up queries; the serving session is released.
     pub async fn get_channel_window(
         &self,
         community_id: CommunityId,
@@ -2070,14 +3020,204 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
     ) -> Result<thread::ChannelWindow> {
-        let pool = match &cursor {
-            Some((ts, _)) if self.has_read_pool() && self.fence.covers(*ts) => self.read(),
-            _ => &self.pool,
+        self.get_channel_window_with_session(community_id, channel_id, limit, cursor, kind_filter)
+            .await
+            .map(|(window, _session)| window)
+    }
+
+    /// [`Db::get_channel_window`], additionally returning the session that
+    /// served the page so request-scoped follow-ups (the aux closure) run on
+    /// the same proved connection.
+    ///
+    /// Routing:
+    ///
+    /// - **Cursor page** (Predicate B — completeness): scrolls *backward*
+    ///   into history bounded above by the cursor timestamp (`created_at <
+    ///   ts`, or `= ts` with the id tiebreak), so it may be served by a
+    ///   replica session when one is configured AND that session **proves**
+    ///   coverage of the cursor timestamp: the heartbeat token/epoch is
+    ///   observed on the exact connection that will serve the page and
+    ///   resolved against the fence's retained ring ([`replica_fence`]).
+    /// - **Head fetch** (Predicate A — bounded staleness): served by a
+    ///   proved replica session only when the head gate is configured
+    ///   ([`DbConfig::replica_read_max_age_ms`], default off) and the
+    ///   proved entry is within the budget. This trades a bounded staleness
+    ///   window (budget plus probe cadence) on the GET leg for writer
+    ///   offload. NOTE: enabling the budget also breaks read-your-own-writes
+    ///   on the GET leg; the client-side WS `since`-overlap union intended
+    ///   to cover fresh events has NOT shipped yet — do not enable
+    ///   `BUZZ_REPLICA_HEAD_MAX_AGE_SECS` until it has, proven by a
+    ///   post-then-immediately-refetch test.
+    ///
+    /// Every failure fails closed to the writer and is recorded in
+    /// `buzz_db_route_decision`.
+    #[datastore_span(name = "get_channel_window", system = "postgresql")]
+    pub async fn get_channel_window_with_session(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        limit: u32,
+        cursor: Option<(DateTime<Utc>, Vec<u8>)>,
+        kind_filter: Option<&[u32]>,
+    ) -> Result<(thread::ChannelWindow, ReadSession)> {
+        let path: &'static str = if cursor.is_some() {
+            "channel_cursor"
+        } else {
+            "channel_head"
         };
-        thread::get_channel_window(pool, community_id, channel_id, limit, cursor, kind_filter).await
+        match self
+            .route_read(
+                path,
+                RoutePredicate::from_channel_cursor(channel_id, &cursor),
+            )
+            .await
+        {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match thread::get_channel_window_on(
+                    &mut tx,
+                    community_id,
+                    channel_id,
+                    limit,
+                    cursor.clone(),
+                    kind_filter,
+                )
+                .await
+                {
+                    Ok(window) => {
+                        Self::record_route(path, "replica", reason);
+                        return Ok((
+                            window,
+                            ReadSession {
+                                inner: ReadSessionInner::Replica {
+                                    tx,
+                                    writer: self.pool.clone(),
+                                },
+                            },
+                        ));
+                    }
+                    Err(e) => {
+                        // A mid-request replica failure (e.g. a hot-standby
+                        // recovery conflict cancelling the held snapshot)
+                        // fails closed to the writer: a stale-but-served
+                        // page, never an error the writer could have
+                        // answered. Dropping `tx` rolls the reader
+                        // transaction back.
+                        tracing::warn!(
+                            error = %e,
+                            path,
+                            "replica window query failed; re-running on writer"
+                        );
+                        Self::record_route(path, "writer", "replica_error");
+                    }
+                }
+            }
+            RouteDecision::Writer => {}
+        }
+        let window = thread::get_channel_window(
+            &self.pool,
+            community_id,
+            channel_id,
+            limit,
+            cursor,
+            kind_filter,
+        )
+        .await?;
+        Ok((
+            window,
+            ReadSession {
+                inner: ReadSessionInner::Writer(self.pool.clone()),
+            },
+        ))
+    }
+
+    /// Shared route decision for one read: evaluate the predicate against a
+    /// proved reader session and record the decision. Fail closed to the
+    /// writer everywhere.
+    async fn route_read(&self, path: &'static str, predicate: RoutePredicate) -> RouteDecision {
+        let Some(read_pool) = &self.read_pool else {
+            Self::record_route(path, "writer", "disabled");
+            return RouteDecision::Writer;
+        };
+        // Cheap prechecks on the shared ring before spending a reader
+        // checkout; the connection-local observation still has to prove it.
+        let Some(newest) = self.fence.newest() else {
+            Self::record_route(path, "writer", "uninitialized");
+            return RouteDecision::Writer;
+        };
+        // Precheck helpers against the newest shared entry: if the newest
+        // cannot satisfy an arm, no proved (older-or-equal) entry can.
+        let bounded_precheck =
+            |budget: &Option<Duration>| -> std::result::Result<(), &'static str> {
+                match budget {
+                    Some(budget) if newest.committed_at.elapsed() <= *budget => Ok(()),
+                    Some(_) => Err("stale"),
+                    None => Err("disabled"),
+                }
+            };
+        let covered_precheck = |upper: &DateTime<Utc>| -> std::result::Result<(), &'static str> {
+            if *upper <= newest.fence_wall {
+                Ok(())
+            } else {
+                Err("stale")
+            }
+        };
+        let precheck = match &predicate {
+            RoutePredicate::Bounded => bounded_precheck(&self.replica_read_max_age),
+            RoutePredicate::Covered { upper, .. } => covered_precheck(upper),
+            // No upper bound: the caller post-verifies served rows.
+            RoutePredicate::CoveredPostVerified { .. } => Ok(()),
+            // Covered first (no budget dependence), else bounded.
+            RoutePredicate::BoundedOrCovered { upper, .. } => {
+                covered_precheck(upper).or_else(|_| bounded_precheck(&self.replica_read_max_age))
+            }
+        };
+        if let Err(reason) = precheck {
+            Self::record_route(path, "writer", reason);
+            return RouteDecision::Writer;
+        }
+        match self.proved_reader(read_pool).await {
+            Ok((tx, entry)) => {
+                // Re-evaluate against the entry the session actually proved
+                // (it may be older than the shared newest).
+                let bounded_holds = || {
+                    self.replica_read_max_age
+                        .is_some_and(|budget| entry.committed_at.elapsed() <= budget)
+                };
+                let verdict: Option<&'static str> = match &predicate {
+                    RoutePredicate::Bounded => bounded_holds().then_some("fresh"),
+                    RoutePredicate::Covered { upper, .. } => {
+                        (*upper <= entry.fence_wall).then_some("covered")
+                    }
+                    // No upper bound: the caller post-verifies the served
+                    // rows against the proved wall.
+                    RoutePredicate::CoveredPostVerified { .. } => Some("covered"),
+                    RoutePredicate::BoundedOrCovered { upper, .. } => {
+                        if *upper <= entry.fence_wall {
+                            Some("covered")
+                        } else {
+                            bounded_holds().then_some("fresh")
+                        }
+                    }
+                };
+                match verdict {
+                    Some(reason) => RouteDecision::Replica(tx, entry, reason),
+                    None => {
+                        // The session proves an older entry than the
+                        // predicate needs (replication lag) — fail closed.
+                        Self::record_route(path, "writer", "stale");
+                        RouteDecision::Writer
+                    }
+                }
+            }
+            Err(reason) => {
+                Self::record_route(path, "writer", reason);
+                RouteDecision::Writer
+            }
+        }
     }
 
     /// Look up a single thread_metadata row by event_id.
+    #[datastore_span(name = "get_thread_metadata_by_event", system = "postgresql")]
     pub async fn get_thread_metadata_by_event(
         &self,
         community_id: CommunityId,
@@ -2087,6 +3227,7 @@ impl Db {
     }
 
     /// Decrement reply counts.
+    #[datastore_span(name = "decrement_reply_count", system = "postgresql")]
     pub async fn decrement_reply_count(
         &self,
         community_id: CommunityId,
@@ -2098,6 +3239,7 @@ impl Db {
     }
 
     /// Add (or re-activate) a reaction.
+    #[datastore_span(name = "add_reaction", system = "postgresql")]
     pub async fn add_reaction(
         &self,
         community: CommunityId,
@@ -2120,6 +3262,7 @@ impl Db {
     }
 
     /// Soft-delete a reaction.
+    #[datastore_span(name = "remove_reaction", system = "postgresql")]
     pub async fn remove_reaction(
         &self,
         community: CommunityId,
@@ -2140,6 +3283,7 @@ impl Db {
     }
 
     /// Soft-delete a reaction by its source event ID.
+    #[datastore_span(name = "remove_reaction_by_source_event_id", system = "postgresql")]
     pub async fn remove_reaction_by_source_event_id(
         &self,
         community: CommunityId,
@@ -2149,6 +3293,7 @@ impl Db {
     }
 
     /// Look up the active reaction row for one actor + emoji + target tuple.
+    #[datastore_span(name = "get_active_reaction_record", system = "postgresql")]
     pub async fn get_active_reaction_record(
         &self,
         community: CommunityId,
@@ -2169,6 +3314,7 @@ impl Db {
     }
 
     /// Backfill the source event ID on an active reaction row.
+    #[datastore_span(name = "set_reaction_event_id", system = "postgresql")]
     pub async fn set_reaction_event_id(
         &self,
         community: CommunityId,
@@ -2191,6 +3337,7 @@ impl Db {
     }
 
     /// Get all active reactions for an event, grouped by emoji.
+    #[datastore_span(name = "get_reactions", system = "postgresql")]
     pub async fn get_reactions(
         &self,
         community: CommunityId,
@@ -2211,6 +3358,7 @@ impl Db {
     }
 
     /// Batch-fetch emoji counts for a set of (event_id, event_created_at) pairs.
+    #[datastore_span(name = "get_reactions_bulk", system = "postgresql")]
     pub async fn get_reactions_bulk(
         &self,
         community: CommunityId,
@@ -2220,6 +3368,7 @@ impl Db {
     }
 
     /// Find events that @mention the given pubkey.
+    #[datastore_span(name = "query_feed_mentions", system = "postgresql")]
     pub async fn query_feed_mentions(
         &self,
         community: CommunityId,
@@ -2239,7 +3388,70 @@ impl Db {
         .await
     }
 
+    /// [`Db::query_feed_mentions`] with replica routing — same contract and
+    /// classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// Feed queries route on the BOUNDED arm only: the `accessible_channel_ids`
+    /// parameter admits community-global rows alongside channel rows, so no
+    /// single channel's fence floor can prove completeness — the covered arm
+    /// is structurally unavailable, not merely unchosen.
+    #[datastore_span(name = "query_feed_mentions_routed", system = "postgresql")]
+    pub async fn query_feed_mentions_routed(
+        &self,
+        path: &'static str,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        accessible_channel_ids: &[Uuid],
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match feed::query_mentions_on(
+                    &mut tx,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+                {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        feed::query_mentions(
+                            &self.pool,
+                            community,
+                            pubkey_bytes,
+                            accessible_channel_ids,
+                            since,
+                            limit,
+                        )
+                        .await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                feed::query_mentions(
+                    &self.pool,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+            }
+        }
+    }
+
     /// Find events that require action from the given pubkey.
+    #[datastore_span(name = "query_feed_needs_action", system = "postgresql")]
     pub async fn query_feed_needs_action(
         &self,
         community: CommunityId,
@@ -2259,7 +3471,66 @@ impl Db {
         .await
     }
 
+    /// [`Db::query_feed_needs_action`] with replica routing — BOUNDED arm
+    /// only; see [`Db::query_feed_mentions_routed`] for why the covered arm
+    /// is structurally unavailable to feed queries.
+    #[datastore_span(name = "query_feed_needs_action_routed", system = "postgresql")]
+    pub async fn query_feed_needs_action_routed(
+        &self,
+        path: &'static str,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        accessible_channel_ids: &[Uuid],
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match feed::query_needs_action_on(
+                    &mut tx,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+                {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        feed::query_needs_action(
+                            &self.pool,
+                            community,
+                            pubkey_bytes,
+                            accessible_channel_ids,
+                            since,
+                            limit,
+                        )
+                        .await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                feed::query_needs_action(
+                    &self.pool,
+                    community,
+                    pubkey_bytes,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+            }
+        }
+    }
+
     /// Find recent activity across accessible channels.
+    #[datastore_span(name = "query_feed_activity", system = "postgresql")]
     pub async fn query_feed_activity(
         &self,
         community: CommunityId,
@@ -2270,8 +3541,57 @@ impl Db {
         feed::query_activity(&self.pool, community, accessible_channel_ids, since, limit).await
     }
 
+    /// [`Db::query_feed_activity`] with replica routing — BOUNDED arm only;
+    /// see [`Db::query_feed_mentions_routed`] for why the covered arm is
+    /// structurally unavailable to feed queries.
+    #[datastore_span(name = "query_feed_activity_routed", system = "postgresql")]
+    pub async fn query_feed_activity_routed(
+        &self,
+        path: &'static str,
+        community: CommunityId,
+        accessible_channel_ids: &[Uuid],
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match feed::query_activity_on(
+                    &mut tx,
+                    community,
+                    accessible_channel_ids,
+                    since,
+                    limit,
+                )
+                .await
+                {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        feed::query_activity(
+                            &self.pool,
+                            community,
+                            accessible_channel_ids,
+                            since,
+                            limit,
+                        )
+                        .await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                feed::query_activity(&self.pool, community, accessible_channel_ids, since, limit)
+                    .await
+            }
+        }
+    }
+
     /// Create a new API token record.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_api_token", system = "postgresql")]
     pub async fn create_api_token(
         &self,
         community_id: CommunityId,
@@ -2297,6 +3617,7 @@ impl Db {
 
     /// Atomic conditional INSERT with 10-token limit (per (community, owner)).
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "create_api_token_if_under_limit", system = "postgresql")]
     pub async fn create_api_token_if_under_limit(
         &self,
         community_id: CommunityId,
@@ -2326,6 +3647,7 @@ impl Db {
     /// See [`api_token::get_api_token_by_hash_including_revoked`] for the
     /// row-44 conformance rationale — the `(community_id, token_hash)` key
     /// is enforced both by the storage UNIQUE index and by this WHERE clause.
+    #[datastore_span(name = "get_api_token_by_hash", system = "postgresql")]
     pub async fn get_api_token_by_hash(
         &self,
         community_id: CommunityId,
@@ -2351,6 +3673,10 @@ impl Db {
     }
 
     /// Look up an API token by hash, including revoked, scoped to community.
+    #[datastore_span(
+        name = "get_api_token_by_hash_including_revoked",
+        system = "postgresql"
+    )]
     pub async fn get_api_token_by_hash_including_revoked(
         &self,
         community_id: CommunityId,
@@ -2365,6 +3691,7 @@ impl Db {
     }
 
     /// Record a token usage (update `last_used_at`), scoped to community.
+    #[datastore_span(name = "touch_api_token", system = "postgresql")]
     pub async fn touch_api_token(&self, community_id: CommunityId, hash: &[u8]) -> Result<()> {
         sqlx::query(
             "UPDATE api_tokens SET last_used_at = NOW() WHERE community_id = $1 AND token_hash = $2",
@@ -2386,6 +3713,7 @@ impl Db {
     }
 
     /// List all active (non-revoked) tokens in a community, newest first.
+    #[datastore_span(name = "list_active_tokens", system = "postgresql")]
     pub async fn list_active_tokens(&self, community_id: CommunityId) -> Result<Vec<TokenSummary>> {
         let rows = sqlx::query(
             r#"
@@ -2420,6 +3748,7 @@ impl Db {
     }
 
     /// List all tokens for a (community, owner) pair (including revoked).
+    #[datastore_span(name = "list_tokens_by_owner", system = "postgresql")]
     pub async fn list_tokens_by_owner(
         &self,
         community_id: CommunityId,
@@ -2429,6 +3758,7 @@ impl Db {
     }
 
     /// Revoke a single token by ID, scoped to (community, owner).
+    #[datastore_span(name = "revoke_token", system = "postgresql")]
     pub async fn revoke_token(
         &self,
         community_id: CommunityId,
@@ -2447,6 +3777,7 @@ impl Db {
     }
 
     /// Revoke all active tokens for a (community, owner) pair.
+    #[datastore_span(name = "revoke_all_tokens", system = "postgresql")]
     pub async fn revoke_all_tokens(
         &self,
         community_id: CommunityId,
@@ -2463,6 +3794,7 @@ impl Db {
     }
 
     /// Create a new workflow.
+    #[datastore_span(name = "create_workflow", system = "postgresql")]
     pub async fn create_workflow(
         &self,
         community_id: CommunityId,
@@ -2486,6 +3818,7 @@ impl Db {
 
     /// Insert or update a workflow using its NIP-33 `d`-tag UUID.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "upsert_workflow", system = "postgresql")]
     pub async fn upsert_workflow(
         &self,
         community_id: CommunityId,
@@ -2510,6 +3843,7 @@ impl Db {
     }
 
     /// Fetch a single workflow by ID, scoped to its community.
+    #[datastore_span(name = "get_workflow", system = "postgresql")]
     pub async fn get_workflow(
         &self,
         community_id: CommunityId,
@@ -2519,6 +3853,7 @@ impl Db {
     }
 
     /// List workflows for a channel.
+    #[datastore_span(name = "list_channel_workflows", system = "postgresql")]
     pub async fn list_channel_workflows(
         &self,
         community_id: CommunityId,
@@ -2530,6 +3865,7 @@ impl Db {
     }
 
     /// List active, enabled workflows for a channel.
+    #[datastore_span(name = "list_enabled_channel_workflows", system = "postgresql")]
     pub async fn list_enabled_channel_workflows(
         &self,
         community_id: CommunityId,
@@ -2539,6 +3875,7 @@ impl Db {
     }
 
     /// List all active, enabled schedule-triggered workflows.
+    #[datastore_span(name = "list_all_enabled_workflows", system = "postgresql")]
     pub async fn list_all_enabled_workflows(&self) -> Result<Vec<workflow::WorkflowRecord>> {
         workflow::list_all_enabled_workflows(&self.pool).await
     }
@@ -2551,6 +3888,7 @@ impl Db {
     /// from the scheduler scan), never client-supplied — `workflows` is keyed
     /// `(community_id, id)`, so the claim must bind both to avoid fanning
     /// across communities that share the workflow UUID.
+    #[datastore_span(name = "claim_scheduled_workflow_fire", system = "postgresql")]
     pub async fn claim_scheduled_workflow_fire(
         &self,
         community_id: CommunityId,
@@ -2567,6 +3905,7 @@ impl Db {
     }
 
     /// Fetch the latest claimed schedule instant for interval trigger anchoring.
+    #[datastore_span(name = "latest_scheduled_workflow_fire", system = "postgresql")]
     pub async fn latest_scheduled_workflow_fire(
         &self,
         community_id: CommunityId,
@@ -2576,6 +3915,7 @@ impl Db {
     }
 
     /// Attach the workflow run id created from a won scheduled-fire claim.
+    #[datastore_span(name = "attach_scheduled_workflow_run", system = "postgresql")]
     pub async fn attach_scheduled_workflow_run(
         &self,
         community_id: CommunityId,
@@ -2594,6 +3934,7 @@ impl Db {
     }
 
     /// Delete old scheduled workflow fire claims before a retention cutoff.
+    #[datastore_span(name = "prune_scheduled_workflow_fires_before", system = "postgresql")]
     pub async fn prune_scheduled_workflow_fires_before(
         &self,
         older_than: chrono::DateTime<chrono::Utc>,
@@ -2602,6 +3943,7 @@ impl Db {
     }
 
     /// Update a workflow's name, definition, and hash.
+    #[datastore_span(name = "update_workflow", system = "postgresql")]
     pub async fn update_workflow(
         &self,
         community_id: CommunityId,
@@ -2622,6 +3964,7 @@ impl Db {
     }
 
     /// Update a workflow's status.
+    #[datastore_span(name = "update_workflow_status", system = "postgresql")]
     pub async fn update_workflow_status(
         &self,
         community_id: CommunityId,
@@ -2632,6 +3975,7 @@ impl Db {
     }
 
     /// Enable or disable a workflow.
+    #[datastore_span(name = "set_workflow_enabled", system = "postgresql")]
     pub async fn set_workflow_enabled(
         &self,
         community_id: CommunityId,
@@ -2643,6 +3987,7 @@ impl Db {
 
     /// Disable all of an owner's workflows in a channel (SEC-006, on
     /// membership loss). Returns the number of workflows disabled.
+    #[datastore_span(name = "disable_workflows_for_owner_in_channel", system = "postgresql")]
     pub async fn disable_workflows_for_owner_in_channel(
         &self,
         community_id: CommunityId,
@@ -2659,12 +4004,14 @@ impl Db {
     }
 
     /// Delete a workflow and all its runs/approvals.
+    #[datastore_span(name = "delete_workflow", system = "postgresql")]
     pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
         workflow::delete_workflow(&self.pool, community_id, id).await
     }
 
     /// Delete a workflow only when it belongs to the provided owner.
     /// Returns the deleted workflow's `channel_id`.
+    #[datastore_span(name = "delete_workflow_for_owner", system = "postgresql")]
     pub async fn delete_workflow_for_owner(
         &self,
         community_id: CommunityId,
@@ -2676,6 +4023,7 @@ impl Db {
 
     /// Find a workflow by owner pubkey and name within a community. Used for
     /// NIP-09 a-tag deletion where the d-tag is the workflow name (not UUID).
+    #[datastore_span(name = "find_workflow_by_owner_and_name", system = "postgresql")]
     pub async fn find_workflow_by_owner_and_name(
         &self,
         community_id: CommunityId,
@@ -2686,6 +4034,7 @@ impl Db {
     }
 
     /// Create a new workflow run.
+    #[datastore_span(name = "create_workflow_run", system = "postgresql")]
     pub async fn create_workflow_run(
         &self,
         community_id: CommunityId,
@@ -2704,6 +4053,7 @@ impl Db {
     }
 
     /// Fetch a single workflow run, scoped to its community.
+    #[datastore_span(name = "get_workflow_run", system = "postgresql")]
     pub async fn get_workflow_run(
         &self,
         community_id: CommunityId,
@@ -2713,6 +4063,7 @@ impl Db {
     }
 
     /// List runs for a workflow.
+    #[datastore_span(name = "list_workflow_runs", system = "postgresql")]
     pub async fn list_workflow_runs(
         &self,
         community_id: CommunityId,
@@ -2722,7 +4073,29 @@ impl Db {
         workflow::list_workflow_runs(&self.pool, community_id, workflow_id, limit).await
     }
 
+    /// List one keyset-paginated page of workflow runs.
+    #[datastore_span(name = "list_workflow_runs_page", system = "postgresql")]
+    pub async fn list_workflow_runs_page(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        before: Option<chrono::DateTime<chrono::Utc>>,
+        before_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<workflow::WorkflowRunRecord>> {
+        workflow::list_workflow_runs_page(
+            &self.pool,
+            community_id,
+            workflow_id,
+            before,
+            before_id,
+            limit,
+        )
+        .await
+    }
+
     /// Update a workflow run's status.
+    #[datastore_span(name = "update_workflow_run", system = "postgresql")]
     pub async fn update_workflow_run(
         &self,
         community_id: CommunityId,
@@ -2730,7 +4103,7 @@ impl Db {
         status: workflow::RunStatus,
         current_step: i32,
         trace: &serde_json::Value,
-        error: Option<&str>,
+        failure: Option<workflow::WorkflowRunFailure<'_>>,
     ) -> Result<()> {
         workflow::update_workflow_run(
             &self.pool,
@@ -2739,17 +4112,19 @@ impl Db {
             status,
             current_step,
             trace,
-            error,
+            failure,
         )
         .await
     }
 
     /// Create an approval request.
+    #[datastore_span(name = "create_approval", system = "postgresql")]
     pub async fn create_approval(&self, params: workflow::CreateApprovalParams<'_>) -> Result<()> {
         workflow::create_approval(&self.pool, params).await
     }
 
     /// Fetch an approval by raw token.
+    #[datastore_span(name = "get_approval", system = "postgresql")]
     pub async fn get_approval(
         &self,
         community_id: CommunityId,
@@ -2759,6 +4134,7 @@ impl Db {
     }
 
     /// Fetch an approval by its already-hashed token (no re-hashing).
+    #[datastore_span(name = "get_approval_by_stored_hash", system = "postgresql")]
     pub async fn get_approval_by_stored_hash(
         &self,
         community_id: CommunityId,
@@ -2768,6 +4144,7 @@ impl Db {
     }
 
     /// Fetch all approvals for a workflow run.
+    #[datastore_span(name = "get_run_approvals", system = "postgresql")]
     pub async fn get_run_approvals(
         &self,
         community_id: CommunityId,
@@ -2778,6 +4155,7 @@ impl Db {
     }
 
     /// Update an approval's status.
+    #[datastore_span(name = "update_approval", system = "postgresql")]
     pub async fn update_approval(
         &self,
         community_id: CommunityId,
@@ -2798,6 +4176,7 @@ impl Db {
     }
 
     /// Update an approval by its already-hashed token (no re-hashing).
+    #[datastore_span(name = "update_approval_by_stored_hash", system = "postgresql")]
     pub async fn update_approval_by_stored_hash(
         &self,
         community_id: CommunityId,
@@ -2818,6 +4197,7 @@ impl Db {
     }
 
     /// Ensures monthly partitions exist for the next N months.
+    #[datastore_span(name = "ensure_future_partitions", system = "postgresql")]
     pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
         partition::ensure_future_partitions(&self.pool, months_ahead).await
     }
@@ -2826,6 +4206,7 @@ impl Db {
     ///
     /// Idempotent — safe to call on every startup. No-ops when all rows are already populated.
     /// Runs a single UPDATE touching only NIP-33 rows with NULL d_tag.
+    #[datastore_span(name = "backfill_d_tags", system = "postgresql")]
     pub async fn backfill_d_tags(&self) -> Result<u64> {
         let result = sqlx::query(
             "UPDATE events \
@@ -2834,7 +4215,8 @@ impl Db {
                   WHERE elem->>0 = 'd' LIMIT 1), \
                  '' \
              ) \
-             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL",
+             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL \
+               AND community_write_allowed(community_id)",
         )
         .execute(&self.pool)
         .await?;
@@ -2842,6 +4224,7 @@ impl Db {
     }
 
     /// Check if a pubkey is in the allowlist for `community`.
+    #[datastore_span(name = "is_pubkey_allowed", system = "postgresql")]
     pub async fn is_pubkey_allowed(&self, community: CommunityId, pubkey: &[u8]) -> Result<bool> {
         let row = sqlx::query(
             "SELECT COUNT(*) as cnt FROM pubkey_allowlist WHERE community_id = $1 AND pubkey = $2",
@@ -2855,6 +4238,7 @@ impl Db {
     }
 
     /// Check if the community allowlist has any entries (i.e. is enforcement active).
+    #[datastore_span(name = "has_allowlist_entries", system = "postgresql")]
     pub async fn has_allowlist_entries(&self, community: CommunityId) -> Result<bool> {
         let row =
             sqlx::query("SELECT COUNT(*) as cnt FROM pubkey_allowlist WHERE community_id = $1")
@@ -2866,6 +4250,7 @@ impl Db {
     }
 
     /// Add a pubkey to the community allowlist.
+    #[datastore_span(name = "add_to_allowlist", system = "postgresql")]
     pub async fn add_to_allowlist(
         &self,
         community: CommunityId,
@@ -2887,6 +4272,7 @@ impl Db {
     }
 
     /// Remove a pubkey from the community allowlist.
+    #[datastore_span(name = "remove_from_allowlist", system = "postgresql")]
     pub async fn remove_from_allowlist(
         &self,
         community: CommunityId,
@@ -2902,6 +4288,7 @@ impl Db {
     }
 
     /// List all pubkeys in the community allowlist.
+    #[datastore_span(name = "list_allowlist", system = "postgresql")]
     pub async fn list_allowlist(&self, community: CommunityId) -> Result<Vec<AllowlistEntry>> {
         let rows = sqlx::query(
             "SELECT pubkey, added_by, added_at, note FROM pubkey_allowlist WHERE community_id = $1 ORDER BY added_at DESC",
@@ -2923,11 +4310,38 @@ impl Db {
     }
 
     /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
+    ///
+    /// Replica-routed on the bounded arm — the one PERMISSION read routed by
+    /// explicit product decision (bounded-stale membership beats the 10s
+    /// cache it replaced). Admits and revokes may lag by at most the budget
+    /// `B`; everything else fails closed to the writer, exactly like
+    /// [`Db::query_events_routed_bounded`]. Not precedent for routing other
+    /// permission reads.
+    #[datastore_span(name = "is_relay_member", system = "postgresql")]
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
-        relay_members::is_relay_member(&self.pool, community, pubkey).await
+        let path = "relay_membership";
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match relay_members::is_relay_member_on(&mut tx, community, pubkey).await {
+                    Ok(is_member) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(is_member)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        relay_members::is_relay_member(&self.pool, community, pubkey).await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                relay_members::is_relay_member(&self.pool, community, pubkey).await
+            }
+        }
     }
 
     /// Returns the relay member record for `pubkey` in `community`, or `None` if not found.
+    #[datastore_span(name = "get_relay_member", system = "postgresql")]
     pub async fn get_relay_member(
         &self,
         community: CommunityId,
@@ -2937,6 +4351,7 @@ impl Db {
     }
 
     /// Returns all relay members of `community` ordered by `created_at` ascending.
+    #[datastore_span(name = "list_relay_members", system = "postgresql")]
     pub async fn list_relay_members(
         &self,
         community: CommunityId,
@@ -2948,6 +4363,7 @@ impl Db {
     ///
     /// Returns `true` if the row was actually inserted, `false` if the pubkey
     /// already existed in `community` (idempotent — `ON CONFLICT DO NOTHING`).
+    #[datastore_span(name = "add_relay_member", system = "postgresql")]
     pub async fn add_relay_member(
         &self,
         community: CommunityId,
@@ -2960,6 +4376,7 @@ impl Db {
 
     /// Claims relay membership via an invite and atomically persists the
     /// accepted policy version when a policy is configured.
+    #[datastore_span(name = "claim_relay_membership", system = "postgresql")]
     pub async fn claim_relay_membership(
         &self,
         community: CommunityId,
@@ -2972,6 +4389,7 @@ impl Db {
     }
 
     /// Returns whether a member has persisted acceptance evidence for a policy version.
+    #[datastore_span(name = "has_join_policy_acceptance", system = "postgresql")]
     pub async fn has_join_policy_acceptance(
         &self,
         community: CommunityId,
@@ -2983,6 +4401,7 @@ impl Db {
     }
 
     /// Removes a relay member from `community` atomically, refusing to delete the owner.
+    #[datastore_span(name = "remove_relay_member", system = "postgresql")]
     pub async fn remove_relay_member(
         &self,
         community: CommunityId,
@@ -2995,6 +4414,7 @@ impl Db {
     ///
     /// Atomic conditional delete — eliminates the TOCTOU race between a
     /// prior role read and the delete. See [`relay_members::remove_relay_member_if_role`].
+    #[datastore_span(name = "remove_relay_member_if_role", system = "postgresql")]
     pub async fn remove_relay_member_if_role(
         &self,
         community: CommunityId,
@@ -3006,6 +4426,7 @@ impl Db {
     }
 
     /// Updates the role of an existing relay member in `community`. Returns `true` if updated.
+    #[datastore_span(name = "update_relay_member_role", system = "postgresql")]
     pub async fn update_relay_member_role(
         &self,
         community: CommunityId,
@@ -3016,14 +4437,22 @@ impl Db {
     }
 
     /// Ensures the owner pubkey exists with role `"owner"` in `community`. Called at startup.
+    #[datastore_span(name = "bootstrap_owner", system = "postgresql")]
     pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
         relay_members::bootstrap_owner(&self.pool, community, owner_pubkey).await
+    }
+
+    /// Returns `true` if any member of `community` holds the `admin` or
+    /// `owner` role.
+    pub async fn has_admin_or_owner(&self, community: CommunityId) -> Result<bool> {
+        relay_members::has_admin_or_owner(&self.pool, community).await
     }
 
     /// Atomically transfers ownership of `community` to `new_owner_pubkey`,
     /// demoting the previous owner(s) to `member`. Verifies
     /// `expected_owner_pubkey` matches the current owner inside the same
     /// transaction to prevent stale-owner races.
+    #[datastore_span(name = "transfer_ownership", system = "postgresql")]
     pub async fn transfer_ownership(
         &self,
         community: CommunityId,
@@ -3043,6 +4472,7 @@ impl Db {
     ///
     /// Idempotent — uses `ON CONFLICT DO NOTHING`. Returns the number of rows
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
+    #[datastore_span(name = "backfill_from_allowlist", system = "postgresql")]
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
         relay_members::backfill_from_allowlist(&self.pool, community).await
     }
@@ -3052,6 +4482,7 @@ impl Db {
     ///
     /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
     /// `ttl_secs` must be in the shared invite lifetime range.
+    #[datastore_span(name = "mint_relay_invite", system = "postgresql")]
     pub async fn mint_relay_invite(
         &self,
         community: CommunityId,
@@ -3063,6 +4494,7 @@ impl Db {
     }
 
     /// Delete one bounded batch of invites expired before `cutoff`.
+    #[datastore_span(name = "reap_expired_relay_invites", system = "postgresql")]
     pub async fn reap_expired_relay_invites(
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
@@ -3075,6 +4507,7 @@ impl Db {
     /// transaction with `FOR UPDATE` on the invite row.
     ///
     /// `token_hash` is the SHA-256 of the presented v2 code (32 bytes).
+    #[datastore_span(name = "claim_relay_invite", system = "postgresql")]
     pub async fn claim_relay_invite(
         &self,
         community: CommunityId,
@@ -3093,6 +4526,7 @@ impl Db {
     }
 
     /// Sidecar an accepted product-feedback event, idempotent by event id.
+    #[datastore_span(name = "insert_product_feedback", system = "postgresql")]
     pub async fn insert_product_feedback(
         &self,
         community: CommunityId,
@@ -3102,6 +4536,7 @@ impl Db {
     }
 
     /// List product feedback across the deployment, newest first.
+    #[datastore_span(name = "list_product_feedback", system = "postgresql")]
     pub async fn list_product_feedback(
         &self,
         limit: i64,
@@ -3110,6 +4545,7 @@ impl Db {
     }
 
     /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.
+    #[datastore_span(name = "insert_moderation_report", system = "postgresql")]
     pub async fn insert_moderation_report(
         &self,
         community: CommunityId,
@@ -3119,6 +4555,7 @@ impl Db {
     }
 
     /// List moderation reports for a community, newest first.
+    #[datastore_span(name = "list_moderation_reports", system = "postgresql")]
     pub async fn list_moderation_reports(
         &self,
         community: CommunityId,
@@ -3129,6 +4566,7 @@ impl Db {
     }
 
     /// Fetch one moderation report by row id.
+    #[datastore_span(name = "get_moderation_report", system = "postgresql")]
     pub async fn get_moderation_report(
         &self,
         community: CommunityId,
@@ -3138,6 +4576,7 @@ impl Db {
     }
 
     /// Fetch one moderation report by signed NIP-56 report event id.
+    #[datastore_span(name = "get_moderation_report_by_event", system = "postgresql")]
     pub async fn get_moderation_report_by_event(
         &self,
         community: CommunityId,
@@ -3147,6 +4586,7 @@ impl Db {
     }
 
     /// Resolve, dismiss, or escalate an open moderation report.
+    #[datastore_span(name = "resolve_moderation_report", system = "postgresql")]
     pub async fn resolve_moderation_report(
         &self,
         community: CommunityId,
@@ -3167,6 +4607,7 @@ impl Db {
     }
 
     /// Upsert a community ban for a member pubkey.
+    #[datastore_span(name = "ban_community_member", system = "postgresql")]
     pub async fn ban_community_member(
         &self,
         community: CommunityId,
@@ -3179,6 +4620,7 @@ impl Db {
     }
 
     /// Lift a community ban for a member pubkey.
+    #[datastore_span(name = "unban_community_member", system = "postgresql")]
     pub async fn unban_community_member(
         &self,
         community: CommunityId,
@@ -3189,6 +4631,7 @@ impl Db {
     }
 
     /// Upsert a community timeout/write-block for a member pubkey.
+    #[datastore_span(name = "timeout_community_member", system = "postgresql")]
     pub async fn timeout_community_member(
         &self,
         community: CommunityId,
@@ -3201,6 +4644,7 @@ impl Db {
     }
 
     /// Clear a community timeout/write-block for a member pubkey.
+    #[datastore_span(name = "untimeout_community_member", system = "postgresql")]
     pub async fn untimeout_community_member(
         &self,
         community: CommunityId,
@@ -3211,6 +4655,7 @@ impl Db {
     }
 
     /// Fetch the active ban/timeout restriction state for enforcement hot paths.
+    #[datastore_span(name = "moderation_restriction_state", system = "postgresql")]
     pub async fn moderation_restriction_state(
         &self,
         community: CommunityId,
@@ -3220,6 +4665,7 @@ impl Db {
     }
 
     /// Fetch the full ban/timeout row for a member pubkey.
+    #[datastore_span(name = "get_community_ban", system = "postgresql")]
     pub async fn get_community_ban(
         &self,
         community: CommunityId,
@@ -3229,6 +4675,7 @@ impl Db {
     }
 
     /// List currently restricted members in a community.
+    #[datastore_span(name = "list_community_restrictions", system = "postgresql")]
     pub async fn list_community_restrictions(
         &self,
         community: CommunityId,
@@ -3237,6 +4684,7 @@ impl Db {
     }
 
     /// Insert a moderation audit action row.
+    #[datastore_span(name = "insert_moderation_action", system = "postgresql")]
     pub async fn insert_moderation_action(
         &self,
         community: CommunityId,
@@ -3246,6 +4694,7 @@ impl Db {
     }
 
     /// List moderation audit action rows, newest first.
+    #[datastore_span(name = "list_moderation_actions", system = "postgresql")]
     pub async fn list_moderation_actions(
         &self,
         community: CommunityId,
@@ -3256,6 +4705,7 @@ impl Db {
 
     /// Return the current owner of git repo name `repo_id` in `community`, or
     /// `None` if unreserved. See [`git_repo::repo_name_owner`].
+    #[datastore_span(name = "repo_name_owner", system = "postgresql")]
     pub async fn repo_name_owner(
         &self,
         community: CommunityId,
@@ -3268,6 +4718,7 @@ impl Db {
     ///
     /// See [`git_repo::reserve_repo_name`] for the outcome semantics. The
     /// per-pubkey quota is enforced by the caller against `count_repos_for_owner`.
+    #[datastore_span(name = "reserve_repo_name", system = "postgresql")]
     pub async fn reserve_repo_name(
         &self,
         community: CommunityId,
@@ -3278,6 +4729,7 @@ impl Db {
     }
 
     /// Count git repos reserved by `owner_pubkey` in `community` (quota check).
+    #[datastore_span(name = "count_repos_for_owner", system = "postgresql")]
     pub async fn count_repos_for_owner(
         &self,
         community: CommunityId,
@@ -3289,6 +4741,7 @@ impl Db {
     /// Release a git repo name reservation held by `owner_pubkey` (rollback).
     ///
     /// Returns the number of rows removed (0 or 1). See [`git_repo::release_repo_name`].
+    #[datastore_span(name = "release_repo_name", system = "postgresql")]
     pub async fn release_repo_name(
         &self,
         community: CommunityId,
@@ -3299,12 +4752,14 @@ impl Db {
     }
 
     /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
+    #[datastore_span(name = "is_archived", system = "postgresql")]
     pub async fn is_archived(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
         archived_identities::is_archived(&self.pool, community_id, pubkey).await
     }
 
     /// Archives an identity in `community_id`. Returns `true` if inserted, `false` if already archived.
     #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "archive", system = "postgresql")]
     pub async fn archive(
         &self,
         community_id: CommunityId,
@@ -3329,11 +4784,13 @@ impl Db {
     }
 
     /// Unarchives an identity from `community_id`. Returns `true` if deleted, `false` if absent.
+    #[datastore_span(name = "unarchive", system = "postgresql")]
     pub async fn unarchive(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
         archived_identities::unarchive(&self.pool, community_id, pubkey).await
     }
 
     /// Returns all identities archived in `community_id`, ordered by archive time ascending.
+    #[datastore_span(name = "list_archived", system = "postgresql")]
     pub async fn list_archived(
         &self,
         community_id: CommunityId,
@@ -3342,6 +4799,7 @@ impl Db {
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
+    #[datastore_span(name = "soft_delete_discovery_events", system = "postgresql")]
     pub async fn soft_delete_discovery_events(
         &self,
         community_id: CommunityId,
@@ -3367,6 +4825,7 @@ impl Db {
     /// Same-second ties are broken by lowest event `id` (NIP-16 deterministic ordering).
     /// Returns `(event, false)` for stale writes and duplicate IDs — callers should
     /// skip fan-out/dispatch when `was_inserted` is false.
+    #[datastore_span(name = "replace_addressable_event", system = "postgresql")]
     pub async fn replace_addressable_event(
         &self,
         community_id: CommunityId,
@@ -3479,13 +4938,12 @@ impl Db {
             ));
         }
 
-        tx.commit().await?;
+        // The replaceable event and its denormalized mention index are one
+        // authoritative discovery write. An indexing error must roll back the
+        // new event and restore the previously-live event.
+        crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
 
-        // Mentions are a denormalized index — safe outside the transaction.
-        // insert_event() normally handles this, but we inlined the INSERT above.
-        if let Err(e) = crate::insert_mentions(&self.pool, community_id, event, channel_id).await {
-            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
-        }
+        tx.commit().await?;
 
         Ok((
             StoredEvent::with_received_at(event.clone(), received_at, channel_id, true),
@@ -3499,6 +4957,10 @@ impl Db {
     /// Snapshot and canonical rows are compared directly rather than by
     /// timestamp: relay membership events use whole-second Nostr timestamps,
     /// and multiple mutations within one second must still be repaired.
+    #[datastore_span(
+        name = "nip43_membership_snapshot_needs_reconciliation",
+        system = "postgresql"
+    )]
     pub async fn nip43_membership_snapshot_needs_reconciliation(
         &self,
         community_id: CommunityId,
@@ -3549,6 +5011,7 @@ impl Db {
     /// prevents the stale-snapshot race where a concurrent publication reads
     /// older state and overwrites a newer snapshot by arrival order.
     ///
+    #[datastore_span(name = "publish_nip43_membership_locked", system = "postgresql")]
     pub async fn publish_nip43_membership_locked(
         &self,
         community_id: CommunityId,
@@ -3689,6 +5152,7 @@ impl Db {
     /// relay-signed NIP-29 group metadata (kind 39000–39002) where the relay is the
     /// author and channel_id distinguishes groups. User-submitted NIP-33 events use
     /// this function instead, where the author's pubkey + d-tag is the natural key.
+    #[datastore_span(name = "replace_parameterized_event", system = "postgresql")]
     pub async fn replace_parameterized_event(
         &self,
         community_id: CommunityId,
@@ -4018,6 +5482,87 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn addressable_replacement_rolls_back_when_mention_indexing_fails() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "atomic_addressable").await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let keys = Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel, &keys).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let member = Keys::generate().public_key().to_hex();
+        let tags = || {
+            vec![
+                Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
+                Tag::parse(["p", member.as_str(), "", "member"]).expect("p tag"),
+            ]
+        };
+        let base = Timestamp::now().as_secs();
+        let old = EventBuilder::new(Kind::Custom(39002), "old")
+            .tags(tags())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign old");
+        db.replace_addressable_event(community, &old, Some(channel))
+            .await
+            .expect("insert old roster");
+
+        sqlx::query(
+            "CREATE FUNCTION reject_test_mention() RETURNS trigger AS $$ \
+             BEGIN RAISE EXCEPTION 'injected mention failure'; END; \
+             $$ LANGUAGE plpgsql",
+        )
+        .execute(&pool)
+        .await
+        .expect("create failure function");
+        sqlx::query(
+            "CREATE TRIGGER reject_test_mention BEFORE INSERT ON event_mentions \
+             FOR EACH ROW EXECUTE FUNCTION reject_test_mention()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install failure injection");
+
+        let new = EventBuilder::new(Kind::Custom(39002), "new")
+            .tags(tags())
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign new");
+        let error = db
+            .replace_addressable_event(community, &new, Some(channel))
+            .await
+            .expect_err("mention failure must fail replacement");
+        assert!(error.to_string().contains("injected mention failure"));
+
+        let live_id: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
+             AND kind=39002 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("query live roster");
+        assert_eq!(live_id, old.id.as_bytes(), "old roster must remain live");
+        let new_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community.as_uuid())
+                .bind(new.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(new_rows, 0, "new roster must roll back with its index");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn nip_rs_replacement_hard_deletes_payload_and_watermark_rejects_replay() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -4159,6 +5704,75 @@ mod tests {
         assert_eq!(
             rows_after_legacy_delete, 0,
             "migration trigger must purge soft-deleted mesh status"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn coordinate_delete_spares_head_newer_than_the_deletion() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let kind = buzz_core::kind::KIND_PROJECT as i32;
+        let d_tag = "stale-tombstone-project";
+        let pubkey = keys.public_key().to_bytes().to_vec();
+        let base = Timestamp::now().as_secs();
+
+        let version = |content: &str, offset: u64| {
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), content)
+                .tags(vec![Tag::parse(["d", d_tag]).expect("d tag")])
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign project version")
+        };
+
+        for (content, offset) in [("v1", 0), ("v2", 100)] {
+            assert!(
+                db.replace_parameterized_event(community, &version(content, offset), d_tag, None)
+                    .await
+                    .expect("store project version")
+                    .1
+            );
+        }
+
+        // Tombstone timestamped between V1 and V2: it authorizes deleting V1,
+        // never the newer head that replaced it.
+        let stale_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 50) as i64)
+            .await
+            .expect("stale coordinate delete");
+        assert!(
+            !stale_deleted,
+            "a tombstone older than the live head must delete nothing"
+        );
+
+        let live_content: Option<String> = sqlx::query_scalar(
+            "SELECT content FROM events \
+             WHERE community_id=$1 AND kind=$2 AND pubkey=$3 AND d_tag=$4 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(kind)
+        .bind(&pubkey)
+        .bind(d_tag)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("read live head");
+        assert_eq!(
+            live_content.as_deref(),
+            Some("v2"),
+            "the newer head must survive a stale tombstone"
+        );
+
+        // A tombstone at or after the head's own timestamp still deletes it.
+        let current_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 100) as i64)
+            .await
+            .expect("current coordinate delete");
+        assert!(
+            current_deleted,
+            "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
     }
 
@@ -4715,15 +6329,21 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn test_usage_metrics_lock_has_single_owner_and_releases_on_drop() {
-        let database_url =
-            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&database_url)
+        // Use a private scratch database — not the shared TEST_DATABASE_URL.
+        // Postgres advisory locks are per-database; hardcoding the production
+        // USAGE_METRICS_LOCK_KEY (0x4255_5A5A_4D45_5452) on the shared test DB
+        // races any live buzz-relay on the same database (see #3619).
+        let admin_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
             .await
-            .expect("connect to test DB");
+            .expect("connect admin to create scratch db");
+        let (pool, scratch_name) = create_scratch_db(&admin, "usage_metrics_lock").await;
         let first = Db::from_pool(pool.clone());
-        let second = Db::from_pool(pool);
+        let second = Db::from_pool(pool.clone());
+        // Same key as production (`buzz-relay` USAGE_METRICS_LOCK_KEY) — safe here
+        // because the scratch DB is empty of other holders.
         let key = 0x4255_5A5A_4D45_5452;
 
         let mut leader = first
@@ -4750,6 +6370,11 @@ mod tests {
                 .is_some(),
             "dropping the detached session releases its advisory lock"
         );
+
+        // Release any remaining session state before DROP DATABASE.
+        drop(first);
+        drop(second);
+        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]
@@ -5436,6 +7061,163 @@ mod tests {
         assert!(db.read_pool_stats().is_none());
     }
 
+    #[test]
+    fn read_budget_zero_disables_and_large_values_clamp_to_staleness() {
+        assert_eq!(read_budget_from_ms(0), None, "0 = bounded routing off");
+        assert_eq!(
+            read_budget_from_ms(1000),
+            Some(std::time::Duration::from_millis(1000))
+        );
+        assert_eq!(
+            read_budget_from_ms(10_000_000),
+            Some(replica_fence::FENCE_STALENESS),
+            "budgets above the staleness gate clamp to it"
+        );
+    }
+
+    /// Truth table for [`RoutePredicate::for_query`]: the strongest sound
+    /// predicate per query shape, and — the deploy-day default row — that
+    /// `routing_enabled = false` (BUZZ_REPLICA_READ_MAX_AGE_MS unset)
+    /// forces `Bounded` even for covered-eligible shapes, so the zero
+    /// budget fails the new seams closed (Dawn's covered-at-zero-budget
+    /// catch, design doc rev 5).
+    #[test]
+    fn for_query_predicate_truth_table() {
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let channel = Uuid::new_v4();
+        let until = chrono::Utc::now();
+
+        let pinned_with_until = {
+            let mut q = event::EventQuery::for_community(community);
+            q.channel_id = Some(channel);
+            q.until = Some(until);
+            q
+        };
+        let pinned_no_until = {
+            let mut q = event::EventQuery::for_community(community);
+            q.channel_id = Some(channel);
+            q
+        };
+        let unpinned_with_until = {
+            let mut q = event::EventQuery::for_community(community);
+            q.until = Some(until);
+            q
+        };
+        let global_only = {
+            let mut q = event::EventQuery::for_community(community);
+            q.global_only = true;
+            q.until = Some(until);
+            q
+        };
+
+        // Deploy-day default: budget unset ⇒ Bounded regardless of shape.
+        // The zero budget then fails Bounded closed, so the new seams
+        // record writer/disabled — merging with no env var set is a no-op.
+        assert!(
+            matches!(
+                RoutePredicate::for_query(&pinned_with_until, false),
+                RoutePredicate::Bounded
+            ),
+            "budget unset must not reach the covered arm even when eligible"
+        );
+
+        // Budget set + channel pin + until ⇒ the strongest predicate.
+        assert!(matches!(
+            RoutePredicate::for_query(&pinned_with_until, true),
+            RoutePredicate::BoundedOrCovered { .. }
+        ));
+
+        // Missing either covered precondition ⇒ Bounded.
+        assert!(matches!(
+            RoutePredicate::for_query(&pinned_no_until, true),
+            RoutePredicate::Bounded
+        ));
+        assert!(matches!(
+            RoutePredicate::for_query(&unpinned_with_until, true),
+            RoutePredicate::Bounded
+        ));
+        // global_only implies `channel_id = None`, so the channel-pin
+        // precondition fails and no covered arm is possible — `for_query`
+        // never inspects `global_only` itself; the row holds because
+        // constructor 1 (channel pin) returns None for an unpinned query.
+        assert!(matches!(
+            RoutePredicate::for_query(&global_only, true),
+            RoutePredicate::Bounded
+        ));
+    }
+
+    /// The pre-existing cursor paths are NOT budget-gated: a channel-window
+    /// cursor page still derives `Covered` with no `routing_enabled` input
+    /// at all — at B=0 today it routes covered, and that status quo is
+    /// intentionally unchanged by the `for_query` gate (Max's matrix row:
+    /// old paths route at budget-unset; only the new seams go dark).
+    #[test]
+    fn channel_cursor_predicate_is_not_budget_gated() {
+        let channel = Uuid::new_v4();
+        let cursor = Some((chrono::Utc::now(), vec![1u8; 32]));
+        assert!(matches!(
+            RoutePredicate::from_channel_cursor(channel, &cursor),
+            RoutePredicate::Covered { .. }
+        ));
+        // Head fetch (no cursor) is bounded — gated by the budget.
+        assert!(matches!(
+            RoutePredicate::from_channel_cursor(channel, &None),
+            RoutePredicate::Bounded
+        ));
+    }
+
+    /// D5 wiring: `read_pool_stats().max` must be the READER pool's own
+    /// ceiling, not the writer's — `buzz_db_read_pool_active / _max` is the
+    /// operator's utilisation signal and inheriting the writer's max hides
+    /// reader saturation by exactly the sizing ratio. Pure wiring test:
+    /// `connect_lazy` never touches the network, but it does spawn the
+    /// pool reaper task, which needs a Tokio runtime — hence
+    /// `#[tokio::test]` despite the test body itself never awaiting.
+    #[tokio::test]
+    async fn read_pool_stats_reports_reader_ceiling_not_writer() {
+        let writer = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(20)
+            .connect_lazy(TEST_DB_URL)
+            .expect("lazy writer pool");
+        let reader = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(40)
+            .connect_lazy(TEST_DB_URL)
+            .expect("lazy reader pool");
+        let db = Db::from_pools(writer, reader);
+        assert_eq!(db.pool_stats().max, 20);
+        assert_eq!(
+            db.read_pool_stats().expect("read pool configured").max,
+            40,
+            "reader gauge must report the reader's own ceiling"
+        );
+    }
+
+    /// D4 wiring: the reader pool is built lazily with `min_connections(0)`
+    /// and the short reader acquire timeout — construction must succeed
+    /// with no replica listening (reader-down at boot must not crash the
+    /// relay), and `read_max_connections` must honour
+    /// `DbConfig::read_max_connections` over the writer sizing.
+    /// `#[tokio::test]` because `connect_lazy` spawns the pool reaper task,
+    /// which needs a Tokio runtime even though nothing is dialed.
+    #[tokio::test]
+    async fn connect_read_pool_is_lazy_and_independently_sized() {
+        let config = DbConfig {
+            max_connections: 20,
+            read_max_connections: Some(7),
+            ..DbConfig::default()
+        };
+        // Unroutable per RFC 5737 TEST-NET-1: proves nothing is dialed at
+        // construction time.
+        let pool = Db::connect_read_pool(&config, "postgres://user:pw@192.0.2.1:5432/none", 7)
+            .expect("lazy construction must not dial the replica");
+        assert_eq!(pool.options().get_max_connections(), 7);
+        assert_eq!(pool.options().get_min_connections(), 0);
+        assert_eq!(
+            pool.options().get_acquire_timeout(),
+            Db::READER_ACQUIRE_TIMEOUT
+        );
+    }
+
     /// Channel window: head fetch (no cursor) reads the WRITER; cursor pages
     /// read the REPLICA. Divergent fixtures prove which pool served each.
     #[tokio::test]
@@ -5517,6 +7299,1056 @@ mod tests {
 
         drop_scratch_db(&admin, replica, &rname).await;
         drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Fail-closed on a mid-request replica failure (Dawn, review of
+    /// 1b0aa0dfa): a replica-routed page whose query errors *after* the
+    /// proof (the live shape is a hot-standby recovery conflict — 40001 /
+    /// 25P02 — cancelling the held snapshot under `max_standby_streaming_delay`)
+    /// must be re-run on the writer and served, never surfaced as an error
+    /// the writer could have answered. Degraded capacity, never holes.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replica_window_failure_falls_back_to_writer() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "fb_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "fb_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let m1 = signed_event_at(&author, "m1", base);
+        let m2 = signed_event_at(&author, "m2", base + 10);
+        let m3 = signed_event_at(&author, "m3", base + 20);
+        for pool in [&writer, &replica] {
+            for ev in [&m1, &m2, &m3] {
+                insert_top_level(pool, community, channel, ev).await;
+            }
+        }
+        let marker = signed_event_at(&author, "replica-only-marker", base + 5);
+        insert_top_level(&replica, community, channel, &marker).await;
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        let head = db
+            .get_channel_window(cid, channel, 1, None, None)
+            .await
+            .expect("head window");
+        let cursor = head.next_cursor.expect("has_more implies next_cursor");
+
+        // Guard against a vacuous pass: the cursor page must actually be
+        // replica-eligible before we break the replica.
+        let healthy = db
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .await
+            .expect("healthy cursor window");
+        assert!(
+            healthy
+                .rows
+                .iter()
+                .any(|r| r.stored_event.event.content == "replica-only-marker"),
+            "fixture must route the cursor page to the replica while healthy"
+        );
+
+        // Break the replica AFTER the proof point: the heartbeat table stays
+        // intact (the observation succeeds), the page query then fails.
+        sqlx::query("DROP TABLE events CASCADE")
+            .execute(&replica)
+            .await
+            .expect("drop replica events");
+
+        let page = db
+            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .await
+            .expect("replica failure must fall back to the writer, not error");
+        let contents: Vec<&str> = page
+            .rows
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["m2", "m1"],
+            "fallback page must be the writer's answer (no replica marker)"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// [`replica_window_failure_falls_back_to_writer`] for the thread-replies
+    /// path: a replica-routed thread page whose query errors after the proof
+    /// re-runs on the writer instead of surfacing an error.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn replica_thread_failure_falls_back_to_writer() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "fbt_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "fbt_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let root = signed_event_at(&author, "root", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &root).await;
+        }
+        let replies: Vec<nostr::Event> = (1..=3)
+            .map(|i| signed_event_at(&author, &format!("r{i}"), base + 10 * i as u64))
+            .collect();
+        for pool in [&writer, &replica] {
+            for reply in &replies {
+                insert_thread_reply(pool, community, channel, &root, reply).await;
+            }
+        }
+        // Replica-only divergent reply between r2 and r3 marks replica serves.
+        let ghost = signed_event_at(&author, "replica-only-ghost", base + 25);
+        insert_thread_reply(&replica, community, channel, &root, &ghost).await;
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        let page1 = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 2, None)
+            .await
+            .expect("head page");
+        let cur = thread_cursor(page1.last().expect("page 1 non-empty"));
+
+        // Healthy: the full page after r2 is the replica's [ghost].
+        let healthy = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur))
+            .await
+            .expect("healthy replica page");
+        assert_eq!(
+            healthy[0].stored_event.event.content, "replica-only-ghost",
+            "fixture must route the cursor page to the replica while healthy"
+        );
+
+        sqlx::query("DROP TABLE events CASCADE")
+            .execute(&replica)
+            .await
+            .expect("drop replica events");
+
+        let page = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur))
+            .await
+            .expect("replica failure must fall back to the writer, not error");
+        assert_eq!(
+            page[0].stored_event.event.content, "r3",
+            "fallback page must be the writer's answer"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Mid-request degradation of the held session (Dawn, review of
+    /// 1b0aa0dfa): when the proved replica transaction dies between the page
+    /// and an aux follow-up (stand-in: `pg_terminate_backend` on the reader
+    /// connection, the same tx-fatal shape as a recovery-conflict cancel),
+    /// [`ReadSession::query_events`] must re-run the query on the writer and
+    /// permanently degrade the session instead of surfacing the error.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn read_session_degrades_to_writer_when_replica_connection_dies() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "deg_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "deg_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let m1 = signed_event_at(&author, "m1", base);
+        let m2 = signed_event_at(&author, "m2", base + 10);
+        for pool in [&writer, &replica] {
+            for ev in [&m1, &m2] {
+                insert_top_level(pool, community, channel, ev).await;
+            }
+        }
+        // Writer-only row proves the degraded aux ran on the writer.
+        let fresh = signed_event_at(&author, "fresh-writer-only", base + 20);
+        insert_top_level(&writer, community, channel, &fresh).await;
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        let head = db
+            .get_channel_window(cid, channel, 1, None, None)
+            .await
+            .expect("head window");
+        let cursor = head.next_cursor.expect("has_more implies next_cursor");
+        let (_window, mut session) = db
+            .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+            .await
+            .expect("routed cursor window");
+        assert!(
+            session.is_replica(),
+            "fixture must route this page to the replica"
+        );
+
+        // Kill the reader's backend out from under the held transaction.
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+             WHERE datname = $1 AND pid <> pg_backend_pid()",
+        )
+        .bind(&rname)
+        .execute(&admin)
+        .await
+        .expect("terminate replica backends");
+
+        let mut aux = EventQuery::for_community(cid);
+        aux.channel_id = Some(channel);
+        let rows = session
+            .query_events(&aux)
+            .await
+            .expect("session must degrade to the writer, not error");
+        assert!(
+            rows.iter()
+                .any(|se| se.event.content == "fresh-writer-only"),
+            "degraded aux must be served by the writer"
+        );
+        assert!(
+            !session.is_replica(),
+            "the session must be permanently degraded to the writer"
+        );
+
+        drop(session);
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Snapshot continuity (Wren, review of 17ea2ff6a): the routed request
+    /// runs inside ONE `REPEATABLE READ, READ ONLY` transaction whose first
+    /// statement was the heartbeat observation — so a row committed on the
+    /// replica *after* the proof must be invisible to every follow-up
+    /// statement in the same request (page, participants, aux). This
+    /// distinguishes the transaction contract from mere connection reuse:
+    /// autocommit statements on the same backend advance their snapshot
+    /// per statement and WOULD see the mid-request row.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn routed_request_holds_one_snapshot_across_page_and_aux() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "snap_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "snap_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let m1 = signed_event_at(&author, "m1", base);
+        let m2 = signed_event_at(&author, "m2", base + 10);
+        for pool in [&writer, &replica] {
+            for ev in [&m1, &m2] {
+                insert_top_level(pool, community, channel, ev).await;
+            }
+        }
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        // Head page on the writer yields the cursor for a replica-routed page.
+        let head = db
+            .get_channel_window(cid, channel, 1, None, None)
+            .await
+            .expect("head window");
+        let cursor = head.next_cursor.expect("has_more implies next_cursor");
+
+        // Route the cursor page to the replica and HOLD the session.
+        let (window, mut session) = db
+            .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+            .await
+            .expect("routed cursor window");
+        assert!(
+            session.is_replica(),
+            "fixture must route this page to the replica"
+        );
+        assert_eq!(window.rows.len(), 1, "page after m2 is [m1]");
+
+        // Mid-request: a new event commits on the replica (stands in for
+        // replay advancing between the page and the aux closure).
+        let mid = signed_event_at(&author, "mid-request-commit", base + 5);
+        insert_top_level(&replica, community, channel, &mid).await;
+
+        // A fresh autocommit statement on ANOTHER session sees it — the row
+        // is really there (control for the assertion below).
+        let mut control = EventQuery::for_community(cid);
+        control.channel_id = Some(channel);
+        let visible_elsewhere = event::query_events(&replica, &control)
+            .await
+            .expect("control query");
+        assert!(
+            visible_elsewhere
+                .iter()
+                .any(|se| se.event.content == "mid-request-commit"),
+            "control: the mid-request row must be committed and visible to a new snapshot"
+        );
+
+        // The held request session must NOT see it: its snapshot was
+        // anchored by the heartbeat observation, before the commit.
+        let mut aux = EventQuery::for_community(cid);
+        aux.channel_id = Some(channel);
+        let in_request = session.query_events(&aux).await.expect("aux query");
+        assert!(
+            !in_request
+                .iter()
+                .any(|se| se.event.content == "mid-request-commit"),
+            "request transaction must hold the proof-time snapshot; a \
+             mid-request commit leaking in means the aux ran outside the \
+             request transaction (autocommit connection reuse)"
+        );
+        // Rows from the proof-time snapshot are still served.
+        assert!(
+            in_request.iter().any(|se| se.event.content == "m1"),
+            "proof-time rows must remain visible in the request snapshot"
+        );
+
+        drop(session);
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Head gate (Predicate A): with the budget unset, a head fetch reads
+    /// the writer even over an open fence; with a budget set and a fresh
+    /// proved entry, the head page is served by the replica session
+    /// (bounded staleness accepted); with a budget the fence entry exceeds,
+    /// the head page falls back to the writer.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn head_fetch_routes_by_configured_budget() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "head_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "head_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let shared = signed_event_at(&author, "shared", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &shared).await;
+        }
+        // Divergent heads prove which pool served the fetch.
+        let fresh = signed_event_at(&author, "fresh-writer-only", base + 30);
+        insert_top_level(&writer, community, channel, &fresh).await;
+        let marker = signed_event_at(&author, "replica-only-marker", base + 20);
+        insert_top_level(&replica, community, channel, &marker).await;
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+        let head_contents = |w: &thread::ChannelWindow| -> Vec<String> {
+            w.rows
+                .iter()
+                .map(|r| r.stored_event.event.content.clone())
+                .collect()
+        };
+
+        // Budget unset (rollout default): head → writer, fence open or not.
+        let head = db
+            .get_channel_window(cid, channel, 2, None, None)
+            .await
+            .expect("head, gate off");
+        assert_eq!(
+            head_contents(&head),
+            vec!["fresh-writer-only".to_string(), "shared".to_string()],
+            "head routing must default off"
+        );
+
+        // Budget set, entry fresh (just recorded): head → replica.
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let head = db
+            .get_channel_window(cid, channel, 2, None, None)
+            .await
+            .expect("head, gate on");
+        assert_eq!(
+            head_contents(&head),
+            vec!["replica-only-marker".to_string(), "shared".to_string()],
+            "a fresh proved entry within budget must serve the head from the replica"
+        );
+
+        // Entry older than the budget: head falls back to the writer.
+        db.fence().close();
+        db.fence().force_open_for_tests_at(
+            chrono::Utc::now(),
+            std::time::Instant::now() - std::time::Duration::from_secs(10),
+        );
+        let head = db
+            .get_channel_window(cid, channel, 2, None, None)
+            .await
+            .expect("head, entry too old");
+        assert_eq!(
+            head_contents(&head),
+            vec!["fresh-writer-only".to_string(), "shared".to_string()],
+            "an over-budget entry must fail the head gate closed"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// End-to-end deploy-default proof for the NEW routed seams: with the
+    /// budget unset, a covered-eligible query (channel-pinned + `until`)
+    /// through [`Db::query_events_routed`] is served by the WRITER — the
+    /// `for_query` gate keeps the covered arm dark (rev 5). With the budget
+    /// set and a fresh proved entry, the same query routes to the replica.
+    /// Divergent fixtures prove which pool served each read.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn query_events_routed_defaults_dark_and_routes_covered_when_enabled() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "qer_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "qer_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let shared = signed_event_at(&author, "shared", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &shared).await;
+        }
+        let writer_only = signed_event_at(&author, "writer-only", base + 10);
+        insert_top_level(&writer, community, channel, &writer_only).await;
+        let replica_only = signed_event_at(&author, "replica-only", base + 20);
+        insert_top_level(&replica, community, channel, &replica_only).await;
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        // Covered-eligible shape: channel-pinned with an `until` upper
+        // bound below the (now) fence wall.
+        let q = {
+            let mut q = EventQuery::for_community(cid);
+            q.channel_id = Some(channel);
+            q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+            q
+        };
+        let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
+            evs.iter().map(|e| e.event.content.clone()).collect()
+        };
+
+        // Deploy default: budget unset ⇒ writer, even though the shape is
+        // covered-eligible and the fence is open.
+        let rows = db
+            .query_events_routed("test_routed", &q)
+            .await
+            .expect("routed query, gate off");
+        assert!(
+            contents(&rows).contains("writer-only"),
+            "budget unset must serve the writer"
+        );
+        assert!(
+            !contents(&rows).contains("replica-only"),
+            "budget unset must not reach the replica via the covered arm"
+        );
+
+        // Budget set ⇒ the covered arm serves it from the replica.
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let rows = db
+            .query_events_routed("test_routed", &q)
+            .await
+            .expect("routed query, gate on");
+        assert!(
+            contents(&rows).contains("replica-only"),
+            "budget set + covered-eligible must route to the replica"
+        );
+        assert!(!contents(&rows).contains("writer-only"));
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// COUNT is bounded-only (rev 5 deletion-visibility rule): a
+    /// covered-eligible shape must NOT let a count take the covered arm.
+    /// With the budget unset the count reads the WRITER even with an open
+    /// fence; with the budget set and a fresh entry it reads the replica
+    /// under the bounded arm. Divergent row counts prove the serving pool.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn count_events_routed_is_bounded_only() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "cnt_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "cnt_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        // Writer: 2 rows. Replica: 1 row.
+        for (i, content) in ["a", "b"].iter().enumerate() {
+            let ev = signed_event_at(&author, content, base + i as u64);
+            insert_top_level(&writer, community, channel, &ev).await;
+        }
+        let ev = signed_event_at(&author, "c", base);
+        insert_top_level(&replica, community, channel, &ev).await;
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        // Covered-eligible shape on purpose: pinned + until. A count must
+        // ignore that eligibility.
+        let q = {
+            let mut q = EventQuery::for_community(cid);
+            q.channel_id = Some(channel);
+            q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+            q
+        };
+
+        // Budget unset ⇒ bounded arm disabled ⇒ writer.
+        let n = db
+            .count_events_routed("test_count", &q)
+            .await
+            .expect("count, gate off");
+        assert_eq!(n, 2, "budget unset must count on the writer");
+
+        // Budget set + fresh entry ⇒ bounded arm ⇒ replica.
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let n = db
+            .count_events_routed("test_count", &q)
+            .await
+            .expect("count, gate on");
+        assert_eq!(n, 1, "budget set must count on the replica (bounded)");
+
+        // Entry older than the budget ⇒ bounded fails ⇒ writer. Covered
+        // would still hold here (upper <= wall) — proving count never
+        // consults it.
+        db.fence().close();
+        db.fence().force_open_for_tests_at(
+            chrono::Utc::now(),
+            std::time::Instant::now() - std::time::Duration::from_secs(10),
+        );
+        let n = db
+            .count_events_routed("test_count", &q)
+            .await
+            .expect("count, entry too old");
+        assert_eq!(
+            n, 2,
+            "an over-budget entry must fail the count closed to the writer, \
+             even when the covered arm would admit the shape"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Routed relay-membership check: budget unset ⇒ writer; budget set +
+    /// fresh proved entry ⇒ replica (bounded arm); over-budget entry ⇒
+    /// writer. Divergent membership rows prove which pool answered.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn is_relay_member_is_bounded_routed_and_fails_closed() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "mem_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "mem_r").await;
+
+        let community = Uuid::new_v4();
+        for pool in [&writer, &replica] {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("member-routing-{}.example", community.simple()))
+                .execute(pool)
+                .await
+                .expect("insert community");
+        }
+        let cid = CommunityId::from_uuid(community);
+        let writer_only = "aa".repeat(32);
+        let replica_only = "bb".repeat(32);
+        relay_members::add_relay_member(&writer, cid, &writer_only, "member", None)
+            .await
+            .expect("seed writer member");
+        relay_members::add_relay_member(&replica, cid, &replica_only, "member", None)
+            .await
+            .expect("seed replica member");
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+
+        // Budget unset ⇒ bounded arm disabled ⇒ writer.
+        assert!(
+            db.is_relay_member(cid, &writer_only)
+                .await
+                .expect("gate off"),
+            "budget unset must answer from the writer"
+        );
+        assert!(!db.is_relay_member(cid, &replica_only).await.unwrap());
+
+        // Budget set + fresh entry ⇒ replica.
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        assert!(
+            db.is_relay_member(cid, &replica_only)
+                .await
+                .expect("gate on"),
+            "budget set must answer from the replica"
+        );
+        assert!(!db.is_relay_member(cid, &writer_only).await.unwrap());
+
+        // Entry older than the budget ⇒ fail closed to the writer. Close
+        // first so no prior fresh entry can be the one proved (matches the
+        // count test; today `force_open_for_tests_at` also clears the ring).
+        db.fence().close();
+        db.fence().force_open_for_tests_at(
+            chrono::Utc::now(),
+            std::time::Instant::now() - std::time::Duration::from_secs(10),
+        );
+        assert!(
+            db.is_relay_member(cid, &writer_only)
+                .await
+                .expect("entry too old"),
+            "an over-budget entry must fail closed to the writer"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Community separation across every routed seam, verified on
+    /// REPLICA-SERVED reads.
+    ///
+    /// The pre-existing feed/event scoping tests prove the shared SQL
+    /// builders confine rows to one community, but they exercise those
+    /// builders through the WRITER wrapper. `_on` variants are
+    /// executor-only refactors, so scoping *should* be identical — this
+    /// test refuses to take that on faith and re-proves it through the
+    /// routed executor, on a snapshot the replica actually served.
+    ///
+    /// Construction: two communities A and B exist in BOTH databases with
+    /// the same ids. The replica additionally holds a `replica-only` row in
+    /// each — divergent fixtures, so any row bearing that content proves
+    /// the replica (not the writer) served the read. Every assertion
+    /// requests A and demands B's rows never appear, including B's
+    /// `replica-only` row, which is the one a leaky predicate would surface.
+    /// The routed fallback must cost ONE reader acquire budget, even when the
+    /// Aurora capability cache is cold.
+    ///
+    /// Regression test for a stacked-budget bug found at `9fa3c9c0b`: the
+    /// capability probe used to `acquire()` from the pool itself and return
+    /// `false` *uncached* on `PoolTimedOut`, so the routed read then spent a
+    /// SECOND `READER_ACQUIRE_TIMEOUT` inside `begin`. Measured 302ms against
+    /// a ~150ms documented bound. Boot priming
+    /// ([`Db::spawn_read_pool_boot_ping`]) hid it only when the boot ping
+    /// SUCCEEDED — and a reader that is unavailable at boot is exactly the
+    /// case the bound is specified for, so the two failures are correlated.
+    ///
+    /// The fixture reproduces that state deliberately: a size-1 reader whose
+    /// sole connection is established and then HELD (so every further acquire
+    /// must time out), with `reader_aurora_identity` asserted cold. It routes
+    /// through `count_events_routed` rather than calling `proved_reader`
+    /// directly, because `buzz_db_route_decision` is emitted by `route_read`
+    /// — a direct call would prove the timing but never emit the label.
+    ///
+    /// Timing uses an upper bound of 2x the budget minus a margin: it must
+    /// fail for two stacked budgets (~300ms) while tolerating scheduler
+    /// jitter on one (~150ms). Asserting a lower bound too would pin the
+    /// budget's own value, which `reader_acquire_timeout_is_the_documented_budget`
+    /// already covers.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed, wname) = create_scratch_db(&admin, "one_budget").await;
+        seed.close().await;
+        let base = admin_url().await;
+        let scratch_url = {
+            let idx = base.rfind('/').expect("db url has a path segment");
+            format!("{}/{}", &base[..idx], wname)
+        };
+
+        // `Db::new` so the writer arms the floor guard and the reader is the
+        // real lazy `connect_read_pool` pool (min_connections=0, 150ms
+        // acquire timeout). Reader is sized 1 so holding one connection
+        // saturates it.
+        let mut db = Db::new(&DbConfig {
+            database_url: scratch_url.clone(),
+            read_database_url: Some(scratch_url),
+            max_connections: 4,
+            read_max_connections: Some(1),
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db with size-1 lazy reader");
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(5)));
+
+        let read_pool = db.read_pool.clone().expect("reader pool configured");
+        // Establish and hold the reader's only connection: saturated.
+        let held = read_pool
+            .acquire()
+            .await
+            .expect("establish the reader's sole connection");
+        assert_eq!(
+            db.read_max_connections, 1,
+            "reader max must report 1 for this fixture to test saturation"
+        );
+        assert_eq!(
+            read_pool.size(),
+            1,
+            "the sole reader connection is established and held"
+        );
+        // The bug is only observable with the capability cache cold; if a
+        // future change primes it here, this fixture would silently stop
+        // discriminating.
+        assert!(
+            db.reader_aurora_identity.get().is_none(),
+            "Aurora capability must be UNPRIMED (post-boot-ping-failure state)"
+        );
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+
+        // The recorder is installed thread-locally, so it must stay installed
+        // across the `.await` — hence the guard form rather than
+        // `with_local_recorder`, whose closure cannot host an await. The
+        // `current_thread` flavor keeps the route decision on this thread; on
+        // a multi-thread runtime the emit could land on a worker where no
+        // local recorder is installed and the label assertions would vacuously
+        // see an empty snapshot.
+        let start = std::time::Instant::now();
+        let count = {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            db.count_events_routed("one_budget_probe", &query).await
+        }
+        .expect("writer fallback still answers the read");
+        let elapsed = start.elapsed();
+
+        assert_eq!(count, 0, "writer answered on an empty scratch database");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "routed fallback must spend ONE {}ms acquire budget, not two; took {}ms",
+            Db::READER_ACQUIRE_TIMEOUT.as_millis(),
+            elapsed.as_millis()
+        );
+
+        let reasons: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_db_route_decision must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let get = |name: &str| {
+                    labels
+                        .iter()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default()
+                };
+                ((get("decision"), get("reason")), n)
+            })
+            .collect();
+
+        assert_eq!(
+            reasons.get(&("writer".to_owned(), "reader_acquire_timeout".to_owned())),
+            Some(&1),
+            "saturated reader must fall back as writer/reader_acquire_timeout; got {reasons:?}"
+        );
+        // `reader_validation_error` would mean we misclassified a timeout as a
+        // broken reader, and `pool_busy` is the retired name — neither may
+        // appear in ANY emitted label.
+        assert!(
+            !reasons
+                .keys()
+                .any(|(_, reason)| reason == "reader_validation_error" || reason == "pool_busy"),
+            "no reader_validation_error or retired pool_busy label may be emitted; got {reasons:?}"
+        );
+
+        drop(held);
+        drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn routed_reads_are_confined_to_the_requested_community() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "sep_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "sep_r").await;
+
+        let author = nostr::Keys::generate();
+        let (comm_a, chan_a) = (Uuid::new_v4(), Uuid::new_v4());
+        let (comm_b, chan_b) = (Uuid::new_v4(), Uuid::new_v4());
+        for pool in [&writer, &replica] {
+            seed_community_channel(pool, comm_a, chan_a, &author).await;
+            seed_community_channel(pool, comm_b, chan_b, &author).await;
+        }
+
+        // A p-tag mention is what makes a row eligible for the mentions and
+        // needs-action feeds. Kind 9 satisfies mentions + activity;
+        // needs-action admits only approval/reminder kinds, so each
+        // community also gets a kind-46010 row.
+        let mentioned = nostr::Keys::generate();
+        let mentioned_hex = mentioned.public_key().to_hex();
+        let mentioned_bytes = mentioned.public_key().to_bytes();
+        let tagged_kind = |kind: u16, content: &str, secs: u64| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(kind), content)
+                .tags([nostr::Tag::parse(["p", mentioned_hex.as_str()]).expect("p tag")])
+                .custom_created_at(nostr::Timestamp::from(secs))
+                .sign_with_keys(&author)
+                .expect("sign event")
+        };
+        let tagged = |content: &str, secs: u64| tagged_kind(9, content, secs);
+
+        let base = 1_700_000_000u64;
+        // Shared rows (both DBs) + replica-only rows (divergence) per community.
+        let a_shared = tagged("a-shared", base);
+        let b_shared = tagged("b-shared", base + 1);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, comm_a, chan_a, &a_shared).await;
+            insert_mentions(
+                pool,
+                CommunityId::from_uuid(comm_a),
+                &a_shared,
+                Some(chan_a),
+            )
+            .await
+            .expect("mentions a-shared");
+            insert_top_level(pool, comm_b, chan_b, &b_shared).await;
+            insert_mentions(
+                pool,
+                CommunityId::from_uuid(comm_b),
+                &b_shared,
+                Some(chan_b),
+            )
+            .await
+            .expect("mentions b-shared");
+        }
+        let a_replica_only = tagged("a-replica-only", base + 10);
+        let b_replica_only = tagged("b-replica-only", base + 11);
+        insert_top_level(&replica, comm_a, chan_a, &a_replica_only).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_a),
+            &a_replica_only,
+            Some(chan_a),
+        )
+        .await
+        .expect("mentions a-replica-only");
+        insert_top_level(&replica, comm_b, chan_b, &b_replica_only).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_b),
+            &b_replica_only,
+            Some(chan_b),
+        )
+        .await
+        .expect("mentions b-replica-only");
+
+        // Needs-action fixtures: approval kind, replica-only in BOTH
+        // communities, so the assertion below is replica-served on A and
+        // must still not see B's.
+        let a_approval = tagged_kind(46010, "a-approval-replica-only", base + 20);
+        let b_approval = tagged_kind(46010, "b-approval-replica-only", base + 21);
+        insert_top_level(&replica, comm_a, chan_a, &a_approval).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_a),
+            &a_approval,
+            Some(chan_a),
+        )
+        .await
+        .expect("mentions a-approval");
+        insert_top_level(&replica, comm_b, chan_b, &b_approval).await;
+        insert_mentions(
+            &replica,
+            CommunityId::from_uuid(comm_b),
+            &b_approval,
+            Some(chan_b),
+        )
+        .await
+        .expect("mentions b-approval");
+
+        let mut db = Db::from_pools(writer.clone(), replica.clone());
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+        let cid_a = CommunityId::from_uuid(comm_a);
+
+        let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
+            evs.iter().map(|e| e.event.content.clone()).collect()
+        };
+        // Every routed seam must (a) have been served by the replica —
+        // proven by a divergent row absent from the writer — and (b) contain
+        // no row belonging to community B. All B fixtures are named `b-*`,
+        // so the leak check is a single prefix scan.
+        let assert_a_only = |rows: &[StoredEvent], marker: &str, seam: &str| {
+            let got = contents(rows);
+            assert!(
+                got.contains(marker),
+                "{seam}: must be replica-served (divergent row `{marker}` absent from writer); got {got:?}"
+            );
+            assert!(
+                !got.iter().any(|c| c.starts_with("b-")),
+                "{seam}: community B rows leaked into a community A read; got {got:?}"
+            );
+        };
+
+        // 1. Generic query — covered arm (channel-pinned + `until`).
+        let mut q = EventQuery::for_community(cid_a);
+        q.channel_id = Some(chan_a);
+        q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+        let rows = db
+            .query_events_routed("sep_query", &q)
+            .await
+            .expect("routed query");
+        assert_a_only(&rows, "a-replica-only", "query_events_routed");
+
+        // 2. Generic query — bounded arm (no channel pin at all, so a
+        //    missing community predicate could not be masked by the pin).
+        let unpinned = EventQuery::for_community(cid_a);
+        let rows = db
+            .query_events_routed_bounded("sep_query_bounded", &unpinned)
+            .await
+            .expect("routed bounded query");
+        assert_a_only(&rows, "a-replica-only", "query_events_routed_bounded");
+
+        // 3. COUNT — bounded-only. Community A holds 3 rows on the replica
+        //    (shared + replica-only + approval) but only 1 on the writer,
+        //    and 3 more exist in community B. Exactly 3 proves the read was
+        //    both replica-served and community-confined.
+        let count = db
+            .count_events_routed("sep_count", &unpinned)
+            .await
+            .expect("routed count");
+        assert_eq!(
+            count, 3,
+            "count must see A's three replica rows only — not B's, not the writer's one"
+        );
+
+        // 4. By-ID hydration — ids carry no channel pin, and B's ids are
+        //    requested alongside A's. Only A's may hydrate.
+        let ids: Vec<&[u8]> = vec![
+            a_shared.id.as_bytes(),
+            a_replica_only.id.as_bytes(),
+            b_shared.id.as_bytes(),
+            b_replica_only.id.as_bytes(),
+        ];
+        let rows = db
+            .get_events_by_ids_routed("sep_by_ids", cid_a, &ids)
+            .await
+            .expect("routed by-ids");
+        assert_a_only(&rows, "a-replica-only", "get_events_by_ids_routed");
+
+        // 5-7. All three feed builders, each given BOTH channels as
+        //      accessible — so only the community predicate can exclude B.
+        let both = [chan_a, chan_b];
+        let rows = db
+            .query_feed_mentions_routed("sep_feed", cid_a, &mentioned_bytes, &both, None, 50)
+            .await
+            .expect("routed mentions");
+        assert_a_only(&rows, "a-replica-only", "query_feed_mentions_routed");
+
+        let rows = db
+            .query_feed_needs_action_routed("sep_feed", cid_a, &mentioned_bytes, &both, None, 50)
+            .await
+            .expect("routed needs action");
+        assert_a_only(
+            &rows,
+            "a-approval-replica-only",
+            "query_feed_needs_action_routed",
+        );
+
+        let rows = db
+            .query_feed_activity_routed("sep_feed", cid_a, &both, None, 50)
+            .await
+            .expect("routed activity");
+        assert_a_only(&rows, "a-replica-only", "query_feed_activity_routed");
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
+    /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
+    /// floor guard and spawn — reader-down or reader-idle at boot must not
+    /// disable fence probing.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lazy_reader_pool_still_spawns_fence_probe() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed, wname) = create_scratch_db(&admin, "lazy_w").await;
+        seed.close().await;
+
+        let writer_url = {
+            let base = admin_url().await;
+            let idx = base.rfind('/').expect("db url has a path segment");
+            format!("{}/{}", &base[..idx], wname)
+        };
+        // `Db::new` (not `from_pools`) so the WRITER pool arms the
+        // `buzz.created_at_floor` GUC — `spawn_fence_probe` verifies the
+        // floor guard on a writer connection, and `create_scratch_db`'s
+        // plain `PgPool::connect` never arms it. The reader is still the
+        // lazy `connect_read_pool` pool this test is about.
+        let db = Db::new(&DbConfig {
+            database_url: writer_url.clone(),
+            read_database_url: Some(writer_url),
+            max_connections: 2,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db with lazy reader");
+
+        let spawned = db
+            .spawn_fence_probe()
+            .await
+            .expect("floor-guard verification must pass on the migrated writer");
+        assert!(spawned, "a configured (lazy) reader must spawn the probe");
+
+        drop_scratch_db(&admin, db.pool.clone(), &wname).await;
     }
 
     /// Thread replies: head fetch reads the writer; a FULL cursor page is
@@ -5902,6 +8734,76 @@ mod tests {
         drop_scratch_db(&admin, pool, &name).await;
     }
 
+    #[test]
+    fn writer_pool_safety_hook_is_single_and_composed() {
+        let source = include_str!("lib.rs");
+        let connect_pool = source
+            .split("async fn connect_pool")
+            .nth(1)
+            .and_then(|tail| tail.split("const READER_ACQUIRE_TIMEOUT").next())
+            .expect("connect_pool source block");
+        assert_eq!(
+            connect_pool.matches(".after_connect(").count(),
+            1,
+            "SQLx replaces after_connect hooks; writer safety must use exactly one"
+        );
+        assert!(connect_pool.contains("buzz.created_at_floor"));
+        assert!(connect_pool.contains("SHOW transaction_isolation"));
+        assert!(!connect_pool.contains("arm_floor_guard"));
+        assert!(!connect_pool.contains("_arm_floor_guard"));
+        assert!(!connect_pool.contains("allow(unused_variables)"));
+
+        let reader_doc = source
+            .split("fn connect_read_pool")
+            .next()
+            .and_then(|prefix| prefix.rsplit("/// Connect the read-replica").next())
+            .expect("reader pool documentation");
+        assert!(reader_doc.contains("replica sessions are"));
+        assert!(reader_doc.contains("read-only"));
+        assert!(!reader_doc.contains("Db::connect_pool"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn writer_pool_rejects_non_read_committed_database_default() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed_pool, name) = create_scratch_db(&admin, "writer_isolation").await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER DATABASE {name} SET default_transaction_isolation = 'repeatable read'"
+        )))
+        .execute(&admin)
+        .await
+        .expect("set unsafe database default");
+        seed_pool.close().await;
+
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+        let error = Db::new(&DbConfig {
+            database_url: scratch_url,
+            max_connections: 1,
+            min_connections: 1,
+            acquire_timeout_secs: 1,
+            ..DbConfig::default()
+        })
+        .await
+        .expect_err("writer pool must reject pinned-snapshot database defaults");
+        assert!(
+            error.to_string().contains("requires READ COMMITTED")
+                || error.to_string().contains("pool timed out"),
+            "unexpected isolation rejection: {error}"
+        );
+
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop isolation test database");
+    }
+
     /// The armed writer pool (`Db::new`) must enforce the floor end-to-end
     /// through the public insert APIs, and the session GUC must be verifiably
     /// set on pooled connections.
@@ -5940,6 +8842,14 @@ mod tests {
             effective,
             crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string(),
             "writer pool must arm the floor guard on every connection"
+        );
+        let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
+            .fetch_one(&db.pool)
+            .await
+            .expect("SHOW writer isolation");
+        assert_eq!(
+            isolation, "read committed",
+            "the same writer after_connect hook must enforce the isolation premise"
         );
 
         let now_secs = chrono::Utc::now().timestamp() as u64;
@@ -6012,20 +8922,38 @@ mod tests {
 
         let base = admin_url().await;
         let idx = base.rfind('/').expect("db url has a path segment");
-        let db = Db::new(&DbConfig {
-            database_url: format!("{}/{}", &base[..idx], wname),
-            read_database_url: Some(format!("{}/{}", &base[..idx], rname)),
+        let writer_url = format!("{}/{}", &base[..idx], wname);
+        let replica_url = format!("{}/{}", &base[..idx], rname);
+
+        // Healthy schema: verification passes, probe starts. A SEPARATE Db
+        // instance, because its background probe legitimately opens its own
+        // fence (the heartbeat probe is writer-side only) — the refusal
+        // assertions below must run against a fence whose spawns were all
+        // refused.
+        let db_healthy = Db::new(&DbConfig {
+            database_url: writer_url.clone(),
+            read_database_url: Some(replica_url.clone()),
             max_connections: 2,
             ..DbConfig::default()
         })
         .await
         .expect("connect armed Db with replica");
-
-        // Healthy schema: verification passes, probe starts.
         assert!(
-            db.spawn_fence_probe().await.expect("verification passes"),
+            db_healthy
+                .spawn_fence_probe()
+                .await
+                .expect("verification passes"),
             "probe must start on a verified schema"
         );
+
+        let db = Db::new(&DbConfig {
+            database_url: writer_url,
+            read_database_url: Some(replica_url),
+            max_connections: 2,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db with replica");
 
         // Sabotage A: catalog-shaped no-op — same trigger, gutted function
         // body. Catalog check alone would pass; behavior check must refuse.
@@ -6066,6 +8994,10 @@ mod tests {
             "fence must remain closed when verification refuses the probe"
         );
 
+        db_healthy.pool.close().await;
+        if let Some(rp) = &db_healthy.read_pool {
+            rp.close().await;
+        }
         db.pool.close().await;
         if let Some(rp) = &db.read_pool {
             rp.close().await;

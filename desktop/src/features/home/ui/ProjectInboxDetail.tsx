@@ -120,7 +120,10 @@ export function ProjectInboxDetail({
           workItem.type === "pull-request"
             ? { pullRequestId: workItem.pullRequest.id }
             : { issueId: workItem.issue.id };
-        void goProject(workItem.project.id, workItemId);
+        void goProject(workItem.project.id, {
+          ...workItemId,
+          repositoryId: workItem.repository.id,
+        });
       }}
       profiles={profiles}
       workItem={workItem}

@@ -1,96 +1,146 @@
+import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import {
-  eventToProject,
   fetchProjects,
   type Project,
   projectsQueryKey,
 } from "@/features/projects/hooks";
+import {
+  buildInitialProjectEventTemplates,
+  isUnsupportedProjectKindError,
+} from "@/features/projects/projectCreation";
+import { buildProjectReadModels } from "@/features/projects/projectModels";
 import { relayClient } from "@/shared/api/relayClient";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
-import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
 
 export type CreateProjectInput = {
+  accessChannelId: string;
   name: string;
   description?: string;
   cloneUrl?: string;
   webUrl?: string;
 };
 
-function projectDtagFromName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
+export type CreateProjectResult = {
+  project: Project;
+  compatibilityWarning?: string;
+};
 
-/** Publishes a NIP-34 repo announcement so the project appears on the relay. */
-async function createProject(input: CreateProjectInput): Promise<Project> {
-  const name = input.name.trim();
-  if (!name) {
-    throw new Error("Project name is required.");
-  }
-  const dtag = projectDtagFromName(name);
-  if (!dtag) {
-    throw new Error("Project name must include letters or numbers.");
-  }
-
+/** Publishes a project announcement and its initial NIP-34 repository. */
+async function createProject(
+  input: CreateProjectInput,
+  resumableProjectIds: Set<string>,
+): Promise<CreateProjectResult> {
   const identity = await getIdentity();
+  const templates = buildInitialProjectEventTemplates({
+    ...input,
+    ownerPubkey: identity.pubkey,
+  });
   const existing = await fetchProjects();
   const ownerPubkey = identity.pubkey.toLowerCase();
-  if (
-    existing.some(
-      (project) =>
-        project.owner.toLowerCase() === ownerPubkey && project.dtag === dtag,
-    )
-  ) {
-    throw new Error(`You already have a project named "${dtag}".`);
-  }
-
-  const description = input.description?.trim() ?? "";
-  const tags: string[][] = [
-    ["d", dtag],
-    ["name", name],
-  ];
-  if (description) {
-    tags.push(["description", description]);
-  }
-  const cloneUrl = input.cloneUrl?.trim();
-  if (cloneUrl) {
-    tags.push(["clone", cloneUrl]);
-  }
-  const webUrl = input.webUrl?.trim();
-  if (webUrl) {
-    tags.push(["web", webUrl]);
-  }
-
-  const event = await signRelayEvent({
-    kind: KIND_REPO_ANNOUNCEMENT,
-    content: description,
-    tags,
-  });
-
-  await relayClient.publishEvent(
-    event,
-    "Timed out creating project.",
-    "Failed to create project.",
+  const existingProject = existing.find(
+    (project) =>
+      project.owner.toLowerCase() === ownerPubkey &&
+      project.dtag === templates.dtag,
   );
+  const projectId = `${ownerPubkey}:${templates.dtag}`;
+  const canResume = resumableProjectIds.has(projectId);
+  if (existingProject && !canResume) {
+    throw new Error(`You already have a project named "${templates.dtag}".`);
+  }
+  if (existingProject && !existingProject.legacy) {
+    if (
+      existingProject.repositories.some(
+        (repository) => repository.repoAddress === templates.repositoryAddress,
+      )
+    ) {
+      resumableProjectIds.delete(projectId);
+      return { project: existingProject };
+    }
+    throw new Error(`You already have a project named "${templates.dtag}".`);
+  }
 
-  return eventToProject(event, getCachedRelayOrigin());
+  resumableProjectIds.add(projectId);
+  const projectEvent = await signRelayEvent(templates.project);
+
+  let repositoryEvent = null;
+  if (!existingProject) {
+    repositoryEvent = await signRelayEvent(templates.repository);
+    await relayClient.publishEvent(
+      repositoryEvent,
+      "Timed out creating the initial repository.",
+      "Failed to create the initial repository.",
+    );
+  }
+
+  try {
+    await relayClient.publishEvent(
+      projectEvent,
+      "Timed out creating project.",
+      "Failed to create project.",
+    );
+  } catch (error) {
+    if (!isUnsupportedProjectKindError(error)) throw error;
+
+    const [legacyProject] = existingProject?.legacy
+      ? [existingProject]
+      : buildProjectReadModels({
+          projectEvents: [],
+          repositoryEvents: repositoryEvent ? [repositoryEvent] : [],
+          relayOrigin: getCachedRelayOrigin(),
+        });
+    if (!legacyProject) throw error;
+
+    resumableProjectIds.delete(projectId);
+    return {
+      project: legacyProject,
+      compatibilityWarning:
+        "The repository was created, but this relay does not support multi-repository projects yet. It will appear as a standalone project.",
+    };
+  }
+
+  const [project] = repositoryEvent
+    ? buildProjectReadModels({
+        projectEvents: [projectEvent],
+        repositoryEvents: [repositoryEvent],
+        relayOrigin: getCachedRelayOrigin(),
+      })
+    : (await fetchProjects()).filter(
+        (candidate) =>
+          candidate.owner.toLowerCase() === ownerPubkey &&
+          candidate.dtag === templates.dtag &&
+          !candidate.legacy,
+      );
+  if (!project) {
+    throw new Error("The project was created but could not be read.");
+  }
+  resumableProjectIds.delete(projectId);
+  return { project };
 }
 
 /** Mutation that creates a project and inserts it into the projects cache. */
 export function useCreateProjectMutation() {
   const queryClient = useQueryClient();
+  const resumableProjectIdsRef = React.useRef(new Set<string>());
 
   return useMutation({
-    mutationFn: createProject,
-    onSuccess: (project) => {
+    mutationFn: (input: CreateProjectInput) =>
+      createProject(input, resumableProjectIdsRef.current),
+    onSuccess: ({ project }) => {
       queryClient.setQueryData<Project[]>(projectsQueryKey, (current = []) => [
         project,
-        ...current,
+        ...current.filter(
+          (candidate) =>
+            candidate.id !== project.id &&
+            !(
+              candidate.legacy &&
+              candidate.owner === project.owner &&
+              candidate.dtag === project.dtag
+            ),
+        ),
       ]);
       void queryClient.invalidateQueries({ queryKey: projectsQueryKey });
     },

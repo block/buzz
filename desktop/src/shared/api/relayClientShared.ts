@@ -54,12 +54,25 @@ type FirstEventSubscription = {
   timeout: number;
 };
 
+export type LiveSubscriptionReadiness = "eose" | "closed" | "timeout";
+
 type LiveSubscription = {
   mode: "live";
   filter: RelaySubscriptionFilter;
   onEvent: (event: RelayEvent) => void;
-  resolveReady?: () => void;
+  resolveReady?: (readiness: LiveSubscriptionReadiness) => void;
   lastSeenCreatedAt?: number;
+  /**
+   * Lower bound of a reconnect backfill window that has not yet completed.
+   *
+   * Events on the restored live REQ advance `lastSeenCreatedAt` regardless of
+   * backfill success, so after an exhausted backfill the cursor alone would
+   * make the next reconnect skip the unresolved older window — silent message
+   * loss. This floor is pinned when paging starts and cleared only when a
+   * backfill pass completes; the next replay starts from
+   * `min(pendingReplaySince, cursor window)`.
+   */
+  pendingReplaySince?: number;
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
 };

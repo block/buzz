@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_persona_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, KIND_PERSONA, P_GATED_KINDS, RESULT_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
+    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -22,7 +22,6 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_HISTORICAL_LIMIT: i64 = 2_000;
 const MAX_SUBSCRIPTIONS: usize = 1024;
 
 /// Maximum `query_events` calls in flight per multi-filter REQ / bridge query.
@@ -33,6 +32,14 @@ const MAX_SUBSCRIPTIONS: usize = 1024;
 /// pool. Post-processing stays strictly in filter order (`buffered`, not
 /// `buffer_unordered`), so dedupe/trace/error semantics are unchanged.
 pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
+
+/// Maximum aggregate number of explicit `#h` values accepted in one REQ,
+/// COUNT, HTTP `/query`, or HTTP `/count` request.
+///
+/// Explicit channels may each require an uncached membership lookup and, for a
+/// live WS subscription, a registry entry plus Redis topic retain. Bound the
+/// values before any of that request-amplified work begins.
+pub(crate) const MAX_EXPLICIT_CHANNEL_VALUES: usize = 128;
 
 // Guard: keep the bound a small fraction of any sane Postgres pool size.
 // Raising it past this range requires re-running the relay bench and
@@ -86,6 +93,18 @@ pub async fn handle_req(
         }
     };
 
+    let channel_id = extract_channel_id_from_filters(&filters);
+    let requested_channel_ids = match extract_channel_ids_from_filters_limited(&filters) {
+        Ok(ids) => ids,
+        Err(()) => {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: too many explicit channels",
+            ));
+            return;
+        }
+    };
+
     let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
             .increment(1);
@@ -107,8 +126,6 @@ pub async fn handle_req(
         accessible_channels.retain(|channel_id| allowed.contains(channel_id));
     }
 
-    let channel_id = extract_channel_id_from_filters(&filters);
-
     // Build the conformance `AbstractState` once at request entry. The
     // `Option` only goes `None` on malformed pubkey bytes (already a
     // separate failure path elsewhere); on the hot read path this is
@@ -127,48 +144,68 @@ pub async fn handle_req(
     // `resolve_request_local_access`). Running this ahead of the search branch
     // is what fixes the search false-miss: a `#h=<just-added>` search would
     // otherwise be scoped against the stale vector and return empty.
-    if let Some(ch_id) = channel_id {
-        let token_allows = token_channel_ids
-            .as_deref()
-            .is_none_or(|allowed| allowed.contains(&ch_id));
-        let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
-            None
-        } else {
-            match state
-                .db
-                .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
-                .await
-            {
-                Ok(member) => {
-                    if let Some(state_snap) = trace_state.as_ref() {
-                        crate::conformance::record_req_authcheck(
-                            &state.tracer,
-                            state_snap,
-                            ch_id,
-                            member,
-                        );
+    if let Some(requested) = requested_channel_ids.as_ref() {
+        for &ch_id in requested {
+            let token_allows = token_channel_ids
+                .as_deref()
+                .is_none_or(|allowed| allowed.contains(&ch_id));
+            let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
+                None
+            } else {
+                match state
+                    .db
+                    .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
+                    .await
+                {
+                    Ok(member) => {
+                        if let Some(state_snap) = trace_state.as_ref() {
+                            crate::conformance::record_req_authcheck(
+                                &state.tracer,
+                                state_snap,
+                                ch_id,
+                                member,
+                            );
+                        }
+                        Some(member)
                     }
-                    Some(member)
+                    Err(e) => {
+                        warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
+                        conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                        return;
+                    }
                 }
-                Err(e) => {
-                    warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
-                    conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-                    return;
-                }
-            }
-        };
-        if !resolve_request_local_access(
-            &mut accessible_channels,
-            ch_id,
-            token_allows,
-            db_is_member,
-        ) {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: not a channel member",
-            ));
-            return;
+            };
+            // An OR filter may include inaccessible channels; retain every
+            // authorized requested channel and silently omit the others.
+            resolve_request_local_access(
+                &mut accessible_channels,
+                ch_id,
+                token_allows,
+                db_is_member,
+            );
         }
+    }
+
+    let authorized_requested_channels = requested_channel_ids.as_ref().map(|requested| {
+        requested
+            .iter()
+            .copied()
+            .filter(|channel_id| accessible_channels.contains(channel_id))
+            .collect::<Vec<_>>()
+    });
+    // Partial authorization preserves NIP-01 OR semantics by omitting only
+    // inaccessible branches. If no valid requested channel survives, retain the
+    // established single-channel contract: reject instead of registering a
+    // subscription that can never produce an event or a terminal notice.
+    if authorized_requested_channels
+        .as_ref()
+        .is_some_and(|authorized| authorized.is_empty())
+    {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: not a channel member",
+        ));
+        return;
     }
 
     // Applied BEFORE the NIP-50 search branch so that an authenticated member
@@ -237,23 +274,39 @@ pub async fn handle_req(
         subs.insert(sub_id.clone(), filters.clone());
     }
 
-    let replaced = state.sub_registry.register_scoped(
-        conn.tenant.community(),
-        conn_id,
-        sub_id.clone(),
-        filters.clone(),
-        channel_id,
-    );
+    let replaced = if let Some(channel_ids) = authorized_requested_channels.as_ref() {
+        state.sub_registry.register_channels_scoped(
+            conn.tenant.community(),
+            conn_id,
+            sub_id.clone(),
+            filters.clone(),
+            channel_ids.clone(),
+        )
+    } else {
+        state.sub_registry.register_scoped(
+            conn.tenant.community(),
+            conn_id,
+            sub_id.clone(),
+            filters.clone(),
+            None,
+        )
+    };
     if let Some(replaced) = replaced {
+        release_subscription_topics(&state, &conn.tenant, &replaced.scope).await;
+    }
+    if let Some(channel_ids) = authorized_requested_channels.as_ref() {
+        for &channel_id in channel_ids {
+            state
+                .pubsub
+                .retain_topic(&conn.tenant, EventTopic::Channel(channel_id))
+                .await;
+        }
+    } else {
         state
             .pubsub
-            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+            .retain_topic(&conn.tenant, EventTopic::Global)
             .await;
     }
-    state
-        .pubsub
-        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
-        .await;
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
 
@@ -289,12 +342,17 @@ pub async fn handle_req(
             };
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
-            apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
-            // Persona visibility pushdown: set reader bytes so query_events appends
-            // the SQL visibility clause before ORDER/LIMIT, preventing newer private
-            // personas from starving older shared ones off the page.
-            if filter_can_match_persona_shared_kinds(filter) {
-                params.persona_reader = Some(pubkey_bytes.clone());
+            apply_channel_scope_to_query(
+                &mut params,
+                filter,
+                per_filter_channel,
+                &accessible_channels,
+            );
+            // Shared-gated visibility pushdown: set reader bytes so query_events
+            // appends the SQL visibility clause before ORDER/LIMIT, preventing
+            // newer private events from starving older shared ones off the page.
+            if filter_can_match_shared_gated_kinds(filter) {
+                params.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             (idx, per_filter_channel, params)
         })
@@ -310,7 +368,7 @@ pub async fn handle_req(
         |(idx, per_filter_channel, params)| {
             let db = db.clone();
             async move {
-                let filter_events = db.query_events(&params).await;
+                let filter_events = db.query_events_routed("req_historical", &params).await;
                 (idx, per_filter_channel, filter_events)
             }
         },
@@ -335,7 +393,12 @@ pub async fn handle_req(
         // (B) projection strategy and the missing-lookup ImplBug
         // guard-rail. Skipped silently if `trace_state` is `None` (only
         // happens on malformed pubkey, a separate failure path).
-        if let Some(state_snap) = trace_state.as_ref() {
+        // `tracer.enabled()` short-circuits the whole block on the production
+        // `NoopTracer`: the `communities_of_channels` lookup below is a
+        // `channels` read whose only consumer is `record_read_message_rows`,
+        // and this emit runs once PER FILTER. Gating on `trace_state` alone was
+        // not enough — that is `Some` for every well-formed request.
+        if let Some(state_snap) = trace_state.as_ref().filter(|_| state.tracer.enabled()) {
             let row_channels: Vec<Option<uuid::Uuid>> =
                 events.iter().map(|e| e.channel_id).collect();
             let distinct: Vec<uuid::Uuid> = {
@@ -416,10 +479,24 @@ pub async fn handle_req(
     );
 }
 
-/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
-/// Search subscriptions are one-shot — no persistent subscription is registered.
+/// FTS candidate hits fetched per page. Pages are always full regardless of
+/// the requested limit — post-filtering discards an unpredictable share of
+/// hits, so the scan fetches candidates in full pages rather than sizing
+/// pages to the request.
+const SEARCH_PAGE_SIZE: u32 = 100;
+
 /// Maximum FTS pages to fetch per filter (prevents unbounded loops).
-const MAX_SEARCH_PAGES: u32 = 10;
+///
+/// Derived from the advertised page ceiling rather than fixed: the scan
+/// budget is a resource policy — at most one advertised page ceiling's worth
+/// of candidates per filter — and deriving it keeps the budget tracking the
+/// ceiling if the ceiling ever moves. This bounds candidates *scanned*, not
+/// events *emitted*: post-filtering (NIP-01 match, channel access, reader
+/// visibility, dedup) can discard any number of candidates, so a result
+/// smaller than the requested limit remains possible and is not a NIP-11
+/// violation — `max_limit` promises a clamp on the request, not a count in
+/// the response.
+const MAX_SEARCH_PAGES: u32 = (buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32).div_ceil(SEARCH_PAGE_SIZE);
 
 /// Resolve request-local channel access, repairing a stale cache-negative.
 ///
@@ -501,6 +578,8 @@ pub(crate) fn build_search_channel_scope_filter(
     })
 }
 
+/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
+/// Search subscriptions are one-shot — no persistent subscription is registered.
 #[allow(clippy::too_many_arguments)]
 async fn handle_search_req(
     sub_id: &str,
@@ -535,8 +614,8 @@ async fn handle_search_req(
 
         let limit = filter
             .limit
-            .map(|l| (l as u32).min(MAX_HISTORICAL_LIMIT as u32))
-            .unwrap_or(MAX_HISTORICAL_LIMIT as u32);
+            .map(|l| (l as u32).min(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32))
+            .unwrap_or(buzz_db::DEFAULT_MAX_PAGE_LIMIT as u32);
 
         if limit == 0 {
             continue; // NIP-01: limit 0 means "no results from this filter"
@@ -583,13 +662,11 @@ async fn handle_search_req(
         let since = filter.since.map(|s| s.as_secs() as i64);
         let until = filter.until.map(|u| u.as_secs() as i64);
 
-        // Paginate: keep fetching pages until we've emitted `limit` results
-        // or exhausted the search result set. This ensures post-filtering
-        // doesn't silently reduce the result count below the requested limit.
+        // Paginate: keep fetching pages until we've emitted `limit` results or
+        // exhausted the search result set. Post-filtering discards an unpredictable
+        // share of each page, so continuing past short yields gives the scan a
+        // chance — not a guarantee — of filling the requested limit.
         let mut emitted: u32 = 0;
-        // Always fetch full pages (100) regardless of limit — post-filtering
-        // may discard many hits, so we need headroom to fill the requested limit.
-        let per_page: u32 = 100;
 
         for page in 1..=MAX_SEARCH_PAGES {
             if emitted >= limit {
@@ -605,7 +682,7 @@ async fn handle_search_req(
                 since,
                 until,
                 page,
-                per_page,
+                per_page: SEARCH_PAGE_SIZE,
                 mode: buzz_search::SearchMode::FullText,
             };
 
@@ -617,9 +694,9 @@ async fn handle_search_req(
                 }
             };
 
-            // A short page is the last page: FTS returns up to `per_page` hits,
-            // so fewer than that means the result set is exhausted.
-            let exhausted = search_result.hits.len() < per_page as usize;
+            // A short page is the last page: FTS returns up to a full page of
+            // hits, so fewer than that means the result set is exhausted.
+            let exhausted = search_result.hits.len() < SEARCH_PAGE_SIZE as usize;
             let page_empty = search_result.hits.is_empty();
 
             let hit_ids: Vec<[u8; 32]> =
@@ -629,7 +706,7 @@ async fn handle_search_req(
                 let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
                 let events = match state
                     .db
-                    .get_events_by_ids(tenant.community(), &id_refs)
+                    .get_events_by_ids_routed("req_search_hydrate", tenant.community(), &id_refs)
                     .await
                 {
                     Ok(evs) => evs,
@@ -646,7 +723,9 @@ async fn handle_search_req(
                 // level isn't bound to a single channel filter, the
                 // per-row `channel_id` carries the channel identity
                 // honestly.
-                if let Some(state_snap) = trace_state {
+                // Same `enabled()` gate as the non-search lane: skip the
+                // trace-only `channels` lookup when nothing observes the emit.
+                if let Some(state_snap) = trace_state.filter(|_| state.tracer.enabled()) {
                     let row_channels: Vec<Option<uuid::Uuid>> =
                         events.iter().map(|e| e.channel_id).collect();
                     let distinct: Vec<uuid::Uuid> = {
@@ -765,11 +844,11 @@ pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
 /// an exact count without post-filtering.
 ///
 /// Pushed constraints: kinds, authors (single or multi), ids, since, until,
-/// channel_id (#h single), #p (single), #d (single, NIP-33-only kinds), #e (any),
-/// channel_ids (injected by caller).
+/// authorized channel scope (#h single or multi, injected by caller), #p (single),
+/// #d (single, NIP-33-only kinds), #e (any).
 ///
-/// Anything else (multi-#p, #t, #a, search, multi-#h, #d on non-NIP-33)
-/// requires post-filtering and cannot use the fast COUNT path.
+/// Anything else (multi-#p, #t, #a, search, #d on non-NIP-33) requires
+/// post-filtering and cannot use the fast COUNT path.
 pub fn filter_fully_pushable(filter: &Filter) -> bool {
     // Check if filter exclusively targets NIP-33 kinds (needed for #d pushability).
     let is_nip33_only = filter.kinds.as_ref().is_some_and(|ks| {
@@ -783,10 +862,8 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
         let key = tag_key.to_string();
         match key.as_str() {
             "h" => {
-                // Single #h is pushed as channel_id; multi-#h is not.
-                if tag_values.len() > 1 {
-                    return false;
-                }
+                // The caller pushes the complete authorized #h set through
+                // EventQuery::channel_id/channel_ids before invoking COUNT.
             }
             "p" => {
                 // Single #p is pushed via event_mentions join; multi is not.
@@ -834,19 +911,20 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
         })
 }
 
-/// Extract a channel UUID from a single filter's `#h` tag.
+/// Extract the single channel UUID from a filter's `#h` tag.
+///
+/// A multi-value `#h` filter has NIP-01 OR semantics, so it cannot be reduced
+/// to one `EventQuery::channel_id` without dropping matches from the other
+/// channels. Return `None` in that case and let the caller apply the accessible
+/// channel set in SQL before the full filter is evaluated in Rust.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
-            }
-        }
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let values = filter.generic_tags.get(&h_tag)?;
+    if values.len() != 1 {
+        return None;
     }
-    None
+
+    values.iter().next()?.parse::<uuid::Uuid>().ok()
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -878,8 +956,8 @@ fn filter_to_query_params(
         .and_then(|u| chrono::DateTime::from_timestamp(u.as_secs() as i64, 0));
     let limit = filter
         .limit
-        .map(|l| (l as i64).min(MAX_HISTORICAL_LIMIT))
-        .unwrap_or(MAX_HISTORICAL_LIMIT);
+        .map(|l| (l as i64).min(buzz_db::DEFAULT_MAX_PAGE_LIMIT))
+        .unwrap_or(buzz_db::DEFAULT_MAX_PAGE_LIMIT);
 
     // Push author filter into SQL. Single-author uses the indexed `pubkey` column;
     // multi-author uses the `authors` IN-list pushdown added in the pure-nostr PR.
@@ -982,30 +1060,96 @@ fn filter_to_query_params(
     }
 }
 
-/// Push the caller's authorized channel set into logically global historical
-/// queries so SQL `LIMIT` counts visible rows. Channel-less events remain in
-/// scope by `EventQuery::channel_ids` contract; an explicit single-channel
-/// filter keeps its narrower `channel_id` predicate.
-pub(crate) fn apply_access_scope_to_query(
+/// Push channel constraints into SQL before `LIMIT`.
+///
+/// A valid multi-value `#h` is narrowed to the requested channels the reader
+/// may access. Invalid values are ignored, and an empty authorized result is an
+/// explicit match-nothing scope rather than a global query. Filters without
+/// `#h` retain the full accessible-channel scope plus global events.
+pub(crate) fn apply_channel_scope_to_query(
     query: &mut EventQuery,
+    filter: &Filter,
     channel_id: Option<uuid::Uuid>,
     accessible_channels: &[uuid::Uuid],
 ) {
-    if channel_id.is_none() {
+    if channel_id.is_some() {
+        return;
+    }
+
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    if let Some(values) = filter.generic_tags.get(&h_tag) {
+        query.channel_ids = Some(
+            values
+                .iter()
+                .filter_map(|value| value.parse::<uuid::Uuid>().ok())
+                .filter(|requested| accessible_channels.contains(requested))
+                .collect(),
+        );
+        query.channel_ids_include_global = false;
+    } else {
         query.channel_ids = Some(accessible_channels.to_vec());
     }
 }
 
-/// Extract a single channel UUID from filter generic tags, or `None` if the
-/// subscription is logically global.
+/// Extract the complete channel set when every filter is explicitly #h-scoped.
+/// `None` means at least one filter is community-global.
 ///
-/// Checks the `"h"` tag key — channel-scoped subscriptions use `#h = <uuid>`.
-///
-/// Returns `None` when:
-/// - Any filter has no channel tag (that filter matches all channels → global sub), or
-/// - Multiple distinct channel UUIDs appear across filters (can't index under one channel).
-///
-/// Callers that receive `None` treat the subscription as global (slow-path fan-out).
+/// The aggregate value count is checked before UUID parsing or membership I/O;
+/// duplicate and malformed values still consume the request budget.
+pub(crate) fn extract_channel_ids_from_filters_limited(
+    filters: &[Filter],
+) -> Result<Option<Vec<uuid::Uuid>>, ()> {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let value_count = filters.iter().try_fold(0usize, |count, filter| {
+        let additional = filter
+            .generic_tags
+            .get(&h_tag)
+            .map_or(0, |values| values.len());
+        count.checked_add(additional).ok_or(())
+    })?;
+    if value_count > MAX_EXPLICIT_CHANNEL_VALUES {
+        return Err(());
+    }
+
+    Ok(extract_channel_ids_from_filters(filters))
+}
+
+/// Extract the complete channel set without applying the aggregate request budget.
+/// Callers that can trigger I/O must validate first with
+/// [`extract_channel_ids_from_filters_limited`].
+pub(crate) fn extract_channel_ids_from_filters(filters: &[Filter]) -> Option<Vec<uuid::Uuid>> {
+    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
+    let mut channel_ids = Vec::new();
+    for filter in filters {
+        let values = filter.generic_tags.get(&h_tag)?;
+        for value in values {
+            if let Ok(channel_id) = value.parse::<uuid::Uuid>() {
+                if !channel_ids.contains(&channel_id) {
+                    channel_ids.push(channel_id);
+                }
+            }
+        }
+    }
+    Some(channel_ids)
+}
+
+async fn release_subscription_topics(
+    state: &AppState,
+    tenant: &TenantContext,
+    scope: &crate::subscription::SubscriptionScope,
+) {
+    if scope.is_global() {
+        state.pubsub.release_topic(tenant, EventTopic::Global).await;
+    } else {
+        for &channel_id in scope.channel_ids() {
+            state
+                .pubsub
+                .release_topic(tenant, EventTopic::Channel(channel_id))
+                .await;
+        }
+    }
+}
+
 fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
     let mut found_id: Option<uuid::Uuid> = None;
     for f in filters {
@@ -1137,19 +1281,20 @@ pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
     })
 }
 
-/// Returns `true` if the filter CAN match kind 30175 (persona) — meaning it
-/// either has no `kinds` constraint (wildcard) or explicitly includes 30175.
+/// Returns `true` if the filter CAN match any kind in [`SHARED_GATED_KINDS`] —
+/// meaning it either has no `kinds` constraint (wildcard) or explicitly includes
+/// one of them.
 ///
 /// Used by the COUNT handler to force the per-event fallback path, which calls
-/// `is_unshared_persona_event` on each row. The fast SQL `count_events()` path
+/// `is_unshared_gated_event` on each row. The fast SQL `count_events()` path
 /// has no per-event access check, so it would over-count foreign unshared
-/// persona events — leaking the existence of persona activity even without
-/// returning content.
-pub(crate) fn filter_can_match_persona_shared_kinds(filter: &Filter) -> bool {
-    filter
-        .kinds
-        .as_ref()
-        .is_none_or(|ks| ks.iter().any(|k| k.as_u16() as u32 == KIND_PERSONA))
+/// events — leaking the existence of private persona/team-catalog activity even
+/// without returning content.
+pub(crate) fn filter_can_match_shared_gated_kinds(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_none_or(|ks| {
+        ks.iter()
+            .any(|k| SHARED_GATED_KINDS.contains(&(k.as_u16() as u32)))
+    })
 }
 
 /// Returns `true` if the filter CAN match result-gated kinds — meaning it
@@ -1208,8 +1353,9 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 ///
 /// 1. **Author-only kinds** (`AUTHOR_ONLY_KINDS`, e.g. kind 30300/30350): only
 ///    the author may read their own events.
-/// 2. **Persona shared-gate** (kind 30175 without `["shared","true"]`): the
-///    event is only visible to the author unless explicitly opted into sharing.
+/// 2. **Shared-gate** (`SHARED_GATED_KINDS`, e.g. kind 30175/30178 without
+///    `["shared","true"]`): the event is only visible to the author unless
+///    explicitly opted into sharing.
 /// 3. **Result-gated kinds** (kind 44200/30622 etc.): `reader_authorized_for_event`
 ///    carries the per-event ownership check.
 ///
@@ -1223,7 +1369,7 @@ pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_byt
     if is_author_only_event(event, requester_pubkey_bytes) {
         return false;
     }
-    if is_unshared_persona_event(event, requester_pubkey_bytes) {
+    if is_unshared_gated_event(event, requester_pubkey_bytes) {
         return false;
     }
     let requester_pubkey_hex = hex::encode(requester_pubkey_bytes);
@@ -1267,13 +1413,6 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
     })
 }
 
-fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
-    match channel_id {
-        Some(channel_id) => EventTopic::Channel(channel_id),
-        None => EventTopic::Global,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1286,7 +1425,7 @@ mod tests {
             uuid::Uuid::new_v4(),
         ));
 
-        apply_access_scope_to_query(&mut query, None, &accessible);
+        apply_channel_scope_to_query(&mut query, &Filter::new(), None, &accessible);
 
         assert_eq!(query.channel_ids.as_deref(), Some(accessible.as_slice()));
     }
@@ -1300,7 +1439,7 @@ mod tests {
         ));
         query.channel_id = Some(channel);
 
-        apply_access_scope_to_query(&mut query, Some(channel), &accessible);
+        apply_channel_scope_to_query(&mut query, &Filter::new(), Some(channel), &accessible);
 
         assert!(query.channel_ids.is_none());
         assert_eq!(query.channel_id, Some(channel));
@@ -1416,6 +1555,83 @@ mod tests {
         )
     }
 
+    /// NIP-11 `limitation.max_limit` as this relay actually advertises it.
+    fn advertised_max_limit() -> i64 {
+        crate::nip11::RelayInfo::build(
+            None,
+            None,
+            false,
+            crate::config::DEFAULT_MAX_FRAME_BYTES,
+            None,
+        )
+        .limitation
+        .expect("limitation")
+        .max_limit
+        .expect("max_limit") as i64
+    }
+
+    #[test]
+    fn req_filter_limit_clamps_to_advertised_nip11_max_limit() {
+        let advertised = advertised_max_limit();
+
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+
+        // A filter asking for more than the relay advertises is clamped down to
+        // exactly the advertised ceiling — the NIP-11 document is the promise,
+        // this is the enforcement.
+        let greedy = filter_to_query_params(
+            &Filter::new().limit(advertised as usize * 10),
+            None,
+            community,
+        );
+        assert_eq!(greedy.limit, Some(advertised));
+
+        // A filter with no `limit` gets the same ceiling, not something larger.
+        let unbounded = filter_to_query_params(&Filter::new(), None, community);
+        assert_eq!(unbounded.limit, Some(advertised));
+
+        // Neither sets `max_limit`, so `query_events` applies its own default
+        // clamp. That default must equal the advertised value too, or the
+        // clamp above would be undone one layer down.
+        assert_eq!(greedy.max_limit, None);
+        assert_eq!(unbounded.max_limit, None);
+        assert_eq!(buzz_db::DEFAULT_MAX_PAGE_LIMIT, advertised);
+
+        // Under-ceiling requests are honored verbatim.
+        let modest = filter_to_query_params(&Filter::new().limit(10), None, community);
+        assert_eq!(modest.limit, Some(10));
+    }
+
+    /// The NIP-50 search path clamps its emission target to the advertised
+    /// ceiling like every other REQ, but the number of candidates it will scan
+    /// is bounded a second time by the page budget. This pins the resource
+    /// policy: the budget covers exactly one advertised page ceiling's worth of
+    /// candidates — no less (a ceiling raise must not silently shrink the scan
+    /// relative to what clients may request) and no hand-tuned spare (the budget
+    /// must stay derived, not drift back into a magic number). It deliberately
+    /// does NOT claim search fills the emitted limit — post-filtering can
+    /// discard any number of candidates.
+    #[test]
+    fn search_scan_capacity_covers_advertised_nip11_max_limit() {
+        let advertised = advertised_max_limit();
+        let capacity = i64::from(MAX_SEARCH_PAGES) * i64::from(SEARCH_PAGE_SIZE);
+
+        assert!(
+            capacity >= advertised,
+            "NIP-50 scans at most {capacity} candidates ({MAX_SEARCH_PAGES} pages of \
+             {SEARCH_PAGE_SIZE}) but NIP-11 advertises {advertised} — the scan budget \
+             no longer covers the advertised ceiling"
+        );
+
+        // The budget is derived, not hand-tuned: one page under the derived
+        // count must be insufficient, or the ceiling could rise without the
+        // page count following it.
+        assert!(
+            capacity - i64::from(SEARCH_PAGE_SIZE) < advertised,
+            "scan budget has a spare page of slack — derive it from the ceiling"
+        );
+    }
+
     #[test]
     fn count_fallback_fetches_one_extra_candidate() {
         let mut query =
@@ -1450,6 +1666,171 @@ mod tests {
         let channel_id = uuid::Uuid::new_v4();
         let filters = vec![filter_with_channel(channel_id)];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    #[test]
+    fn extract_channel_id_from_multi_value_filter_returns_none() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let filter: Filter = serde_json::from_value(serde_json::json!({
+            "#h": [channel_a.to_string(), channel_b.to_string()],
+        }))
+        .unwrap();
+
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
+        assert_eq!(
+            filter_to_query_params(
+                &filter,
+                extract_channel_id_from_filter(&filter),
+                buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+            )
+            .channel_id,
+            None,
+            "multi-channel OR filters must not be narrowed to their first channel",
+        );
+    }
+
+    #[test]
+    fn valid_channel_union_survives_malformed_or_empty_explicit_siblings() {
+        let valid = uuid::Uuid::new_v4();
+        for sibling in [
+            serde_json::json!({"#h": ["not-a-uuid"]}),
+            serde_json::json!({"#h": []}),
+        ] {
+            let filters = [
+                filter_with_channel(valid),
+                serde_json::from_value(sibling).expect("parse sibling filter"),
+            ];
+            assert_eq!(
+                extract_channel_ids_from_filters(&filters),
+                Some(vec![valid]),
+            );
+        }
+
+        let malformed_only: Filter =
+            serde_json::from_value(serde_json::json!({"#h": ["not-a-uuid"]}))
+                .expect("parse malformed filter");
+        assert_eq!(
+            extract_channel_ids_from_filters(&[malformed_only]),
+            Some(Vec::new()),
+            "malformed-only explicit scope must remain match-nothing, never global",
+        );
+    }
+
+    #[test]
+    fn explicit_channel_limit_is_aggregate_and_counts_every_value() {
+        let channel_values = |count: usize| {
+            (0..count)
+                .map(|_| uuid::Uuid::new_v4().to_string())
+                .collect::<Vec<_>>()
+        };
+        let at_limit: Filter = serde_json::from_value(serde_json::json!({
+            "#h": channel_values(MAX_EXPLICIT_CHANNEL_VALUES),
+        }))
+        .unwrap();
+        assert!(extract_channel_ids_from_filters_limited(&[at_limit]).is_ok());
+
+        let first: Filter = serde_json::from_value(serde_json::json!({
+            "#h": channel_values(MAX_EXPLICIT_CHANNEL_VALUES),
+        }))
+        .unwrap();
+        let duplicate_over_limit: Filter = serde_json::from_value(serde_json::json!({
+            "#h": [uuid::Uuid::nil().to_string()],
+        }))
+        .unwrap();
+        assert_eq!(
+            extract_channel_ids_from_filters_limited(&[first, duplicate_over_limit]),
+            Err(()),
+        );
+
+        let global_then_over_limit = [
+            Filter::new(),
+            serde_json::from_value(serde_json::json!({
+                "#h": channel_values(MAX_EXPLICIT_CHANNEL_VALUES + 1),
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(
+            extract_channel_ids_from_filters_limited(&global_then_over_limit),
+            Err(()),
+            "a global filter must not hide an over-limit explicit filter",
+        );
+    }
+
+    #[test]
+    fn multi_value_h_scope_intersects_access_before_limit() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let unrelated_c = uuid::Uuid::new_v4();
+        let unauthorized = uuid::Uuid::new_v4();
+        let filter: Filter = serde_json::from_value(serde_json::json!({
+            "#h": [
+                channel_a.to_string(),
+                channel_b.to_string(),
+                unauthorized.to_string(),
+                "not-a-uuid"
+            ],
+            "limit": 1
+        }))
+        .unwrap();
+        let mut query = filter_to_query_params(
+            &filter,
+            extract_channel_id_from_filter(&filter),
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
+
+        apply_channel_scope_to_query(
+            &mut query,
+            &filter,
+            None,
+            &[channel_a, channel_b, unrelated_c],
+        );
+
+        let scoped_channels = query.channel_ids.expect("explicit channel scope");
+        assert_eq!(scoped_channels.len(), 2);
+        assert!(scoped_channels.contains(&channel_a));
+        assert!(scoped_channels.contains(&channel_b));
+        assert!(!query.channel_ids_include_global);
+        assert_eq!(query.limit, Some(1));
+    }
+
+    #[test]
+    fn multi_value_h_scope_remains_explicit_when_only_one_channel_is_authorized() {
+        let authorized = uuid::Uuid::new_v4();
+        let unauthorized = uuid::Uuid::new_v4();
+        let filter: Filter = serde_json::from_value(serde_json::json!({
+            "#h": [authorized.to_string(), unauthorized.to_string()],
+        }))
+        .unwrap();
+        let mut query = filter_to_query_params(
+            &filter,
+            extract_channel_id_from_filter(&filter),
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
+
+        apply_channel_scope_to_query(&mut query, &filter, None, &[authorized]);
+
+        assert_eq!(query.channel_id, None);
+        assert_eq!(query.channel_ids, Some(vec![authorized]));
+        assert!(!query.channel_ids_include_global);
+    }
+
+    #[test]
+    fn empty_or_unauthorized_h_scope_matches_nothing() {
+        for values in [serde_json::json!([]), serde_json::json!(["not-a-uuid"])] {
+            let filter: Filter =
+                serde_json::from_value(serde_json::json!({ "#h": values })).unwrap();
+            let mut query = filter_to_query_params(
+                &filter,
+                None,
+                buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+            );
+
+            apply_channel_scope_to_query(&mut query, &filter, None, &[uuid::Uuid::new_v4()]);
+
+            assert_eq!(query.channel_ids, Some(Vec::new()));
+            assert!(!query.channel_ids_include_global);
+        }
     }
 
     #[test]

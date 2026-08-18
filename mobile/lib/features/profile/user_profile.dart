@@ -39,3 +39,10 @@ class UserProfile {
       (displayName?.isNotEmpty == true ? displayName! : pubkey)[0]
           .toUpperCase();
 }
+
+/// Optional profile handle shown beside a message author's display name.
+String? messageUsernameLabel(UserProfile? profile) {
+  final handle = profile?.nip05Handle?.trim();
+  if (handle != null && handle.isNotEmpty) return handle;
+  return null;
+}

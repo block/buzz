@@ -260,6 +260,44 @@ test("first-event request resolves null when EOSE arrives without an event", asy
   assert.equal(subscriptions.has(requestedSubId), false);
 });
 
+test("live readiness distinguishes EOSE from CLOSED", () => {
+  const readiness = [];
+  const subscriptions = new Map([
+    [
+      "live-eose",
+      {
+        mode: "live",
+        filter: { kinds: [9], limit: 0 },
+        onEvent: () => {},
+        resolveReady: (result) => readiness.push(result),
+      },
+    ],
+    [
+      "live-closed",
+      {
+        mode: "live",
+        filter: { kinds: [9], limit: 0 },
+        onEvent: () => {},
+        resolveReady: (result) => readiness.push(result),
+      },
+    ],
+  ]);
+
+  handleSubscriptionEose({
+    subscriptions,
+    subId: "live-eose",
+    closeSubscription: async () => {},
+  });
+  handleRelayClosed({
+    subscriptions,
+    subId: "live-closed",
+    message: "restricted: access revoked",
+    sendReq: () => Promise.resolve(),
+  });
+
+  assert.deepEqual(readiness, ["eose", "closed"]);
+});
+
 test("production CLOSED handler removes terminal live subscriptions", () => {
   let readyCalls = 0;
   const subscriptions = new Map([

@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
@@ -108,8 +109,6 @@ class ManageChannelSheet extends HookConsumerWidget {
         child: ListView(
           shrinkWrap: true,
           children: [
-            Text('Manage channel', style: context.textTheme.titleMedium),
-            const SizedBox(height: Grid.xxs),
             Text(
               'Basic management for ${channel.name}.',
               style: context.textTheme.bodySmall?.copyWith(
@@ -272,7 +271,12 @@ class ManageChannelSheet extends HookConsumerWidget {
                     ],
                   );
                 },
-                loading: () => const Center(child: CircularProgressIndicator()),
+                loading: () => const Center(
+                  child: BuzzLoadingIndicator(
+                    size: 40,
+                    semanticLabel: 'Loading channel details',
+                  ),
+                ),
                 error: (error, _) => Text(
                   error.toString(),
                   style: context.textTheme.bodySmall?.copyWith(

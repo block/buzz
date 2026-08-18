@@ -35,10 +35,12 @@ import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelHeaderTitleBlock,
 } from "@/shared/layout/AuxiliaryPanel";
 import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -237,6 +239,15 @@ export function AgentSessionThreadPanel({
       ? `#${scopeChannelName}`
       : "1 channel"
     : "All channels";
+  const agentProfile = profiles?.[normalizePubkey(agent.pubkey)] ?? null;
+  const agentLabel = resolveUserLabel({
+    pubkey: agent.pubkey,
+    fallbackName: agent.name,
+    profiles,
+    preferResolvedSelfLabel: true,
+  });
+  const viewLabel = showRawFeed ? "Raw ACP activity" : "Activity";
+  const headerScopeLabel = `${viewLabel} · ${scopeLabel}`;
   const animateActivity = useTranscriptAnimationEnabled();
   const showTimestamps = useTranscriptTimestampsEnabled();
   async function handleInterruptTurn() {
@@ -417,19 +428,39 @@ export function AgentSessionThreadPanel({
         backButtonTestId="agent-session-back"
         onBack={onBack}
       >
-        <AuxiliaryPanelHeaderTitleBlock
-          subtitle={lastUpdatedLabel}
-          subtitleTitle={lastUpdatedTitle}
-          title={showRawFeed ? "Raw ACP Activity" : "Activity"}
+        <ProfileAvatar
+          avatarUrl={agentProfile?.avatarUrl ?? null}
+          className="size-9"
+          label={agentLabel}
+          testId="agent-session-agent-avatar"
         />
-        {/* Scope label: makes channel-targeted vs all-channels state obvious
-            (an all-channels pane can look "wrong" without it). */}
-        <span
-          className="min-w-0 shrink truncate text-xs text-muted-foreground"
-          data-testid="agent-session-scope-label"
-        >
-          {scopeLabel}
-        </span>
+        <div className="min-w-0 flex-1">
+          <h2
+            className="truncate text-sm font-semibold leading-5"
+            data-testid="agent-session-agent-name"
+            title={agentLabel}
+          >
+            {agentLabel}
+          </h2>
+          <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+            <p
+              className="min-w-0 flex-1 truncate"
+              data-testid="agent-session-scope-label"
+            >
+              {headerScopeLabel}
+            </p>
+            <span aria-hidden="true" className="shrink-0">
+              ·
+            </span>
+            <span
+              className="shrink-0"
+              data-testid="agent-session-recency-label"
+              title={lastUpdatedTitle}
+            >
+              {lastUpdatedLabel}
+            </span>
+          </div>
+        </div>
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>

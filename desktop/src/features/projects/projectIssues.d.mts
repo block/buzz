@@ -24,13 +24,20 @@ export type ProjectIssue = {
   author: string;
   createdAt: number;
   repoAddress: string | null;
+  channelId: string | null;
+  originAgentName: string | null;
   labels: string[];
   recipients: string[];
+  assignees: string[];
+  assigneeOperationHeads: Record<string, string>;
   status: ProjectIssueStatus;
   statusEventId: string | null;
   updatedAt: number;
   comments: ProjectIssueComment[];
 };
+
+export const ISSUE_ASSIGNMENT_LABEL: "assignment";
+export const ISSUE_UNASSIGNMENT_LABEL: "unassignment";
 
 export const PROJECT_ISSUE_STATUS: {
   TRIAGE: "Triage";
@@ -54,6 +61,11 @@ export function projectIssueEventsToIssues(
   statusEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
 ): ProjectIssue[];
+export function nextProjectIssueCommentCreatedAt(
+  issue: ProjectIssue,
+  now: number,
+  author: string,
+): number;
 export function buildGitIssueTags(input: {
   repoAddress: string;
   repoOwner: string;

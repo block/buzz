@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use buzz_core_pkg::kind::KIND_PERSONA;
+use buzz_core_pkg::kind::{event_is_shared, KIND_PERSONA};
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
@@ -138,7 +138,11 @@ pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, Str
         .map_err(|e| format!("failed to serialize persona content: {e}"))?;
 
     let d_tag = persona_d_tag(record);
-    let tags = vec![Tag::parse(["d", d_tag.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    let mut tags =
+        vec![Tag::parse(["d", d_tag.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    if record.shared {
+        tags.push(Tag::parse(["shared", "true"]).map_err(|e| format!("invalid shared tag: {e}"))?);
+    }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), content_json).tags(tags))
 }
@@ -188,8 +192,10 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         name_pool: content.name_pool,
         is_builtin: false,
         is_active: true,
+        shared: event_is_shared(event),
         source_team: None,
         source_team_persona_slug: Some(d_tag),
+        catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
@@ -218,9 +224,49 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
 /// Returns the number of events the relay accepted. Best-effort: a relay
 /// failure on one row leaves it pending for the next sweep and does not abort
 /// the remaining rows.
+#[cfg(test)]
 pub async fn flush_pending_events(
     db_path: &std::path::Path,
     state: &AppState,
+) -> Result<u32, String> {
+    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let owner_keys = state.signing_keys()?;
+    flush_pending_events_at(db_path, state, &relay_url, &owner_keys).await
+}
+
+/// Resolve and flush only the currently active `(relay, owner)` scope.
+///
+/// The scope snapshots its relay, owner keys, and database path together
+/// before network work starts. Switching communities during the flush cannot
+/// redirect rows from the old scope into the new relay.
+pub async fn flush_active_pending_events(
+    app: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<u32, String> {
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    flush_pending_events_at(&scope.db_path, state, &scope.relay_url, &scope.owner_keys).await
+}
+
+pub fn active_pending_event(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    kind: u32,
+    d_tag: &str,
+) -> Result<bool, String> {
+    let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
+    let owner_pubkey = scope.owner_keys.public_key().to_hex();
+    let conn = crate::managed_agents::retention::open_retention_db(&scope.db_path)?;
+    Ok(
+        crate::managed_agents::retention::get_retained_event(&conn, kind, &owner_pubkey, d_tag)?
+            .is_some_and(|event| event.pending_sync),
+    )
+}
+
+pub(crate) async fn flush_pending_events_at(
+    db_path: &std::path::Path,
+    state: &AppState,
+    relay_url: &str,
+    owner_keys: &nostr::Keys,
 ) -> Result<u32, String> {
     use crate::managed_agents::retention::{
         deferred_behind_failed_tombstone, get_pending_sync, get_retained_event, mark_synced,
@@ -228,6 +274,8 @@ pub async fn flush_pending_events(
     };
     use nostr::JsonUtil;
 
+    let owner_pubkey = owner_keys.public_key().to_hex();
+    let relay_api_base = crate::relay::relay_http_base_url(relay_url);
     let pending = {
         let conn = open_retention_db(db_path)?;
         get_pending_sync(&conn)?
@@ -237,6 +285,9 @@ pub async fn flush_pending_events(
     let mut failed_tombstones: std::collections::HashSet<(String, String)> =
         std::collections::HashSet::new();
     for row in pending {
+        if row.pubkey != owner_pubkey {
+            continue;
+        }
         if deferred_behind_failed_tombstone(row.kind, &row.pubkey, &row.d_tag, &failed_tombstones) {
             continue; // its tombstone failed this sweep; next sweep re-orders them
         }
@@ -270,9 +321,14 @@ pub async fn flush_pending_events(
             event
         };
 
-        if crate::relay::submit_signed_event(&event, state)
-            .await
-            .is_err()
+        if crate::relay::submit_signed_event_at_with_keys(
+            &event,
+            state,
+            &relay_api_base,
+            owner_keys,
+        )
+        .await
+        .is_err()
         {
             if current.kind == 5 {
                 failed_tombstones.insert((current.pubkey.clone(), current.d_tag.clone()));
@@ -409,12 +465,12 @@ pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
 /// This is the single apply used by every snapshot-apply site: the spawn
 /// re-pin (`start_local_agent_with_preflight`), the launch backfill and
 /// restore re-snapshot (`restore.rs`), and the prospective re-snapshot inside
-/// `spawn_config_hash` — so a future `PersonaSnapshot` field addition
-/// propagates to all of them at once.
+/// `prospective_spawn_config_snapshot` — so a future `PersonaSnapshot` field
+/// addition propagates to all of them at once.
 ///
 /// Deliberately does NOT touch `updated_at`: persistence stamps are the
-/// caller's concern, and `spawn_config_hash` (which applies this to a clone)
-/// must stay pure.
+/// caller's concern, and the prospective snapshot (which applies this to a
+/// clone) must stay pure.
 pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
     let snapshot = persona_snapshot(persona);
     if let Some(prompt) = snapshot.system_prompt {
@@ -423,23 +479,42 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
-    // Drop a stale create-time harness pin when the definition names a
-    // different known runtime; custom commands stay pinned.
-    if let Some(def_runtime) = persona
+    // Drop a stale create-time harness pin when the definition switches to a
+    // different known runtime (builtin, static preset, or loaded custom). A pin
+    // that names an unknown/custom command is always kept.
+    //
+    // Both sides are resolved through the canonical harness-identity resolver
+    // (`canonical_harness_command`) which accepts either a runtime id OR a
+    // command string — covering aliases (e.g. "claude-code-acp"), path prefixes
+    // ("/usr/local/bin/goose"), and harnesses whose id ≠ command. The persona
+    // runtime side is resolved via `command_for_runtime_id` (id-only input is
+    // sufficient there since persona.runtime is always an authoritative id).
+    //
+    // Comparison is on canonical primary commands so "goose", "/usr/local/bin/goose",
+    // and runtime id "goose" all represent the same harness; the stale pin is
+    // dropped only when the canonical commands differ.
+    if let Some(new_cmd) = persona
         .runtime
         .as_deref()
         .map(str::trim)
         .filter(|r| !r.is_empty())
-        .and_then(crate::managed_agents::known_acp_runtime_exact)
+        .and_then(super::command_for_runtime_id)
     {
-        if let Some(pin_runtime) = record
+        if let Some(pin) = record
             .agent_command_override
             .as_deref()
-            .and_then(crate::managed_agents::known_acp_runtime)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
         {
-            if !std::ptr::eq(pin_runtime, def_runtime) {
-                record.agent_command_override = None;
+            // Resolve the pin via the canonical resolver (accepts id OR command).
+            if let Some(pin_cmd) = super::canonical_harness_command(pin) {
+                if pin_cmd != new_cmd {
+                    // Known harness switched to a different known harness — drop stale pin.
+                    record.agent_command_override = None;
+                }
+                // Same harness: keep the pin (e.g. explicit path override for same runtime).
             }
+            // Custom/unknown pin: always keep.
         }
     }
     // env_vars stay overrides-only. Self-heal records written before the env
@@ -457,8 +532,9 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// paths re-pin it to its linked persona, without mutating `record` itself.
 ///
 /// Every decision made ahead of the real re-pin — the relay-mesh preflight in
-/// `start_local_agent_with_preflight`, the restart-badge hash in
-/// `spawn_config_hash` — needs to reason about spawn-time state, not
+/// `start_local_agent_with_preflight`, the restart-badge snapshot in
+/// `prospective_spawn_config_snapshot` — needs to reason about spawn-time
+/// state, not
 /// pre-snapshot bytes, so a persona edit that flips a field (e.g. `provider`
 /// to/from relay-mesh) between saves is reflected in the decision instead of
 /// the stale value the real [`apply_persona_snapshot`] is about to overwrite
@@ -466,7 +542,7 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
 /// so the spawn-time stamp and later recomputes agree when nothing changed.
 ///
 /// Orphaned records (persona deleted) pass through unchanged: the caller's
-/// own orphan handling — refusing to spawn, hashing as `(None, None, None)`
+/// own orphan handling — refusing to spawn, snapshotting as `(None, None, None)`
 /// — runs on the real record downstream, not on this preview.
 pub fn preview_prospective_persona_snapshot(
     record: &ManagedAgentRecord,
@@ -480,5 +556,7 @@ pub fn preview_prospective_persona_snapshot(
     }
     preview
 }
+#[cfg(test)]
+mod stale_pin_tests;
 #[cfg(test)]
 mod tests;

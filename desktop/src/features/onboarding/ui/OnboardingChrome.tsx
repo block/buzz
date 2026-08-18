@@ -2,8 +2,8 @@ import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 
 /**
  * Positions in the first-launch flow: landing, identity/key, harness setup,
- * default config, community choice, community profile, meet the team. Used as
- * the default pagination length when a flow doesn't pass an explicit total.
+ * default config, community choice, community profile, meet the team. Password
+ * backup is an optional subview of identity/key, not another position.
  */
 export const TOTAL_ONBOARDING_PAGES = 7;
 
@@ -17,12 +17,19 @@ const ONBOARDING_CTA_SHAPE = "h-[2.375rem] rounded-full px-6";
  */
 export const ONBOARDING_PRIMARY_CTA_CLASS = `${ONBOARDING_CTA_SHAPE} text-[var(--buzz-onboarding-cta-label)]`;
 
+/** Inverted primary action used only on dark backup-security surfaces. */
+export const ONBOARDING_SECURITY_PRIMARY_CTA_CLASS = `${ONBOARDING_CTA_SHAPE} bg-white text-black/80 hover:bg-white/90 hover:text-black`;
+
 /**
  * Primary-CTA styling for the landing screen only: the shared pill with the
  * chartreuse label (`--buzz-welcome-chartreuse`). The blue label is reserved
  * for the CTAs inside the steps.
  */
 export const ONBOARDING_LANDING_CTA_CLASS = `${ONBOARDING_CTA_SHAPE} text-[var(--buzz-welcome-chartreuse)]`;
+
+/** Shared quiet pill for secondary actions throughout onboarding. */
+export const ONBOARDING_SECONDARY_CTA_CLASS =
+  "h-9 rounded-full bg-foreground/10 px-6 text-foreground hover:bg-foreground/15 hover:text-foreground";
 
 /**
  * Icon-control styling for onboarding surfaces that sit on the textured card:
@@ -33,6 +40,10 @@ export const ONBOARDING_LANDING_CTA_CLASS = `${ONBOARDING_CTA_SHAPE} text-[var(-
  */
 export const ONBOARDING_INK_ICON_CLASS =
   "text-[color:var(--buzz-onboarding-backup-ink)] hover:bg-transparent hover:text-foreground";
+
+/** Icon controls on the dark noisy backup surfaces stay visually unboxed. */
+export const ONBOARDING_SECURITY_ICON_CLASS =
+  "text-muted-foreground hover:bg-transparent hover:text-foreground";
 
 /**
  * Shared onboarding chrome shown on every page after the landing screen: a
