@@ -13,7 +13,17 @@ import {
 } from "./check-file-sizes-core.mjs";
 
 function git(repo, ...args) {
-  return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  // These fixture repositories inherit both hook configuration and Git's
+  // repository-local environment when this test runs from pre-push. Isolate
+  // them completely so fixture commits cannot recurse into the real checkout.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+  );
+  return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+    cwd: repo,
+    encoding: "utf8",
+    env,
+  }).trim();
 }
 
 test("local base resolution uses the branch merge-base and fails without origin/main", () => {

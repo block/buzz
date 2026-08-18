@@ -91,8 +91,17 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+# Run repo lint, formatting, and repository policy checks
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check file-size-check
+
+# Run the repository-wide differential file-size ratchet and its policy tests.
+# The ratchet inspects only files changed from the merge base, so this stays
+# cheap enough to run unconditionally without duplicating path filters.
+file-size-check:
+    node --test scripts/check-file-sizes-core.test.mjs
+    node desktop/scripts/check-file-sizes.mjs
+    node web/scripts/check-file-sizes.mjs
+    node mobile/scripts/check-file-sizes.mjs
 
 # Format all Rust code
 fmt:
@@ -120,7 +129,7 @@ desktop-check:
 
 # Fix desktop lint and format issues
 desktop-fix:
-    cd {{desktop_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{desktop_dir}} && pnpm exec biome check --write .
 
 # Run desktop TS helper unit tests
 desktop-test:
@@ -641,7 +650,7 @@ web-check:
 
 # Fix web lint and format issues
 web-fix:
-    cd {{web_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{web_dir}} && pnpm exec biome check --write .
 
 # Run web TypeScript checks
 web-typecheck:
@@ -673,7 +682,7 @@ mobile-fix:
 
 # Run mobile lint and format checks
 mobile-check:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze && node ./scripts/check-file-sizes.mjs
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
 
 # Run mobile tests
 mobile-test:

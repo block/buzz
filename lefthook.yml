@@ -6,6 +6,9 @@
 #   changes, though CI's Desktop Core job does. Those commands are pure TS
 #   (biome + tsc + node:test) with no Rust dependency, so the extra trigger
 #   would be spurious locally.
+# - The repository-wide `file-size-check` is deliberately unfiltered. Its own
+#   merge-base diff is the path filter; duplicating its governed roots here is
+#   the coverage drift this gate is intended to prevent.
 # - Deletion-only surface changes do not trigger local hooks: lefthook 2.1.x
 #   drops deleted paths from push-file discovery (`extractFiles` existence
 #   check, repository.go). CI's dorny/paths-filter catches deletions.
@@ -51,6 +54,10 @@ pre-push:
   commands:
     branch-skew:
       run: ./scripts/check-branch-skew.sh
+    file-size-check:
+      # The ratchet computes its own merge-base diff, so path filtering here
+      # would only duplicate policy and create another place for coverage drift.
+      run: just file-size-check
     rust-tests:
       glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
       run: just test-unit
