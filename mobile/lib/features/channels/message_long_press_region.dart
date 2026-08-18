@@ -17,11 +17,23 @@ double _messageSnapshotPixelRatio(Size size, double devicePixelRatio) {
 }
 
 /// Geometry and snapshot controls for a completed message long press.
+///
+/// Call [captureSnapshot] while the source is still mounted, then use
+/// [setSourceHidden] to hide it behind the lifted preview. Restore the source
+/// before the preview is disposed or dismissed.
 class MessageLongPressDetails {
+  /// The long-pressed source bounds in global logical coordinates.
   final Rect anchorRect;
+
+  /// Captures the current source as an image for the lifted preview.
+  ///
+  /// The returned future can fail if the source is no longer mounted.
   final Future<ui.Image> Function() captureSnapshot;
+
+  /// Hides or reveals the mounted source while its preview is displayed.
   final ValueChanged<bool> setSourceHidden;
 
+  /// Creates the details passed to a completed long-press callback.
   const MessageLongPressDetails({
     required this.anchorRect,
     required this.captureSnapshot,
