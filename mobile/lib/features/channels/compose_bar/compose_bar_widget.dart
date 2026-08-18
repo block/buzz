@@ -10,15 +10,10 @@ class ComposeBar extends HookConsumerWidget {
   /// prepare focus-dependent layout (for example, following a thread tail).
   final VoidCallback? onFocusRequested;
 
-  /// Optional focus node owned and disposed by the caller.
-  ///
-  /// When omitted, the composer creates and disposes its own focus node.
+  /// Parent-owned if set; otherwise internally created and disposed.
   final FocusNode? focusNode;
 
-  /// Receives the current callback for restoring the editor and its focus.
-  ///
-  /// The callback is valid only while this composer is mounted and becomes a
-  /// no-op after unmounting. A replacement registration supersedes it.
+  /// Receives a restorer which becomes a no-op after replacement/unmount.
   final ValueChanged<VoidCallback>? onFocusRestorerChanged;
 
   /// Optional thread IDs for thread-scoped typing indicators.
@@ -44,15 +39,9 @@ class ComposeBar extends HookConsumerWidget {
       () => controller.text,
     );
     useEffect(() => controller.dispose, [controller]);
-    // Restore and persist unsent text as a local draft so the Activity
-    // inbox Drafts filter reflects real composer state.
-    //
-    // The effect is additionally keyed on the active relay + pubkey identity:
-    // provider-level namespacing alone cannot protect a composer that stays
-    // mounted through an in-place community/account switch — the controller
-    // would retain the old identity's text and the next edit would persist it
-    // into the new identity's store. On identity change we replace the
-    // controller content with the new identity's own saved draft (or clear).
+    // Draft identity is part of the effect key because an in-place account or
+    // community switch can leave this composer mounted. Reload that identity's
+    // draft so old text cannot be persisted into the new identity's store.
     final draftKey = composeDraftKey(channelId, threadHeadId: threadHeadId);
     final draftRevision = useRef(0);
     final draftIdentity =
