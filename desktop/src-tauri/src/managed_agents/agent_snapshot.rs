@@ -56,6 +56,13 @@ pub const PNG_CHUNK_KEYWORD: &str = "buzz_agent_snapshot";
 /// this are stored as a URL reference instead.
 const MAX_AVATAR_INLINE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
 
+/// Maximum edge (px) for the PNG image body. The body is only a card
+/// thumbnail — the manifest keeps the full-resolution source reference — so a
+/// large avatar is downscaled here to keep the encoded snapshot well under
+/// `MAX_SNAPSHOT_PNG_BYTES`. Mirrors the frontend SVG rasterizer's 512×512 cap
+/// in `snapshotAvatarPng.ts`.
+const MAX_PNG_BODY_EDGE: u32 = 512;
+
 /// Format discriminator — used for sniffing and validation.
 pub const FORMAT_DISCRIMINATOR: &str = "buzz-agent-snapshot";
 
@@ -328,7 +335,7 @@ pub(crate) fn encode_chunk_payload_png(
     // there is no avatar or it cannot be decoded.
     let png_bytes = match avatar_bytes.filter(|bytes| !bytes.is_empty()) {
         Some(bytes) => {
-            let encoded_avatar = if bytes.starts_with(b"\x89PNG") {
+            let encoded_avatar = if bytes.starts_with(b"\x89PNG") && png_within_body_cap(bytes) {
                 inject_text_chunk(bytes, PNG_CHUNK_KEYWORD, &chunk_text).or_else(|_| {
                     transcode_avatar_to_png_with_text(bytes, PNG_CHUNK_KEYWORD, &chunk_text)
                 })
@@ -449,6 +456,11 @@ pub(crate) fn make_png_with_text(keyword: &str, text: &str) -> Result<Vec<u8>, S
 }
 
 /// Transcode a decodable avatar to PNG and add the snapshot manifest chunk.
+///
+/// The decoded image is downscaled so its longest edge is at most
+/// `MAX_PNG_BODY_EDGE` before PNG re-encoding. The body is only a card
+/// thumbnail — this keeps a large source avatar (e.g. a 4K webp) from
+/// producing a PNG that blows `MAX_SNAPSHOT_PNG_BYTES`.
 fn transcode_avatar_to_png_with_text(
     avatar_bytes: &[u8],
     keyword: &str,
@@ -456,11 +468,38 @@ fn transcode_avatar_to_png_with_text(
 ) -> Result<Vec<u8>, String> {
     let image = image::load_from_memory(avatar_bytes)
         .map_err(|e| format!("Failed to decode avatar image: {e}"))?;
+    let image = downscale_to_body_cap(image);
     let mut png_bytes = Vec::new();
     image
         .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
         .map_err(|e| format!("Failed to encode avatar as PNG: {e}"))?;
     inject_text_chunk(&png_bytes, keyword, text)
+}
+
+/// Downscale so the longest edge is at most `MAX_PNG_BODY_EDGE`, preserving
+/// aspect ratio. Images already within the cap are returned untouched.
+fn downscale_to_body_cap(image: image::DynamicImage) -> image::DynamicImage {
+    if image.width() <= MAX_PNG_BODY_EDGE && image.height() <= MAX_PNG_BODY_EDGE {
+        return image;
+    }
+    image.resize(
+        MAX_PNG_BODY_EDGE,
+        MAX_PNG_BODY_EDGE,
+        image::imageops::FilterType::Lanczos3,
+    )
+}
+
+/// Whether an already-PNG avatar is within the body dimension cap and can be
+/// carried as-is (via a cheap tEXt-chunk injection) instead of being decoded
+/// and downscaled. Undecodable headers fall through to the transcode path.
+fn png_within_body_cap(png_bytes: &[u8]) -> bool {
+    Decoder::new(Cursor::new(png_bytes))
+        .read_info()
+        .map(|reader| {
+            let info = reader.info();
+            info.width <= MAX_PNG_BODY_EDGE && info.height <= MAX_PNG_BODY_EDGE
+        })
+        .unwrap_or(false)
 }
 
 /// Inject a tEXt chunk into an existing PNG by re-encoding it.
