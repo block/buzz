@@ -1,0 +1,114 @@
+:root {
+  --skel-pulse-dur: 1000ms;
+  --skel-pulse-count: infinite;
+  --skel-pulse-min: 0.5;
+  --skel-reveal-dur: 400ms;
+  --skel-reveal-blur: 2px;
+  --skel-reveal-ease: ease-in-out;
+}
+
+.t-skel {
+  position: relative;
+}
+
+.t-skel[data-layout="flow"] {
+  display: grid;
+}
+
+.t-skel-skeleton,
+.t-skel-content {
+  inset: 0;
+  position: absolute;
+}
+
+.t-skel[data-layout="flow"] > .t-skel-skeleton,
+.t-skel[data-layout="flow"] > .t-skel-content {
+  grid-area: 1 / 1;
+  width: 100%;
+}
+
+.t-skel[data-layout="flow"] > .t-skel-skeleton {
+  inset: auto;
+  position: relative;
+}
+
+.t-skel[data-layout="flow"] > .t-skel-content,
+.t-skel[data-layout="flow"].is-revealed > .t-skel-skeleton {
+  inset: 0;
+  position: absolute;
+}
+
+.t-skel[data-layout="flow"].is-revealed > .t-skel-content {
+  inset: auto;
+  position: relative;
+}
+
+.t-skel-skeleton {
+  filter: blur(0);
+  opacity: 1;
+  transition:
+    opacity var(--skel-reveal-dur) var(--skel-reveal-ease),
+    filter var(--skel-reveal-dur) var(--skel-reveal-ease);
+  z-index: 1;
+}
+
+.t-skel-content {
+  filter: blur(var(--skel-reveal-blur));
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--skel-reveal-dur) var(--skel-reveal-ease),
+    filter var(--skel-reveal-dur) var(--skel-reveal-ease);
+  z-index: 2;
+}
+
+.t-skel.is-revealed .t-skel-skeleton {
+  filter: blur(var(--skel-reveal-blur));
+  opacity: 0;
+  pointer-events: none;
+}
+
+.t-skel.is-revealed .t-skel-content {
+  filter: blur(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.t-skel.is-resetting .t-skel-skeleton,
+.t-skel.is-resetting .t-skel-content {
+  transition: none;
+}
+
+.t-skel-bar.is-pulsing,
+.t-skel-skeleton.is-pulsing > :not(:has(.t-skel-bar)) {
+  animation: t-skel-pulse var(--skel-pulse-dur) ease-in-out
+    var(--skel-pulse-count);
+}
+
+.t-skel.is-revealed .t-skel-bar.is-pulsing,
+.t-skel.is-revealed .t-skel-skeleton.is-pulsing > :not(:has(.t-skel-bar)) {
+  animation: none;
+}
+
+@keyframes t-skel-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: var(--skel-pulse-min);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-skel-skeleton,
+  .t-skel-content {
+    transition: none;
+  }
+
+  .t-skel-bar.is-pulsing,
+  .t-skel-skeleton.is-pulsing > :not(:has(.t-skel-bar)) {
+    animation: none;
+  }
+}

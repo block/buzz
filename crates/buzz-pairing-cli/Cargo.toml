@@ -1,0 +1,25 @@
+[package]
+name = "buzz-pairing-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI tool for NIP-AB device pairing interop testing"
+
+[[bin]]
+name = "buzz-pair"
+path = "src/main.rs"
+
+[dependencies]
+buzz-core = { workspace = true }
+nostr = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+hex = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
