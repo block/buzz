@@ -44,35 +44,32 @@ export function useAgentAddressLockPicker({
       }),
     [audience.pubkeys, mentions.getMentionDisplayName, profiles],
   );
-  const toggleAgentAddressLock = React.useCallback(
+  const alwaysMentionAgent = React.useCallback(
     (suggestion: MentionSuggestion) => {
       const pubkey = suggestion.pubkey?.trim().toLowerCase();
       if (!audienceScope || !pubkey || !suggestion.isAgent) return;
 
       const { cursor } = richText.getPlainTextAndCursor();
-      if (lockedAgentPubkeys.has(pubkey)) {
-        audience.removePubkey(pubkey);
-        mentions.openMentionPicker(cursor);
-        return;
+      mentions.cancelMentionAutocomplete();
+      applyAutocompleteEdit({
+        replaceFromOffset: mentions.mentionStartIndex,
+        replaceToOffset: cursor,
+        insertText: "",
+      });
+      if (!lockedAgentPubkeys.has(pubkey)) {
+        audience.addPubkey(pubkey);
       }
-
-      const edit = mentions.insertMention(suggestion, cursor);
-      applyAutocompleteEdit({ ...edit, insertText: "" });
-      audience.addPubkey(pubkey);
-      const { cursor: updatedCursor } = richText.getPlainTextAndCursor();
-      mentions.openMentionPicker(updatedCursor);
     },
     [
       applyAutocompleteEdit,
       audience.addPubkey,
-      audience.removePubkey,
       audienceScope,
       lockedAgentPubkeys,
-      mentions.insertMention,
-      mentions.openMentionPicker,
+      mentions.cancelMentionAutocomplete,
+      mentions.mentionStartIndex,
       richText.getPlainTextAndCursor,
     ],
   );
 
-  return { lockedAgents, lockedAgentPubkeys, toggleAgentAddressLock };
+  return { alwaysMentionAgent, lockedAgents, lockedAgentPubkeys };
 }

@@ -401,7 +401,7 @@ function MessageComposerImpl({
       richText.getPlainTextAndCursor,
     ],
   );
-  const { lockedAgents, lockedAgentPubkeys, toggleAgentAddressLock } =
+  const { alwaysMentionAgent, lockedAgents, lockedAgentPubkeys } =
     useAgentAddressLockPicker({
       applyAutocompleteEdit,
       audience: persistentAudience,
@@ -478,14 +478,20 @@ function MessageComposerImpl({
       richText.focus();
       return;
     }
+    // Insert a fresh trigger at the captured cursor so the toolbar behaves
+    // exactly like typing `@` in the composer.
+    const previousChar = text.slice(0, cursor).slice(-1);
+    const prefix =
+      cursor > 0 && previousChar && !/\s/.test(previousChar) ? " @" : "@";
+    richText.editor.chain().focus().insertContent(prefix).run();
     setIsEmojiPickerOpen(false);
-    mentions.openMentionPicker(cursor);
-    richText.focus();
+    const { text: updatedText, cursor: updatedCursor } =
+      richText.getPlainTextAndCursor();
+    mentions.updateMentionQuery(updatedText, updatedCursor);
   }, [
     richText.editor,
     richText.getPlainTextAndCursor,
     richText.focus,
-    mentions.openMentionPicker,
     mentions.updateMentionQuery,
   ]);
   const submitMessage = React.useCallback(async () => {
@@ -893,13 +899,13 @@ function MessageComposerImpl({
             />
             <MentionAutocomplete
               lockedAgentPubkeys={lockedAgentPubkeys}
-              onFetchMore={mentions.fetchMoreSuggestions}
-              onSelect={applyMentionInsert}
-              onToggleAgentLock={
+              onAlwaysMentionAgent={
                 audienceScope && editTarget == null
-                  ? toggleAgentAddressLock
+                  ? alwaysMentionAgent
                   : undefined
               }
+              onFetchMore={mentions.fetchMoreSuggestions}
+              onSelect={applyMentionInsert}
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
             />

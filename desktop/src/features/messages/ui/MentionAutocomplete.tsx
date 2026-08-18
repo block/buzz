@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Bot, Lock, LockOpen, Users } from "lucide-react";
+import { Bot, Users } from "lucide-react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
 import { Badge } from "@/shared/ui/badge";
@@ -33,7 +33,7 @@ type MentionAutocompleteProps = {
   onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
-  onToggleAgentLock?: (suggestion: MentionSuggestion) => void;
+  onAlwaysMentionAgent?: (suggestion: MentionSuggestion) => void;
   position?: "above" | "below";
 };
 
@@ -43,7 +43,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   onFetchMore,
   onSelect,
   lockedAgentPubkeys,
-  onToggleAgentLock,
+  onAlwaysMentionAgent,
   position = "above",
 }: MentionAutocompleteProps) {
   const listRef = React.useRef<HTMLDivElement>(null);
@@ -98,14 +98,6 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
         ref={listRef}
         style={POPOVER_SHADOW_STYLE}
       >
-        {onToggleAgentLock ? (
-          <div
-            className="px-3 py-1.5 text-2xs font-medium text-muted-foreground"
-            data-testid="mention-address-lock-hint"
-          >
-            Hover an agent avatar to keep it addressed
-          </div>
-        ) : null}
         {suggestions.map((suggestion, index) => {
           const suggestionKey =
             suggestion.pubkey ??
@@ -119,10 +111,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             hasNameCollision && suggestion.pubkey
               ? safeNpub(suggestion.pubkey)
               : null;
-          const canAddressLock = Boolean(
-            onToggleAgentLock && suggestion.isAgent && suggestion.pubkey,
+          const canAlwaysMention = Boolean(
+            onAlwaysMentionAgent && suggestion.isAgent && suggestion.pubkey,
           );
-          const isAddressLocked = Boolean(
+          const isAlwaysMentioned = Boolean(
             suggestion.pubkey &&
               lockedAgentPubkeys?.has(suggestion.pubkey.toLowerCase()),
           );
@@ -130,7 +122,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
           return (
             <div
               className={cn(
-                "group flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
+                "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
                 index === selectedIndex
                   ? "bg-accent text-accent-foreground"
                   : "text-popover-foreground hover:bg-accent/50",
@@ -139,67 +131,29 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               data-mention-suggestion-index={index}
               key={suggestionKey}
             >
-              <span className="relative h-6 w-6 shrink-0">
-                <button
-                  aria-label={`Mention ${suggestion.displayName}`}
-                  className={cn(
-                    "absolute inset-0 transition-opacity",
-                    canAddressLock &&
-                      (isAddressLocked
-                        ? "pointer-events-none opacity-0"
-                        : "group-hover:pointer-events-none group-hover:opacity-0 group-focus-within:pointer-events-none group-focus-within:opacity-0"),
-                  )}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    onSelect(suggestion);
-                  }}
-                  tabIndex={-1}
-                  type="button"
-                >
-                  {suggestion.kind === "team" ? (
-                    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary">
-                      <Users aria-hidden="true" className="h-4 w-4" />
-                    </span>
-                  ) : (
-                    <UserAvatar
-                      avatarUrl={suggestion.avatarUrl ?? null}
-                      displayName={suggestion.displayName}
-                      size="xs"
-                      testId="mention-suggestion-avatar"
-                    />
-                  )}
-                </button>
-                {canAddressLock ? (
-                  <button
-                    aria-label={`${isAddressLocked ? "Stop keeping" : "Keep"} ${suggestion.displayName} addressed`}
-                    aria-pressed={isAddressLocked}
-                    className={cn(
-                      "absolute -inset-0.5 inline-flex h-7 w-7 items-center justify-center rounded-full border transition-[background-color,border-color,color,opacity]",
-                      isAddressLocked
-                        ? "pointer-events-auto border-primary/30 bg-primary/15 text-primary opacity-100"
-                        : "pointer-events-none border-border/60 bg-background text-muted-foreground opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100 hover:bg-accent hover:text-foreground",
-                    )}
-                    data-testid={`mention-address-lock-${suggestion.pubkey}`}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onToggleAgentLock?.(suggestion);
-                    }}
-                    title={
-                      isAddressLocked
-                        ? "Address locked — click to stop keeping addressed"
-                        : "Keep addressed after sending"
-                    }
-                    type="button"
-                  >
-                    {isAddressLocked ? (
-                      <Lock aria-hidden="true" className="h-3.5 w-3.5" />
-                    ) : (
-                      <LockOpen aria-hidden="true" className="h-3.5 w-3.5" />
-                    )}
-                  </button>
-                ) : null}
-              </span>
+              <button
+                aria-label={`Mention ${suggestion.displayName}`}
+                className="h-6 w-6 shrink-0"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  onSelect(suggestion);
+                }}
+                tabIndex={-1}
+                type="button"
+              >
+                {suggestion.kind === "team" ? (
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary">
+                    <Users aria-hidden="true" className="h-4 w-4" />
+                  </span>
+                ) : (
+                  <UserAvatar
+                    avatarUrl={suggestion.avatarUrl ?? null}
+                    displayName={suggestion.displayName}
+                    size="xs"
+                    testId="mention-suggestion-avatar"
+                  />
+                )}
+              </button>
               <button
                 className="flex min-w-0 flex-1 items-center gap-2 text-left"
                 onMouseDown={(event) => {
@@ -287,6 +241,33 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   ) : null}
                 </span>
               </button>
+              {canAlwaysMention ? (
+                isAlwaysMentioned ? (
+                  <span
+                    className="shrink-0 whitespace-nowrap px-2 py-1 text-xs font-medium text-muted-foreground"
+                    data-testid={`mention-always-mentioned-${suggestion.pubkey}`}
+                  >
+                    Always mentioned
+                  </span>
+                ) : (
+                  <button
+                    aria-label={`Always mention ${suggestion.displayName}`}
+                    className="shrink-0 whitespace-nowrap rounded-md px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                    data-testid={`mention-always-mention-${suggestion.pubkey}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onAlwaysMentionAgent?.(suggestion);
+                    }}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                    type="button"
+                  >
+                    Always mention
+                  </button>
+                )
+              ) : null}
             </div>
           );
         })}

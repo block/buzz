@@ -835,7 +835,6 @@ export function useMentions(
     ownerPolicyError: agentAccessOwnerOnlyQuery.error,
     refetchManagedAgents: managedAgentsQuery.refetch,
   });
-
   const extractMentionPersonas = React.useCallback(
     (text: string): PersonaMentionTarget[] =>
       extractMentionPersonasFromMaps(
@@ -845,7 +844,6 @@ export function useMentions(
       ),
     [activePersonaById],
   );
-
   const cancelMentionAutocomplete = React.useCallback(() => {
     autocompleteGenerationRef.current += 1;
     if (debounceTimerRef.current !== null) {
@@ -865,7 +863,6 @@ export function useMentions(
     setSelectedMentionNames([]);
     setSelectedAgentMentionNames([]);
   }, [cancelMentionAutocomplete]);
-
   const { getDraftMentionRefs, restoreDraftMentionRefs } =
     useDraftMentionRouting({
       mentionMapRef,
@@ -978,6 +975,7 @@ export function useMentions(
     knownNames: highlightNames,
     memberPubkeys,
     mentionSelectedIndex,
+    mentionStartIndex,
     openMentionPicker,
     registerMentionPubkey,
     restoreDraftMentionRefs,
