@@ -72,6 +72,7 @@ import {
   AuthOkTracker,
   type RelayAuthRequest,
 } from "@/shared/api/relayAuthPolicy";
+import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 export class RelayClient {
@@ -528,19 +529,19 @@ export class RelayClient {
     this.connectionStateEmitter.set(
       this.hasConnectedOnce ? "reconnecting" : "connecting",
     );
-
     const generation = ++this.connectionGeneration;
-    let pendingInbound: unknown[] | null = [];
-    this.onMessageChannel = new Channel<unknown>((message) => {
-      if (pendingInbound) return void pendingInbound.push(message);
-      void this.handleWsMessage(message, generation).catch((error) => {
+    const inbound = createRelayInboundBuffer(
+      (message) => this.handleWsMessage(message, generation),
+      (error) => {
         if (generation !== this.connectionGeneration) return;
         this.resetConnection(
           this.normalizeRelayError(error, "Relay connection errored."),
         );
-      });
-    });
-
+      },
+    );
+    this.onMessageChannel = new Channel<unknown>((message) =>
+      inbound.receive(message),
+    );
     try {
       if (!this.relayUrl) {
         this.relayUrl = await getRelayWsUrl();
@@ -567,10 +568,9 @@ export class RelayClient {
         },
       );
 
-      while (pendingInbound.length > 0) {
-        await this.handleWsMessage(pendingInbound.shift(), generation);
-      }
-      pendingInbound = null;
+      const drain = inbound.drain();
+      await Promise.race([drain, authentication, inbound.overflow]);
+      await drain;
       await authentication;
       this.stabilityTimer = window.setTimeout(() => {
         this.stabilityTimer = null;
