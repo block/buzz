@@ -28,12 +28,14 @@ pre-commit:
       run: just desktop-tauri-fmt
       stage_fixed: true
     desktop-fix:
-      glob: ["desktop/**", "pnpm-lock.yaml"]
+      # A lockfile-only change has no desktop source for Biome to rewrite.
+      glob: ["desktop/**"]
       exclude: ["desktop/src-tauri/**"]
       run: just desktop-fix
       stage_fixed: true
     web-fix:
-      glob: ["web/**", "pnpm-lock.yaml"]
+      # A lockfile-only change has no web source for Biome to rewrite.
+      glob: ["web/**"]
       run: just web-fix
       stage_fixed: true
     mobile-fmt:
@@ -59,7 +61,7 @@ pre-push:
       # would only duplicate policy and create another place for coverage drift.
       run: just file-size-check
     rust-tests:
-      glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
+      glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
       run: just test-unit
     desktop-check:
       glob: ["desktop/**", "pnpm-lock.yaml"]
@@ -77,7 +79,7 @@ pre-push:
       # Keep local lint parity with Desktop Core CI for every path that can
       # affect the Tauri crate or its path dependencies. Run clippy and tests
       # serially so parallel pre-push hooks do not contend for Cargo's lock.
-      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
+      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
       run: just desktop-tauri-clippy && just desktop-tauri-test
     mobile-check:
       glob: ["mobile/**"]
