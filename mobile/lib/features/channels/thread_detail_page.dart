@@ -118,7 +118,8 @@ class ThreadDetailPage extends HookConsumerWidget {
     // loading states provisional, but let the hydrated route snapshot drive
     // the one-shot target jump when the relay query has definitively failed.
     final canUseMessagesForInitialTarget =
-        fetchedReplies != null || replyMessages.hasError;
+        fetchedReplies != null ||
+        (replyMessages.hasError && !replyMessages.retrying);
     final liveDeletionHidesHead = _isDeletedBy(
       liveChannelEvents,
       threadHead.id,

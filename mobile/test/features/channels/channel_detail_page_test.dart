@@ -191,9 +191,12 @@ Widget _buildTestable({
       InitialThreadRouteBehavior.push,
   Map<String, List<NostrEvent>> threadReplies = const {},
   Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
+  Map<String, Future<List<NostrEvent>> Function()> threadReplyLoaders =
+      const {},
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
   bool disableRetries = false,
+  Duration? Function(int retryCount, Object error)? providerRetry,
   RelaySessionNotifier? relaySessionNotifier,
   http.Client? mediaClient,
   Widget? home,
@@ -204,7 +207,7 @@ Widget _buildTestable({
   final fakeMessagesNotifier =
       messagesNotifier ?? _FakeMessagesNotifier(messages);
   return ProviderScope(
-    retry: disableRetries ? (_, _) => null : null,
+    retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
       channelMessagesProvider(
         _channelId,
@@ -245,6 +248,10 @@ Widget _buildTestable({
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) => entry.value),
+      for (final entry in threadReplyLoaders.entries)
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) => entry.value()),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -4469,6 +4476,110 @@ void main() {
           tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
       expect(enteringDecoration.color!.a, greaterThan(0));
       expect(enteringDecoration.color!.a, lessThan(0.12 * 0.4));
+    });
+
+    testWidgets('waits for a retry before jumping to a hydrated target', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'bob',
+        content: 'Hydrated target',
+        createdAt: 1400,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final earlierReplies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+      final timelineMessages = formatTimeline([root, target]);
+      final firstAttempt = Completer<List<NostrEvent>>();
+      var attempts = 0;
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, target],
+          providerRetry: (retryCount, _) =>
+              retryCount == 0 ? const Duration(seconds: 30) : null,
+          threadReplyLoaders: {
+            'root': () {
+              attempts++;
+              if (attempts == 1) return firstAttempt.future;
+              return Future.value([...earlierReplies, target]);
+            },
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: ThreadDetailPage(
+            threadHead: timelineMessages.first,
+            allMessages: timelineMessages,
+            channelId: _testChannel.id,
+            currentPubkey: null,
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'target',
+          ),
+        ),
+      );
+      await tester.pump();
+      firstAttempt.completeError(Exception('transient thread query failure'));
+      await tester.pump();
+      await tester.pump();
+
+      final targetFinder = find.byKey(const ValueKey('thread-message-target'));
+      expect(targetFinder, findsOneWidget);
+      final retryingDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(retryingDecoration.color, Colors.transparent);
+      expect(attempts, 1);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+      final stillRetryingDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(stillRetryingDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(milliseconds: 2800));
+      expect(attempts, 1);
+      final expiredJumpDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(expiredJumpDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+
+      expect(attempts, 2);
+      expect(
+        find.byKey(const ValueKey('thread-message-group-target')),
+        findsOneWidget,
+      );
+      final landedDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(landedDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+      final highlightedDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(highlightedDecoration.color!.a, greaterThan(0));
     });
 
     testWidgets('highlights a hydrated target after the thread query fails', (
