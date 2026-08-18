@@ -381,19 +381,32 @@ export async function sendDesktopNotification(
     }
   }
 
-  const notification = new window.Notification(payload.title, {
-    body: payload.body,
-    silent: true,
-    extra: notificationExtra(payload.target),
-  } as DesktopNotificationOptions);
+  // block/buzz#5081 — WebKit throws `NotificationError` from the constructor
+  // when the notification backend becomes temporarily unavailable. Callers
+  // discard the returned promise without a rejection handler, so an
+  // un-guarded throw becomes an unhandled rejection. Treat constructor failure
+  // as a delivery miss (return false) and log the failed delivery.
+  try {
+    const notification = new window.Notification(payload.title, {
+      body: payload.body,
+      silent: true,
+      extra: notificationExtra(payload.target),
+    } as DesktopNotificationOptions);
 
-  const target = payload.target;
-  if (!isTauri() && target) {
-    notification.onclick = () => {
-      dispatchDesktopNotificationTarget(target);
-      notification.close();
-    };
+    const target = payload.target;
+    if (!isTauri() && target) {
+      notification.onclick = () => {
+        dispatchDesktopNotificationTarget(target);
+        notification.close();
+      };
+    }
+
+    return true;
+  } catch (error) {
+    console.warn(
+      "[desktop] window.Notification constructor threw — notification dropped:",
+      error,
+    );
+    return false;
   }
-
-  return true;
 }

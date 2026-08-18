@@ -46,7 +46,9 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
   const section = page.getByTestId("settings-mobile");
-  const card = page.getByTestId("mobile-pairing-card");
+  const card = page
+    .getByTestId("mobile-pairing-card")
+    .locator('[data-slot="settings-section-card"]');
   const layout = card.getByTestId("mobile-pairing-layout");
   const qrContainer = page.getByTestId("mobile-pairing-qr-container");
   const steps = card.getByTestId("mobile-pairing-steps");
@@ -59,6 +61,11 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   const finalStep = card.getByTestId("mobile-pairing-final-step");
   const startButton = card.getByTestId("start-pairing-button");
   await expect(card).toBeVisible();
+  await expect(card).toHaveCSS("border-top-width", "0px");
+  await expect(card).toHaveCSS("border-radius", "16px");
+  expect(
+    await card.evaluate((element) => getComputedStyle(element).backgroundColor),
+  ).not.toBe("rgba(0, 0, 0, 0)");
   await expect(startButton).toHaveText("Start pairing");
   await expect(steps.getByText("Scan QR code", { exact: true })).toBeVisible();
   await expect(

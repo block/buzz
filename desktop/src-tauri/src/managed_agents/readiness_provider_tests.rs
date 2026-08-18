@@ -148,6 +148,7 @@ fn minimal_record(
         runtime_pid: None,
         backend: Default::default(),
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -284,8 +285,6 @@ fn explicit_deliver_plain_replies_override_is_preserved_for_openai_compat() {
         "explicit user override must survive the openai-compat default"
     );
 }
-
-// ── provider-specific model fallback tests ────────────────────────────
 
 #[test]
 fn buzz_agent_databricks_v2_with_databricks_model_but_no_buzz_agent_model_is_ready() {

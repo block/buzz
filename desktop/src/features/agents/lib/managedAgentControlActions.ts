@@ -44,7 +44,7 @@ export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
     return "Stop";
   }
 
-  return agent.status === "stopped" ? "Restart Agent" : "Start Agent";
+  return "Start agent";
 }
 
 export function resolveManagedAgentChannelId(

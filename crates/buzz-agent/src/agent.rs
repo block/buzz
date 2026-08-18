@@ -3,9 +3,12 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 
 use crate::builtin;
-use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
+use crate::config::{
+    pricing_authority, Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
+};
 use crate::handoff::{ContextRecovery, HandoffOutcome};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
@@ -13,8 +16,9 @@ use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
 use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, SessionUsageBaseline, StopReason,
-    ToolCall, ToolResult, ToolResultContent, TurnTotalState,
+    AgentError, CacheTotalState, ContentBlock, HistoryItem, PricingIdentity, ProviderStop,
+    SessionUsageBaseline, StopReason, ToolCall, ToolResult, ToolResultContent, TurnIOState,
+    TurnTotalState,
 };
 use crate::wire::{self, WireSender};
 
@@ -22,6 +26,12 @@ const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
 
 const UNSUPPORTED_IMAGE_TOOL_MESSAGE: &str = "The current model does not support image input. The image was removed from conversation history so this turn can continue. Use a text-based inspection tool or ask the user for a textual description instead.";
+
+/// Model-visible feedback after the provider truncates an assistant response at
+/// its output-token limit. This is a user message rather than a synthetic tool
+/// result because truncation can happen without a tool call (and an unpaired
+/// tool result is invalid on every provider wire format).
+const MAX_TOKENS_RECOVERY_MESSAGE: &str = "Your previous response reached the model's output token limit and was truncated. Any incomplete tool calls were discarded and were not run. Stop prolonged internal reasoning now. Use the available tools immediately: write a script or artifact to a file and run it in small, verifiable steps instead of emitting the entire solution inline. Continue the task concisely from the preserved text.";
 
 /// Remove image blocks that the provider has explicitly rejected while keeping
 /// their surrounding tool result (and therefore the tool-call/result pairing)
@@ -144,6 +154,12 @@ pub struct RunCtx<'a> {
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
+    /// ACP v2 session identifier for this prompt turn. Used to derive
+    /// per-message `messageId` values that are unique within the ACP session.
+    /// Distinct from `session_id` (which is the ACP session); this is a
+    /// per-`session/prompt` random token so that IDs from one prompt invocation
+    /// never collide with those from another even within the same session.
+    pub run_id: String,
     /// Cache-summed input tokens reported by the provider on this session's
     /// most recent request (persists across `session/prompt` calls), or `None`
     /// before the first response and immediately after a handoff resets the
@@ -157,16 +173,38 @@ pub struct RunCtx<'a> {
     /// preserved in lockstep with `last_request_input_tokens`.
     pub last_request_history_bytes: &'a mut Option<usize>,
     /// Accumulated input tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_input_tokens: &'a mut Option<u64>,
+    /// NIP-AM metric publishing. Reset to `Unseen` at turn start in `run()`.
+    pub turn_input_tokens: &'a mut TurnIOState,
     /// Accumulated output tokens across all LLM rounds in this turn, for
-    /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
-    pub turn_output_tokens: &'a mut Option<u64>,
+    /// NIP-AM metric publishing. Reset to `Unseen` at turn start in `run()`.
+    pub turn_output_tokens: &'a mut TurnIOState,
     /// The cache-served subset of `turn_input_tokens`, accumulated across all
-    /// LLM rounds in this turn. Reset to `None` at turn start in `run()`.
+    /// LLM rounds in this turn. Reset to `Unseen` at turn start in `run()`.
     /// Consumers price this slice at the provider's cached rate; without it
     /// every round of a growing conversation is billed at full price.
-    pub turn_cached_input_tokens: &'a mut Option<u64>,
+    ///
+    /// `CacheTotalState` enforces the D1 rule: any usage-bearing round that
+    /// omits this category poisons the accumulator permanently for the turn.
+    pub turn_cached_input_tokens: &'a mut CacheTotalState,
+    /// The cache-written subset of `turn_input_tokens`, accumulated across all
+    /// LLM rounds in this turn. Reset to `Unseen` at turn start in `run()`.
+    /// Consumers need this to price cache-creation at the provider's write rate
+    /// (distinct from both the standard input rate and the cached-read rate).
+    ///
+    /// Same D1 tri-state contract as `turn_cached_input_tokens`.
+    pub turn_cache_write_tokens: &'a mut CacheTotalState,
+    /// Per-turn billing identity accumulator.
+    ///
+    /// - `None`: no usage-bearing response observed yet this turn (initial state).
+    /// - `Some(Some(pi))`: all usage-bearing responses so far carry the same
+    ///   proven identity `pi`. If a subsequent response carries a different or
+    ///   unproven identity, this transitions to `Some(None)` (poisoned).
+    /// - `Some(None)`: poisoned — mixed identities, unproven response, mesh
+    ///   retry across models, or no identity derived. Never heals within the turn.
+    ///
+    /// Reset to `None` at turn start in `run()`. The wire payload emits the
+    /// proven identity when `Some(Some(pi))`, omits it otherwise.
+    pub turn_pricing_identity: &'a mut Option<Option<PricingIdentity>>,
     /// Tri-state total-token accumulator for this turn.
     ///
     /// - `Unseen`: no usage-bearing response observed yet this turn (initial state).
@@ -184,6 +222,41 @@ pub struct RunCtx<'a> {
     pub usage_baseline: SessionUsageBaseline,
 }
 
+/// Fold one round's proven identity into the per-turn identity accumulator.
+///
+/// Accumulator tri-state (NIP-AM §pricingIdentity):
+/// - `None`: no usage-bearing round observed yet this turn.
+/// - `Some(Some(pi))`: every usage-bearing round so far carries the same
+///   proven identity `pi`.
+/// - `Some(None)`: poisoned — mixed identities or unproven round seen.
+///   Never heals within the turn.
+///
+/// `round`: `Some(pi)` when this round's `(base_url, request_model)` resolve
+/// to a proven identity; `None` when the endpoint is unallowlisted or the
+/// model is unknown.
+#[inline]
+fn fold_pricing_identity(
+    acc: Option<Option<PricingIdentity>>,
+    round: Option<PricingIdentity>,
+) -> Option<Option<PricingIdentity>> {
+    match acc {
+        // First usage-bearing round: record whatever was derived.
+        None => Some(round),
+        // Already consistent: keep only if this round matches exactly.
+        Some(Some(ref existing)) => {
+            if Some(existing) == round.as_ref() {
+                Some(round)
+            } else {
+                // Mismatch (different model, different authority,
+                // or this round had no proven identity) → poison.
+                Some(None)
+            }
+        }
+        // Already poisoned: stays poisoned forever this turn.
+        poisoned @ Some(None) => poisoned,
+    }
+}
+
 impl RunCtx<'_> {
     /// Send a session-cumulative `usage_update` reflecting everything observed
     /// up to and including the most recent LLM response.
@@ -195,15 +268,30 @@ impl RunCtx<'_> {
     /// everything but its final in-flight request.
     async fn emit_usage_update(&self) {
         let base = self.usage_baseline;
+        // Combine session baseline CacheTotalState with the per-turn delta:
+        // merge_session produces Exact when both sides are Exact, Unknown when
+        // either is Unknown, and leaves Unseen when both sides are Unseen.
+        let cached_total = base
+            .cached_input_tokens
+            .merge_session(*self.turn_cached_input_tokens);
+        let write_total = base
+            .cache_write_tokens
+            .merge_session(*self.turn_cache_write_tokens);
         let payload = wire::usage_update_payload(
             base.input_tokens
-                .saturating_add(self.turn_input_tokens.unwrap_or(0)),
+                .merge_session(*self.turn_input_tokens)
+                .exact_value(),
             base.output_tokens
-                .saturating_add(self.turn_output_tokens.unwrap_or(0)),
-            base.cached_input_tokens
-                .saturating_add(self.turn_cached_input_tokens.unwrap_or(0)),
+                .merge_session(*self.turn_output_tokens)
+                .exact_value(),
+            cached_total.exact_value(),
+            write_total.exact_value(),
             base.total_state.merge_session(*self.turn_total_state),
             self.effective_model,
+            // Extract the proven identity if this turn is consistent so far.
+            self.turn_pricing_identity
+                .as_ref()
+                .and_then(|inner| inner.as_ref()),
         );
         wire::send(
             self.wire,
@@ -225,9 +313,11 @@ impl RunCtx<'_> {
         self.history.push(HistoryItem::User(user_text));
 
         // Reset per-turn token accumulators for this prompt.
-        *self.turn_input_tokens = None;
-        *self.turn_output_tokens = None;
-        *self.turn_cached_input_tokens = None;
+        *self.turn_input_tokens = TurnIOState::Unseen;
+        *self.turn_output_tokens = TurnIOState::Unseen;
+        *self.turn_cached_input_tokens = CacheTotalState::Unseen;
+        *self.turn_cache_write_tokens = CacheTotalState::Unseen;
+        *self.turn_pricing_identity = None;
         *self.turn_total_state = TurnTotalState::Unseen;
         // Per-turn handoff-attempt counter. Scoped here (not persisted in the
         // session) so `BUZZ_AGENT_MAX_HANDOFFS` bounds compactions per
@@ -255,6 +345,10 @@ impl RunCtx<'_> {
         // per-session: a fresh prompt deserves a fresh chance to recover, and
         // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
         let mut context_recoveries = 0u32;
+        // Per-run output-truncation recovery budget. Unlike context recovery,
+        // these successful provider requests consume a real round and are not
+        // refunded; this counter only bounds the default-unlimited case.
+        let mut max_tokens_recoveries = 0u32;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -292,7 +386,8 @@ impl RunCtx<'_> {
             let response_result = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model)
+                        .instrument(tracing::info_span!("llm", session_id = %self.session_id)) => r,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness
@@ -400,7 +495,17 @@ impl RunCtx<'_> {
             // a response omits usage (`None`) rather than clobbering — a
             // one-off missing field shouldn't blind the gate or zero the
             // growth baseline.
-            if let Some(tokens) = response.input_tokens {
+            if response.input_tokens_overflowed {
+                // The Anthropic-style inclusive sum (input_tokens +
+                // cache_read_input_tokens + cache_creation_input_tokens)
+                // overflowed u64::MAX during parsing. Permanently poison the
+                // turn accumulator so wire emission omits this value and ACP
+                // marks the delta unreliable. Do NOT update
+                // last_request_input_tokens — freeze the context-gate
+                // baseline at its prior reading rather than poisoning it with
+                // a clamped value, exactly as the absent-usage path does.
+                *self.turn_input_tokens = TurnIOState::Poisoned;
+            } else if let Some(tokens) = response.input_tokens {
                 *self.last_request_input_tokens = Some(tokens);
                 *self.last_request_history_bytes = Some(
                     self.history
@@ -409,29 +514,30 @@ impl RunCtx<'_> {
                         .sum(),
                 );
                 // Accumulate per-turn input tokens for NIP-AM metric publishing.
-                *self.turn_input_tokens =
-                    Some(self.turn_input_tokens.unwrap_or(0).saturating_add(tokens));
+                // fold_round uses checked_add; overflow permanently poisons the
+                // turn accumulator (and, via merge_session, the session cumulative).
+                *self.turn_input_tokens = self.turn_input_tokens.fold_round(tokens);
             }
             // Accumulate per-turn output tokens for NIP-AM metric publishing.
             if let Some(out) = response.output_tokens {
-                *self.turn_output_tokens =
-                    Some(self.turn_output_tokens.unwrap_or(0).saturating_add(out));
+                *self.turn_output_tokens = self.turn_output_tokens.fold_round(out);
             }
-            // Accumulate the cache-served subset of this turn's input. Tracked
-            // separately from `turn_input_tokens` rather than subtracted from
-            // it: the input total must stay inclusive for the handoff gate,
-            // which cares how much context was sent, not what it cost.
-            if let Some(cached) = response.cached_input_tokens {
-                *self.turn_cached_input_tokens = Some(
-                    self.turn_cached_input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(cached),
-                );
-            }
-            // Fold the provider-reported total into the turn tri-state, but only
-            // when this response was usage-bearing (had input or output tokens).
-            // A response with no usage at all is not evidence of a missing total
-            // and must not poison the accumulator.
+            // Fold the provider-reported total, cache subsets, and billing
+            // identity — only when this response was usage-bearing (had input
+            // or output tokens).  A response with no usage at all is not
+            // evidence of a missing cache field or total and must not poison
+            // either accumulator.
+            //
+            // `input_tokens_overflowed` counts as usage-bearing: the provider
+            // reported an input total (which overflowed) so cache fields and
+            // the total are meaningful and must be folded.
+            //
+            // D1: absent cache field on a usage-bearing round permanently
+            // poisons the turn accumulator.  Some(0) stays Exact(0) (explicit
+            // zero is distinct from absent).  Cache-read and cache-write are
+            // tracked separately from `turn_input_tokens` rather than
+            // subtracted from it: the input total must stay inclusive for the
+            // handoff gate, which cares how much context was sent, not cost.
             //
             // Shape assumption: documented OpenAI-compatible responses that carry
             // `total_tokens` always co-report at least one of `prompt_tokens` /
@@ -439,8 +545,45 @@ impl RunCtx<'_> {
             // with neither category is therefore not a supported shape and would
             // be silently ignored here. If that shape is ever encountered, extend
             // this gate rather than representing absent categories as zero.
-            if response.input_tokens.is_some() || response.output_tokens.is_some() {
+            if response.input_tokens.is_some()
+                || response.input_tokens_overflowed
+                || response.output_tokens.is_some()
+            {
                 *self.turn_total_state = self.turn_total_state.fold(response.total_tokens);
+                // Cache-read: the cache-served subset of input tokens.
+                *self.turn_cached_input_tokens = self
+                    .turn_cached_input_tokens
+                    .fold(response.cached_input_tokens);
+                // Cache-write: the cache-creation subset of input tokens.
+                *self.turn_cache_write_tokens = self
+                    .turn_cache_write_tokens
+                    .fold(response.cache_write_tokens);
+
+                // Derive billing identity for this round and fold it into the
+                // per-turn accumulator.  Rules (NIP-AM §pricingIdentity):
+                //
+                // 1. Attempt to derive identity from (base_url, request_model).
+                //    - base_url must canonically match an official allowlisted host.
+                //    - request_model must be Some (mesh-auto with unknown model
+                //      cannot prove identity).
+                // 2. Fold the round identity into the turn accumulator:
+                //    - Unseen (None): record this round's identity (or poison if None).
+                //    - Consistent: if it matches, keep; otherwise poison.
+                //    - Poisoned: stays poisoned forever this turn.
+                {
+                    let round_identity: Option<PricingIdentity> =
+                        response.request_model.as_deref().and_then(|model| {
+                            pricing_authority(&self.cfg.base_url).map(|auth| PricingIdentity {
+                                authority: auth.to_string(),
+                                model: model.to_string(),
+                                cache_class: None, // no cache-class derivation yet
+                            })
+                        });
+
+                    *self.turn_pricing_identity =
+                        fold_pricing_identity(self.turn_pricing_identity.take(), round_identity);
+                }
+
                 // Report what the turn has burned SO FAR, before running the
                 // next round. A turn is many provider round-trips over many
                 // minutes, and until this point the only report was the one
@@ -460,6 +603,23 @@ impl RunCtx<'_> {
                 self.emit_usage_update().await;
             }
 
+            // Stable per-kind message IDs for ACP v2 ContentChunk compliance.
+            // ACP v2 requires every ContentChunk to carry `messageId`; all chunks
+            // that belong to the same logical message must share the same ID, and
+            // IDs must be unique per message within the ACP session.
+            //
+            // A provider round produces at most one thought and one assistant
+            // message (the parsers collapse all provider output into one
+            // LlmResponse.reasoning string and one LlmResponse.text string).
+            // These are two *distinct* logical messages, so they get distinct IDs.
+            //
+            // `run_id` is a fresh random token per `session/prompt` invocation,
+            // so `<run_id>-thought-<round>` and `<run_id>-message-<round>` are
+            // unique within the ACP session even across multiple prompts.
+            //
+            // ACP v1 allows the field, so this is a backwards-safe addition.
+            let thought_msg_id = format!("{}-thought-{round}", self.run_id);
+            let message_msg_id = format!("{}-message-{round}", self.run_id);
             if !response.reasoning.is_empty() {
                 wire::send(
                     self.wire,
@@ -467,6 +627,7 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_thought_chunk",
+                            "messageId": &thought_msg_id,
                             "content": { "type": "text", "text": &response.reasoning }
                         }),
                     ),
@@ -481,11 +642,43 @@ impl RunCtx<'_> {
                         self.session_id,
                         json!({
                             "sessionUpdate": "agent_message_chunk",
+                            "messageId": &message_msg_id,
                             "content": { "type": "text", "text": &response.text }
                         }),
                     ),
                 )
                 .await;
+            }
+
+            // `max_tokens` describes a truncated assistant response, not turn
+            // completion. Never execute tool calls from it: although one may
+            // parse as valid, a later call (or surrounding instructions) may
+            // have been cut off. Replay only the text, with no tool calls, so
+            // the history remains valid without fabricated tool results; then
+            // add actionable user-role feedback and ask the model to continue.
+            if response.stop == ProviderStop::MaxTokens {
+                self.history.push(HistoryItem::Assistant {
+                    text: response.text,
+                    tool_calls: Vec::new(),
+                    reasoning_details: response.reasoning_details,
+                });
+                if max_tokens_recoveries >= self.cfg.max_token_recoveries {
+                    tracing::warn!(
+                        recoveries = max_tokens_recoveries,
+                        max_recoveries = self.cfg.max_token_recoveries,
+                        "provider repeatedly hit output token limit; recovery budget exhausted"
+                    );
+                    return Ok(StopReason::MaxTokens);
+                }
+                max_tokens_recoveries = max_tokens_recoveries.saturating_add(1);
+                tracing::warn!(
+                    recovery = max_tokens_recoveries,
+                    max_recoveries = self.cfg.max_token_recoveries,
+                    "provider hit output token limit; asking model to continue in smaller steps"
+                );
+                self.history
+                    .push(HistoryItem::User(MAX_TOKENS_RECOVERY_MESSAGE.to_string()));
+                continue;
             }
 
             if response.tool_calls.is_empty() {
@@ -1303,6 +1496,101 @@ mod tests {
             history.len(),
             original_len,
             "under budget must not evict anything"
+        );
+    }
+
+    // ── fold_pricing_identity: turn discipline ────────────────────────────────
+
+    fn pi(authority: &str, model: &str) -> PricingIdentity {
+        PricingIdentity {
+            authority: authority.to_string(),
+            model: model.to_string(),
+            cache_class: None,
+        }
+    }
+
+    /// Case 1: two usage-bearing rounds with different proven identities in one
+    /// turn must poison the accumulator.  The wire payload omits `pricingIdentity`
+    /// when `Some(None)`.
+    #[test]
+    fn fold_pricing_identity_mismatch_poisons() {
+        let round_a = Some(pi("api.anthropic.com", "claude-opus-4-5"));
+        let round_b = Some(pi("api.openai.com", "gpt-4o"));
+
+        // Start: unseen.
+        let acc = None;
+        // After round A: consistent — Some(Some(claude-opus-4-5)).
+        let acc = fold_pricing_identity(acc, round_a);
+        assert!(
+            matches!(acc, Some(Some(_))),
+            "after one round must be consistent"
+        );
+        // After round B (different authority + model): poisoned.
+        let acc = fold_pricing_identity(acc, round_b);
+        assert_eq!(
+            acc,
+            Some(None),
+            "different proven identities in one turn must poison"
+        );
+    }
+
+    /// Case 2: proven identity followed by a usage-bearing round with no proven
+    /// identity (request_model absent or non-allowlisted endpoint) must poison.
+    /// An unpaired cumulative snapshot also produces round=None (no model known)
+    /// and hits this same path — case 4 collapses into case 2.
+    #[test]
+    fn fold_pricing_identity_unproven_round_poisons() {
+        let round_a = Some(pi("api.anthropic.com", "claude-3-7-sonnet"));
+        let round_unproven: Option<PricingIdentity> = None; // absent request_model or custom endpoint
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, round_a);
+        assert!(
+            matches!(acc, Some(Some(_))),
+            "after one proven round must be consistent"
+        );
+        let acc = fold_pricing_identity(acc, round_unproven);
+        assert_eq!(
+            acc,
+            Some(None),
+            "an unproven round after a proven round must poison (no-model / custom-endpoint path)"
+        );
+    }
+
+    /// Case 3: a poisoned accumulator must not heal, even if a later round
+    /// carries an identity matching the original.
+    #[test]
+    fn fold_pricing_identity_poisoned_never_heals() {
+        let round_a = Some(pi("api.openai.com", "gpt-4o"));
+        let round_unproven: Option<PricingIdentity> = None;
+        let round_a_again = Some(pi("api.openai.com", "gpt-4o")); // identical to round_a
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, round_a);
+        let acc = fold_pricing_identity(acc, round_unproven); // poisons
+        assert_eq!(acc, Some(None), "must be poisoned before heal attempt");
+        let acc = fold_pricing_identity(acc, round_a_again); // must not heal
+        assert_eq!(
+            acc,
+            Some(None),
+            "poisoned accumulator must stay poisoned even when the next round matches the original identity"
+        );
+    }
+
+    /// Baseline: a turn where every round carries the same proven identity
+    /// stays consistent and emits the identity on the wire.
+    #[test]
+    fn fold_pricing_identity_consistent_rounds_stay_proven() {
+        let identity = pi("api.openrouter.ai", "meta-llama/llama-4-scout");
+
+        let acc = None;
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        let acc = fold_pricing_identity(acc, Some(identity.clone()));
+        assert_eq!(
+            acc,
+            Some(Some(identity)),
+            "three identical rounds must remain consistently proven"
         );
     }
 }

@@ -2,17 +2,20 @@ import { Search } from "lucide-react";
 import * as React from "react";
 
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import {
-  MIN_SEARCH_QUERY_LENGTH,
-  useSearchResults,
-} from "@/features/search/useSearchResults";
+import { getMinimumSearchQueryLength } from "@/features/search/hooks";
+import { useSearchResults } from "@/features/search/useSearchResults";
 import {
   resultIcon,
   resultKey,
   resultTestId,
   type SearchResult,
 } from "@/features/search/ui/SearchResultItem";
-import { SearchPromptPlaceholder } from "@/features/search/ui/SearchPromptPlaceholder";
+import {
+  CurrentChannelSearchAction,
+  getChannelScopeLabel,
+  SearchDialogInputRow,
+} from "@/features/search/ui/SearchScopeControls";
+import { useSearchMenuKeyboardNavigation } from "@/features/search/ui/useSearchMenuKeyboardNavigation";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -30,6 +33,7 @@ type TopbarSearchProps = {
   channels: Channel[];
   className?: string;
   currentPubkey?: string;
+  currentChannelId?: string | null;
   focusRequest?: number;
   onOpenChannel: (channelId: string) => void;
   onOpenResult: (hit: SearchHit) => void;
@@ -38,12 +42,14 @@ type TopbarSearchProps = {
   onCreateAgent?: () => void | Promise<void>;
   onCreateChannel?: () => void | Promise<void>;
   suggestionChannels?: Channel[];
+  scopeFocusRequest?: number;
   variant?: "bar" | "icon";
 };
 
 const MAX_SEARCH_SUGGESTIONS = 4;
+const SEARCH_RESULT_LIMIT = 40;
 const SEARCH_SECTION_TITLE_CLASS =
-  "px-3 pb-1.5 pt-2 text-xs font-medium text-muted-foreground/70";
+  "px-2.5 pb-1.5 pt-2 text-xs font-medium text-muted-foreground/70";
 const SEARCH_RESULT_SECTION_ORDER = [
   "channels",
   "direct-messages",
@@ -360,7 +366,7 @@ function SearchResultsSkeleton() {
   return (
     <div
       aria-hidden="true"
-      className="max-h-[360px] overflow-y-auto p-1"
+      className="p-1"
       data-testid="search-results-loading"
     >
       {searchSkeletonRows.map((row) => (
@@ -389,6 +395,7 @@ export function TopbarSearch({
   channelLabels,
   channels,
   className,
+  currentChannelId,
   currentPubkey,
   focusRequest = 0,
   onOpenChannel,
@@ -397,10 +404,14 @@ export function TopbarSearch({
   onBrowseChannels,
   onCreateAgent,
   onCreateChannel,
+  scopeFocusRequest = 0,
   suggestionChannels,
   variant = "bar",
 }: TopbarSearchProps) {
   const [isOpen, setIsOpen] = React.useState(false);
+  const [scopeChannelId, setScopeChannelId] = React.useState<string | null>(
+    null,
+  );
   const [selectedMenuIndex, setSelectedMenuIndex] = React.useState(0);
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const dialogInputRef = React.useRef<HTMLInputElement>(null);
@@ -409,6 +420,7 @@ export function TopbarSearch({
   const {
     channelLookup,
     debouncedQuery,
+    fuzzyUserCandidatesQuery,
     isWaitingOnFromResolution,
     query,
     resultProfiles,
@@ -416,12 +428,27 @@ export function TopbarSearch({
     searchQuery,
     setQuery,
     userSearchQuery,
-  } = useSearchResults({ channelLabels, channels, enabled: isOpen, limit: 8 });
+  } = useSearchResults({
+    channelLabels,
+    channels,
+    enabled: isOpen,
+    limit: SEARCH_RESULT_LIMIT,
+    scopeChannelId,
+  });
   const trimmedQuery = query.trim();
   const isIconVariant = variant === "icon";
-  const currentPubkeyNormalized = currentPubkey
-    ? normalizePubkey(currentPubkey)
+  const currentChannel = currentChannelId
+    ? (channelLookup.get(currentChannelId) ?? null)
     : null;
+  const scopeChannel = scopeChannelId
+    ? (channelLookup.get(scopeChannelId) ?? null)
+    : null;
+  const scopeLabel = scopeChannel
+    ? getChannelScopeLabel(scopeChannel, channelLabels, currentPubkey)
+    : null;
+  const currentPubkeyNormalized =
+    currentPubkey && normalizePubkey(currentPubkey);
+  const hasScopeAction = Boolean(currentChannel && !scopeChannel);
   const suggestedResults = React.useMemo(
     () => getSuggestedSearchResults(suggestionChannels ?? channels),
     [channels, suggestionChannels],
@@ -465,9 +492,9 @@ export function TopbarSearch({
     () => [...suggestedResults, ...suggestionActionResults],
     [suggestedResults, suggestionActionResults],
   );
+  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
   const isShowingSuggestions =
-    debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH &&
-    trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH;
+    Math.max(debouncedQuery.length, trimmedQuery.length) < minimumQueryLength;
   const searchableResults = React.useMemo(
     () =>
       results.filter(
@@ -486,27 +513,35 @@ export function TopbarSearch({
     [searchResultSections],
   );
   const activeResults = isShowingSuggestions
-    ? suggestionResults
+    ? scopeChannel
+      ? []
+      : suggestionResults
     : groupedSearchResults;
   const isSearchLoading =
     isWaitingOnFromResolution ||
     searchQuery.isLoading ||
+    fuzzyUserCandidatesQuery.isLoading ||
     userSearchQuery.isLoading;
 
-  const openSearchDialog = React.useCallback(() => {
-    setSelectedMenuIndex(0);
-    openNextFrame(() => setIsOpen(true));
-  }, [openNextFrame]);
+  const openSearchDialog = React.useCallback(
+    (nextScopeChannelId: string | null = null) => {
+      setScopeChannelId(nextScopeChannelId);
+      setSelectedMenuIndex(0);
+      openNextFrame(() => setIsOpen(true));
+    },
+    [openNextFrame],
+  );
 
   const handleSearchOpenChange = React.useCallback(
     (nextOpen: boolean) => {
       if (nextOpen) {
-        openSearchDialog();
+        openSearchDialog(null);
         return;
       }
 
       cancelDeferredModalOpen();
       setSelectedMenuIndex(0);
+      setScopeChannelId(null);
       setIsOpen(false);
     },
     [cancelDeferredModalOpen, openSearchDialog],
@@ -515,6 +550,7 @@ export function TopbarSearch({
   const openResult = React.useCallback(
     (result: SearchResult) => {
       setIsOpen(false);
+      setScopeChannelId(null);
       setQuery("");
 
       if (result.kind === "channel") {
@@ -567,8 +603,37 @@ export function TopbarSearch({
     }
     lastFocusRequestRef.current = focusRequest;
 
-    openSearchDialog();
+    openSearchDialog(null);
   }, [focusRequest, openSearchDialog]);
+
+  const lastScopeFocusRequestRef = React.useRef(scopeFocusRequest);
+  React.useEffect(() => {
+    if (scopeFocusRequest === lastScopeFocusRequestRef.current) {
+      return;
+    }
+    lastScopeFocusRequestRef.current = scopeFocusRequest;
+
+    if (currentChannelId) {
+      openSearchDialog(currentChannelId);
+    }
+  }, [currentChannelId, openSearchDialog, scopeFocusRequest]);
+
+  const focusDialogInput = React.useCallback(() => {
+    window.requestAnimationFrame(() => dialogInputRef.current?.focus());
+  }, []);
+
+  const activateCurrentChannelScope = React.useCallback(() => {
+    if (!currentChannel) return;
+    setScopeChannelId(currentChannel.id);
+    setSelectedMenuIndex(0);
+    focusDialogInput();
+  }, [currentChannel, focusDialogInput]);
+
+  const removeChannelScope = React.useCallback(() => {
+    setScopeChannelId(null);
+    setSelectedMenuIndex(0);
+    focusDialogInput();
+  }, [focusDialogInput]);
 
   React.useEffect(() => {
     if (!isOpen) {
@@ -584,44 +649,20 @@ export function TopbarSearch({
     };
   }, [isOpen]);
 
-  React.useEffect(() => {
-    setSelectedMenuIndex((current) => {
-      if (activeResults.length === 0) {
-        return 0;
-      }
-
-      return Math.min(current, activeResults.length - 1);
-    });
-  }, [activeResults]);
-
-  const handleDialogInputKeyDown = React.useCallback(
-    (event: React.KeyboardEvent<HTMLInputElement>) => {
-      if (event.key === "ArrowDown" && activeResults.length > 0) {
-        event.preventDefault();
-        setSelectedMenuIndex((current) =>
-          Math.min(current + 1, activeResults.length - 1),
-        );
-        return;
-      }
-
-      if (event.key === "ArrowUp" && activeResults.length > 0) {
-        event.preventDefault();
-        setSelectedMenuIndex((current) => Math.max(current - 1, 0));
-        return;
-      }
-
-      if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-        event.preventDefault();
-        const result = activeResults[selectedMenuIndex];
-        if (result) {
-          openResult(result);
-        }
-      }
-    },
-    [activeResults, openResult, selectedMenuIndex],
-  );
+  const handleDialogInputKeyDown = useSearchMenuKeyboardNavigation({
+    activeResults,
+    hasLeadingAction: hasScopeAction,
+    onActivateLeadingAction: activateCurrentChannelScope,
+    onOpenResult: openResult,
+    onRemoveScope: removeChannelScope,
+    query,
+    scopeActive: Boolean(scopeChannel),
+    selectedMenuIndex,
+    setSelectedMenuIndex,
+  });
 
   const renderSearchResultRow = (result: SearchResult, index: number) => {
+    const menuIndex = index + (hasScopeAction ? 1 : 0);
     const channelDisplayName =
       result.kind === "channel"
         ? getChannelDisplayName(result.channel, channelLabels)
@@ -666,21 +707,22 @@ export function TopbarSearch({
 
     return (
       <button
-        aria-selected={index === selectedMenuIndex}
+        aria-selected={menuIndex === selectedMenuIndex}
         className={cn(
-          "search-result-row flex w-full gap-3 rounded-lg px-3 text-left transition-colors",
+          "search-result-row flex w-full gap-3 rounded-lg px-2.5 text-left transition-colors",
           result.kind === "message" ? "items-start" : "items-center",
           result.kind === "message" ? "py-3.5" : "py-2.5",
-          index === selectedMenuIndex
+          menuIndex === selectedMenuIndex
             ? "bg-muted/45 text-foreground"
             : "hover:bg-muted/35",
         )}
         key={resultKey(result)}
         onClick={() => openResult(result)}
-        onMouseEnter={() => setSelectedMenuIndex(index)}
+        onMouseEnter={() => setSelectedMenuIndex(menuIndex)}
         role="option"
         type="button"
         data-testid={resultTestId(result)}
+        data-search-result-index={menuIndex}
       >
         {result.kind === "message" ? (
           <UserAvatar
@@ -759,7 +801,7 @@ export function TopbarSearch({
     let resultIndex = 0;
 
     return sections.map((section) => (
-      <div key={section.key}>
+      <div data-search-section={section.key} key={section.key}>
         <div className={SEARCH_SECTION_TITLE_CLASS}>{section.title}</div>
         {section.results.map((result) =>
           renderSearchResultRow(result, resultIndex++),
@@ -767,62 +809,119 @@ export function TopbarSearch({
       </div>
     ));
   };
-
+  const currentChannelSearchAction =
+    currentChannel && !scopeChannel ? (
+      <CurrentChannelSearchAction
+        channelLabel={getChannelScopeLabel(
+          currentChannel,
+          channelLabels,
+          currentPubkey,
+        )}
+        channelType={currentChannel.channelType}
+        isSelected={selectedMenuIndex === 0}
+        onActivate={activateCurrentChannelScope}
+        onMouseEnter={() => setSelectedMenuIndex(0)}
+      />
+    ) : null;
   const searchResultContent = isShowingSuggestions ? (
-    suggestionResults.length === 0 ? (
-      <div className="px-4 py-5 text-sm text-muted-foreground">
-        <p>No recent activity yet.</p>
+    scopeChannel ? null : suggestionResults.length === 0 ? (
+      <div className="max-h-96 overflow-y-auto">
+        {currentChannelSearchAction}
+        <div
+          className={cn(
+            "px-4 text-sm text-muted-foreground",
+            currentChannelSearchAction ? "pb-5" : "py-5",
+          )}
+        >
+          <p>No recent activity yet.</p>
+        </div>
       </div>
     ) : (
       <div
         aria-label="Recent activity"
-        className="max-h-96 overflow-y-auto p-1.5"
+        className="max-h-96 overflow-y-auto"
         role="listbox"
       >
-        {(() => {
-          let resultIndex = 0;
+        {currentChannelSearchAction}
+        <div className="p-1.5">
+          {(() => {
+            let resultIndex = 0;
 
-          return (
-            <>
-              {suggestedResults.length > 0 ? (
-                <div>
-                  <div className={SEARCH_SECTION_TITLE_CLASS}>
-                    Recent activity
+            return (
+              <>
+                {suggestedResults.length > 0 ? (
+                  <div>
+                    <div className={SEARCH_SECTION_TITLE_CLASS}>
+                      Recent activity
+                    </div>
+                    {suggestedResults.map((result) =>
+                      renderSearchResultRow(result, resultIndex++),
+                    )}
                   </div>
-                  {suggestedResults.map((result) =>
-                    renderSearchResultRow(result, resultIndex++),
-                  )}
-                </div>
-              ) : null}
-              {suggestionActionResults.length > 0 ? (
-                <div>
-                  <div className={SEARCH_SECTION_TITLE_CLASS}>Actions</div>
-                  {suggestionActionResults.map((result) =>
-                    renderSearchResultRow(result, resultIndex++),
-                  )}
-                </div>
-              ) : null}
-            </>
-          );
-        })()}
+                ) : null}
+                {suggestionActionResults.length > 0 ? (
+                  <div>
+                    <div className={SEARCH_SECTION_TITLE_CLASS}>Actions</div>
+                    {suggestionActionResults.map((result) =>
+                      renderSearchResultRow(result, resultIndex++),
+                    )}
+                  </div>
+                ) : null}
+              </>
+            );
+          })()}
+        </div>
       </div>
     )
   ) : isSearchLoading && searchableResults.length === 0 ? (
-    <SearchResultsSkeleton />
+    <div className="max-h-[min(60vh,32rem)] overflow-y-auto">
+      {currentChannelSearchAction}
+      <SearchResultsSkeleton />
+    </div>
   ) : searchQuery.error instanceof Error && searchableResults.length === 0 ? (
-    <p className="px-4 py-5 text-sm text-destructive">
-      {searchQuery.error.message}
-    </p>
+    <div className="max-h-[min(60vh,32rem)] overflow-y-auto">
+      {currentChannelSearchAction}
+      <p
+        className={cn(
+          "px-4 text-sm text-destructive",
+          currentChannelSearchAction ? "pb-5" : "py-5",
+        )}
+      >
+        {searchQuery.error.message}
+      </p>
+    </div>
   ) : searchableResults.length === 0 ? (
-    <p className="px-4 py-5 text-sm text-muted-foreground">
-      No matches for <span className="font-semibold">{trimmedQuery}</span>.
-    </p>
+    <div className="max-h-[min(60vh,32rem)] overflow-y-auto">
+      {currentChannelSearchAction}
+      <p
+        className={cn(
+          "px-4 text-sm text-muted-foreground",
+          currentChannelSearchAction ? "pb-5" : "py-5",
+        )}
+      >
+        No {scopeChannel ? "messages" : "matches"} for{" "}
+        <span className="font-semibold">{trimmedQuery}</span>
+        {scopeLabel ? (
+          <>
+            {" "}
+            in <span className="font-semibold">{scopeLabel}</span>
+          </>
+        ) : null}
+        .
+      </p>
+    </div>
   ) : (
-    <div className="max-h-96 overflow-y-auto p-1.5" role="listbox">
-      {renderSearchResultSections(searchResultSections)}
+    <div
+      className="max-h-[min(60vh,32rem)] overflow-y-auto"
+      data-testid="search-results-list"
+      role="listbox"
+    >
+      {currentChannelSearchAction}
+      <div className="p-1.5">
+        {renderSearchResultSections(searchResultSections)}
+      </div>
     </div>
   );
-
   return (
     <div className={cn("relative", className)}>
       <Dialog open={isOpen} onOpenChange={handleSearchOpenChange}>
@@ -834,7 +933,7 @@ export function TopbarSearch({
               : "group/search flex h-8 w-full items-center gap-2 rounded-md bg-sidebar-border/35 px-2 text-left text-sm text-sidebar-foreground/55 transition-colors duration-150 ease-out hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-sidebar-ring"
           }
           data-testid="open-search"
-          onClick={openSearchDialog}
+          onClick={() => openSearchDialog(null)}
           ref={triggerRef}
           title="Search everything"
           type="button"
@@ -878,35 +977,20 @@ export function TopbarSearch({
           }}
           showCloseButton={false}
         >
-          <DialogTitle className="sr-only">Search everything</DialogTitle>
-          <div className="flex h-12 items-center gap-3 border-b border-border/70 px-4">
-            <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <div className="relative min-w-0 flex-1">
-              {query.length === 0 ? (
-                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center text-base leading-none">
-                  <SearchPromptPlaceholder />
-                </span>
-              ) : null}
-              <input
-                aria-label="Search everything"
-                autoCapitalize="none"
-                autoCorrect="off"
-                className="relative z-10 w-full min-w-0 bg-transparent text-base text-foreground outline-none"
-                data-testid="search-dialog-input"
-                ref={dialogInputRef}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setSelectedMenuIndex(0);
-                }}
-                onKeyDown={handleDialogInputKeyDown}
-                spellCheck={false}
-                value={query}
-              />
-            </div>
-            <kbd className="shrink-0 rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
-              ESC
-            </kbd>
-          </div>
+          <DialogTitle className="sr-only">
+            {scopeLabel ? `Search in ${scopeLabel}` : "Search everything"}
+          </DialogTitle>
+          <SearchDialogInputRow
+            inputRef={dialogInputRef}
+            onChange={(nextQuery) => {
+              setQuery(nextQuery);
+              setSelectedMenuIndex(0);
+            }}
+            onKeyDown={handleDialogInputKeyDown}
+            onRemoveScope={removeChannelScope}
+            query={query}
+            scopeLabel={scopeLabel}
+          />
           {searchResultContent}
         </DialogContent>
       </Dialog>

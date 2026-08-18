@@ -34,6 +34,7 @@ fn bare_agent_record(
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -98,8 +99,12 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
 
     let owner = nostr::Keys::generate();
     let agent = nostr::Keys::generate();
-    let event = build_agent_archive_request(&owner, &agent.public_key().to_hex())
-        .expect("build archive request");
+    let event = build_agent_archive_request(
+        &owner,
+        &agent.public_key().to_hex(),
+        Some("persona-reviewer"),
+    )
+    .expect("build archive request");
     let json: serde_json::Value = serde_json::from_str(&event.as_json()).unwrap();
     let tags = json["tags"].as_array().unwrap();
 
@@ -107,6 +112,7 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
     assert_eq!(event.pubkey, owner.public_key());
     assert!(event.verify_id());
     assert!(event.verify_signature());
+    assert_eq!(event.content, r#"{"persona_id":"persona-reviewer"}"#);
     assert!(tags.iter().any(|tag| {
         tag.as_array().is_some_and(|parts| {
             parts.first().and_then(serde_json::Value::as_str) == Some("p")
@@ -617,6 +623,11 @@ fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_b
     assert_eq!(payload["respond_to"], "owner-only");
     assert_eq!(payload["respond_to_allowlist"], serde_json::json!([]));
     assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, false
+    ));
+
+    record.provider_policy_pending = true;
+    assert!(provider_access::needs_reconciliation_with_policy(
         &record, false
     ));
 

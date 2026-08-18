@@ -44,7 +44,7 @@ export type WelcomeTeamStarterDefinition = Readonly<{
 export const WELCOME_TEAM_STARTERS = [
   { name: "Fizz", personaId: "builtin:fizz", role: "lead" },
   { name: "Honey", personaId: "builtin:honey", role: "teammate" },
-  { name: "Bumble", personaId: "builtin:bumble", role: "teammate" },
+  { name: "Pollen", personaId: "builtin:bumble", role: "teammate" },
 ] as const satisfies readonly WelcomeTeamStarterDefinition[];
 
 export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
@@ -370,11 +370,11 @@ async function provisionWelcomeTeam(
     const created = await createManagedAgent(desired);
     agents.push(created.agent);
   }
-  const [lead, honey, bumble] = agents;
-  if (!lead || !honey || !bumble) {
+  const [lead, honey, pollen] = agents;
+  if (!lead || !honey || !pollen) {
     throw new Error("Welcome Team provisioning did not return every starter.");
   }
-  const welcomeAgents: WelcomeTeamAgents = [lead, honey, bumble];
+  const welcomeAgents: WelcomeTeamAgents = [lead, honey, pollen];
   const leadPubkey = lead.pubkey;
   for (const index of [1, 2] as const) {
     const teammate = welcomeAgents[index];

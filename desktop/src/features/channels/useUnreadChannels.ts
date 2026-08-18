@@ -38,11 +38,8 @@ import { useStableMap, useStableSet } from "@/shared/hooks/useStableReference";
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 import { DM_NOTIFIABLE_EVENT_KINDS } from "./isDmNotifiableKind";
 import {
-  activityScopeKey,
   addThreadActivityItems,
   projectActivityForScope,
-  readActivityFromStorage,
-  writeActivityToStorage,
   type ThreadActivityItem,
 } from "@/features/channels/threadActivityStorage";
 export type { ThreadActivityItem } from "@/features/channels/threadActivityStorage";
@@ -55,6 +52,7 @@ export {
   writeActivityToStorage,
 } from "@/features/channels/threadActivityStorage";
 import { useObservedUnreadPersistence } from "@/features/channels/useObservedUnreadPersistence";
+import { useThreadActivityPersistence } from "@/features/channels/useThreadActivityPersistence";
 
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
@@ -147,14 +145,6 @@ export function useUnreadChannels(
   const normalizedRelayUrl = relayUrlOption
     ? normalizeRelayUrl(relayUrlOption)
     : "";
-  // Single identity for the in-memory thread-activity buffer — computed once
-  // per render and used at reset, both writers, and the return fence. The
-  // helper returns "" when either value is absent, which never matches a valid
-  // loaded scope, so the fence returns [] until the buffer is seeded.
-  const currentActivityScope = activityScopeKey(
-    normalizedPubkey,
-    normalizedRelayUrl,
-  );
 
   const {
     getEffectiveTimestamp,
@@ -227,12 +217,10 @@ export function useUnreadChannels(
   mutedChannelIdsRef.current = mutedChannelIdsOption ?? new Set();
 
   // Thread reply events that triggered notifications — surfaced in the Home
-  // activity feed as synthetic FeedItems.
+  // activity feed as synthetic FeedItems. The buffer is the source of truth
+  // between coalesced writes; useThreadActivityPersistence owns the loaded
+  // scope, the write timer, flush, and hydration.
   const threadActivityRef = React.useRef<ThreadActivityItem[]>([]);
-  // Tracks the (pubkey:relayUrl) scope currently loaded into threadActivityRef.
-  // Writers guard against this before merging so in-flight writes from a prior
-  // scope cannot corrupt the new one; renders return [] until it matches.
-  const threadActivityScopeRef = React.useRef<string>("");
 
   // Tracks which channels we've already issued a catch-up REQ for this
   // session. Prevents re-fetching on every channels-list refetch, while still
@@ -266,6 +254,15 @@ export function useUnreadChannels(
     { onPruned: bumpLatestVersion },
   );
 
+  // Thread-activity persistence: coalesced writes, pagehide/visibility flush,
+  // hydration + legacy-key cleanup. Owns the loaded scope for the buffer above.
+  const activityPersistence = useThreadActivityPersistence(
+    normalizedPubkey,
+    normalizedRelayUrl,
+    threadActivityRef,
+  );
+  const currentActivityScope = activityPersistence.currentScope;
+
   // Reset all in-session state when the identity or relay changes. In-memory
   // caches are cleared; persisted stores are loaded for the new pubkey (so
   // forced-unread, participation, etc. are correct for the new identity).
@@ -285,11 +282,6 @@ export function useUnreadChannels(
       ? mentionedStore.read(pubkey)
       : new Set();
     mutedRootIdsRef.current = pubkey ? mutedStore.read(pubkey) : new Set();
-    threadActivityRef.current =
-      normalizedPubkey && normalizedRelayUrl
-        ? readActivityFromStorage(normalizedPubkey, normalizedRelayUrl)
-        : [];
-    threadActivityScopeRef.current = currentActivityScope;
     bumpLatestVersion();
     bumpMembershipVersion();
   }, [pubkey, relayClient, normalizedRelayUrl]);
@@ -490,15 +482,10 @@ export function useUnreadChannels(
 
   const handleThreadReplyNotification = React.useCallback(
     (channelId: string, event: RelayEvent) => {
-      // Guard: don't merge into a ref whose scope has drifted from the current
-      // identity. Also reject an empty scope — activityScopeKey() returns ""
-      // when pubkey or relay is absent, and "" !== "" is false, so without this
-      // guard a writer could fire before the first valid scope is established.
-      if (
-        !currentActivityScope ||
-        threadActivityScopeRef.current !== currentActivityScope
-      )
-        return;
+      // Guard: don't merge into a buffer whose scope has drifted from the
+      // current identity. isScopeLoaded() also rejects an empty scope, so a
+      // writer can never fire before the first valid scope is seeded.
+      if (!activityPersistence.isScopeLoaded()) return;
 
       const channelName =
         channels.find((ch) => ch.id === channelId)?.name ?? "";
@@ -516,25 +503,13 @@ export function useUnreadChannels(
       if (!added.didAdd) return;
       const didRecordMentionedRoot = recordMentionedRoot(event);
       threadActivityRef.current = added.items;
-      if (normalizedPubkey !== null && normalizedRelayUrl) {
-        writeActivityToStorage(
-          normalizedPubkey,
-          normalizedRelayUrl,
-          added.items,
-        );
-      }
+      activityPersistence.schedule(currentActivityScope);
       if (didRecordMentionedRoot) {
         bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
-    [
-      channels,
-      currentActivityScope,
-      normalizedPubkey,
-      normalizedRelayUrl,
-      recordMentionedRoot,
-    ],
+    [channels, currentActivityScope, activityPersistence, recordMentionedRoot],
   );
 
   const muteThread = React.useCallback(
@@ -785,13 +760,7 @@ export function useUnreadChannels(
         );
         if (added.didAdd) {
           threadActivityRef.current = added.items;
-          if (normalizedPubkey && normalizedRelayUrl) {
-            writeActivityToStorage(
-              normalizedPubkey,
-              normalizedRelayUrl,
-              added.items,
-            );
-          }
+          activityPersistence.schedule(currentActivityScope);
           didAdvance = true;
         }
       }
@@ -1009,7 +978,7 @@ export function useUnreadChannels(
     mentionedRootIds,
     recordThreadInteraction,
     threadActivityItems: projectActivityForScope(
-      threadActivityScopeRef.current,
+      activityPersistence.scopeLoadedRef.current,
       currentActivityScope,
       threadActivityRef.current,
     ),

@@ -5,7 +5,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError,
     },
 };
 
@@ -64,7 +64,7 @@ impl PlaybackProbe {
     }
 
     pub(super) fn set_synthesis_in_flight(&self, in_flight: bool) {
-        let _ops = super::lock_player_ops(&self.player_ops);
+        let _ops = lock_player_ops(&self.player_ops);
         self.synthesis_in_flight.store(in_flight, Ordering::Release);
     }
 
@@ -202,7 +202,7 @@ pub(super) fn request_active_speaker_cancel(
     let Some(player) = playback_probe.player() else {
         return false;
     };
-    let _ops = super::lock_player_ops(&playback_probe.player_ops);
+    let _ops = lock_player_ops(&playback_probe.player_ops);
     let playback_live =
         !player.empty() || playback_probe.synthesis_in_flight.load(Ordering::Acquire);
     request_active_speaker_cancel_while_locked(
@@ -470,6 +470,88 @@ pub(super) fn retain_cancelled_text(
 
 fn log_cancelled_route(route_id: u64, reason: &str) {
     eprintln!("buzz-desktop: tts stage=queue status=dropped reason={reason} route_id={route_id}");
+}
+
+/// Check for cancel or shutdown. Returns `true` if the caller should break/continue.
+/// On cancel: drains the text queue and clears the cancel flag.
+///
+/// `player` pairs the Player with the `player_ops` mutex shared with the
+/// barge-in monitor thread; the cancel/shutdown clear runs under that lock so
+/// it is serialized with the monitor's stale-branch re-check (see the monitor
+/// block in `tts_worker`).
+pub(super) fn handle_cancel_or_shutdown(
+    cancel_signals: CancelSignals<'_>,
+    shutdown: &AtomicBool,
+    tts_active: &AtomicBool,
+    text_state: CancelTextState<'_>,
+    voice_change_ack: &VoiceChangeAck,
+    active_route_id: Option<u64>,
+    player: Option<(&rodio::Player, &Mutex<()>)>,
+) -> bool {
+    let (cancel, voice_cancel) = cancel_signals;
+    let (text_rx, deferred_text, current_text) = text_state;
+    if shutdown.load(Ordering::Acquire) {
+        eprintln!(
+            "buzz-desktop: tts stage=cancellation reason=shutdown route_id={}",
+            active_route_id.unwrap_or(0)
+        );
+        if let Some((p, ops)) = player {
+            let _ops = lock_player_ops(ops);
+            p.clear();
+        }
+        tts_active.store(false, Ordering::Release);
+        return true;
+    }
+    if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
+        // Serialize with begin_voice_change so the generation boundary and
+        // cancel consumption are observed as one transition.
+        let pending_voice_change = voice_change_ack
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Consume at the serialization point. A later barge-in remains true
+        // for the next pass instead of being overwritten after queue cleanup.
+        let barge_in = cancel.swap(false, Ordering::AcqRel);
+        voice_cancel.store(false, Ordering::Release);
+        eprintln!(
+            "buzz-desktop: tts stage=cancellation reason={} route_id={}",
+            if barge_in { "barge_in" } else { "voice_switch" },
+            active_route_id.unwrap_or(0)
+        );
+        let preserve_generation = (!barge_in)
+            .then(|| {
+                pending_voice_change
+                    .as_ref()
+                    .map(|pending| pending.generation)
+            })
+            .flatten();
+        retain_cancelled_text(deferred_text, current_text, text_rx, preserve_generation);
+        if let Some((p, ops)) = player {
+            let _ops = lock_player_ops(ops);
+            // `Player::clear()` removes queued sources AND pauses the player
+            // (rodio 0.22 `clear()` ends with `self.pause()`). With one
+            // persistent Player for the worker's lifetime, the un-pause is
+            // mandatory: without `play()`, every append after a barge-in
+            // would queue silently forever.
+            p.clear();
+            p.play();
+            // Consume the flag under the lock: once released with
+            // `cancel == false`, the monitor's stale branch no-ops instead
+            // of clearing the fresh post-cancel utterance.
+        }
+        tts_active.store(false, Ordering::Release);
+        return true;
+    }
+    false
+}
+
+/// Acquire the `player_ops` lock, recovering from poison.
+///
+/// The data under the mutex is `()` — it only serializes Player mutations —
+/// so a panicked holder leaves nothing inconsistent to observe and recovery
+/// is always safe. Without this, a worker panic would wedge the monitor (or
+/// vice versa) on `unwrap()`.
+pub(super) fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
+    ops.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]

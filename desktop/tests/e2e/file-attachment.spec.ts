@@ -72,6 +72,56 @@ async function choosePhoto(page: Page) {
   });
 }
 
+const PHOTO_FILE = {
+  buffer: Buffer.from("photo"),
+  mimeType: "image/png",
+  name: "photo.png",
+};
+
+async function uploadCommandCount(page: Page) {
+  return page.evaluate(
+    () =>
+      (
+        (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+          .__BUZZ_E2E_COMMANDS__ ?? []
+      ).filter((command) => command === "upload_media_bytes_raw").length,
+  );
+}
+
+test("picker survives cancel, same-file retry, and multiple selection", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const attach = page.getByRole("button", { name: "Attach file" });
+
+  // Model cancel/no selection, then immediately reopen. The composer must
+  // reuse its one mounted input rather than creating competing detached ones.
+  const [canceledChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    attach.click(),
+  ]);
+  await canceledChooser.setFiles([]);
+
+  await choosePhoto(page);
+  await expect.poll(() => uploadCommandCount(page)).toBe(1);
+
+  // Reset-before-open is load-bearing: without it browsers suppress `change`
+  // when the same path remains selected.
+  await choosePhoto(page);
+  await expect.poll(() => uploadCommandCount(page)).toBe(2);
+
+  const [multipleChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    attach.click(),
+  ]);
+  await multipleChooser.setFiles([
+    PHOTO_FILE,
+    { ...PHOTO_FILE, buffer: Buffer.from("second photo"), name: "other.png" },
+  ]);
+  await expect.poll(() => uploadCommandCount(page)).toBe(4);
+});
+
 test("photos upload before Send without a queued spoiler control", async ({
   page,
 }) => {

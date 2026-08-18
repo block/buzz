@@ -89,6 +89,10 @@ export function resolve(specifier, context, nextResolve) {
     const resolved = path.join(repoRoot, "preview-features.json");
     return nextResolve(toFileSpecifier(resolved), context);
   }
+  if (specifier === "@model-capabilities-manifest") {
+    const resolved = path.join(repoRoot, "scripts", "model-capabilities.json");
+    return nextResolve(toFileSpecifier(resolved), context);
+  }
   if (specifier.startsWith("@/")) {
     const stripped = specifier.slice(2);
     // Preserve explicit extensions (.mjs, .js, .json, .ts, etc.). The bundler

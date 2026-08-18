@@ -15,6 +15,7 @@ import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
+import { useAppShellKeyboardShortcuts } from "@/app/useAppShellKeyboardShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useChannelActivityProjection } from "@/app/useChannelActivityProjection";
@@ -89,8 +90,7 @@ import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBou
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
-import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
-import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
+import { useAppDeepLinks } from "@/shared/useAppDeepLinks";
 import { SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -127,6 +127,8 @@ export function AppShell() {
     null,
   );
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
+  const [scopeSearchFocusRequest, setScopeSearchFocusRequest] =
+    React.useState(0);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
   const [isSendFeedbackOpen, setIsSendFeedbackOpen] = React.useState(false);
   const mainInsetRef = React.useRef<HTMLElement>(null);
@@ -494,6 +496,10 @@ export function AppShell() {
     setSearchFocusRequest((request) => request + 1);
     void refetchChannels();
   }, [refetchChannels]);
+  const handleOpenChannelSearch = React.useCallback(() => {
+    setScopeSearchFocusRequest((request) => request + 1);
+    void refetchChannels();
+  }, [refetchChannels]);
 
   const handleBrowseChannelJoin = React.useCallback(
     async (channelId: string) => {
@@ -634,76 +640,24 @@ export function AppShell() {
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://message` deep links only from the main window; the companion is dedicated to its active Huddle route.
-  useMessageDeepLinks(!isHuddleRoom);
+  // Dispatch `buzz://` deep links only from the main window; the companion is dedicated to its active Huddle route.
+  useAppDeepLinks(!isHuddleRoom);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
   );
-  React.useLayoutEffect(() => {
-    if (settingsOpen || isHuddleRoom) {
-      return;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (!hasPrimaryShortcutModifier(event) || event.altKey || event.repeat) {
-        return;
-      }
-
-      // A focused surface may claim the shortcut first — e.g. the composer
-      // consumes ⌘K to open the link editor when text is selected. Its
-      // element-level handler runs before this window-level bubble listener
-      // and calls `preventDefault()`; respect that instead of also opening
-      // the global dialog.
-      if (event.defaultPrevented) {
-        return;
-      }
-
-      const key = event.key.toLowerCase();
-      if (key === "k" && !event.shiftKey) {
-        event.preventDefault();
-        handleOpenSearch();
-        return;
-      }
-
-      if (key === "k" && event.shiftKey) {
-        event.preventDefault();
-        void goNewMessage();
-        return;
-      }
-
-      if (key === "n" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenCreateChannel();
-        return;
-      }
-
-      if (key === "o" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenBrowseChannels();
-        return;
-      }
-
-      if (key === "a" && event.shiftKey) {
-        event.preventDefault();
-        void goHome();
-        return;
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [
-    handleOpenBrowseChannels,
-    handleOpenCreateChannel,
-    handleOpenSearch,
-    goNewMessage,
-    goHome,
-    isHuddleRoom,
-    settingsOpen,
-  ]);
+  useAppShellKeyboardShortcuts({
+    activeChannelId: selectedView === "channel" ? selectedChannelId : null,
+    canSearchCurrentChannel:
+      selectedView === "channel" && Boolean(activeChannel),
+    disabled: settingsOpen || isHuddleRoom,
+    onBrowseChannels: handleOpenBrowseChannels,
+    onCreateChannel: handleOpenCreateChannel,
+    onGoHome: goHome,
+    onNewMessage: goNewMessage,
+    onSearchCurrentChannel: handleOpenChannelSearch,
+    onSearchEverything: handleOpenSearch,
+  });
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
@@ -788,7 +742,7 @@ export function AppShell() {
               />
             ) : null}
             <SidebarProvider
-              className="relative z-10 min-h-0 flex-1 flex-col overflow-visible"
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>
@@ -897,7 +851,10 @@ export function AppShell() {
                         onSelectChannel={handleSidebarChannelSelect}
                         onOpenSearchResult={handleOpenSearchResult}
                         searchChannels={channels}
-                        searchFocusRequest={searchFocusRequest}
+                        searchFocusRequests={[
+                          searchFocusRequest,
+                          scopeSearchFocusRequest,
+                        ]}
                         onSelectHome={() => void goHome()}
                         onSelectProjects={() => void goProjects()}
                         onSelectPulse={() => void goPulse()}
@@ -983,6 +940,7 @@ export function AppShell() {
                   onSelectChannel={(channelId) => {
                     void goChannel(channelId);
                   }}
+                  relayUrl={communitiesHook.activeCommunity?.relayUrl}
                 />
                 <SendFeedbackController
                   onOpenChange={setIsSendFeedbackOpen}
