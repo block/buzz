@@ -11,22 +11,36 @@ function formatChannelLabel(ch: Channel): string {
 
 type ChannelComboboxProps = {
   channels: Channel[];
+  defaultOpen?: boolean;
   disabled?: boolean;
   id?: string;
   onChange: (value: string) => void;
+  readOnly?: boolean;
+  required?: boolean;
+  variant?: "header" | "field";
   value: string;
 };
 
 export function ChannelCombobox({
   channels,
+  defaultOpen = false,
   disabled,
   id,
   onChange,
+  readOnly = false,
+  required = false,
+  variant = "header",
   value,
 }: ChannelComboboxProps) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!defaultOpen || readOnly) return;
+    const frame = window.requestAnimationFrame(() => setOpen(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [defaultOpen, readOnly]);
 
   const selected = channels.find((c) => c.id === value);
 
@@ -83,15 +97,18 @@ export function ChannelCombobox({
   }
 
   return (
-    <Popover onOpenChange={handleOpenChange} open={open}>
+    <Popover onOpenChange={handleOpenChange} open={open && !readOnly}>
       <PopoverTrigger asChild>
         <button
           aria-expanded={open}
+          aria-label="Channel"
+          aria-required={required}
           className={cn(
             "flex h-9 w-full items-center justify-between rounded-md border border-input bg-transparent px-3 text-sm shadow-xs transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
             !selected && "text-muted-foreground",
+            variant === "header" && "border-0 bg-transparent px-0 shadow-none",
           )}
-          disabled={disabled}
+          disabled={disabled || readOnly}
           id={id}
           role="combobox"
           type="button"

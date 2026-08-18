@@ -1,16 +1,12 @@
 import { Trash2 } from "lucide-react";
 
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
-import { ACTION_LABELS, ACTION_TYPES } from "./workflowFormTypes";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
-import type {
-  ActionType,
-  StepFormState,
-  TriggerType,
-} from "./workflowFormTypes";
+import type { StepFormState, TriggerType } from "./workflowFormTypes";
 
 function BackendSupportHint({ action }: { action: StepFormState["action"] }) {
   switch (action) {
@@ -102,8 +98,8 @@ function StepConfigFields({
               value={step.channel ?? ""}
             />
             <p className="text-xs text-muted-foreground">
-              Leave empty to use the trigger channel. Webhook runs and manual
-              Trigger runs need an explicit channel override.
+              Defaults to the trigger channel. Webhook and manual triggers
+              require a channel.
             </p>
             {triggerType === "webhook" && !(step.channel ?? "").trim() ? (
               <p className="text-xs text-amber-700">
@@ -149,9 +145,9 @@ function StepConfigFields({
       );
     case "call_webhook":
       return (
-        <div className="space-y-3">
+        <div className="space-y-4">
           <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-url`}>URL</FieldLabel>
+            <FieldLabel htmlFor={`${prefix}-url`}>Endpoint URL</FieldLabel>
             <Input
               autoCapitalize="off"
               disabled={disabled}
@@ -169,9 +165,7 @@ function StepConfigFields({
             ) : null}
           </div>
           <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-method`}>
-              Method (optional)
-            </FieldLabel>
+            <FieldLabel htmlFor={`${prefix}-method`}>HTTP method</FieldLabel>
             <FormSelect
               disabled={disabled}
               id={`${prefix}-method`}
@@ -192,7 +186,9 @@ function StepConfigFields({
             stepId={step.id || prefix}
           />
           <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-body`}>Body (optional)</FieldLabel>
+            <FieldLabel htmlFor={`${prefix}-body`}>
+              Request body (optional)
+            </FieldLabel>
             <Textarea
               autoCapitalize="off"
               className="min-h-[60px] resize-y font-mono text-xs"
@@ -294,7 +290,13 @@ function StepConfigFields({
   }
 }
 
+function SectionHeading({ title }: { title: string }) {
+  return <h4 className="text-sm font-semibold text-foreground">{title}</h4>;
+}
+
 export function WorkflowStepCard({
+  bare = false,
+  showHeader = true,
   index,
   disabled,
   onRemove,
@@ -302,6 +304,8 @@ export function WorkflowStepCard({
   step,
   triggerType,
 }: {
+  bare?: boolean;
+  showHeader?: boolean;
   index: number;
   disabled?: boolean;
   onRemove: () => void;
@@ -312,78 +316,61 @@ export function WorkflowStepCard({
   const prefix = `wf-step-${index}`;
 
   return (
-    <div className="space-y-3 rounded-lg border border-border/70 bg-muted/10 p-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-muted-foreground">
-          Step {index + 1}
-        </span>
-        <Button
-          aria-label="Remove step"
-          className="h-7 w-7"
-          disabled={disabled}
-          onClick={onRemove}
-          size="icon"
-          type="button"
-          variant="ghost"
-        >
-          <Trash2 className="h-4 w-4 text-muted-foreground" />
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-id`}>Step ID</FieldLabel>
-          <Input
-            autoCapitalize="off"
+    <div
+      className={cn(
+        "space-y-0",
+        !bare && "rounded-lg border border-border/70 bg-muted/10 p-3",
+      )}
+    >
+      {showHeader ? (
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-muted-foreground">
+            Step {index + 1}
+          </span>
+          <Button
+            aria-label="Remove step"
+            className="h-7 w-7"
             disabled={disabled}
-            id={`${prefix}-id`}
-            onChange={(event) => onUpdate({ ...step, id: event.target.value })}
-            placeholder="unique_step_id"
-            value={step.id}
-          />
+            onClick={onRemove}
+            size="icon"
+            type="button"
+            variant="ghost"
+          >
+            <Trash2 className="h-4 w-4 text-muted-foreground" />
+          </Button>
         </div>
+      ) : null}
+
+      <section className="space-y-4 pb-5">
+        <StepConfigFields
+          disabled={disabled}
+          onUpdate={onUpdate}
+          prefix={prefix}
+          step={step}
+          triggerType={triggerType}
+        />
+      </section>
+
+      <section className="space-y-4 border-t border-border/50 py-5">
+        <SectionHeading title="Run controls" />
         <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-name`}>
-            Step name (optional)
+          <FieldLabel htmlFor={`${prefix}-condition`}>
+            Condition (optional)
           </FieldLabel>
           <Input
             autoCapitalize="off"
             disabled={disabled}
-            id={`${prefix}-name`}
+            id={`${prefix}-condition`}
             onChange={(event) =>
-              onUpdate({ ...step, name: event.target.value })
+              onUpdate({ ...step, condition: event.target.value })
             }
-            placeholder="Human-friendly label"
-            value={step.name ?? ""}
+            placeholder='e.g. str_contains(trigger_text, "deploy")'
+            value={step.condition ?? ""}
           />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-action`}>Action</FieldLabel>
-          <FormSelect
-            disabled={disabled}
-            id={`${prefix}-action`}
-            onChange={(value) => {
-              const next = { ...step, action: value as ActionType };
-              if (value === "call_webhook" && !next.method) {
-                next.method = "POST";
-              }
-              onUpdate(next);
-            }}
-            value={step.action}
-          >
-            {ACTION_TYPES.map((action) => (
-              <option key={action} value={action}>
-                {ACTION_LABELS[action]}
-              </option>
-            ))}
-          </FormSelect>
         </div>
         <div className="space-y-1.5">
           <FieldLabel htmlFor={`${prefix}-timeout-secs`}>
-            Timeout seconds (optional)
+            Timeout (seconds)
           </FieldLabel>
           <Input
             autoCapitalize="off"
@@ -396,32 +383,42 @@ export function WorkflowStepCard({
             placeholder="e.g. 300"
             value={step.timeoutSecs ?? ""}
           />
+          <p className="text-xs text-muted-foreground">
+            Defaults to the workflow timeout.
+          </p>
         </div>
-      </div>
+      </section>
 
-      <div className="space-y-1.5">
-        <FieldLabel htmlFor={`${prefix}-condition`}>
-          Run condition (optional)
-        </FieldLabel>
-        <Input
-          autoCapitalize="off"
-          disabled={disabled}
-          id={`${prefix}-condition`}
-          onChange={(event) =>
-            onUpdate({ ...step, condition: event.target.value })
-          }
-          placeholder='e.g. str_contains(trigger_text, "deploy")'
-          value={step.condition ?? ""}
-        />
-      </div>
-
-      <StepConfigFields
-        disabled={disabled}
-        onUpdate={onUpdate}
-        prefix={prefix}
-        step={step}
-        triggerType={triggerType}
-      />
+      <section className="space-y-4 border-t border-border/50 pt-5">
+        <SectionHeading title="Step details" />
+        <div className="space-y-1.5">
+          <FieldLabel htmlFor={`${prefix}-name`}>Name (optional)</FieldLabel>
+          <Input
+            autoCapitalize="off"
+            disabled={disabled}
+            id={`${prefix}-name`}
+            onChange={(event) =>
+              onUpdate({ ...step, name: event.target.value })
+            }
+            placeholder="e.g. Notify deployment channel"
+            value={step.name ?? ""}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <FieldLabel htmlFor={`${prefix}-id`}>Step ID</FieldLabel>
+          <Input
+            autoCapitalize="off"
+            disabled={disabled}
+            id={`${prefix}-id`}
+            onChange={(event) => onUpdate({ ...step, id: event.target.value })}
+            placeholder="unique_step_id"
+            value={step.id}
+          />
+          <p className="text-xs text-muted-foreground">
+            Used in configuration and run history.
+          </p>
+        </div>
+      </section>
     </div>
   );
 }

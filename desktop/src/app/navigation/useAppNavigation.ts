@@ -175,6 +175,47 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goNewWorkflow = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows",
+          search: { pane: "trigger", view: "create" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goEditWorkflow = React.useCallback(
+    (workflowId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows/$workflowId",
+          params: { workflowId },
+          search: { pane: "trigger", view: "edit" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goDuplicateWorkflow = React.useCallback(
+    (workflowId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows/$workflowId",
+          params: { workflowId },
+          search: { pane: "trigger", view: "duplicate" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goChannel = React.useCallback(
     (
       channelId: string,
@@ -330,9 +371,12 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goDuplicateWorkflow,
+    goEditWorkflow,
     goForumPost,
     goHome,
     goNewMessage,
+    goNewWorkflow,
     goProject,
     goProjects,
     goPulse,

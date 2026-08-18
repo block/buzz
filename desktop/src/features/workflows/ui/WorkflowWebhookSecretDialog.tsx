@@ -10,7 +10,8 @@ import {
 type WorkflowWebhookSecretDialogProps = {
   onOpenChange: (open: boolean) => void;
   open: boolean;
-  relayHttpUrl: string;
+  relayHttpUrl: string | null;
+  relayUrlError: string | null;
   webhookSecret: string;
   workflowId: string;
 };
@@ -19,10 +20,13 @@ export function WorkflowWebhookSecretDialog({
   onOpenChange,
   open,
   relayHttpUrl,
+  relayUrlError,
   webhookSecret,
   workflowId,
 }: WorkflowWebhookSecretDialogProps) {
-  const webhookUrl = `${relayHttpUrl}/hooks/${workflowId}`;
+  const webhookUrl = relayHttpUrl
+    ? `${relayHttpUrl}/hooks/${workflowId}`
+    : null;
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -30,8 +34,8 @@ export function WorkflowWebhookSecretDialog({
         <DialogHeader>
           <DialogTitle>Webhook Ready</DialogTitle>
           <DialogDescription>
-            This secret is only shown now. If it is lost, re-save the workflow
-            to generate a new one.
+            This secret is only shown now and cannot be recovered later. Copy it
+            before closing this dialog.
           </DialogDescription>
         </DialogHeader>
 
@@ -40,10 +44,26 @@ export function WorkflowWebhookSecretDialog({
             <p className="text-xs font-medium text-muted-foreground">
               Webhook URL
             </p>
-            <pre className="overflow-x-auto rounded-md bg-muted/50 p-3 font-mono text-xs">
-              {webhookUrl}
-            </pre>
-            <CopyButton label="Copy URL" value={webhookUrl} />
+            {webhookUrl ? (
+              <>
+                <pre className="overflow-x-auto rounded-md bg-muted/50 p-3 font-mono text-xs">
+                  {webhookUrl}
+                </pre>
+                <CopyButton label="Copy URL" value={webhookUrl} />
+              </>
+            ) : (
+              <p
+                className={
+                  relayUrlError
+                    ? "rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+                    : "rounded-md bg-muted/50 p-3 text-sm text-muted-foreground"
+                }
+              >
+                {relayUrlError
+                  ? `The workflow was saved, but its webhook URL could not be loaded: ${relayUrlError}`
+                  : "Loading webhook URL…"}
+              </p>
+            )}
           </div>
 
           <div className="space-y-1.5">
