@@ -187,7 +187,8 @@ export function formStateToYaml(state: WorkflowFormState): string {
   const trigger: Record<string, unknown> = { on: state.trigger.on };
   if (
     (state.trigger.on === "message_posted" ||
-      state.trigger.on === "diff_posted") &&
+      state.trigger.on === "diff_posted" ||
+      state.trigger.on === "reaction_added") &&
     state.trigger.filter
   ) {
     trigger.filter = state.trigger.filter;
@@ -245,7 +246,7 @@ const TOP_LEVEL_KEYS = new Set([
 ]);
 const TRIGGER_KEYS: Record<TriggerType, ReadonlySet<string>> = {
   message_posted: new Set(["on", "filter"]),
-  reaction_added: new Set(["on", "emoji"]),
+  reaction_added: new Set(["on", "emoji", "filter"]),
   diff_posted: new Set(["on", "filter"]),
   webhook: new Set(["on"]),
   schedule: new Set(["on", "cron", "interval"]),

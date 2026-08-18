@@ -23,7 +23,7 @@ function normalizeBackendDefaults(value) {
 
 const acceptedFixtures = [
   `name: Notify\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify_1\n    action: send_message\n    text: hello\n`,
-  `name: React\ndescription: React to a message\nenabled: false\ntrigger:\n  on: reaction_added\n  emoji: eyes\nsteps:\n  - id: react\n    name: Add reaction\n    timeout_secs: 30\n    action: add_reaction\n    emoji: white_check_mark\n`,
+  `name: React\ndescription: React to a message\nenabled: false\ntrigger:\n  on: reaction_added\n  emoji: eyes\n  filter: trigger_message_id == "abc123"\nsteps:\n  - id: react\n    name: Add reaction\n    timeout_secs: 30\n    action: add_reaction\n    emoji: white_check_mark\n`,
   `name: Webhook\ntrigger:\n  on: webhook\nsteps:\n  - id: call\n    action: call_webhook\n    url: https://example.com/hook\n    method: PATCH\n    headers:\n      Authorization: secret\n      X-Trace: trace\n    body: '{"ok":true}'\n`,
   `name: Legacy actions\ntrigger:\n  on: diff_posted\n  filter: str_contains(trigger_text, "deploy")\nsteps:\n  - id: dm\n    action: send_dm\n    to: abc123\n    text: hello\n  - id: approval\n    action: request_approval\n    from: manager\n    message: Approve?\n    timeout: 24h\n  - id: topic\n    action: set_channel_topic\n    topic: Deployed\n  - id: wait\n    action: delay\n    duration: 5m\n`,
 ];
