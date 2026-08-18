@@ -90,6 +90,41 @@ fn sanitize_upload_filename(file_path: &str) -> String {
     }
 }
 
+fn text_mime_from_filename(filename: &str, bytes: &[u8]) -> Option<&'static str> {
+    if bytes.contains(&0) || std::str::from_utf8(bytes).is_err() {
+        return None;
+    }
+    let extension = std::path::Path::new(filename)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "md" | "markdown" | "mdown" | "mkd" => Some("text/markdown"),
+        "txt" | "log" => Some("text/plain"),
+        "csv" => Some("text/csv"),
+        "json" | "jsonc" | "jsonl" => Some("application/json"),
+        "c" | "cc" | "cpp" | "cs" | "css" | "go" | "h" | "hpp" | "java" | "js" | "jsx" | "kt"
+        | "kts" | "lua" | "php" | "pl" | "ps1" | "py" | "rb" | "rs" | "sh" | "sql" | "swift"
+        | "toml" | "ts" | "tsx" | "xml" | "yaml" | "yml" => Some("text/plain"),
+        _ => None,
+    }
+}
+
+fn detect_upload_mime(bytes: &[u8], filename: &str) -> String {
+    infer::get(bytes)
+        .map(|t| t.mime_type().to_string())
+        .or_else(|| text_mime_from_filename(filename, bytes).map(str::to_string))
+        .unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+fn preserve_client_text_mime(descriptor: &mut BlobDescriptor, upload_mime: &str) {
+    if descriptor.mime_type == "application/octet-stream"
+        && (upload_mime.starts_with("text/") || upload_mime == "application/json")
+    {
+        descriptor.mime_type = upload_mime.to_string();
+    }
+}
+
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
 /// The event includes:
@@ -1124,11 +1159,10 @@ impl BuzzClient {
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
         let filename = sanitize_upload_filename(file_path);
 
-        // 2. Detect MIME from magic bytes. Unknown payloads are generic files;
-        // the relay applies the authoritative deny-list before storing them.
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
+        // 2. Prefer magic bytes, then use a text filename hint only for valid
+        // UTF-8 without NUL bytes. The relay remains authoritative for binary
+        // validation, while Markdown and source files keep useful metadata.
+        let mime = detect_upload_mime(&bytes, &filename);
 
         // 3. Size check
         let max = if mime.starts_with("video/") {
@@ -1230,6 +1264,7 @@ impl BuzzClient {
         // itself is not retried; only transient failures on the selected legacy endpoint are.
         match result {
             Ok(mut desc) => {
+                preserve_client_text_mime(&mut desc, &mime);
                 desc.filename = Some(filename);
                 return Ok(desc);
             }
@@ -1280,6 +1315,7 @@ impl BuzzClient {
                 }
             })
             .await?;
+        preserve_client_text_mime(&mut desc, &mime);
         desc.filename = Some(filename);
         Ok(desc)
     }
@@ -2280,7 +2316,7 @@ mod retry_policy_tests {
             let mut request = vec![0u8; 8192];
             let read = stream.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
-            assert!(request.contains("content-type: application/octet-stream"));
+            assert!(request.contains("content-type: text/markdown"));
 
             let body = r#"{"url":"https://relay.test/media/aabbcc.bin","sha256":"aabbcc","size":44,"type":"application/octet-stream","uploaded":0}"#;
             let response = format!(
@@ -2293,12 +2329,34 @@ mod retry_policy_tests {
 
         let client = test_client(&format!("http://{addr}"));
         let descriptor = client.upload_file(path.to_str().unwrap()).await.unwrap();
-        assert_eq!(descriptor.mime_type, "application/octet-stream");
+        assert_eq!(descriptor.mime_type, "text/markdown");
         assert_eq!(descriptor.filename.as_deref(), Some("release-notes.md"));
         assert!(super::build_imeta_tag(&descriptor)
             .iter()
             .any(|field| field == "filename release-notes.md"));
         server.await.unwrap();
+    }
+
+    #[test]
+    fn upload_mime_uses_filename_only_for_safe_text() {
+        assert_eq!(
+            super::detect_upload_mime(b"# Notes\n", "notes.md"),
+            "text/markdown"
+        );
+        assert_eq!(
+            super::detect_upload_mime(br#"{"ok":true}"#, "result.json"),
+            "application/json"
+        );
+        assert_eq!(
+            super::detect_upload_mime(b"fn main() {}\n", "main.rs"),
+            "text/plain"
+        );
+        assert_eq!(
+            super::detect_upload_mime(b"not utf-8: \xff", "fake.md"),
+            "application/octet-stream"
+        );
+        let elf = [b"\x7fELF".as_slice(), &[0u8; 60]].concat();
+        assert_ne!(super::detect_upload_mime(&elf, "fake.md"), "text/markdown");
     }
 
     /// When all retry attempts for a stored event end with a partial body (200

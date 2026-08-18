@@ -62,7 +62,7 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `canvas get` | raw markdown string or `null` — NOT a JSON envelope |
 | `social *`, `repos get/list` | raw Nostr event JSON INCLUDING `sig` — different contract than read commands above |
 | `repos protect list` | `{repo_id, protections: [{ref, rules}], unknown_rules, validation_error}` |
-| `upload file` | pretty-printed multi-line `BlobDescriptor`: `{url, sha256, size, type, uploaded}` |
+| `upload file` | pretty-printed multi-line `BlobDescriptor`: `{url, sha256, size, type, uploaded, filename, attachment_markdown, delivery_hint}` |
 | `mem get` | raw bytes to stdout, no trailing newline |
 | `mem hash` | SHA-256 hex string |
 | `mem set/patch/rm` | nothing to stdout; progress to stderr |
@@ -71,6 +71,17 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `pack validate/inspect` | human-readable text, not JSON |
 
 **Errors** go to stderr as `{"error": "<category>", "message": "<detail>"}`. Exit codes: 0 = success, 1 = input/not-found, 2 = relay/network, 3 = auth, 4 = other, 5 = write conflict (value superseded).
+
+## File Delivery
+
+To send a file to the user in the current channel, use the message command in one step:
+
+```bash
+buzz messages send --channel <current-channel-uuid> \
+  --content "Attached file" --file <path>
+```
+
+`buzz upload file` only stores a blob; it does not deliver the file to the channel. Do not send its bare URL as a substitute for an attachment. Do not ZIP a file or rename its extension to work around delivery. The relay may use a content-addressed `.bin` URL for an unrecognized file, but the original filename and MIME type are carried in the message's `imeta` metadata, so the URL suffix does not determine how Buzz presents the attachment. For Markdown, text, code, JSON, CSV, PDF, and other user-requested files, keep the original filename and send them directly with `messages send --file`.
 
 ## Compact Format
 

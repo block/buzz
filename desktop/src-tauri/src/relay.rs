@@ -96,6 +96,34 @@ pub fn relay_api_base_url() -> String {
     relay_http_base_url(&relay_ws_url())
 }
 
+fn relay_url_bypasses_proxy(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+
+    match parsed.host() {
+        Some(url::Host::Ipv4(address)) => {
+            address.is_private() || address.is_loopback() || address.is_link_local()
+        }
+        Some(url::Host::Ipv6(address)) => {
+            address.is_loopback() || address.is_unique_local() || address.is_unicast_link_local()
+        }
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost") || domain.ends_with(".local")
+        }
+        None => false,
+    }
+}
+
+fn relay_http_client<'a>(state: &'a AppState, url: &str) -> &'a reqwest::Client {
+    if relay_url_bypasses_proxy(url) {
+        &state.direct_relay_http_client
+    } else {
+        &state.http_client
+    }
+}
+
 // ── NIP-98 HTTP auth ────────────────────────────────────────────────────────
 
 pub fn build_nip98_auth_header(
@@ -323,8 +351,7 @@ pub async fn query_relay_at(
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
 
-    let response = state
-        .http_client
+    let response = relay_http_client(state, &url)
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json")
@@ -352,8 +379,7 @@ pub async fn query_relay_at_with_keys(
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
-    let mut request = state
-        .http_client
+    let mut request = relay_http_client(state, &url)
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
@@ -455,8 +481,7 @@ pub async fn sync_managed_agent_profile(
     let url = format!("{}/events", relay_http_base_url(relay_url));
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
-    let mut request = state
-        .http_client
+    let mut request = relay_http_client(state, &url)
         .post(&url)
         .header("Authorization", auth)
         .header("Content-Type", "application/json");
@@ -573,8 +598,7 @@ pub async fn submit_signed_event_with_keys(
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "signed event submit (keys)")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
-    let mut request = state
-        .http_client
+    let mut request = relay_http_client(state, &url)
         .post(&url)
         .header("Authorization", auth_header)
         .header("Content-Type", "application/json");
@@ -608,7 +632,7 @@ mod tests {
     use super::{
         build_profile_event, classify_intercepted_response, effective_agent_relay_url,
         extract_retry_in_hint, parse_command_response, relay_http_base_url,
-        MALFORMED_RESPONSE_MESSAGE,
+        relay_url_bypasses_proxy, MALFORMED_RESPONSE_MESSAGE,
     };
     use serde::Deserialize;
 
@@ -793,6 +817,39 @@ mod tests {
             relay_http_base_url("wss://localhost:3000"),
             "https://localhost:3000"
         );
+    }
+
+    #[test]
+    fn private_relay_urls_bypass_system_proxy() {
+        for url in [
+            "http://10.24.11.82:3000/events",
+            "http://127.0.0.1:3000/query",
+            "http://169.254.10.20:3000/events",
+            "http://localhost:3000/events",
+            "http://buzz.local:3000/events",
+            "http://[::1]:3000/events",
+            "http://[fd00::1]:3000/events",
+        ] {
+            assert!(
+                relay_url_bypasses_proxy(url),
+                "expected direct relay: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_relay_urls_keep_system_proxy_support() {
+        for url in [
+            "https://relay.example.com/events",
+            "http://8.8.8.8:3000/events",
+            "http://localhost.evil.com:3000/events",
+            "not a url",
+        ] {
+            assert!(
+                !relay_url_bypasses_proxy(url),
+                "expected proxy-capable relay: {url}"
+            );
+        }
     }
 
     // ── classify_intercepted_response ────────────────────────────────────────

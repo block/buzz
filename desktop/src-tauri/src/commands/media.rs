@@ -308,6 +308,47 @@ pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
     Ok(mime)
 }
 
+fn text_mime_from_filename(filename: &str, body: &[u8]) -> Option<&'static str> {
+    if body.contains(&0) || std::str::from_utf8(body).is_err() {
+        return None;
+    }
+    let extension = std::path::Path::new(filename)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "md" | "markdown" | "mdown" | "mkd" => Some("text/markdown"),
+        "txt" | "log" => Some("text/plain"),
+        "csv" => Some("text/csv"),
+        "json" | "jsonc" | "jsonl" => Some("application/json"),
+        "c" | "cc" | "cpp" | "cs" | "css" | "go" | "h" | "hpp" | "java" | "js" | "jsx" | "kt"
+        | "kts" | "lua" | "php" | "pl" | "ps1" | "py" | "rb" | "rs" | "sh" | "sql" | "swift"
+        | "toml" | "ts" | "tsx" | "xml" | "yaml" | "yml" => Some("text/plain"),
+        _ => None,
+    }
+}
+
+fn detect_and_validate_upload_mime(body: &[u8], filename: Option<&str>) -> Result<String, String> {
+    let mime = infer::get(body)
+        .map(|t| t.mime_type().to_string())
+        .or_else(|| {
+            filename.and_then(|name| text_mime_from_filename(name, body).map(str::to_string))
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if BLOCKED_MIME.contains(&mime.as_str()) {
+        return Err(format!("unsupported file type: {mime}"));
+    }
+    Ok(mime)
+}
+
+fn preserve_client_text_mime(descriptor: &mut BlobDescriptor, upload_mime: &str) {
+    if descriptor.mime_type == "application/octet-stream"
+        && (upload_mime.starts_with("text/") || upload_mime == "application/json")
+    {
+        descriptor.mime_type = upload_mime.to_string();
+    }
+}
+
 /// Lifetime of a Blossom `t=get` read token. Ten minutes keeps a token alive
 /// across a video's range-request stream while staying well inside the
 /// server's `created_at` freshness window (3600s, matching upload).
@@ -486,7 +527,9 @@ async fn do_upload(
         return Err(relay_error_message(resp).await);
     }
 
-    parse_json_response::<BlobDescriptor>(resp).await
+    let mut descriptor = parse_json_response::<BlobDescriptor>(resp).await?;
+    preserve_client_text_mime(&mut descriptor, mime);
+    Ok(descriptor)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -522,12 +565,12 @@ pub async fn upload_media(
         let _ = std::fs::remove_file(&fd_path);
     }
 
-    let mime = detect_and_validate_mime(&body)?;
-    let body = sanitize_image_for_upload(body, &mime)?;
     let filename = path
         .file_name()
         .and_then(|name| name.to_str())
         .map(sanitize_filename);
+    let mime = detect_and_validate_upload_mime(&body, filename.as_deref())?;
+    let body = sanitize_image_for_upload(body, &mime)?;
     let mut descriptor = do_upload(body, &mime, filename.as_deref(), &state, None, None).await?;
     descriptor.filename = filename;
     Ok(descriptor)
@@ -600,7 +643,11 @@ async fn process_picked_path(
         .await
         .map_err(|e| format!("transcode task failed: {e}"))??;
 
-    let mime = detect_and_validate_mime(&body)?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(sanitize_filename);
+    let mime = detect_and_validate_upload_mime(&body, filename.as_deref())?;
     let body = sanitize_image_for_upload(body, &mime)?;
 
     // Image-only surfaces (e.g. "Send feedback"): reject anything that didn't
@@ -611,10 +658,6 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(sanitize_filename);
     let mut descriptor = do_upload(body, &mime, filename.as_deref(), state, progress, None).await?;
     if let Some(poster) = poster_bytes {
         match do_upload(poster, "image/jpeg", None, state, None, None).await {
@@ -785,7 +828,8 @@ pub(super) async fn upload_media_bytes_inner(
         (data, None)
     };
 
-    let mime = detect_and_validate_mime(&body)?;
+    let sanitized_filename = filename.as_deref().map(sanitize_filename);
+    let mime = detect_and_validate_upload_mime(&body, sanitized_filename.as_deref())?;
     let body = sanitize_image_for_upload(body, &mime)?;
 
     // Upload video first, then poster (best-effort).
@@ -793,7 +837,6 @@ pub(super) async fn upload_media_bytes_inner(
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err("upload cancelled".to_string());
     }
-    let sanitized_filename = filename.as_deref().map(sanitize_filename);
     let mut descriptor = do_upload(
         body,
         &mime,
@@ -925,6 +968,32 @@ mod tests {
     fn test_detect_and_validate_mime_still_rejects_executable() {
         let elf = [b"\x7fELF".as_slice(), &[0u8; 60]].concat();
         assert!(detect_and_validate_mime(&elf).is_err());
+    }
+
+    #[test]
+    fn test_upload_mime_uses_filename_for_safe_text() {
+        assert_eq!(
+            detect_and_validate_upload_mime(b"# Notes\n", Some("notes.md")).unwrap(),
+            "text/markdown"
+        );
+        assert_eq!(
+            detect_and_validate_upload_mime(br#"{"ok":true}"#, Some("result.json")).unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            detect_and_validate_upload_mime(b"fn main() {}\n", Some("main.rs")).unwrap(),
+            "text/plain"
+        );
+    }
+
+    #[test]
+    fn test_upload_mime_does_not_trust_text_extension_for_binary() {
+        assert_eq!(
+            detect_and_validate_upload_mime(b"not utf-8: \xff", Some("fake.md")).unwrap(),
+            "application/octet-stream"
+        );
+        let elf = [b"\x7fELF".as_slice(), &[0u8; 60]].concat();
+        assert!(detect_and_validate_upload_mime(&elf, Some("fake.md")).is_err());
     }
 
     #[test]
