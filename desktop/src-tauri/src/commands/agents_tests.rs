@@ -34,6 +34,7 @@ fn bare_agent_record(
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -58,6 +59,7 @@ fn bare_agent_record(
         source_team_persona_slug: None,
         catalog_source: None,
         relay_mesh: None,
+        effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
@@ -622,6 +624,11 @@ fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_b
     assert_eq!(payload["respond_to"], "owner-only");
     assert_eq!(payload["respond_to_allowlist"], serde_json::json!([]));
     assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, false
+    ));
+
+    record.provider_policy_pending = true;
+    assert!(provider_access::needs_reconciliation_with_policy(
         &record, false
     ));
 
