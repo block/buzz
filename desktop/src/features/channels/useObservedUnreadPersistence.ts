@@ -8,6 +8,7 @@ import {
   readObservedUnreadFromStorage,
   scheduleObservedUnreadWrite,
   flushObservedUnreadWrite,
+  writeObservedUnreadToStorage,
   type ObservedUnreadRefs,
 } from "@/features/channels/observedUnreadStorage";
 import { activityScopeKey } from "@/features/channels/threadActivityStorage";
@@ -228,6 +229,27 @@ export function useObservedUnreadPersistence(
         }).then(apply);
       })
       .catch(() => {
+        // Native can fail after a scope switch. Preserve the failed scope's
+        // unacked events in its own fallback bucket without touching the
+        // replacement scope's refs or native health.
+        if (scopeLoadedRef.current !== stateScope) {
+          const fallback =
+            readObservedUnreadFromStorage(
+              state.scope.pubkey,
+              state.scope.relayUrl,
+            ) ?? new Map();
+          for (const { event } of queued) {
+            const { channelId, ...observed } = event;
+            recordObservedUnreadEvent(fallback, channelId, observed, 1_000);
+          }
+          writeObservedUnreadToStorage(
+            state.scope.pubkey,
+            state.scope.relayUrl,
+            fallback,
+          );
+          return;
+        }
+
         // Native can fail after the caller stopped maintaining the legacy
         // mirror. Seed fallback with the unacked events before scheduling its
         // first write; acknowledged native history remains native-owned.

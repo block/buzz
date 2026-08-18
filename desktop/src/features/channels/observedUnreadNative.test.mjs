@@ -26,6 +26,10 @@ installDOMShim();
 installFreshStorage();
 
 import { act } from "react";
+import {
+  readObservedUnreadFromStorage,
+  writeObservedUnreadToStorage,
+} from "./observedUnreadStorage.ts";
 
 const RELAY = "wss://relay.example.com";
 const NOW_S = Math.floor(Date.now() / 1_000);
@@ -178,6 +182,120 @@ test("native mode is NOT entered when the bridge fails, and the hook says so", a
       harness.api.isNative(),
       false,
       "a failed open must leave the hook on the declared fallback path",
+    );
+  } finally {
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
+test("late scope-A flush rejection falls back under A without mutating native scope B", async () => {
+  installFreshStorage();
+  let harness;
+  const rig = installNativeRig();
+  const invoke = globalThis.window.__TAURI_INTERNALS__.invoke;
+  const scopeA = { pubkey: "pk-late-flush-a", relayUrl: RELAY };
+  const scopeB = { pubkey: "pk-late-flush-b", relayUrl: RELAY };
+  let rejectA;
+  const delayedA = new Promise((_, reject) => {
+    rejectA = reject;
+  });
+  globalThis.window.__TAURI_INTERNALS__.invoke = (command, args = {}) => {
+    if (
+      command === "observed_unread_ingest" &&
+      args.request?.scope.pubkey === scopeA.pubkey
+    ) {
+      return delayedA;
+    }
+    return invoke(command, args);
+  };
+
+  try {
+    harness = await mountHook(
+      { ...DEFAULT_PROPS, pubkey: scopeA.pubkey },
+      makeRefs(),
+    );
+    await settle();
+    harness.api.schedule(
+      harness.api.currentScope,
+      "channel-a",
+      makeObservedEvent({ id: "event-a", createdAt: NOW_S }),
+    );
+    await act(async () => {
+      globalThis.dispatchEvent({ type: "pagehide" });
+      await Promise.resolve();
+    });
+
+    writeObservedUnreadToStorage(
+      scopeB.pubkey,
+      scopeB.relayUrl,
+      new Map([
+        [
+          "channel-b",
+          new Map([
+            [
+              "event-b",
+              makeObservedEvent({ id: "event-b", createdAt: NOW_S + 1 }),
+            ],
+          ]),
+        ],
+      ]),
+    );
+    await harness.render({ ...DEFAULT_PROPS, pubkey: scopeB.pubkey });
+    await settle();
+    assert.equal(harness.api.isNative(), true, "scope B must open natively");
+    assert.ok(
+      harness.api.projectionsRef.current.has("channel-b"),
+      "scope B's native projection must be installed",
+    );
+
+    const sentinelB = new Map([
+      [
+        "storage-b",
+        new Map([
+          [
+            "storage-event-b",
+            makeObservedEvent({
+              id: "storage-event-b",
+              createdAt: NOW_S + 2,
+            }),
+          ],
+        ]),
+      ],
+    ]);
+    writeObservedUnreadToStorage(scopeB.pubkey, scopeB.relayUrl, sentinelB);
+    const projectionsB = new Map(harness.api.projectionsRef.current);
+    const storedB = readObservedUnreadFromStorage(
+      scopeB.pubkey,
+      scopeB.relayUrl,
+    );
+
+    await act(async () => {
+      rejectA(new Error("scope A flush failed after B opened"));
+      await delayedA.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    assert.deepEqual(
+      harness.api.projectionsRef.current,
+      projectionsB,
+      "scope A's rejection must not alter scope B's projections",
+    );
+    assert.equal(
+      harness.api.isNative(),
+      true,
+      "scope A's rejection must not disable scope B's native store",
+    );
+    assert.deepEqual(
+      readObservedUnreadFromStorage(scopeB.pubkey, scopeB.relayUrl),
+      storedB,
+      "scope A's rejection must not write into scope B's storage",
+    );
+    assert.ok(
+      readObservedUnreadFromStorage(scopeA.pubkey, scopeA.relayUrl)
+        ?.get("channel-a")
+        ?.has("event-a"),
+      "scope A's unacked event must be preserved under A's storage key",
     );
   } finally {
     await harness?.unmount();
