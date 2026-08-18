@@ -799,3 +799,62 @@ fn summary_with_drift_serializes_restart_diff_entries() {
         }]))
     );
 }
+
+use super::RelayAgentInfo;
+
+/// `RelayAgentInfo` crosses the Tauri boundary as the payload of
+/// `list_relay_agents` and `revalidate_relay_agents`, and the frontend maps it
+/// by hand: `fromRawRelayAgent` in `desktop/src/shared/api/tauri.ts` reads
+/// `owner_pubkey`, `agent_type`, `channel_ids`, `respond_to` and
+/// `respond_to_allowlist` and rewrites them to camelCase.
+///
+/// That contract is carried entirely by this struct having no `rename_all`.
+/// Adding `#[serde(rename_all = "camelCase")]` — the reflex when a Rust struct
+/// feeds a TypeScript client — would leave all five fields `undefined` on the
+/// other side, with no compiler and no test objecting: `RawRelayAgent` marks
+/// them optional, so the mapper silently produces `null`/`[]` and every relay
+/// agent turns owner-less, typeless and un-mentionable at runtime.
+#[test]
+fn relay_agent_info_wire_keys_are_snake_case() {
+    let wire = serde_json::to_value(RelayAgentInfo {
+        pubkey: "a".repeat(64),
+        owner_pubkey: Some("b".repeat(64)),
+        name: "Scout".to_string(),
+        agent_type: "agent".to_string(),
+        channels: vec!["general".to_string()],
+        channel_ids: vec!["11111111-1111-1111-1111-111111111111".to_string()],
+        capabilities: vec!["chat".to_string()],
+        status: "offline".to_string(),
+        respond_to: Some(RespondTo::Anyone),
+        respond_to_allowlist: vec!["c".repeat(64)],
+    })
+    .expect("relay agent info serializes");
+
+    assert_eq!(
+        wire.get("owner_pubkey"),
+        Some(&serde_json::json!("b".repeat(64)))
+    );
+    assert_eq!(wire.get("agent_type"), Some(&serde_json::json!("agent")));
+    assert_eq!(
+        wire.get("channel_ids"),
+        Some(&serde_json::json!(["11111111-1111-1111-1111-111111111111"]))
+    );
+    assert_eq!(wire.get("respond_to"), Some(&serde_json::json!("anyone")));
+    assert_eq!(
+        wire.get("respond_to_allowlist"),
+        Some(&serde_json::json!([&"c".repeat(64)]))
+    );
+
+    for camel in [
+        "ownerPubkey",
+        "agentType",
+        "channelIds",
+        "respondTo",
+        "respondToAllowlist",
+    ] {
+        assert!(
+            wire.get(camel).is_none(),
+            "{camel} must not appear on the wire: the TypeScript mapper reads the snake_case key"
+        );
+    }
+}
