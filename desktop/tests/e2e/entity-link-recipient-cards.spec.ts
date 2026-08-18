@@ -118,9 +118,13 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(prChip).not.toHaveAttribute("title");
   await prChip.hover();
   const prTooltip = page.getByRole("tooltip");
-  await expect(
-    prTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
-  ).toContainText(PR_SUBJECT);
+  const prContext = prTooltip.locator(
+    '[data-buzz-tooltip-metadata-content=""]',
+  );
+  await expect(prContext).toHaveText(
+    "buzz · The complete Buzz community platform.",
+  );
+  await expect(prContext).not.toContainText(PR_SUBJECT);
   const prFooter = prTooltip.locator('[data-buzz-tooltip-metadata-type=""]');
   await expect(prFooter).toHaveText("Pull request · relay-tools");
   await expect(prFooter).toHaveCSS("white-space", "nowrap");
@@ -150,9 +154,13 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(issueChip).toHaveClass(/max-w-64/);
   await issueChip.hover();
   const issueTooltip = page.getByRole("tooltip");
-  await expect(
-    issueTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
-  ).toContainText(ISSUE_SUBJECT);
+  const issueContext = issueTooltip.locator(
+    '[data-buzz-tooltip-metadata-content=""]',
+  );
+  await expect(issueContext).toHaveText(
+    "buzz · The complete Buzz community platform.",
+  );
+  await expect(issueContext).not.toContainText(ISSUE_SUBJECT);
   await expect(
     issueTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Issue · relay-tools");

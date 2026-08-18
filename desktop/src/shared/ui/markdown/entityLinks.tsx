@@ -1,6 +1,8 @@
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useProjectsQuery } from "@/features/projects/hooks";
+import type { Project } from "@/features/projects/projectModels";
 import {
   entityLinkProjectRouteId,
   isEntityLink,
@@ -30,6 +32,8 @@ function EntityMetadataTooltip({
   fallback,
   footer,
   href,
+  link,
+  projects,
 }: {
   children: (
     metadata: LinkPreviewMetadata | null | undefined,
@@ -37,6 +41,8 @@ function EntityMetadataTooltip({
   fallback: string;
   footer: string;
   href: string;
+  link: ParsedEntityLink;
+  projects: Project[] | undefined;
 }) {
   const [metadata, setMetadata] = React.useState<
     LinkPreviewMetadata | null | undefined
@@ -50,7 +56,32 @@ function EntityMetadataTooltip({
       cancelled = true;
     };
   }, [href]);
-  const context = metadata?.title.trim() || fallback;
+  const repositoryAddress =
+    link.type === "issue" || link.type === "pr"
+      ? `30617:${link.owner}:${link.dtag}`
+      : null;
+  const containingProject = repositoryAddress
+    ? projects?.find((project) =>
+        project.repositoryAddresses.includes(repositoryAddress),
+      )
+    : null;
+  const resolvedTitle = metadata?.title.trim();
+  const chipRepeatsTitle =
+    Boolean(resolvedTitle) && (link.type === "issue" || link.type === "pr");
+  const projectName = containingProject?.name.trim();
+  const projectDescription = containingProject?.description.trim();
+  const projectContext = projectName
+    ? projectDescription && projectDescription !== projectName
+      ? `${projectName} · ${projectDescription}`
+      : projectName
+    : null;
+  const context = projectContext
+    ? projectContext
+    : chipRepeatsTitle
+      ? metadata?.description
+      : [resolvedTitle || fallback, metadata?.description]
+          .filter((value): value is string => Boolean(value))
+          .join(" · ");
   const chip = children(metadata);
   return (
     <TooltipProvider delayDuration={500} skipDelayDuration={0}>
@@ -61,12 +92,16 @@ function EntityMetadataTooltip({
           className="max-w-72 p-2 text-left"
           side="top"
         >
-          <span className="line-clamp-2" data-buzz-tooltip-metadata-content="">
-            {context}
-            {metadata?.description ? ` · ${metadata.description}` : null}
-          </span>
+          {context ? (
+            <span
+              className="line-clamp-2"
+              data-buzz-tooltip-metadata-content=""
+            >
+              {context}
+            </span>
+          ) : null}
           <span
-            className="mt-1 block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/70"
+            className={`${context ? "mt-1 " : ""}block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/70`}
             data-buzz-tooltip-metadata-type=""
           >
             {footer}
@@ -190,7 +225,7 @@ function resolveEntityHref(
  * the href is not a valid entity link so the caller can fall through to its
  * default anchor.
  */
-export function renderEntityLinkAnchor({
+export function EntityLinkAnchor({
   children,
   href,
   onOpenEntityLink,
@@ -198,12 +233,46 @@ export function renderEntityLinkAnchor({
   interactive = true,
   asChip = true,
 }: {
+  children?: React.ReactNode;
+  href: string;
+  onOpenEntityLink: (link: ParsedEntityLink) => void;
+  relayOrigin: string | null;
+  interactive?: boolean;
+  asChip?: boolean;
+}): React.ReactElement | null {
+  const { data: projects } = useProjectsQuery();
+  return renderEntityLinkAnchor({
+    children,
+    href,
+    onOpenEntityLink,
+    relayOrigin,
+    interactive,
+    asChip,
+    projects,
+  });
+}
+
+/**
+ * Pure rendering boundary retained for static-markup tests and non-provider
+ * callers. The normal Markdown path uses `EntityLinkAnchor` above so the
+ * authoritative Projects read model can enrich issue/PR tooltips.
+ */
+export function renderEntityLinkAnchor({
+  children,
+  href,
+  onOpenEntityLink,
+  relayOrigin,
+  interactive = true,
+  asChip = true,
+  projects,
+}: {
   children: React.ReactNode;
   href: string | undefined;
   onOpenEntityLink: (link: ParsedEntityLink) => void;
   relayOrigin: string | null;
   interactive?: boolean;
   asChip?: boolean;
+  projects?: Project[];
 }): React.ReactElement | null {
   if (!href) return null;
 
@@ -254,6 +323,8 @@ export function renderEntityLinkAnchor({
       fallback={presentation.label}
       footer={presentation.tooltipFooter}
       href={canonicalHref}
+      link={parsed.value}
+      projects={projects}
     >
       {chip}
     </EntityMetadataTooltip>

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // These are copied here to avoid importing from .ts files that depend on
 // React (which isn't resolvable outside the bundler). Same pattern as
@@ -1080,17 +1081,21 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
   });
   const html = renderToStaticMarkup(
     React.createElement(
-      MarkdownRuntimeContext.Provider,
-      {
-        value: {
-          channels: [{ id: channelId, name: "engineering" }],
-          onOpenChannel: () => {},
-          onOpenEntityLink: () => {},
-          onOpenMessageLink: () => {},
-          relayOrigin: null,
+      QueryClientProvider,
+      { client: new QueryClient() },
+      React.createElement(
+        MarkdownRuntimeContext.Provider,
+        {
+          value: {
+            channels: [{ id: channelId, name: "engineering" }],
+            onOpenChannel: () => {},
+            onOpenEntityLink: () => {},
+            onOpenMessageLink: () => {},
+            relayOrigin: null,
+          },
         },
-      },
-      markdown,
+        markdown,
+      ),
     ),
   );
 
