@@ -1015,6 +1015,10 @@ jobs:
         run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
       - name: Check (workspace)
         run: cargo check --workspace --all-targets --target $env:TARGET
+      - name: Test (buzz-acp runtime lease)
+        # File-lock contention has platform-specific error codes, so compile-only
+        # coverage cannot protect the single-runtime contract on Windows.
+        run: cargo test -p buzz-acp instance_lease --target $env:TARGET
       - name: Test (buzz-dev-mcp)
         # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
         # only gate if this crate is tested ON Windows.

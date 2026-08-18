@@ -90,6 +90,11 @@ run_unit_tests() {
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
+  # The runtime lease is intentionally exercised as real subprocesses. Mirror
+  # the focused nextest gate rather than running every buzz-acp integration test.
+  run_test_step "buzz-acp instance lease tests" \
+    cargo test -p buzz-acp instance_lease -- --nocapture
+
   # buzz-db migrator/lint unit tests (no infra): guard the embedded-migrator
   # invariant (exactly the consolidated 0001; cutover/backfill stays an operator
   # script, not startup state) and the tenant-scoping lints. The Postgres-backed
