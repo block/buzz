@@ -8,8 +8,8 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../pairing/pairing_page.dart';
 import 'invite_join_provider.dart';
 
-Future<void> showInviteJoinSheet(BuildContext context, WidgetRef ref) {
-  return showBuzzModalBottomSheet<void>(
+Future<bool?> showInviteJoinSheet(BuildContext context, WidgetRef ref) {
+  return showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
@@ -28,7 +28,11 @@ class InviteJoinSheet extends ConsumerWidget {
     final derivedName = state.communityName;
 
     if (state.status == InviteJoinStatus.success) {
-      return _InviteJoinSuccess(host: host, communityName: derivedName);
+      return _InviteJoinSuccess(
+        host: host,
+        communityName: derivedName,
+        hasFocusChannel: state.focusChannelId != null,
+      );
     }
 
     return SafeArea(
@@ -139,8 +143,13 @@ class InviteJoinSheet extends ConsumerWidget {
 class _InviteJoinSuccess extends StatelessWidget {
   final String host;
   final String? communityName;
+  final bool hasFocusChannel;
 
-  const _InviteJoinSuccess({required this.host, this.communityName});
+  const _InviteJoinSuccess({
+    required this.host,
+    required this.hasFocusChannel,
+    this.communityName,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -183,8 +192,10 @@ class _InviteJoinSuccess extends StatelessWidget {
             ),
             const SizedBox(height: Grid.xs),
             TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Not now'),
+              onPressed: () => Navigator.of(context).pop(hasFocusChannel),
+              child: Text(
+                hasFocusChannel ? 'Continue to #welcome-everyone' : 'Not now',
+              ),
             ),
           ],
         ),

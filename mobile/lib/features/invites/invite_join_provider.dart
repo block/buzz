@@ -21,6 +21,20 @@ final inviteKeyGeneratorProvider = Provider<InviteKeyGenerator>((ref) {
 
 typedef InviteKeyGenerator = nostr.Keys Function();
 
+const _unset = Object();
+
+/// Adds useful starter-channel memberships after an invite membership claim.
+abstract interface class InviteJoinRecovery {
+  /// Best-effort ensures the public starters and returns the preferred focus.
+  Future<String?> ensureStarterChannels();
+}
+
+final inviteJoinRecoveryProvider = Provider<InviteJoinRecovery>((ref) {
+  throw StateError(
+    'inviteJoinRecoveryProvider must be configured by the app root',
+  );
+});
+
 enum InviteJoinStatus {
   idle,
   confirming,
@@ -37,6 +51,7 @@ class InviteJoinState {
   final String? communityName;
   final String? errorMessage;
   final bool requiresFreshInvite;
+  final String? focusChannelId;
 
   const InviteJoinState({
     this.status = InviteJoinStatus.idle,
@@ -45,6 +60,7 @@ class InviteJoinState {
     this.communityName,
     this.errorMessage,
     this.requiresFreshInvite = false,
+    this.focusChannelId,
   });
 
   InviteJoinState copyWith({
@@ -52,15 +68,21 @@ class InviteJoinState {
     InviteDeepLink? invite,
     String? host,
     String? communityName,
-    String? errorMessage,
+    Object? errorMessage = _unset,
     bool? requiresFreshInvite,
+    Object? focusChannelId = _unset,
   }) => InviteJoinState(
     status: status ?? this.status,
     invite: invite ?? this.invite,
     host: host ?? this.host,
     communityName: communityName ?? this.communityName,
-    errorMessage: errorMessage ?? this.errorMessage,
+    errorMessage: identical(errorMessage, _unset)
+        ? this.errorMessage
+        : errorMessage as String?,
     requiresFreshInvite: requiresFreshInvite ?? this.requiresFreshInvite,
+    focusChannelId: identical(focusChannelId, _unset)
+        ? this.focusChannelId
+        : focusChannelId as String?,
   );
 }
 
@@ -102,7 +124,10 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       return;
     }
 
-    state = state.copyWith(status: InviteJoinStatus.claiming);
+    state = state.copyWith(
+      status: InviteJoinStatus.claiming,
+      errorMessage: null,
+    );
     try {
       final communities = await ref.read(communityListProvider.future);
       final existing = _existingCommunity(communities, invite.relayUrl);
@@ -164,9 +189,19 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
+      String? focusChannelId;
+      try {
+        focusChannelId = await ref
+            .read(inviteJoinRecoveryProvider)
+            .ensureStarterChannels();
+      } catch (_) {
+        // Starter channels are optional. A successful invite claim remains a
+        // success even when post-join setup is temporarily unavailable.
+      }
       state = state.copyWith(
         status: InviteJoinStatus.success,
         communityName: community.name,
+        focusChannelId: focusChannelId,
       );
     } catch (error) {
       final requiresFreshInvite = _requiresFreshInvite(error);

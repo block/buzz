@@ -390,6 +390,57 @@ void main() {
       expect(find.text('Pairing'), findsOneWidget);
     },
   );
+
+  testWidgets('continues a successful invite into welcome-everyone', (
+    tester,
+  ) async {
+    const invite = InviteDeepLink(
+      relayUrl: 'wss://relay.example.com',
+      code: 'invite-code',
+    );
+    final container = ProviderContainer(
+      overrides: [
+        pendingDeepLinkProvider.overrideWith(
+          () => _FakePendingDeepLinkNotifier(invite),
+        ),
+        channelsProvider.overrideWith(
+          () => _FakeChannelsNotifier(Future.value([_welcomeEveryoneChannel])),
+        ),
+        inviteJoinProvider.overrideWith(_SuccessfulInviteJoinNotifier.new),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          home: DeepLinkDispatcher(
+            destinationBuilder: (channel, link) =>
+                _CapturedDestination(channel: channel, link: link),
+            child: const Scaffold(body: SizedBox()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+    await tester.pumpAndSettle();
+    expect(find.text('Continue to #welcome-everyone'), findsOneWidget);
+
+    await tester.tap(find.text('Continue to #welcome-everyone'));
+    await tester.pumpAndSettle();
+
+    final destination = tester.widget<_CapturedDestination>(
+      find.byType(_CapturedDestination),
+    );
+    expect(destination.channel.id, 'welcome-everyone-id');
+    expect(
+      destination.link,
+      const ChannelDeepLink(channelId: 'welcome-everyone-id'),
+    );
+  });
 }
 
 final _channel = Channel(
@@ -403,6 +454,41 @@ final _channel = Channel(
   memberCount: 2,
   isMember: true,
 );
+
+final _welcomeEveryoneChannel = Channel(
+  id: 'welcome-everyone-id',
+  name: 'welcome-everyone',
+  channelType: 'stream',
+  visibility: 'open',
+  description: 'Say hi',
+  createdBy: 'creator',
+  createdAt: DateTime(2026),
+  memberCount: 1,
+  isMember: true,
+);
+
+class _SuccessfulInviteJoinNotifier extends InviteJoinNotifier {
+  @override
+  InviteJoinState build() => const InviteJoinState();
+
+  @override
+  Future<void> prepare(InviteDeepLink invite) async {
+    state = InviteJoinState(
+      status: InviteJoinStatus.confirming,
+      invite: invite,
+      host: 'relay.example.com',
+      communityName: 'Example',
+    );
+  }
+
+  @override
+  Future<void> confirmJoin() async {
+    state = state.copyWith(
+      status: InviteJoinStatus.success,
+      focusChannelId: 'welcome-everyone-id',
+    );
+  }
+}
 
 class _CountingCommunityStorage extends CommunityStorage {
   int loadCalls = 0;

@@ -7,6 +7,8 @@ import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'package:buzz/app.dart';
+import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
@@ -88,6 +90,7 @@ void main() {
           communityStorageProvider.overrideWithValue(storage),
           authProvider.overrideWith(() => auth),
           inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+          inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
           inviteJoinHttpClientProvider.overrideWithValue(
             http_testing.MockClient((request) async {
               capturedRequest = request;
@@ -123,6 +126,7 @@ void main() {
 
       final state = container.read(inviteJoinProvider);
       expect(state.status, InviteJoinStatus.success);
+      expect(state.focusChannelId, 'welcome-everyone-id');
       expect(capturedRequest, isNotNull);
       expect(
         capturedRequest!.url.toString(),
@@ -177,6 +181,225 @@ void main() {
     );
     expect(container.read(inviteJoinProvider).status, InviteJoinStatus.idle);
   });
+
+  test('starter channel ids match desktop for the same relay scope', () async {
+    expect(
+      desktopStarterChannelId(
+        relayHttpOrigin: 'https://relay.example.com/',
+        slug: 'general',
+      ),
+      '9ed9563a-84d6-586d-8007-ae294a6dfdaf',
+    );
+    expect(
+      desktopStarterChannelId(
+        relayHttpOrigin: 'https://relay.example.com',
+        slug: 'welcome-everyone',
+      ),
+      '1e288e10-2f7d-5c2c-9a9f-dee58c8daa7a',
+    );
+  });
+
+  test(
+    'invite recovery joins existing public general and welcome-everyone',
+    () async {
+      final joined = <String>[];
+      final recovery = MobileInviteJoinRecovery(
+        loadChannels: () async => [
+          _channel(id: 'general-id', name: ' General '),
+          _channel(id: 'welcome-id', name: 'WELCOME-EVERYONE'),
+          _channel(
+            id: 'private-welcome-id',
+            name: 'Welcome',
+            visibility: 'private',
+          ),
+        ],
+        createChannel:
+            ({
+              required channelId,
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async => throw StateError('starters already exist'),
+        joinChannel: (channelId) async => joined.add(channelId),
+        relayHttpOrigin: 'https://relay.example.com',
+      );
+
+      final focusChannelId = await recovery.ensureStarterChannels();
+
+      expect(joined, ['general-id', 'welcome-id']);
+      expect(focusChannelId, 'welcome-id');
+    },
+  );
+
+  test(
+    'invite recovery creates missing public starters with desktop ids',
+    () async {
+      final created = <String, Map<String, Object?>>{};
+      final recovery = MobileInviteJoinRecovery(
+        loadChannels: () async => const [],
+        createChannel:
+            ({
+              required channelId,
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async {
+              created[name] = {
+                'id': channelId,
+                'channelType': channelType,
+                'visibility': visibility,
+                'description': description,
+                'ttlSeconds': ttlSeconds,
+              };
+              return _channel(id: channelId, name: name, isMember: true);
+            },
+        joinChannel: (_) async => fail('creator is already a member'),
+        relayHttpOrigin: 'https://relay.example.com/',
+      );
+
+      final focusChannelId = await recovery.ensureStarterChannels();
+
+      expect(created.keys, ['general', 'welcome-everyone']);
+      expect(created['general'], {
+        'id': '9ed9563a-84d6-586d-8007-ae294a6dfdaf',
+        'channelType': 'stream',
+        'visibility': 'open',
+        'description': 'General conversation and community updates.',
+        'ttlSeconds': null,
+      });
+      expect(created['welcome-everyone'], {
+        'id': '1e288e10-2f7d-5c2c-9a9f-dee58c8daa7a',
+        'channelType': 'stream',
+        'visibility': 'open',
+        'description':
+            'Say hi, ask a question, or share what brought you here.',
+        'ttlSeconds': null,
+      });
+      expect(focusChannelId, '1e288e10-2f7d-5c2c-9a9f-dee58c8daa7a');
+    },
+  );
+
+  test(
+    'duplicate starter creation converges and joins relay channels',
+    () async {
+      var loadCount = 0;
+      final joined = <String>[];
+      final recovery = MobileInviteJoinRecovery(
+        loadChannels: () async {
+          loadCount++;
+          if (loadCount == 1) return const [];
+          return [
+            _channel(id: 'relay-general', name: 'general'),
+            _channel(id: 'relay-welcome', name: 'welcome-everyone'),
+          ];
+        },
+        createChannel:
+            ({
+              required channelId,
+              required name,
+              required channelType,
+              required visibility,
+              description,
+              ttlSeconds,
+            }) async => throw Exception(
+              'relay rejected event: duplicate: channel already exists',
+            ),
+        joinChannel: (channelId) async => joined.add(channelId),
+        relayHttpOrigin: 'https://relay.example.com',
+      );
+
+      final focusChannelId = await recovery.ensureStarterChannels();
+
+      expect(loadCount, 2);
+      expect(joined, ['relay-general', 'relay-welcome']);
+      expect(focusChannelId, 'relay-welcome');
+    },
+  );
+
+  test('one unavailable starter does not block the other', () async {
+    final joined = <String>[];
+    final recovery = MobileInviteJoinRecovery(
+      loadChannels: () async => [
+        _channel(id: 'welcome-id', name: 'welcome-everyone'),
+      ],
+      createChannel:
+          ({
+            required channelId,
+            required name,
+            required channelType,
+            required visibility,
+            description,
+            ttlSeconds,
+          }) async => throw Exception('relay unavailable'),
+      joinChannel: (channelId) async => joined.add(channelId),
+      relayHttpOrigin: 'https://relay.example.com',
+    );
+
+    final focusChannelId = await recovery.ensureStarterChannels();
+
+    expect(joined, ['welcome-id']);
+    expect(focusChannelId, 'welcome-id');
+  });
+
+  test(
+    'starter setup failure does not fail or repeat a claimed invite',
+    () async {
+      final keys = nostr.Keys.generate();
+      var generatedKeys = 0;
+      var claimRequests = 0;
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final auth = _RecordingAuthNotifier();
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          authProvider.overrideWith(() => auth),
+          inviteKeyGeneratorProvider.overrideWithValue(() {
+            generatedKeys++;
+            return keys;
+          }),
+          inviteJoinRecoveryProvider.overrideWithValue(
+            _FakeInviteJoinRecovery(error: Exception('relay disconnected')),
+          ),
+          inviteJoinHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              claimRequests++;
+              return http.Response(
+                jsonEncode({
+                  'status': 'joined',
+                  'host': 'relay.example.com',
+                  'role': 'member',
+                }),
+                200,
+              );
+            }),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container
+          .read(inviteJoinProvider.notifier)
+          .prepare(
+            const InviteDeepLink(
+              relayUrl: 'wss://relay.example.com',
+              code: 'code',
+            ),
+          );
+      await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+      final joined = container.read(inviteJoinProvider);
+      expect(joined.status, InviteJoinStatus.success);
+      expect(joined.errorMessage, isNull);
+      expect(joined.focusChannelId, isNull);
+      expect(generatedKeys, 1);
+      expect(claimRequests, 1);
+      expect(auth.authenticatedCommunities, hasLength(1));
+    },
+  );
 
   test('join_policy_required requires a fresh link and cannot retry', () async {
     final keys = nostr.Keys.generate();
@@ -276,6 +499,7 @@ void main() {
         communityStorageProvider.overrideWithValue(storage),
         authProvider.overrideWith(() => auth),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+        inviteJoinRecoveryProvider.overrideWithValue(_successfulRecovery()),
         inviteJoinHttpClientProvider.overrideWithValue(
           http_testing.MockClient((request) async {
             attempts++;
@@ -322,6 +546,39 @@ void main() {
     expect(auth.authenticatedCommunities, hasLength(1));
   });
 }
+
+InviteJoinRecovery _successfulRecovery() =>
+    const _FakeInviteJoinRecovery(focusChannelId: 'welcome-everyone-id');
+
+class _FakeInviteJoinRecovery implements InviteJoinRecovery {
+  final String? focusChannelId;
+  final Object? error;
+
+  const _FakeInviteJoinRecovery({this.focusChannelId, this.error});
+
+  @override
+  Future<String?> ensureStarterChannels() async {
+    if (error case final failure?) throw failure;
+    return focusChannelId;
+  }
+}
+
+Channel _channel({
+  required String id,
+  required String name,
+  String visibility = 'open',
+  bool isMember = false,
+}) => Channel(
+  id: id,
+  name: name,
+  channelType: 'stream',
+  visibility: visibility,
+  description: '',
+  createdBy: 'me',
+  createdAt: DateTime.utc(2026),
+  memberCount: isMember ? 1 : 0,
+  isMember: isMember,
+);
 
 class _RecordingAuthNotifier extends AuthNotifier {
   final List<Community> authenticatedCommunities = [];
