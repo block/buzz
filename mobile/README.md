@@ -12,10 +12,10 @@ flutter pub get
 ## Run
 
 ```bash
-# From repo root (recommended — starts Docker, relay, and simulator):
+# From repo root (applies a worktree-isolated debug identity and starts/reuses Simulator):
 just mobile-dev
 
-# Direct (requires services and relay already running):
+# Direct (uses the app's configured community; apply worktree overrides first):
 cd mobile && flutter run
 ```
 

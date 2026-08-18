@@ -442,6 +442,21 @@ fn managed_agent_record_without_key_deserializes_empty() {
     .expect("keyring-backed record without inline key should deserialize");
 
     assert_eq!(record.private_key_nsec, "");
+    assert!(
+        !record.provider_policy_pending,
+        "pre-pending stores must deserialize as acknowledged"
+    );
+}
+
+#[test]
+fn pending_provider_policy_round_trips() {
+    let mut record = sample_agent_record();
+    record.provider_policy_pending = true;
+
+    let json = serde_json::to_string(&record).expect("serialize pending policy");
+    let reloaded: ManagedAgentRecord = serde_json::from_str(&json).expect("reload pending policy");
+
+    assert!(reloaded.provider_policy_pending);
 }
 
 fn sample_agent_record() -> ManagedAgentRecord {
