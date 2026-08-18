@@ -334,27 +334,53 @@ final class WindowRecorder: @unchecked Sendable {
             let start = ContinuousClock.now
             var frame: Int64 = 0
             while !Task.isCancelled {
-                autoreleasepool {
-                    guard writerInput.isReadyForMoreMediaData,
-                          let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
-                          let pool = pixelAdaptor.pixelBufferPool else { return }
-                    var optionalBuffer: CVPixelBuffer?
-                    guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &optionalBuffer) == kCVReturnSuccess,
-                          let buffer = optionalBuffer else { return }
-                    CVPixelBufferLockBaseAddress(buffer, [])
-                    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-                    guard let base = CVPixelBufferGetBaseAddress(buffer),
-                          let context = CGContext(data: base, width: width, height: height,
-                                                  bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-                                                  space: CGColorSpaceCreateDeviceRGB(),
-                                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
-                    context.interpolationQuality = .high
-                    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-                    let time = CMTime(value: frame, timescale: 15)
-                    if !pixelAdaptor.append(buffer, withPresentationTime: time) {
-                        self.captureError = assetWriter.error ?? DriverError.message("failed to append window video frame")
-                    }
+                if let error = assetWriter.error {
+                    self.captureError = error
+                    break
+                }
+                if !writerInput.isReadyForMoreMediaData {
+                    // Dropped frames still advance the media clock; otherwise
+                    // backpressure spins forever at the same deadline.
                     frame += 1
+                } else {
+                    autoreleasepool {
+                        guard let image = CGWindowListCreateImage(
+                            bounds, .optionIncludingWindow, windowID,
+                            [.boundsIgnoreFraming, .bestResolution]
+                        ), let pool = pixelAdaptor.pixelBufferPool else {
+                            self.captureError = DriverError.message("window capture source became unavailable")
+                            return
+                        }
+                        var optionalBuffer: CVPixelBuffer?
+                        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &optionalBuffer) == kCVReturnSuccess,
+                              let buffer = optionalBuffer else {
+                            self.captureError = DriverError.message("could not allocate window video frame")
+                            return
+                        }
+                        CVPixelBufferLockBaseAddress(buffer, [])
+                        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+                        guard let base = CVPixelBufferGetBaseAddress(buffer),
+                              let context = CGContext(
+                                data: base, width: width, height: height,
+                                bitsPerComponent: 8,
+                                bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                  | CGBitmapInfo.byteOrder32Little.rawValue
+                              ) else {
+                            self.captureError = DriverError.message("could not create window video context")
+                            return
+                        }
+                        context.interpolationQuality = .high
+                        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+                        let time = CMTime(value: frame, timescale: 15)
+                        if !pixelAdaptor.append(buffer, withPresentationTime: time) {
+                            self.captureError = assetWriter.error
+                              ?? DriverError.message("failed to append window video frame")
+                        }
+                        frame += 1
+                    }
+                    if self.captureError != nil { break }
                 }
                 let target = start.advanced(by: .milliseconds(Int(frame * 1000 / 15)))
                 try? await Task.sleep(until: target)
@@ -528,6 +554,24 @@ struct BuzzNativeDriver {
                         } else if type == "type_text" {
                             try postText(action["text"] as? String ?? "")
                         } else if type == "scroll" {
+                            guard let (_, used) = selected else {
+                                throw DriverError.message("scroll requires a freshly selected target")
+                            }
+                            var fresh: ElementDescription?
+                            if let path = semanticSnapshotPath,
+                               let element = semanticNodes(path: path, pid: pid).first(where: { matches($0, locator: used) }) {
+                                fresh = describe(element, locator: used)
+                            }
+                            if fresh == nil, let element = find(accessibilityRoots(app: app, pid: pid), locator: used) {
+                                fresh = describe(element, locator: used)
+                            }
+                            guard let element = fresh, let frame = element.frame else {
+                                throw DriverError.message("scroll requires a freshly selected target with current bounds")
+                            }
+                            selected = (element, used)
+                            let point = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
+                            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                                    mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             let deltaY = Int32(action["delta_y"] as? Int ?? 0)
                             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                                       wheel1: deltaY, wheel2: 0, wheel3: 0) else {

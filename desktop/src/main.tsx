@@ -42,18 +42,31 @@ function configureNativeReviewFixtureFromUrl() {
     url.searchParams.get(NATIVE_REVIEW_PARAM) === "1" || buildEnabled;
   if (!enabled) return;
 
-  const relayUrl =
-    url.searchParams.get("reviewRelay") ??
-    import.meta.env.VITE_NATIVE_REVIEW_RELAY;
-  const pubkey =
-    url.searchParams.get("reviewPubkey") ??
-    import.meta.env.VITE_NATIVE_REVIEW_PUBKEY;
+  const relayUrl = import.meta.env.VITE_NATIVE_REVIEW_RELAY;
+  const pubkey = import.meta.env.VITE_NATIVE_REVIEW_PUBKEY;
+  let relay: URL;
+  try {
+    relay = new URL(relayUrl ?? "");
+  } catch {
+    throw new Error(
+      "native review bootstrap requires a loopback relay and pubkey",
+    );
+  }
+  const loopbackHost = ["localhost", "127.0.0.1", "[::1]"].includes(
+    relay.hostname,
+  );
   if (
     !relayUrl ||
     !pubkey ||
-    !/^(ws|http):\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\/?$/.test(
-      relayUrl,
-    )
+    !/^[0-9a-f]{64}$/.test(pubkey) ||
+    !["ws:", "http:"].includes(relay.protocol) ||
+    !loopbackHost ||
+    !relay.port ||
+    (relay.pathname !== "/" && relay.pathname !== "") ||
+    relay.username ||
+    relay.password ||
+    relay.search ||
+    relay.hash
   ) {
     throw new Error(
       "native review bootstrap requires a loopback relay and pubkey",

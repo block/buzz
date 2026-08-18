@@ -18,8 +18,17 @@ exact-SHA run receipt. It is a targeted review lane, not a replacement for
 
 ## Commands
 
+Create an isolated Python environment and install the pinned parser dependency:
+
 ```bash
-just native-review-doctor
+python3 -m venv .venv-native-review
+.venv-native-review/bin/pip install --require-hashes -r tools/native-review/requirements.txt
+```
+
+Then run the harness with that interpreter first on `PATH`:
+
+```bash
+PATH="$PWD/.venv-native-review/bin:$PATH" just native-review-doctor
 just native-review-desktop tools/native-review/desktop/tooltip-fresh-dwell.yaml
 python3 -m unittest discover -s tools/native-review/tests -p 'test_*.py'
 ```

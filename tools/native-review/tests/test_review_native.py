@@ -62,6 +62,42 @@ class JourneyTests(unittest.TestCase):
             with self.assertRaisesRegex(review_native.HarnessError, "scroll requires integer delta_y"):
                 review_native.load_journey(path)
 
+
+    def test_boolean_and_nonfinite_journey_numbers_are_rejected(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        composer = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
+        cases = [
+            (source, "timeout_ms: 15000", "timeout_ms: true", "timeout_ms"),
+            (source, "duration_ms: 800", "duration_ms: true", "duration_ms"),
+            (composer, "scroll_y_less_than: 1", "scroll_y_less_than: .nan", "finite number"),
+        ]
+        for source_text, old, new, error in cases:
+            with self.subTest(new=new), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "invalid.yaml"
+                path.write_text(source_text.replace(old, new, 1))
+                with self.assertRaisesRegex(review_native.HarnessError, error):
+                    review_native.load_journey(path)
+
+    def test_scroll_requires_locator_and_bounded_delta(self):
+        source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
+        without_locator = source.replace("    locate:\n      - {id: message-input-scroll}\n", "", 1)
+        oversized = source.replace("delta_y: 240", "delta_y: 10001", 1)
+        for value in (without_locator, oversized):
+            with tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "invalid.yaml"
+                path.write_text(value)
+                with self.assertRaises(review_native.HarnessError):
+                    review_native.load_journey(path)
+
+    def test_relay_url_rejects_ambiguous_components(self):
+        for relay in (
+            "ws://localhost:3030/path", "ws://user@localhost:3030",
+            "ws://localhost:3030?x=1", "ws://localhost:3030#x",
+            "ws://localhost", "ws://localhost:99999",
+        ):
+            with self.subTest(relay=relay), self.assertRaises(review_native.HarnessError):
+                review_native.isolation_manifest("run", relay)
+
     def test_value_expectation_uses_selected_element(self):
         driver = mock.Mock()
         driver.request.return_value = {"ok": True, "element": {"value": "draft"}}
@@ -237,9 +273,11 @@ class PerformanceTests(unittest.TestCase):
 
     def receipt(self, path, artifact, timing, cpu=10, memory=100, flow="tooltip_fresh_dwell"):
         payload = {
+            "schema_version": 1,
             "run_id": path.stem, "flow": flow, "status": "passed",
             "cleanup": {"status": "passed"},
-            "provenance": {"dirty": False, "head_sha": artifact + "-sha", "artifact_sha256": artifact},
+            "provenance": {"dirty": False, "head_sha": ("a" if artifact == "base" else "b") * 40,
+                           "artifact_sha256": ("c" if artifact == "base" else "d") * 64},
             "measurements": {"tooltip_open_latency": {"value": timing, "unit": "ms", "step": "tooltip"}},
             "performance": {"machine": self.MACHINE, "process": {
                 "cpu_percent_median": cpu, "resident_mb_peak": memory,
@@ -291,9 +329,39 @@ metrics:
     def test_comparison_rejects_too_few_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            receipts = [self.receipt(root / f"r{i}.json", "same", 100) for i in range(2)]
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(2)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(2)]
             with self.assertRaisesRegex(review_native.HarnessError, "at least 3"):
-                review_native.compare_performance(receipts, receipts, self.budget(root / "budget.yaml"))
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+
+    def test_comparison_rejects_nonfinite_bool_overlap_and_same_revision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            payload = json.loads(candidate[0].read_text())
+            payload["measurements"]["tooltip_open_latency"]["value"] = float("nan")
+            candidate[0].write_text(json.dumps(payload))
+            with self.assertRaisesRegex(review_native.HarnessError, "finite numeric"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+            candidate = [self.receipt(root / f"d{i}.json", "base", 100) for i in range(3)]
+            with self.assertRaisesRegex(review_native.HarnessError, "same source revision"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+            with self.assertRaisesRegex(review_native.HarnessError, "overlap"):
+                review_native.compare_performance(baseline, baseline, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_bool_and_nonfinite_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            for value in ("true", ".nan", ".inf"):
+                budget = self.budget(root / f"budget-{value}.yaml")
+                budget.write_text(budget.read_text().replace("max: 1000", f"max: {value}"))
+                with self.assertRaisesRegex(review_native.HarnessError, "invalid limits"):
+                    review_native.compare_performance(baseline, candidate, budget)
 
     def test_comparison_rejects_incompatible_machine(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,7 +380,7 @@ metrics:
             baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
             candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
             payload = json.loads(candidate[0].read_text())
-            payload["provenance"]["head_sha"] = "other"
+            payload["provenance"]["head_sha"] = "e" * 40
             candidate[0].write_text(json.dumps(payload))
             with self.assertRaisesRegex(review_native.HarnessError, "mixes source revisions"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))

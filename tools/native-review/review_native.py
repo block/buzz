@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import http.server
 import json
+import math
 import os
 import pathlib
 import platform
@@ -37,6 +38,10 @@ SECRET_NAME = re.compile(r"(AUTH|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|COOKIE)", re.
 ALLOWED_TOP = {"schema_version", "flow", "platforms", "fixture", "record", "steps", "cleanup"}
 ALLOWED_STEP = {"name", "locate", "act", "expect", "expect_for", "timeout_ms", "measure"}
 PERFORMANCE_SAMPLE_MINIMUM = 3
+MAX_ACTION_DURATION_MS = 30_000
+MAX_SCROLL_DELTA = 10_000
+MAX_SEMANTIC_SNAPSHOT_BYTES = 1_000_000
+PUBKEY = re.compile(r"[0-9a-f]{64}")
 
 
 class HarnessError(RuntimeError):
@@ -148,8 +153,11 @@ def validate_expectation(expectation: Any, where: str) -> None:
     if "value" in expectation and not isinstance(expectation["value"], str):
         raise HarnessError(f"{where}.value must be a string")
     for key in ("scroll_y_greater_than", "scroll_y_less_than"):
-        if key in expectation and not isinstance(expectation[key], (int, float)):
-            raise HarnessError(f"{where}.{key} must be numeric")
+        if key in expectation:
+            value = expectation[key]
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not math.isfinite(value)):
+                raise HarnessError(f"{where}.{key} must be a finite number")
 
 
 def load_journey(path: pathlib.Path) -> dict[str, Any]:
@@ -192,8 +200,17 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
             raise HarnessError(f"{where}.act has unsupported type")
         if set(action) - {"type", "duration_ms", "key", "modifiers", "text", "delta_y"}:
             raise HarnessError(f"{where}.act contains an unsupported field")
-        if action_type in {"click", "move_pointer"} and locators is None:
+        if action_type in {"click", "move_pointer", "scroll"} and locators is None:
             raise HarnessError(f"{where}: {action_type} requires locate")
+        if "duration_ms" in action:
+            duration = action["duration_ms"]
+            if (not isinstance(duration, int) or isinstance(duration, bool)
+                    or not 0 <= duration <= MAX_ACTION_DURATION_MS):
+                raise HarnessError(
+                    f"{where}.act.duration_ms must be 0..{MAX_ACTION_DURATION_MS}"
+                )
+        if action_type == "wait" and "duration_ms" not in action:
+            raise HarnessError(f"{where}: wait requires duration_ms")
         if action_type == "press":
             if not isinstance(action.get("key"), str) or not action["key"]:
                 raise HarnessError(f"{where}: press requires key")
@@ -202,16 +219,29 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
                 raise HarnessError(f"{where}: press modifiers must be strings")
         if action_type == "type_text" and not isinstance(action.get("text"), str):
             raise HarnessError(f"{where}: type_text requires text")
-        if action_type == "scroll" and not isinstance(action.get("delta_y"), int):
-            raise HarnessError(f"{where}: scroll requires integer delta_y")
+        if action_type == "scroll":
+            delta = action.get("delta_y")
+            if (not isinstance(delta, int) or isinstance(delta, bool)
+                    or not -MAX_SCROLL_DELTA <= delta <= MAX_SCROLL_DELTA):
+                raise HarnessError(
+                    f"{where}: scroll requires integer delta_y in "
+                    f"-{MAX_SCROLL_DELTA}..{MAX_SCROLL_DELTA}"
+                )
         validate_expectation(step["expect"], f"{where}.expect")
         if "expect_for" in step:
             sustained = step["expect_for"]
             if not isinstance(sustained, dict) or set(sustained) != {"duration_ms", "condition"}:
                 raise HarnessError(f"{where}.expect_for requires duration_ms and condition")
+            sustained_duration = sustained["duration_ms"]
+            if (not isinstance(sustained_duration, int) or isinstance(sustained_duration, bool)
+                    or not 0 < sustained_duration <= MAX_ACTION_DURATION_MS):
+                raise HarnessError(
+                    f"{where}.expect_for.duration_ms must be 1..{MAX_ACTION_DURATION_MS}"
+                )
             validate_expectation(sustained["condition"], f"{where}.expect_for.condition")
         timeout = step.get("timeout_ms", 5000)
-        if not isinstance(timeout, int) or not 0 < timeout <= 60000:
+        if (not isinstance(timeout, int) or isinstance(timeout, bool)
+                or not 0 < timeout <= 60000):
             raise HarnessError(f"{where}.timeout_ms must be 1..60000")
         if "measure" in step:
             measurement = step["measure"]
@@ -226,10 +256,29 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
     return journey
 
 
+def parse_loopback_relay(relay_url: str) -> urllib.parse.ParseResult:
+    try:
+        parsed = urllib.parse.urlparse(relay_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise HarnessError(f"invalid review relay URL: {relay_url}") from exc
+    if (
+        parsed.scheme not in {"ws", "http"}
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or port is None
+    ):
+        raise HarnessError(f"refusing ambiguous or non-loopback review relay: {relay_url}")
+    return parsed
+
+
 def isolation_manifest(run_id: str, relay_url: str) -> dict[str, str]:
-    parsed = urllib.parse.urlparse(relay_url)
-    if parsed.scheme not in {"ws", "http"} or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise HarnessError(f"refusing non-loopback review relay: {relay_url}")
+    parse_loopback_relay(relay_url)
     slug = re.sub(r"[^a-z0-9-]", "-", run_id.lower())
     bundle_id = f"xyz.block.buzz.app.dev.native-review.{slug}"
     keyring = f"buzz-desktop-dev.native-review.{slug}"
@@ -268,8 +317,8 @@ def scrubbed_environment(*, include_home: bool = False) -> dict[str, str]:
 
 def fixture_environment(isolation: dict[str, str], review_pubkey: str) -> dict[str, str]:
     """Return fixed local fixture coordinates without inheriting host credentials."""
-    parsed = urllib.parse.urlparse(isolation["relay_url"])
-    port = parsed.port or 80
+    parsed = parse_loopback_relay(isolation["relay_url"])
+    port = parsed.port
     if port != 3030:
         raise HarnessError("fixture seeding requires the isolated relay at loopback port 3030")
     return {
@@ -378,12 +427,15 @@ def prepare_fixture(run_dir: pathlib.Path, isolation: dict[str, str]) -> dict[st
     public_match = re.search(r"Public key:\s+(\S+)", generated)
     if not secret_match or not public_match:
         raise HarnessError("buzz-admin generate-key returned an unrecognized response")
+    identity_pubkey = public_match.group(1)
+    if not PUBKEY.fullmatch(identity_pubkey):
+        raise HarnessError("buzz-admin generate-key returned an invalid public key")
     secret_path = run_dir / "state" / "identity.key"
     secret_path.parent.mkdir(parents=True, exist_ok=True)
     secret_path.write_text(secret_match.group(1) + "\n")
     secret_path.chmod(0o600)
     fixture = {
-        "kind": "local_review_channel", "identity_pubkey": public_match.group(1),
+        "kind": "local_review_channel", "identity_pubkey": identity_pubkey,
         "secret_path": str(secret_path), "relay_url": isolation["relay_url"],
         "seed": "scripts/setup-desktop-test-data.sh", "cleanup_scope": "run-local app state and keyring only",
     }
@@ -397,12 +449,40 @@ def prepare_fixture(run_dir: pathlib.Path, isolation: dict[str, str]) -> dict[st
     return fixture
 
 
-def semantic_probe_server(path: pathlib.Path) -> tuple[http.server.ThreadingHTTPServer, str]:
+def valid_semantic_snapshot(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) > 20_000:
+        return False
+    allowed = {"id", "role", "name", "value", "scrollY", "enabled", "focused", "frame", "viewport"}
+    for node in value:
+        if not isinstance(node, dict) or set(node) - allowed or not {
+            "scrollY", "enabled", "focused", "frame", "viewport"
+        } <= set(node):
+            return False
+        if any(not isinstance(node.get(key), str) or len(node[key]) > 4096
+               for key in ("id", "role", "name", "value") if key in node):
+            return False
+        if (not isinstance(node["scrollY"], (int, float)) or isinstance(node["scrollY"], bool)
+                or not math.isfinite(node["scrollY"])
+                or not isinstance(node["enabled"], bool)
+                or not isinstance(node["focused"], bool)):
+            return False
+        for field, keys in (("frame", {"x", "y", "width", "height"}),
+                            ("viewport", {"width", "height"})):
+            item = node[field]
+            if not isinstance(item, dict) or set(item) != keys:
+                return False
+            if any(not isinstance(number, (int, float)) or isinstance(number, bool)
+                   or not math.isfinite(number) for number in item.values()):
+                return False
+    return True
+
+
+def semantic_probe_server(path: pathlib.Path, token: str) -> tuple[http.server.ThreadingHTTPServer, str]:
     class Handler(http.server.BaseHTTPRequestHandler):
         def end_headers(self) -> None:
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Origin", "http://localhost:1420")
             self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Buzz-Native-Review-Token")
             self.send_header("Access-Control-Allow-Private-Network", "true")
             super().end_headers()
 
@@ -411,12 +491,24 @@ def semantic_probe_server(path: pathlib.Path) -> tuple[http.server.ThreadingHTTP
             self.end_headers()
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
-            length = int(self.headers.get("Content-Length", "0"))
+            if self.path != "/snapshot" or self.headers.get("X-Buzz-Native-Review-Token") != token:
+                self.send_response(404 if self.path != "/snapshot" else 401)
+                self.end_headers()
+                return
+            raw_length = self.headers.get("Content-Length")
+            try:
+                length = int(raw_length) if raw_length is not None else -1
+            except ValueError:
+                length = -1
+            if not 0 <= length <= MAX_SEMANTIC_SNAPSHOT_BYTES:
+                self.send_response(413)
+                self.end_headers()
+                return
             payload = self.rfile.read(length)
             try:
                 value = json.loads(payload)
-                if not isinstance(value, list):
-                    raise ValueError("snapshot must be an array")
+                if not valid_semantic_snapshot(value):
+                    raise ValueError("invalid semantic snapshot")
                 temporary = path.with_suffix(".json.tmp")
                 temporary.write_text(json.dumps(value))
                 temporary.replace(path)
@@ -435,7 +527,7 @@ def semantic_probe_server(path: pathlib.Path) -> tuple[http.server.ThreadingHTTP
 
 
 def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: dict[str, Any],
-                     probe_url: str) -> tuple[subprocess.Popen[str], pathlib.Path, int]:
+                     probe_url: str, probe_token: str) -> tuple[subprocess.Popen[str], pathlib.Path, int]:
     # Build with the repository toolchain but no inherited credentials. Launch
     # the resulting executable separately so only the app receives isolated HOME.
     dev_url = (
@@ -453,6 +545,7 @@ def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: 
     build_env["VITE_NATIVE_REVIEW_RELAY"] = isolation["relay_url"]
     build_env["VITE_NATIVE_REVIEW_PUBKEY"] = fixture["identity_pubkey"]
     build_env["VITE_NATIVE_REVIEW_PROBE_URL"] = probe_url
+    build_env["VITE_NATIVE_REVIEW_PROBE_TOKEN"] = probe_token
     run(["pnpm", "exec", "tauri", "build", "--debug", "--bundles", "app", "--config", config],
         cwd=ROOT / "desktop", env=build_env, capture=False)
     app_binary = (ROOT / "desktop" / "src-tauri" / "target" / "debug" / "bundle" / "macos" /
@@ -600,8 +693,13 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
         if not doctor(require_permissions=True)["ok"]:
             raise HarnessError("doctor failed; grant required permissions and rerun")
         fixture = prepare_fixture(run_dir, isolation)
-        probe_server, probe_url = semantic_probe_server(run_dir / "state" / "semantic.json")
-        process, app_binary, app_pid = build_and_launch(run_dir, isolation, fixture, probe_url)
+        probe_token = secrets.token_urlsafe(32)
+        probe_server, probe_url = semantic_probe_server(
+            run_dir / "state" / "semantic.json", probe_token
+        )
+        process, app_binary, app_pid = build_and_launch(
+            run_dir, isolation, fixture, probe_url, probe_token
+        )
         receipt["provenance"]["artifact_path"] = str(app_binary)
         receipt["provenance"]["artifact_sha256"] = sha256(app_binary)
         driver = Driver(build_driver(), app_pid, run_dir / "state" / "semantic.json")
@@ -689,7 +787,14 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
     return run_dir
 
 
+def numeric(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
 def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]:
+    if len({path.resolve() for path in paths}) != len(paths):
+        raise HarnessError(f"{label} cohort contains duplicate receipt paths")
     receipts = []
     for path in paths:
         try:
@@ -700,7 +805,22 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
             raise HarnessError(f"{label} receipt is not a clean pass: {path}")
         if receipt.get("provenance", {}).get("dirty"):
             raise HarnessError(f"{label} receipt was captured from a dirty tree: {path}")
+        provenance = receipt.get("provenance")
+        machine = receipt.get("performance", {}).get("machine")
+        if (receipt.get("schema_version") != 1
+                or not isinstance(receipt.get("run_id"), str) or not receipt["run_id"]
+                or not isinstance(provenance, dict)
+                or not isinstance(provenance.get("head_sha"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", provenance["head_sha"])
+                or not isinstance(provenance.get("artifact_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", provenance["artifact_sha256"])
+                or not isinstance(machine, dict)
+                or set(machine) != {"system", "release", "machine", "cpu"}
+                or any(not isinstance(value, str) or not value for value in machine.values())):
+            raise HarnessError(f"{label} receipt has incomplete provenance: {path}")
         receipts.append(receipt)
+    if len({receipt["run_id"] for receipt in receipts}) != len(receipts):
+        raise HarnessError(f"{label} cohort contains duplicate run identities")
     return receipts
 
 
@@ -709,8 +829,8 @@ def metric_value(receipt: dict[str, Any], metric: str) -> float:
         value = receipt.get("performance", {}).get("process", {}).get(metric.removeprefix("process."))
     else:
         value = receipt.get("measurements", {}).get(metric, {}).get("value")
-    if not isinstance(value, (int, float)):
-        raise HarnessError(f"receipt {receipt.get('run_id')} has no numeric metric {metric}")
+    if not numeric(value):
+        raise HarnessError(f"receipt {receipt.get('run_id')} has no finite numeric metric {metric}")
     return float(value)
 
 
@@ -742,7 +862,8 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     if budget["schema_version"] != 1 or not isinstance(budget["flow"], str):
         raise HarnessError("unsupported performance budget schema")
     minimum = budget["minimum_samples"]
-    if not isinstance(minimum, int) or minimum < PERFORMANCE_SAMPLE_MINIMUM:
+    if (not isinstance(minimum, int) or isinstance(minimum, bool)
+            or minimum < PERFORMANCE_SAMPLE_MINIMUM):
         raise HarnessError(f"minimum_samples must be at least {PERFORMANCE_SAMPLE_MINIMUM}")
     metrics = budget["metrics"]
     if not isinstance(metrics, dict) or not metrics:
@@ -751,11 +872,15 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     for name, limits in metrics.items():
         if (not isinstance(name, str) or not name or not isinstance(limits, dict) or not limits
                 or set(limits) - allowed_limits
-                or not all(isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 for value in limits.values())):
+                or not all(numeric(value) and value >= 0 for value in limits.values())):
             raise HarnessError(f"invalid limits for performance metric {name}")
 
     baseline = load_receipts(baseline_paths, "baseline")
     candidate = load_receipts(candidate_paths, "candidate")
+    if {path.resolve() for path in baseline_paths} & {path.resolve() for path in candidate_paths}:
+        raise HarnessError("baseline and candidate cohorts overlap")
+    if {receipt["run_id"] for receipt in baseline} & {receipt["run_id"] for receipt in candidate}:
+        raise HarnessError("baseline and candidate cohorts reuse run identities")
     if len(baseline) < minimum or len(candidate) < minimum:
         raise HarnessError(f"performance comparison requires at least {minimum} clean samples per cohort")
     all_receipts = baseline + candidate
@@ -766,8 +891,14 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     if len(machines) != 1:
         raise HarnessError("baseline and candidate receipts were captured on incompatible machines")
     for label, cohort in (("baseline", baseline), ("candidate", candidate)):
-        if len({receipt["provenance"].get("head_sha") for receipt in cohort}) != 1:
+        revisions = {receipt["provenance"]["head_sha"] for receipt in cohort}
+        artifacts = {receipt["provenance"]["artifact_sha256"] for receipt in cohort}
+        if len(revisions) != 1:
             raise HarnessError(f"{label} cohort mixes source revisions")
+        if len(artifacts) != 1:
+            raise HarnessError(f"{label} cohort mixes application artifacts")
+    if baseline[0]["provenance"]["head_sha"] == candidate[0]["provenance"]["head_sha"]:
+        raise HarnessError("baseline and candidate cohorts use the same source revision")
 
     baseline_summary = cohort_summary(baseline, list(metrics))
     candidate_summary = cohort_summary(candidate, list(metrics))

@@ -88,23 +88,54 @@ function snapshot(): SemanticNode[] {
 }
 
 export function installNativeReviewSemanticProbe(): void {
+  const probeUrl = import.meta.env.VITE_NATIVE_REVIEW_PROBE_URL;
+  const probeToken = import.meta.env.VITE_NATIVE_REVIEW_PROBE_TOKEN;
+  const parsed = new URL(probeUrl);
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.hostname !== "127.0.0.1" ||
+    !parsed.port ||
+    parsed.pathname !== "/snapshot" ||
+    parsed.search ||
+    parsed.hash ||
+    !probeToken
+  ) {
+    throw new Error("native review semantic probe destination is invalid");
+  }
   let scheduled = false;
-  const publish = () => {
-    scheduled = false;
-    const payload = JSON.stringify(snapshot());
-    if (
-      !navigator.sendBeacon(
-        import.meta.env.VITE_NATIVE_REVIEW_PROBE_URL,
-        payload,
-      )
-    ) {
-      console.error("native review semantic probe beacon was rejected");
-    }
-  };
+  let probeInFlight = false;
+  let publishPending = false;
   const schedule = () => {
+    if (probeInFlight) {
+      publishPending = true;
+      return;
+    }
     if (scheduled) return;
     scheduled = true;
     window.requestAnimationFrame(publish);
+  };
+  const publish = () => {
+    scheduled = false;
+    probeInFlight = true;
+    const payload = JSON.stringify(snapshot());
+    void fetch(probeUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Buzz-Native-Review-Token": probeToken,
+      },
+      body: payload,
+    })
+      .catch((error) => {
+        console.error("native review semantic probe publish failed", error);
+      })
+      .finally(() => {
+        probeInFlight = false;
+        if (publishPending) {
+          publishPending = false;
+          schedule();
+        }
+      });
   };
   new MutationObserver(schedule).observe(document.documentElement, {
     attributes: true,
