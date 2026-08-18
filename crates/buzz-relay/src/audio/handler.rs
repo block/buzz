@@ -675,6 +675,7 @@ async fn handle_active_audio_connection(
         parent_id_for_event,
         &pubkey_hex,
         Some(lifecycle_revision),
+        Some(peer_id),
     )
     .await;
 
@@ -876,6 +877,7 @@ async fn handle_active_audio_connection(
         parent_id_for_event,
         &pubkey_hex,
         removal_revision,
+        Some(peer_id),
     )
     .await;
 
@@ -905,6 +907,7 @@ async fn handle_active_audio_connection(
                     channel_id,
                     parent_id_for_event,
                     &pubkey_hex,
+                    None,
                     None,
                 )
                 .await;
@@ -1309,13 +1312,23 @@ async fn emit_participant_event(
     parent_channel_id: Uuid,
     participant_pubkey: &str,
     roster_revision: Option<u64>,
+    admission_id: Option<Uuid>,
 ) {
-    let content = match roster_revision {
-        Some(revision) => serde_json::json!({
+    let content = match (roster_revision, admission_id) {
+        (Some(revision), Some(admission_id)) => serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+            "roster_revision": revision,
+            "admission_id": admission_id.to_string(),
+        }),
+        (Some(revision), None) => serde_json::json!({
             "ephemeral_channel_id": channel_id.to_string(),
             "roster_revision": revision,
         }),
-        None => serde_json::json!({"ephemeral_channel_id": channel_id.to_string()}),
+        (None, Some(admission_id)) => serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+            "admission_id": admission_id.to_string(),
+        }),
+        (None, None) => serde_json::json!({"ephemeral_channel_id": channel_id.to_string()}),
     }
     .to_string();
 

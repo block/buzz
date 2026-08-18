@@ -326,23 +326,34 @@ struct HuddleActiveTalkerSelector {
   struct Activity {
     let peerIndex: Int
     let lastPacketOrdinal: UInt64
+    let lastPacketAt: TimeInterval
     let levelDbov: Int
   }
 
   let capacity: Int
+  let now: () -> TimeInterval
+  let inactivityTimeout: TimeInterval
   private(set) var active: [Int: Activity] = [:]
   private var ordinal: UInt64 = 0
 
-  init(capacity: Int) {
+  init(
+    capacity: Int,
+    now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+    inactivityTimeout: TimeInterval = 1
+  ) {
     self.capacity = capacity
+    self.now = now
+    self.inactivityTimeout = inactivityTimeout
   }
 
   mutating func activate(peerIndex: Int, levelDbov: Int) -> HuddleTalkerSelection {
     ordinal &+= 1
+    let packetAt = now()
     if active[peerIndex] != nil {
       active[peerIndex] = Activity(
         peerIndex: peerIndex,
         lastPacketOrdinal: ordinal,
+        lastPacketAt: packetAt,
         levelDbov: levelDbov
       )
       return HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
@@ -358,17 +369,26 @@ struct HuddleActiveTalkerSelector {
         return left.peerIndex < right.peerIndex
       }
       : nil
+    let expired = active.values
+      .filter { packetAt - $0.lastPacketAt >= inactivityTimeout }
+      .min { left, right in
+        if left.lastPacketAt != right.lastPacketAt {
+          return left.lastPacketAt < right.lastPacketAt
+        }
+        return left.peerIndex < right.peerIndex
+      }
     // Equal-level packets (especially continuous -127 dBov silence) must not
-    // churn decoder/jitter state. Admit a new peer only when it is louder than
-    // the quietest selected peer.
-    if let weakest, levelDbov <= weakest.levelDbov {
+    // churn decoder/jitter state. Admit a new peer when any selected slot is
+    // inactive or the new packet is louder than the quietest selected peer.
+    if let weakest, expired == nil, levelDbov <= weakest.levelDbov {
       return HuddleTalkerSelection(accepted: false, evictedPeerIndex: nil)
     }
-    let evicted = weakest?.peerIndex
+    let evicted = expired?.peerIndex ?? weakest?.peerIndex
     if let evicted { active.removeValue(forKey: evicted) }
     active[peerIndex] = Activity(
       peerIndex: peerIndex,
       lastPacketOrdinal: ordinal,
+      lastPacketAt: packetAt,
       levelDbov: levelDbov
     )
     return HuddleTalkerSelection(accepted: true, evictedPeerIndex: evicted)

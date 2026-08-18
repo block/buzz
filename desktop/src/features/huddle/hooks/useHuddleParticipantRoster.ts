@@ -27,11 +27,13 @@ function normalizedPubkey(value: string | null | undefined): string | null {
 function lifecycleContent(event: RelayEvent): {
   ephemeralChannelId: string | null;
   rosterRevision: number | null;
+  admissionId: string | null;
 } {
   try {
     const content = JSON.parse(event.content) as {
       ephemeral_channel_id?: unknown;
       roster_revision?: unknown;
+      admission_id?: unknown;
     };
     return {
       ephemeralChannelId:
@@ -44,9 +46,17 @@ function lifecycleContent(event: RelayEvent): {
         content.roster_revision >= 0
           ? content.roster_revision
           : null,
+      admissionId:
+        typeof content.admission_id === "string" && content.admission_id
+          ? content.admission_id
+          : null,
     };
   } catch {
-    return { ephemeralChannelId: null, rosterRevision: null };
+    return {
+      ephemeralChannelId: null,
+      rosterRevision: null,
+      admissionId: null,
+    };
   }
 }
 
@@ -71,8 +81,18 @@ function compareLifecycleEvents(left: RelayEvent, right: RelayEvent): number {
   const rightParticipant = lifecycleParticipant(right);
   const sameParticipant =
     leftParticipant !== null && leftParticipant === rightParticipant;
-  const leftRevision = lifecycleContent(left).rosterRevision;
-  const rightRevision = lifecycleContent(right).rosterRevision;
+  const leftContent = lifecycleContent(left);
+  const rightContent = lifecycleContent(right);
+  if (
+    sameParticipant &&
+    leftContent.admissionId !== null &&
+    leftContent.admissionId === rightContent.admissionId &&
+    left.kind !== right.kind
+  ) {
+    return left.kind === KIND_HUDDLE_PARTICIPANT_JOINED ? -1 : 1;
+  }
+  const leftRevision = leftContent.rosterRevision;
+  const rightRevision = rightContent.rosterRevision;
   if (sameParticipant && leftRevision !== rightRevision) {
     if (leftRevision === null) {
       return left.kind === KIND_HUDDLE_PARTICIPANT_LEFT ? -1 : 1;

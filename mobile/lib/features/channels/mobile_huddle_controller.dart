@@ -112,7 +112,7 @@ final class MobileHuddleController extends Notifier<bool> {
     ref.listen(huddleSessionProvider, (previous, next) {
       if (previous?.wasAdmitted == true &&
           next.phase == HuddleSessionPhase.failed) {
-        unawaited(_cleanupAfterLocalTeardown(next));
+        _startFailureCleanup(next);
       }
     });
     ref.listen(appLifecycleProvider, (_, next) {
@@ -226,9 +226,21 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 
   Future<void>? _backgroundLeave;
+  Future<void>? _failureCleanup;
+  final Set<Future<void>> _lifecycleCleanups = {};
 
   Future<void> _leaveForBackground() =>
       _backgroundLeave ??= leave().whenComplete(() => _backgroundLeave = null);
+
+  void _startFailureCleanup(HuddleSessionState session) {
+    final cleanup = _cleanupAfterLocalTeardown(session);
+    _failureCleanup = cleanup;
+    unawaited(
+      cleanup.whenComplete(() {
+        if (identical(_failureCleanup, cleanup)) _failureCleanup = null;
+      }),
+    );
+  }
 
   Future<void> _leaveForTransition() async {
     final startFuture = _startFuture;
@@ -242,8 +254,15 @@ final class MobileHuddleController extends Notifier<bool> {
         // settle before the relay is rebound to the next community.
       }
     }
+    final failureCleanup = _failureCleanup;
+    if (failureCleanup != null) await failureCleanup;
+    final backgroundLeave = _backgroundLeave;
+    if (backgroundLeave != null) await backgroundLeave;
     if (ref.read(huddleSessionProvider).isInSession) {
-      await _leaveForBackground();
+      await leave();
+    }
+    if (_lifecycleCleanups.isNotEmpty) {
+      await Future.wait(_lifecycleCleanups.toList());
     }
   }
 
@@ -277,11 +296,13 @@ final class MobileHuddleController extends Notifier<bool> {
     if (backingChannelId != null &&
         humanCount != null &&
         admissionToken != null) {
-      await _finishLeaveLifecycle(
-        admissionToken: admissionToken,
-        parentChannelId: parentChannelId,
-        backingChannelId: backingChannelId,
-        humanCount: humanCount,
+      await _trackLifecycleCleanup(
+        _finishLeaveLifecycle(
+          admissionToken: admissionToken,
+          parentChannelId: parentChannelId,
+          backingChannelId: backingChannelId,
+          humanCount: humanCount,
+        ),
       );
     }
     if (localFailure != null) {
@@ -297,12 +318,23 @@ final class MobileHuddleController extends Notifier<bool> {
     final humanCount = ref
         .read(huddleHumanCountProvider)(backingChannelId)
         .catchError((_) => 2);
-    await _finishLeaveLifecycle(
-      admissionToken: admissionToken,
-      parentChannelId: session.parentChannelId,
-      backingChannelId: backingChannelId,
-      humanCount: humanCount,
+    await _trackLifecycleCleanup(
+      _finishLeaveLifecycle(
+        admissionToken: admissionToken,
+        parentChannelId: session.parentChannelId,
+        backingChannelId: backingChannelId,
+        humanCount: humanCount,
+      ),
     );
+  }
+
+  Future<void> _trackLifecycleCleanup(Future<void> cleanup) async {
+    _lifecycleCleanups.add(cleanup);
+    try {
+      await cleanup;
+    } finally {
+      _lifecycleCleanups.remove(cleanup);
+    }
   }
 
   Future<void> _finishLeaveLifecycle({
@@ -311,10 +343,14 @@ final class MobileHuddleController extends Notifier<bool> {
     required String backingChannelId,
     required Future<int> humanCount,
   }) async {
-    if (!_finishedLifecycleAdmissions.add(admissionToken)) return;
     final actions = ref.read(channelActionsProvider);
     final humansRemaining = await humanCount;
-    if (admissionToken.epoch != _admissionEpoch) return;
+    final currentSession = ref.read(huddleSessionProvider);
+    if (currentSession.isInSession &&
+        currentSession.ephemeralChannelId == backingChannelId) {
+      return;
+    }
+    if (!_finishedLifecycleAdmissions.add(admissionToken)) return;
     if (humansRemaining <= 1 && parentChannelId != null) {
       // Desktop auto-ends when the departing person is the last human.
       // Both lifecycle publication and archival are best effort there.
@@ -324,7 +360,6 @@ final class MobileHuddleController extends Notifier<bool> {
           ephemeralChannelId: backingChannelId,
         );
       } catch (_) {}
-      if (admissionToken.epoch != _admissionEpoch) return;
       try {
         await actions.archiveChannel(backingChannelId);
       } catch (_) {}
@@ -343,7 +378,6 @@ final class MobileHuddleController extends Notifier<bool> {
     state = false;
     final session = ref.read(huddleSessionProvider);
     final admissionToken = session.wasAdmitted ? _admissionToken : null;
-    if (identical(_admissionToken, admissionToken)) _admissionToken = null;
     final parentChannelId = session.parentChannelId;
     final backingChannelId = session.ephemeralChannelId;
     if (!session.isCreator ||
@@ -352,6 +386,7 @@ final class MobileHuddleController extends Notifier<bool> {
         backingChannelId == null) {
       throw StateError('Only the Huddle creator can end it.');
     }
+    if (identical(_admissionToken, admissionToken)) _admissionToken = null;
 
     final actions = ref.read(channelActionsProvider);
     if (!_finishedLifecycleAdmissions.add(admissionToken)) return;

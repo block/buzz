@@ -81,6 +81,26 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(Set(selector.active.keys), Set([2, 4]))
   }
 
+  func testHuddleActiveTalkerSelectorExpiresInactiveSlots() {
+    var now: TimeInterval = 0
+    var selector = HuddleActiveTalkerSelector(
+      capacity: 2,
+      now: { now },
+      inactivityTimeout: 1
+    )
+
+    _ = selector.activate(peerIndex: 4, levelDbov: -10)
+    now = 0.999
+    _ = selector.activate(peerIndex: 2, levelDbov: -5)
+    now = 1
+
+    XCTAssertEqual(
+      selector.activate(peerIndex: 9, levelDbov: -30),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: 4)
+    )
+    XCTAssertEqual(Set(selector.active.keys), Set([2, 9]))
+  }
+
   func testHuddlePacketJitterQueueReordersAndRejectsStaleDuplicates() {
     var queue = HuddlePacketJitterQueue(capacity: 3, startPackets: 2)
     queue.enqueue(remotePacket(sequence: 11))

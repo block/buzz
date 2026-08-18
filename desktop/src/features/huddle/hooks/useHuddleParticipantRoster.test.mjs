@@ -26,6 +26,7 @@ function event({
   createdAt = 1,
   channel = room,
   rosterRevision,
+  admissionId,
 }) {
   return {
     id,
@@ -37,6 +38,7 @@ function event({
       ...(rosterRevision === undefined
         ? {}
         : { roster_revision: rosterRevision }),
+      ...(admissionId === undefined ? {} : { admission_id: admissionId }),
     }),
     tags: participant ? [["p", participant]] : [],
     sig: "",
@@ -141,6 +143,35 @@ test("orders same-second leave then rejoin by roster revision", () => {
       fallbackParticipants: ["mobile"],
     }),
     ["mobile"],
+  );
+});
+
+test("orders same-second join then leave by admission identity", () => {
+  const events = [
+    event({
+      id: "joined",
+      kind: 48101,
+      participant: "mobile",
+      createdAt: 2,
+      rosterRevision: 3,
+      admissionId: "admission-a",
+    }),
+    event({
+      id: "left",
+      kind: 48102,
+      participant: "mobile",
+      createdAt: 2,
+      admissionId: "admission-a",
+    }),
+  ];
+
+  assert.deepEqual(
+    reconstructHuddleParticipantRoster({
+      ephemeralChannelId: room,
+      events,
+      fallbackParticipants: ["mobile"],
+    }),
+    [],
   );
 });
 

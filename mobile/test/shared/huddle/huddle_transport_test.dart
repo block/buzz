@@ -367,15 +367,19 @@ void main() {
       ],
     );
     final received = <int>[];
-    final subscription = transport.remoteAudioFrames.listen(
-      (frame) => received.add(frame.header.sequence),
-    );
+    final drained = Completer<void>();
+    final subscription = transport.remoteAudioFrames.listen((frame) {
+      received.add(frame.header.sequence);
+      if (frame.header.sequence == 99 && !drained.isCompleted) {
+        drained.complete();
+      }
+    });
     addTearDown(subscription.cancel);
 
     for (var sequence = 0; sequence < 100; sequence++) {
       channel.emitBinary(_relayFrame(peerIndex: 4, sequence: sequence));
     }
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await drained.future.timeout(const Duration(seconds: 1));
 
     expect(received, hasLength(50));
     expect(received.first, 50);

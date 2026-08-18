@@ -55,10 +55,13 @@ internal data class HuddleTalkerSelection(
 /// native decoder/track resources exist only for peers that actually send.
 internal class HuddleActiveTalkerSelector(
     private val capacity: Int,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val inactivityTimeoutMs: Long = 1_000,
 ) {
     internal data class Activity(
         val peerIndex: Int,
         val lastPacketOrdinal: Long,
+        val lastPacketAtMs: Long,
         val levelDbov: Int,
     )
 
@@ -67,8 +70,9 @@ internal class HuddleActiveTalkerSelector(
 
     fun activate(peerIndex: Int, levelDbov: Int): HuddleTalkerSelection {
         ordinal += 1
+        val now = nowMs()
         if (active.containsKey(peerIndex)) {
-            active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
+            active[peerIndex] = Activity(peerIndex, ordinal, now, levelDbov)
             return HuddleTalkerSelection(accepted = true, evictedPeerIndex = null)
         }
         val weakest = if (active.size >= capacity) {
@@ -80,15 +84,18 @@ internal class HuddleActiveTalkerSelector(
         } else {
             null
         }
+        val expired = active.values
+            .filter { now - it.lastPacketAtMs >= inactivityTimeoutMs }
+            .minWithOrNull(compareBy<Activity> { it.lastPacketAtMs }.thenBy { it.peerIndex })
         // Equal-level packets (especially continuous -127 dBov silence) must
-        // not churn decoder/jitter state. A new peer earns a slot only when it
-        // is actually louder than the quietest selected peer.
-        if (weakest != null && levelDbov <= weakest.levelDbov) {
+        // not churn decoder/jitter state. A new peer earns a slot when any
+        // selected slot is inactive or the new packet is actually louder.
+        if (weakest != null && expired == null && levelDbov <= weakest.levelDbov) {
             return HuddleTalkerSelection(accepted = false, evictedPeerIndex = null)
         }
-        val evicted = weakest?.peerIndex
+        val evicted = expired?.peerIndex ?: weakest?.peerIndex
         evicted?.let(active::remove)
-        active[peerIndex] = Activity(peerIndex, ordinal, levelDbov)
+        active[peerIndex] = Activity(peerIndex, ordinal, now, levelDbov)
         return HuddleTalkerSelection(accepted = true, evictedPeerIndex = evicted)
     }
 
@@ -540,8 +547,7 @@ internal class HuddleAudioEngine(
                                     playbacks[packet.peerIndex] = it
                                 }
                             }
-                            ?: continue
-                        playback.enqueue(packet)
+                        playback?.enqueue(packet)
                     }
                     is HuddlePlaybackCommand.RemovePeer -> {
                         activeTalkers.remove(command.peerIndex)

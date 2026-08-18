@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth_provider.dart';
@@ -14,7 +16,20 @@ final class CommunityTransitionCoordinator {
   }
 
   Future<void> run() async {
-    await Future.wait(_callbacks.values.map((callback) => callback()));
+    await Future.wait(
+      _callbacks.values.map((callback) async {
+        try {
+          await callback();
+        } catch (error, stackTrace) {
+          developer.log(
+            'Community transition cleanup failed',
+            name: 'buzz.community',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }),
+    );
   }
 }
 

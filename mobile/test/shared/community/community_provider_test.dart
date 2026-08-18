@@ -153,6 +153,34 @@ void main() {
       expect(await communityStorage.loadActiveId(), ws2.id);
     });
 
+    test(
+      'transition callback failure does not block the active ID update',
+      () async {
+        container = createContainer();
+        await container.read(communityListProvider.future);
+
+        final ws1 = Community.create(
+          name: 'One',
+          relayUrl: 'https://one.example.com',
+        );
+        final ws2 = Community.create(
+          name: 'Two',
+          relayUrl: 'https://two.example.com',
+        );
+        final notifier = container.read(communityListProvider.notifier);
+        await notifier.addCommunity(ws1);
+        await notifier.addCommunity(ws2);
+        await notifier.switchCommunity(ws1.id);
+        container.read(communityTransitionProvider).register(() async {
+          throw StateError('native cleanup failed');
+        });
+
+        await notifier.switchCommunity(ws2.id);
+
+        expect(await communityStorage.loadActiveId(), ws2.id);
+      },
+    );
+
     test('switchCommunity updates active ID', () async {
       container = createContainer();
       await container.read(communityListProvider.future);

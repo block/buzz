@@ -85,6 +85,27 @@ class HuddleActiveTalkerSelectorTest {
     }
 
     @Test
+    fun `inactive selected peer yields its slot to a quieter speaker`() {
+        var nowMs = 0L
+        val selector = HuddleActiveTalkerSelector(
+            capacity = 2,
+            nowMs = { nowMs },
+            inactivityTimeoutMs = 1_000,
+        )
+
+        selector.activate(4, -10)
+        nowMs = 999
+        selector.activate(2, -5)
+        nowMs = 1_000
+
+        assertEquals(
+            HuddleTalkerSelection(accepted = true, evictedPeerIndex = 4),
+            selector.activate(9, -30),
+        )
+        assertEquals(setOf(2, 9), selector.indices())
+    }
+
+    @Test
     fun `jitter queue reorders packets and rejects stale duplicates`() {
         val queue = HuddlePacketJitterQueue(capacity = 3, startPackets = 2)
         queue.enqueue(packet(11))

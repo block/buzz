@@ -4583,6 +4583,52 @@ void main() {
     );
 
     testWidgets(
+      'rejected non-creator end preserves the later leave lifecycle',
+      (tester) async {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        String? leftChannelId;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'non-creator-end',
+                kind: EventKind.huddleStarted,
+                pubkey: 'desktop',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'desktop': UserProfile(pubkey: 'desktop'),
+              'self': UserProfile(pubkey: 'self'),
+            },
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleHumanCountLoader: (_) async => 2,
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => _HuddleTestTransport(),
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onLeaveChannel: (channelId) async => leftChannelId = channelId,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        final controller = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        ).read(mobileHuddleControllerProvider.notifier);
+        await expectLater(controller.end(), throwsStateError);
+        await controller.leave();
+
+        expect(leftChannelId, _huddleChannelId);
+      },
+    );
+
+    testWidgets(
       'community transition cancels and awaits an in-flight Huddle start',
       (tester) async {
         final createGate = Completer<void>();
@@ -4630,6 +4676,148 @@ void main() {
           isNot(contains(EventKind.huddleStarted)),
         );
         await tester.pump(const Duration(seconds: 1));
+      },
+    );
+
+    testWidgets(
+      'community transition leaves a newer call after background cleanup',
+      (tester) async {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final oldMedia = _HuddleTestMedia();
+        final currentMedia = _HuddleTestMedia();
+        final media = Queue<_HuddleTestMedia>.of([oldMedia, currentMedia]);
+        final transports = Queue<_HuddleTestTransport>.of([
+          _HuddleTestTransport(),
+          _HuddleTestTransport(),
+        ]);
+        final oldHumanCount = Completer<int>();
+        var humanCountCalls = 0;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'background-transition-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'desktop',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'desktop': UserProfile(pubkey: 'desktop'),
+              'self': UserProfile(pubkey: 'self'),
+            },
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleHumanCountLoader: (_) {
+              humanCountCalls++;
+              return humanCountCalls == 1
+                  ? oldHumanCount.future
+                  : Future.value(2);
+            },
+            huddleMediaFactory: media.removeFirst,
+            huddleTransportFactory: (_) => transports.removeFirst(),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final lifecycle = container.read(appLifecycleProvider.notifier);
+        expect(lifecycle, isA<_TestAppLifecycleNotifier>());
+        (lifecycle as _TestAppLifecycleNotifier).setLifecycle(
+          AppLifecycleState.paused,
+        );
+        await oldMedia.stopStarted.future;
+        await tester.pump();
+        await container
+            .read(mobileHuddleControllerProvider.notifier)
+            .join(
+              parentChannelId: _channelId,
+              ephemeralChannelId: _huddleChannelId,
+              startedBy: 'desktop',
+              startedEventId: 'background-transition-call',
+            );
+
+        var transitionCompleted = false;
+        final transition = container
+            .read(communityTransitionProvider)
+            .run()
+            .then((_) => transitionCompleted = true);
+        await tester.pump();
+        expect(transitionCompleted, isFalse);
+
+        oldHumanCount.complete(2);
+        await transition;
+
+        expect(currentMedia.state.phase, HuddleMediaPhase.stopped);
+        expect(container.read(huddleSessionProvider).isInSession, isFalse);
+      },
+    );
+
+    testWidgets(
+      'community transition awaits failed-session lifecycle cleanup',
+      (tester) async {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final media = _HuddleTestMedia();
+        final humanCount = Completer<int>();
+        String? leftChannelId;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'failed-call-transition',
+                kind: EventKind.huddleStarted,
+                pubkey: 'desktop',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'desktop': UserProfile(pubkey: 'desktop'),
+              'self': UserProfile(pubkey: 'self'),
+            },
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleHumanCountLoader: (_) => humanCount.future,
+            huddleMediaFactory: () => media,
+            huddleTransportFactory: (_) => _HuddleTestTransport(),
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onLeaveChannel: (channelId) async => leftChannelId = channelId,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        media.emitFailure();
+        await tester.pump();
+        for (var attempt = 0; attempt < 20; attempt++) {
+          await tester.pump();
+        }
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        var transitionCompleted = false;
+        final transition = container
+            .read(communityTransitionProvider)
+            .run()
+            .then((_) => transitionCompleted = true);
+        await tester.pump();
+
+        expect(transitionCompleted, isFalse);
+        expect(leftChannelId, isNull);
+        humanCount.complete(2);
+        await transition;
+
+        expect(leftChannelId, _huddleChannelId);
       },
     );
 
@@ -8759,6 +8947,8 @@ class _ErrorMessagesNotifier extends ChannelMessagesNotifier {
 class _TestAppLifecycleNotifier extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
+
+  void setLifecycle(AppLifecycleState value) => state = value;
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {
@@ -9100,6 +9290,21 @@ final class _HuddleTestMedia implements HuddleMedia {
     );
   }
 
+  void emitFailure() {
+    scheduleMicrotask(() {
+      _emit(
+        HuddleMediaState(
+          phase: HuddleMediaPhase.failed,
+          capabilities: _state.capabilities,
+          error: const HuddleMediaError(
+            code: HuddleMediaErrorCode.platformFailure,
+            message: 'Native audio failed.',
+          ),
+        ),
+      );
+    });
+  }
+
   @override
   Future<void> playRemoteFrame(HuddleRemoteAudioFrame frame) async {}
 
@@ -9110,12 +9315,14 @@ final class _HuddleTestMedia implements HuddleMedia {
   Future<void> stop() async {
     if (!stopStarted.isCompleted) stopStarted.complete();
     if (stopGate case final gate?) await gate;
-    _emit(
-      HuddleMediaState(
-        phase: HuddleMediaPhase.stopped,
-        capabilities: _state.capabilities,
-      ),
-    );
+    scheduleMicrotask(() {
+      _emit(
+        HuddleMediaState(
+          phase: HuddleMediaPhase.stopped,
+          capabilities: _state.capabilities,
+        ),
+      );
+    });
   }
 
   @override
