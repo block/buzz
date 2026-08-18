@@ -58,7 +58,7 @@ fn opencode_surface_takes_its_model_from_the_config_file() {
     };
 
     let surface = with_opencode_config(&config, || {
-        read_config_surface(&record, Some(runtime), None, &no_tiers())
+        read_config_surface(&record, Some(runtime), None, &no_tiers(), None)
     });
 
     let model = surface.normalized.model.expect("model field");

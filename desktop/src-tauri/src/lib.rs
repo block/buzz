@@ -781,6 +781,7 @@ pub fn run() {
             put_agent_session_config,
             get_agent_routing_policy,
             set_agent_routing_policy,
+            persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,
             mesh_start_node,

@@ -43,15 +43,24 @@ const presetIds = [...presetBlock[1].matchAll(/^\s{8}id: "([^"]+)",$/gm)].map(
 // `config_file_path`, but it still ships a mark keyed by id in PRESET_LOGOS.
 // Only the reverse direction consults this list — every *preset* must still have
 // a logo, while a known runtime is free to use a remote avatar instead.
-const discoveryRs = readFileSync(
-  path.join(desktopRoot, "src-tauri/src/managed_agents/discovery.rs"),
+const KNOWN_RUNTIMES_RS =
+  "src-tauri/src/managed_agents/discovery/known_runtimes.rs";
+const knownRuntimesRs = readFileSync(
+  path.join(desktopRoot, KNOWN_RUNTIMES_RS),
   "utf8",
 );
 
-const runtimeBlock = discoveryRs.match(
-  /const KNOWN_ACP_RUNTIMES: &\[KnownAcpRuntime\] = &\[([\s\S]*?)\n\];/,
+// `pub(super)` is optional in the pattern: the table carries it today because
+// it lives in a submodule of `discovery`, and requiring the bare `const` form
+// is what silently broke this guard when the table was moved out of
+// discovery.rs.
+const runtimeBlock = knownRuntimesRs.match(
+  /(?:pub(?:\([^)]*\))?\s+)?const KNOWN_ACP_RUNTIMES: &\[KnownAcpRuntime\] = &\[([\s\S]*?)\n\];/,
 );
-assert.ok(runtimeBlock, "could not locate KNOWN_ACP_RUNTIMES in discovery.rs");
+assert.ok(
+  runtimeBlock,
+  `could not locate KNOWN_ACP_RUNTIMES in ${KNOWN_RUNTIMES_RS}`,
+);
 
 const knownRuntimeIds = [
   ...runtimeBlock[1].matchAll(/^\s{8}id: "([^"]+)",$/gm),

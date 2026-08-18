@@ -6,9 +6,13 @@ import { cn } from "@/shared/lib/cn";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/shared/ui/popover";
 
-const HOVER_OPEN_DELAY_MS = 500;
 const HOVER_CLOSE_DELAY_MS = 200;
 
 type PubKeyProps = {
@@ -99,7 +103,7 @@ export function PubKey({
     clearHoverTimer();
     hoverTimerRef.current = setTimeout(() => {
       setOpen(true);
-    }, HOVER_OPEN_DELAY_MS);
+    }, DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS);
   }, [clearHoverTimer]);
 
   const handleMouseLeave = React.useCallback(() => {
