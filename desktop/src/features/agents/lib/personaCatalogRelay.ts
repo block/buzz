@@ -7,6 +7,7 @@ import type {
 } from "@/shared/api/types";
 import { KIND_PERSONA } from "@/shared/constants/kinds";
 import { verifyEvent } from "nostr-tools/pure";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type CatalogPersonaShareLevel = "not-shared" | "none";
 
@@ -341,7 +342,7 @@ function catalogPublicationsFromVerifiedEvents(
     if (event.kind !== KIND_PERSONA) continue;
     const sourcePersonaId = extractTag(event, "d");
     if (!sourcePersonaId) continue;
-    const ownerPubkey = event.pubkey.toLowerCase();
+    const ownerPubkey = normalizePubkey(event.pubkey);
     const coordinate = `${ownerPubkey}:${sourcePersonaId}`;
     if (seenCoordinates.has(coordinate)) continue;
     seenCoordinates.add(coordinate);
@@ -474,7 +475,9 @@ export function catalogPersonasFromPublications(
   localPersonas: readonly AgentPersona[],
   currentPubkey: string | null | undefined,
 ): CatalogPersona[] {
-  const normalizedCurrentPubkey = currentPubkey?.toLowerCase() ?? null;
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
   const personas: CatalogPersona[] = [];
 
   for (const publication of publications) {

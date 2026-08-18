@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 
 import { evictUsersBatchEntries } from "@/features/profile/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 /**
  * Refresh every cache a saved persona edit can invalidate.
@@ -22,7 +23,7 @@ export async function invalidatePersonaEditCaches(
       queryClient,
       agents
         .filter((agent) => agent.personaId === personaId)
-        .map((agent) => agent.pubkey.toLowerCase()),
+        .map((agent) => normalizePubkey(agent.pubkey)),
     );
   }
 

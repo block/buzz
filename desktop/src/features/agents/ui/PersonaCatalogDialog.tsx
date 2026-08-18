@@ -26,6 +26,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 import { AgentDefinitionMetadata } from "./AgentDefinitionMetadata";
 import { PersonaAddedBy } from "./PersonaAddedBy";
 import { personaCatalogCopy } from "./personaLibraryCopy";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type PersonaCatalogDialogProps = {
   createContent: (controls: {
@@ -561,7 +562,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
     addedByLabel = "You";
   } else {
     const summary = ownerPubkey
-      ? ownerBatchQuery.data?.profiles[ownerPubkey.toLowerCase()]
+      ? ownerBatchQuery.data?.profiles[normalizePubkey(ownerPubkey)]
       : undefined;
     addedByLabel = resolveCatalogOwnerLabel(summary);
   }
