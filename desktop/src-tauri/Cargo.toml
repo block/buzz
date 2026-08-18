@@ -26,7 +26,7 @@ default = ["system-keyring"]
 mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:mesh-llm-client", "dep:mesh-llm-node", "dep:mesh-llm-system", "dep:mesh-llm-events"]
 # OS keyring backing for desktop secret storage (nsec private keys). When
 # disabled, secrets fall back to 0o600 files. On by default for real builds.
-system-keyring = ["dep:keyring"]
+system-keyring = ["buzz-secret-store/system-keyring"]
 
 [build-dependencies]
 base64 = "0.22"
@@ -39,7 +39,6 @@ libc = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
 # Used directly (alongside tauri-plugin-notification) so we can hold the posting
 # D-Bus connection open. GNOME 46+ dismisses a notification the moment that
 # connection is dropped, which the plugin does immediately. Default features
@@ -56,15 +55,12 @@ objc2 = { version = "0.6.4", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem", "block2"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDictionary", "NSError", "NSBundle", "NSObject", "NSProcessInfo", "NSString"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
-keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
-security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
 window-vibrancy = "0.6"
 user-idle = { version = "0.6", default-features = false }
 plist = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
-keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
 user-idle = { version = "0.6", default-features = false }
 
 [dependencies]
@@ -105,6 +101,7 @@ url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
+buzz-secret-store = { path = "../../crates/buzz-secret-store", default-features = false }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 buzz_voice_pkg = { package = "buzz-voice", path = "../../crates/buzz-voice" }
 buzz_terminal = { package = "buzz-terminal", path = "crates/buzz-terminal" }

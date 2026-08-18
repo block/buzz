@@ -14,10 +14,19 @@ cargo install --path crates/buzz-cli
 |---------|------|----------|
 | `BUZZ_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair |
 
+Use `--use-desktop-identity` to explicitly sign with the identity stored by the
+signed Buzz Desktop release. The flag is global, does not change relay
+selection, and cannot be combined with `--private-key` or `BUZZ_PRIVATE_KEY`.
+The CLI only reads the current secure-storage entry; it never migrates, writes,
+deletes, generates, or falls back to Desktop's plaintext identity file.
+
 ```bash
 # Private key identity (NIP-98 signed requests)
 export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
+
+# Signed-in Buzz Desktop identity (global flag goes before the command)
+env -u BUZZ_PRIVATE_KEY buzz --use-desktop-identity channels list
 ```
 
 ## Usage

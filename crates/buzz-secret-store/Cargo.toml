@@ -1,0 +1,31 @@
+[package]
+name = "buzz-secret-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform secure storage shared by Buzz clients"
+
+[features]
+default = ["system-keyring"]
+system-keyring = ["dep:fs4", "dep:keyring", "dep:rustix", "dep:security-framework"]
+
+[dependencies]
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+fs4 = { version = "1.1.0", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["process"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
+security-framework = { version = "3.7.0", features = ["OSX_10_15"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }

@@ -13,12 +13,12 @@ pub(crate) fn keyring_service() -> &'static str {
             .get_or_init(|| dev_keyring_service(std::env::var("BUZZ_DEV_KEYRING_SERVICE").ok()))
             .as_str()
     } else {
-        "buzz-desktop"
+        buzz_secret_store::DESKTOP_RELEASE_SERVICE
     }
 }
 
 pub(super) fn migration_marker_name(service: &str, default_name: &str) -> String {
-    if service == "buzz-desktop" || service == "buzz-desktop-dev" {
+    if service == buzz_secret_store::DESKTOP_RELEASE_SERVICE || service == "buzz-desktop-dev" {
         default_name.to_string()
     } else {
         format!("identity.{service}.migrated")

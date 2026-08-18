@@ -516,7 +516,7 @@ buzz users set-profile 2>&1; echo "exit: $?"
 # Exit 3: No auth configured
 env -u BUZZ_PRIVATE_KEY \
   cargo run -p buzz-cli -- channels list 2>&1; echo "exit: $?"
-# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key or set env var)"}
+# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key, set the env var, or pass --use-desktop-identity)"}
 # exit: 3
 
 # Not-found returns null, not an error (exit 0)
@@ -539,8 +539,12 @@ BUZZ_PRIVATE_KEY="nsec1..." buzz channels list | jq .
 # No auth → exit 3
 env -u BUZZ_PRIVATE_KEY \
   cargo run -p buzz-cli -- channels list 2>&1; echo "exit: $?"
-# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key or set env var)"}
+# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key, set the env var, or pass --use-desktop-identity)"}
 # exit: 3
+
+# Signed-in Desktop identity (read-only secure-storage access)
+env -u BUZZ_PRIVATE_KEY buzz --use-desktop-identity channels list | jq .
+# Should succeed when the signed Desktop release has an identity stored
 ```
 
 ---

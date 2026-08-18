@@ -10,6 +10,7 @@ use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
 ///
@@ -69,7 +70,7 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
 The 'pack' subcommand runs locally and does not require a relay connection.
@@ -85,6 +86,10 @@ struct Cli {
     /// Nostr private key (hex or nsec). This is the CLI's identity.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+
+    /// Sign with the identity stored by the signed Buzz Desktop release.
+    #[arg(long, conflicts_with = "private_key")]
+    use_desktop_identity: bool,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
@@ -1989,6 +1994,70 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivateKeyOrigin {
+    Explicit,
+    Desktop,
+}
+
+fn desktop_identity_auth_error(error: buzz_secret_store::ReadonlySecretError) -> CliError {
+    use buzz_secret_store::ReadonlySecretError;
+    let message = match error {
+        ReadonlySecretError::LockedOrUnavailable => {
+            "Buzz Desktop secure storage is locked or unavailable; unlock it and retry"
+        }
+        ReadonlySecretError::AccessDenied => "access to the Buzz Desktop identity was denied",
+        ReadonlySecretError::Corrupt => "the Buzz Desktop secure storage entry is corrupt",
+        ReadonlySecretError::Unavailable | ReadonlySecretError::Disabled => {
+            "Buzz Desktop secure storage is unavailable in this environment"
+        }
+    };
+    CliError::Auth(message.to_string())
+}
+
+fn resolve_private_key<F>(
+    explicit: Option<String>,
+    use_desktop_identity: bool,
+    load_desktop_identity: F,
+) -> Result<(Zeroizing<String>, PrivateKeyOrigin), CliError>
+where
+    F: FnOnce() -> Result<Option<String>, buzz_secret_store::ReadonlySecretError>,
+{
+    match (explicit, use_desktop_identity) {
+        (Some(_), true) => Err(CliError::Usage(
+            "--use-desktop-identity cannot be combined with --private-key or BUZZ_PRIVATE_KEY"
+                .to_string(),
+        )),
+        (Some(private_key), false) => {
+            Ok((Zeroizing::new(private_key), PrivateKeyOrigin::Explicit))
+        }
+        (None, true) => {
+            let private_key = load_desktop_identity()
+                .map_err(desktop_identity_auth_error)?
+                .ok_or_else(|| {
+                    CliError::Auth(
+                        "Buzz Desktop identity is missing; sign in to the release app first"
+                            .to_string(),
+                    )
+                })?;
+            Ok((Zeroizing::new(private_key), PrivateKeyOrigin::Desktop))
+        }
+        (None, false) => Err(CliError::Auth(
+            "BUZZ_PRIVATE_KEY is required (use --private-key, set the env var, or pass --use-desktop-identity)"
+                .to_string(),
+        )),
+    }
+}
+
+fn parse_private_key(private_key: &str, origin: PrivateKeyOrigin) -> Result<Keys, CliError> {
+    Keys::parse(private_key).map_err(|error| match origin {
+        PrivateKeyOrigin::Explicit => CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {error}")),
+        PrivateKeyOrigin::Desktop => CliError::Key(format!(
+            "invalid Buzz Desktop identity in secure storage: {error}"
+        )),
+    })
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -2002,11 +2071,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
+    let (private_key, private_key_origin) = resolve_private_key(
+        cli.private_key,
+        cli.use_desktop_identity,
+        buzz_secret_store::load_desktop_release_identity,
+    )?;
+    let keys = parse_private_key(private_key.as_str(), private_key_origin)?;
+    drop(private_key);
 
     // NIP-OA: parse and verify the auth tag if provided.
     //
@@ -2117,6 +2188,108 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn desktop_identity_is_an_explicit_global_flag() {
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "--relay",
+            "wss://relay.example",
+            "--use-desktop-identity",
+            "channels",
+            "list",
+        ])
+        .expect("desktop identity flag should parse before the command");
+        assert!(cli.use_desktop_identity);
+        assert!(cli.private_key.is_none());
+        assert_eq!(cli.relay, "wss://relay.example");
+    }
+
+    #[test]
+    fn desktop_identity_conflicts_with_explicit_private_key_argument() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "--use-desktop-identity",
+            "--private-key",
+            "not-a-real-key",
+            "channels",
+            "list",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn explicit_private_key_does_not_touch_desktop_storage() {
+        let (key, origin) = resolve_private_key(Some("explicit".to_string()), false, || {
+            panic!("desktop loader must not run for explicit credentials")
+        })
+        .unwrap();
+        assert_eq!(key.as_str(), "explicit");
+        assert_eq!(origin, PrivateKeyOrigin::Explicit);
+    }
+
+    #[test]
+    fn desktop_private_key_is_loaded_only_when_requested() {
+        let (key, origin) =
+            resolve_private_key(None, true, || Ok(Some("desktop-secret".to_string()))).unwrap();
+        assert_eq!(key.as_str(), "desktop-secret");
+        assert_eq!(origin, PrivateKeyOrigin::Desktop);
+    }
+
+    #[test]
+    fn desktop_identity_and_environment_credentials_are_mutually_exclusive() {
+        let error = resolve_private_key(Some("environment-secret".to_string()), true, || {
+            panic!("ambiguous auth must fail before keychain access")
+        })
+        .unwrap_err();
+        assert!(matches!(error, CliError::Usage(_)));
+        assert!(!error.to_string().contains("environment-secret"));
+    }
+
+    #[test]
+    fn missing_desktop_identity_is_a_redacted_auth_error() {
+        let error = resolve_private_key(None, true, || Ok(None)).unwrap_err();
+        assert!(matches!(error, CliError::Auth(_)));
+        assert!(error.to_string().contains("identity is missing"));
+        assert_eq!(error::exit_code(&error), 3);
+    }
+
+    #[test]
+    fn desktop_storage_failures_are_clear_redacted_auth_errors() {
+        use buzz_secret_store::ReadonlySecretError;
+
+        for (storage_error, expected) in [
+            (ReadonlySecretError::LockedOrUnavailable, "locked"),
+            (ReadonlySecretError::AccessDenied, "denied"),
+            (ReadonlySecretError::Corrupt, "corrupt"),
+            (ReadonlySecretError::Unavailable, "unavailable"),
+        ] {
+            let error = resolve_private_key(None, true, || Err(storage_error)).unwrap_err();
+            assert!(matches!(error, CliError::Auth(_)));
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(error::exit_code(&error), 3);
+        }
+    }
+
+    #[test]
+    fn missing_all_auth_keeps_a_safe_failure() {
+        let error = resolve_private_key(None, false, || {
+            panic!("desktop loader must not run without explicit opt-in")
+        })
+        .unwrap_err();
+        assert!(matches!(error, CliError::Auth(_)));
+        assert_eq!(error::exit_code(&error), 3);
+    }
+
+    #[test]
+    fn invalid_desktop_credential_is_a_redacted_key_error() {
+        let invalid_secret = "not-a-valid-secret";
+        let error = parse_private_key(invalid_secret, PrivateKeyOrigin::Desktop).unwrap_err();
+        assert!(matches!(error, CliError::Key(_)));
+        assert!(error.to_string().contains("invalid Buzz Desktop identity"));
+        assert!(!error.to_string().contains(invalid_secret));
+        assert_eq!(error::exit_code(&error), 3);
     }
 
     #[test]
