@@ -7,6 +7,8 @@
 - Pull request: [#27](https://github.com/NavigatorRAN/buzz/pull/27)
 - Base: Phase 4 merge `87fe1a26c7e937933d82c2873b7e726b4ebff308`
 - Phase 5.1 integration: PR #28 merge `201b19b76766c7fc4638f2e7f0aa6e11426a053b`
+- Thread-context correction: `6cefe4b71b41e46b6750635fe75bb721bc8e49c4`
+- Dependency audit refresh: `9cc044833c89a73694be37269cc78e0ddcc61bc3` and `aacc22ef5a6ebf0b7ad85e7c9f9f59b865c34ba4`
 - Qualified model: `gemma4-26b-official`
 - RAG snapshot: `f88174b38ae3bca3c0339d0d0bb9dafdec2fbb2507503c1b11e830c4895b735d`
 
@@ -29,23 +31,25 @@
 
 | Component | State | Evidence |
 | --- | --- | --- |
-| Installed app | Pass for online preflight | v0.5.8, Developer ID `SR52Q9EJ76`, CDHash `94d3c97e2bcec8440d7b000719b878b95a704ead`; signed 18 August 2026 |
+| Installed app | Pass for online preflight | v0.5.8, Developer ID `SR52Q9EJ76`, CDHash `61f47810edf301eb0960f6760a1693a7ed3e677f`; signed, installed, launched, and relay health verified 18 August 2026 |
 | Relay | Pass | loopback health returned `ok` |
 | LM Studio | Pass | exact local generation; `gemma4-26b-official`, 65,536 context, reasoning off, generation capacity one |
 | Mac-local RAG | Pass for online preflight | snapshot identity and ADF Doctrine semantic result include document, location, and `point_id`; physical offline repeat remains required |
 | Mac-local Memory | Pass | LaunchAgent on port 18006; MCP server `memory` v3.4.7 |
 | Active skills | Pass | one verified learned projection exists |
-| Bundle manifest | Pass before final runtime rebuild | `5afbe7249988a9a57cee5da4f8e2a43166b8644052a7bb32ca38d2c170a1498f`; metadata-only inventory, no duplicate model payload. Refresh again after installing the thread-context correction. |
-| Online readiness | Pass as designed | every component passed; `ready:false` only because the external default route was correctly observed |
+| Bundle manifest | Pass | `1ac2d4363a02a4ab4b425930c25595bc6af8fbd44cd3d81e64140f4a88168767`; metadata-only inventory of the final installed app and local runtime, with no duplicate model payload |
+| Online readiness | Pass as designed | final installed app, manifest, disk reserve, model, relay, RAG, Memory, and skills all passed; `ready:false` only because the external default route was correctly observed |
 
 Phase 5.1 added global local/cloud routing and offline RAG prefetch. Physical
 testing then exposed one runtime defect: the adviser requested an ID-only root
 filter while reconstructing a thread. The relay correctly rejected the
 potentially private agent-skill read with HTTP 403. The candidate now limits
 the root filter to Buzz message kinds 9 and 40002, matching the reply filters.
-A final signed rebuild, install, and manifest refresh are therefore required.
+The corrected candidate was rebuilt with both Rust lockfiles refreshed for the
+compatible non-yanked `async-utility` and `spin` releases and patched `h2`
+release, then signed, installed, launched, and re-inventoried successfully.
 
-Encrypted backups and recovery material are at `/Users/matthewwarren/Command Adviser Backups/phase5-20260817`. The verified signed-app rollback is `Command-Adviser-PR26-rollback.zip` in that directory.
+Encrypted backups and recovery material are at `/Users/matthewwarren/Command Adviser Backups/phase5-20260817`. The verified signed-app rollbacks are `Command-Adviser-PR26-rollback.zip` and `Command Adviser.before-thread-context-fix-20260818-192213.app` in that directory.
 
 ## Physical acceptance
 
