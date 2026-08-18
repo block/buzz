@@ -55,7 +55,7 @@ function WorkflowsListSkeleton() {
     <div className={WORKFLOW_CARD_GRID_CLASS}>
       {["first", "second", "third", "fourth"].map((card) => (
         <div
-          className="flex min-h-60 flex-col rounded-2xl border bg-card p-5"
+          className="flex min-h-60 flex-col rounded-2xl bg-muted/50 p-5 shadow-xs"
           key={card}
         >
           <div className="flex items-start justify-between">

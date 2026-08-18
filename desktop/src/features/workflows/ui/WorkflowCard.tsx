@@ -100,7 +100,7 @@ export function WorkflowCard({
   return (
     <div
       className={cn(
-        "group relative min-h-60 w-full overflow-hidden rounded-2xl border border-border/70 bg-muted/50 p-5 text-left text-foreground shadow-xs transition-colors hover:border-border hover:bg-muted/65",
+        "group relative min-h-60 w-full overflow-hidden rounded-2xl bg-muted/50 p-5 text-left text-foreground shadow-xs transition-colors hover:bg-muted/65",
       )}
       data-testid={`workflow-card-${workflow.id}`}
     >
