@@ -86,7 +86,7 @@ function renderApp() {
             enabled={huddleWindowChannelId() === null}
           >
             <ThemeProvider defaultTheme="buzz">
-              <TooltipProvider delayDuration={300}>
+              <TooltipProvider>
                 <EmojiBurstProvider>
                   <PoofBurstProvider>
                     <UpdaterProvider>
