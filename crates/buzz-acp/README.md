@@ -157,7 +157,7 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 
 Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
 
-Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
+Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent. Send them the way you would any mention — `@Fountain Maintainer !rotate` — the harness ignores the mention text the client renders into the body (`@Name …` or `nostr:npub…`, before or after the command) and matches on the command alone. Content that does not begin with the mention, or that continues past the command ("please !rotate", "!rotate now"), is an ordinary message and is forwarded to the agent.
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 
