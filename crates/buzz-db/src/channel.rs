@@ -366,6 +366,59 @@ async fn acquire_channel_membership_lock(
     Ok(())
 }
 
+/// An active member roster captured while holding the channel's membership
+/// serialization lock.
+///
+/// Keep this value alive until every membership-derived discovery event has
+/// been stored. Dropping it rolls back the read-only transaction and releases
+/// the lock; [`LockedMemberSnapshot::release`] does so explicitly.
+pub struct LockedMemberSnapshot {
+    /// Canonical active members captured behind the lock.
+    pub members: Vec<MemberRecord>,
+    tx: Transaction<'static, Postgres>,
+}
+
+impl LockedMemberSnapshot {
+    /// Release the membership lock after publishing the captured snapshot.
+    pub async fn release(self) -> Result<()> {
+        self.tx.commit().await?;
+        Ok(())
+    }
+}
+
+/// Capture all active members while holding the same per-channel lock used by
+/// membership writers.
+///
+/// The returned guard must remain alive through publication. This prevents a
+/// rolling relay from publishing an older roster after a concurrent add or
+/// remove has committed and published newer membership state.
+pub async fn lock_member_snapshot(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<LockedMemberSnapshot> {
+    let mut tx = pool.begin().await?;
+    acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT cm.channel_id, cm.pubkey, cm.role::text AS role, cm.joined_at, cm.invited_by, cm.removed_at
+        FROM channel_members cm
+        JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL
+        WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL
+        ORDER BY cm.joined_at ASC
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let members = rows
+        .into_iter()
+        .map(row_to_member_record)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(LockedMemberSnapshot { members, tx })
+}
+
 /// Add a member to a channel.
 ///
 /// Role enforcement:
@@ -2742,6 +2795,72 @@ mod tests {
         .expect("promote second owner");
 
         (community, channel.id, owner_a, owner_b)
+    }
+
+    /// A captured roster holds the same lock as membership writers until the
+    /// publisher explicitly releases it. This is the freshness fence used by
+    /// rolling-deploy reconciliation.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn locked_member_snapshot_blocks_post_capture_membership_mutation() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let newcomer = random_pubkey();
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "snapshot-freshness-fence",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let snapshot = lock_member_snapshot(&pool, community, channel.id)
+            .await
+            .expect("capture locked roster");
+        assert_eq!(snapshot.members.len(), 1);
+
+        let mut contender = pool.begin().await.expect("begin membership writer");
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
+                    community.as_uuid(),
+                    channel.id
+                ))
+                .fetch_one(&mut *contender)
+                .await
+                .expect("try membership writer lock");
+        assert!(
+            !acquired,
+            "membership mutation must wait until the captured roster is published"
+        );
+        contender.rollback().await.expect("rollback contender");
+
+        snapshot.release().await.expect("release snapshot fence");
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &newcomer,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("membership mutation after publication");
+        assert_eq!(
+            get_members(&pool, community, channel.id)
+                .await
+                .expect("fresh roster")
+                .len(),
+            2
+        );
     }
 
     /// The lock must be shared with `remove_member`: a demotion racing an owner

@@ -1083,7 +1083,14 @@ pub async fn emit_group_discovery_events(
     channel_id: Uuid,
 ) -> anyhow::Result<()> {
     let channel = state.db.get_channel(tenant.community(), channel_id).await?;
-    let members = state.db.get_members(tenant.community(), channel_id).await?;
+    // Keep the membership-writer lock through all membership-derived event
+    // replacements. This orders normal publication and startup repair by the
+    // canonical roster they captured, rather than by wall-clock timestamps.
+    let member_snapshot = state
+        .db
+        .lock_member_snapshot(tenant.community(), channel_id)
+        .await?;
+    let members = &member_snapshot.members;
 
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
@@ -1109,7 +1116,7 @@ pub async fn emit_group_discovery_events(
             tags.push(Tag::parse(["hidden"])?);
             // Include participant pubkeys in kind:39000 for DMs so clients can
             // resolve display names without a separate kind:39002 fetch.
-            for m in &members {
+            for m in members {
                 let pubkey_hex = hex::encode(&m.pubkey);
                 tags.push(Tag::parse(["p", &pubkey_hex])?);
             }
@@ -1171,7 +1178,8 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    emit_group_members_event(tenant, state, channel_id, &members, &relay_pubkey_hex).await?;
+    emit_group_members_event(tenant, state, channel_id, members, &relay_pubkey_hex).await?;
+    member_snapshot.release().await?;
 
     Ok(())
 }
@@ -3087,15 +3095,23 @@ pub async fn reconcile_large_channel_member_snapshots(
     for candidate in candidates {
         let result = async {
             let channel_id = candidate.channel_id;
-            // Re-read the canonical roster immediately before publication. A
-            // membership mutation may have landed after the candidate scan.
-            let members = state
+            // Hold the membership-writer lock from roster capture through
+            // replacement. Otherwise a rolling deployment can publish stale
+            // roster A after another relay commits and publishes roster B.
+            let member_snapshot = state
                 .db
-                .get_members(candidate.community_id, channel_id)
+                .lock_member_snapshot(candidate.community_id, channel_id)
                 .await?;
             let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
-            emit_group_members_event(&tenant, state, channel_id, &members, &relay_pubkey_hex)
-                .await?;
+            emit_group_members_event(
+                &tenant,
+                state,
+                channel_id,
+                &member_snapshot.members,
+                &relay_pubkey_hex,
+            )
+            .await?;
+            member_snapshot.release().await?;
             Ok::<bool, anyhow::Error>(true)
         }
         .await;

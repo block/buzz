@@ -2390,6 +2390,16 @@ impl Db {
         channel::set_canvas(&self.pool, community_id, channel_id, canvas).await
     }
 
+    /// Capture the active roster while holding the membership-writer lock.
+    #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
+    pub async fn lock_member_snapshot(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<channel::LockedMemberSnapshot> {
+        channel::lock_member_snapshot(&self.pool, community_id, channel_id).await
+    }
+
     /// Adds a member to a channel.
     #[datastore_span(name = "add_member", system = "postgresql")]
     pub async fn add_member(
