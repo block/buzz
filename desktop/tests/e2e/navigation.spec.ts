@@ -137,7 +137,8 @@ test("direct workflow detail links close back to workflows", async ({
   await page.goto(`/#/workflows/${workflowId}`);
 
   const dialog = page.getByRole("dialog", { name: workflowName });
-  await expect(dialog).toContainText("Run history");
+  await expect(dialog.getByText("Trigger", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Run history" }).click();
   await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
 

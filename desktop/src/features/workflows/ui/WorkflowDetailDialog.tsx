@@ -1,6 +1,8 @@
 import { History, Pencil, X } from "lucide-react";
+import * as React from "react";
+import { stringify as yamlStringify } from "yaml";
 
-import type { Workflow } from "@/shared/api/types";
+import type { Channel, Workflow } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -11,9 +13,11 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { WorkflowDetailPanel } from "./WorkflowDetailPanel";
+import { WorkflowFormBuilder } from "./WorkflowFormBuilder";
 import { getWorkflowDescription } from "./workflowDefinition";
 
 type WorkflowDetailDialogProps = {
+  channels: Channel[];
   onEditWorkflow: (workflowId: string) => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
@@ -21,12 +25,18 @@ type WorkflowDetailDialogProps = {
 };
 
 export function WorkflowDetailDialog({
+  channels,
   onEditWorkflow,
   onOpenChange,
   open,
   workflow,
 }: WorkflowDetailDialogProps) {
   const description = getWorkflowDescription(workflow.definition);
+  const [historyOpen, setHistoryOpen] = React.useState(false);
+  const yaml = React.useMemo(
+    () => yamlStringify(workflow.definition),
+    [workflow.definition],
+  );
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -45,11 +55,12 @@ export function WorkflowDetailDialog({
           </div>
           <div className="flex items-center gap-2">
             <Button
-              aria-current="page"
+              aria-pressed={historyOpen}
               className="h-8 gap-1.5"
+              onClick={() => setHistoryOpen((value) => !value)}
               size="sm"
               type="button"
-              variant="secondary"
+              variant={historyOpen ? "secondary" : "outline"}
             >
               <History className="h-4 w-4" />
               Run history
@@ -78,10 +89,26 @@ export function WorkflowDetailDialog({
           </div>
         </DialogHeader>
         <div className="min-h-0 flex-1">
-          <WorkflowDetailPanel
-            showDefinition={false}
-            showHeader={false}
-            workflowId={workflow.id}
+          <WorkflowFormBuilder
+            channels={channels}
+            disabled
+            historyPanel={
+              historyOpen ? (
+                <WorkflowDetailPanel
+                  showDefinition={false}
+                  showHeader={false}
+                  workflowId={workflow.id}
+                />
+              ) : null
+            }
+            mode="form"
+            onChange={() => {}}
+            onHistoryClose={() => setHistoryOpen(false)}
+            onSelectedNodeChange={() => {}}
+            parseError={null}
+            selectedNode={null}
+            workflowChannelId={workflow.channelId}
+            yaml={yaml}
           />
         </div>
       </DialogContent>

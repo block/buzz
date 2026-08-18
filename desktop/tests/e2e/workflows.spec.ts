@@ -652,8 +652,10 @@ test("direct workflow routes survive refresh and invalid view opens detail", asy
   const workflowId = new URL(page.url()).hash.match(/workflows\/([^?]+)/)?.[1];
   expect(workflowId).toBeTruthy();
   await page.goto(`/#/workflows/${workflowId}?view=invalid`);
+  const detailDialog = page.getByRole("dialog", { name: workflowName });
+  await expect(detailDialog).toBeVisible();
+  await detailDialog.getByRole("button", { name: "Run history" }).click();
   await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run history" })).toBeVisible();
 
   await page.goto("/#/workflows?view=create");
   await page.reload();
@@ -728,9 +730,17 @@ test("card click opens the detail modal and run history", async ({ page }) => {
   await page.getByRole("button", { name: `View ${workflowName}` }).click();
 
   await expect(page).toHaveURL(/#\/workflows\/[^?]+$/);
-  await expect(page.getByRole("dialog", { name: workflowName })).toBeVisible();
+  const detailDialog = page.getByRole("dialog", { name: workflowName });
+  await expect(detailDialog).toBeVisible();
+  await expect(
+    detailDialog.getByText("Trigger", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
+  await detailDialog.getByRole("button", { name: "Run history" }).click();
+  await expect(page.getByTestId("workflow-history-inspector")).toBeVisible();
   await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run history" })).toBeVisible();
+  await detailDialog.getByRole("button", { name: "Close run history" }).click();
+  await expect(page.getByTestId("workflow-history-inspector")).toHaveCount(0);
 });
 
 test("missing workflow routes show an unavailable modal with close and retry", async ({

@@ -305,6 +305,7 @@ export function WorkflowsView({
 
       {editor?.mode === "detail" && editorWorkflow ? (
         <WorkflowDetailDialog
+          channels={channels}
           onEditWorkflow={onEditWorkflow}
           onOpenChange={(open) => {
             if (!open) onCloseEditor();

@@ -128,6 +128,10 @@ export function ChannelCombobox({
     () => filtered.filter((channel) => !isChannelDisabled?.(channel)),
     [filtered, isChannelDisabled],
   );
+  const highlightedChannel = selectable[highlightedIndex];
+  const highlightedOptionId = highlightedChannel
+    ? `${listboxId}-option-${highlightedChannel.id}`
+    : undefined;
 
   function handleOpenChange(next: boolean) {
     setOpen(next);
@@ -251,7 +255,10 @@ export function ChannelCombobox({
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <input
+            aria-activedescendant={highlightedOptionId}
+            aria-autocomplete="list"
             aria-controls={listboxId}
+            aria-expanded={open}
             aria-label={`Search ${ariaLabel.toLowerCase()}s`}
             autoCapitalize="none"
             autoComplete="off"
@@ -264,6 +271,7 @@ export function ChannelCombobox({
             }}
             onKeyDown={handleKeyDown}
             placeholder="Search channels..."
+            role="combobox"
             spellCheck={false}
             value={query}
           />
@@ -314,6 +322,7 @@ export function ChannelCombobox({
                       "bg-accent text-accent-foreground",
                   )}
                   disabled={optionDisabled}
+                  id={`${listboxId}-option-${channel.id}`}
                   key={channel.id}
                   onClick={() => selectChannel(channel.id)}
                   role="option"
