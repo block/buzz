@@ -3015,7 +3015,12 @@ where
 
     // Three filters: (1) root event by ID, (2) recent replies with #e=root +
     // #h=channel plus a sentinel, and (3) the agent's newest reply for pinning.
-    let root_filter = nostr::Filter::new().id(nostr::EventId::from_hex(root_event_id).ok()?);
+    let root_filter = nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .id(nostr::EventId::from_hex(root_event_id).ok()?);
     let replies_filter = nostr::Filter::new()
         .kinds([
             nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
@@ -5235,6 +5240,7 @@ mod tests {
         );
 
         let root = serde_json::to_value(&filters[0]).expect("serialize root filter");
+        assert_eq!(root.get("kinds"), Some(&json!([9, 40002])));
         assert_eq!(root.get("ids"), Some(&json!([root_id])));
         assert!(root.get("limit").is_none());
 
