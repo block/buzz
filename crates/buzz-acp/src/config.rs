@@ -264,6 +264,14 @@ pub struct CliArgs {
     )]
     pub agent_args: Vec<String>,
 
+    /// Structured agent arguments as a JSON array of strings.
+    /// When set, takes precedence over `BUZZ_ACP_AGENT_ARGS` (which must be
+    /// unset or left at its default). Parses strictly with no shell splitting,
+    /// preserving arguments containing spaces, backslashes, and quotes.
+    /// Example: `BUZZ_ACP_AGENT_ARGS_JSON='["-m","my-model","--reasoning","low"]'`
+    #[arg(long, env = "BUZZ_ACP_AGENT_ARGS_JSON")]
+    pub agent_args_json: Option<String>,
+
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
@@ -816,29 +824,6 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
             let trimmed = arg.trim().to_string();
             if trimmed.is_empty() {
                 Vec::new()
-            } else if trimmed.chars().any(|c| c.is_whitespace()) {
-                // `BUZZ_ACP_AGENT_ARGS` splits on commas (clap
-                // `value_delimiter`), so a space-separated value like
-                // "-m my-model --reasoning low" arrives as one entry.
-                // Shell-split it so each flag becomes its own argv
-                // element — matching what every shell user reaches for
-                // first. Without this, the agent receives the entire
-                // string as a single argument, fails to parse it, and
-                // times out at 60s with a misleading error (#6017).
-                match shlex::split(&trimmed) {
-                    Some(parts) => parts,
-                    None => {
-                        // Malformed shell syntax (unmatched quote, trailing
-                        // backslash): preserve the original entry rather than
-                        // silently dropping or mutating it, and warn so the
-                        // operator can fix the configuration.
-                        tracing::warn!(
-                            entry = %trimmed,
-                            "BUZZ_ACP_AGENT_ARGS entry has malformed shell quoting; preserving as-is"
-                        );
-                        vec![trimmed]
-                    }
-                }
             } else {
                 vec![trimmed]
             }
@@ -862,6 +847,59 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     }
 
     normalized
+}
+
+/// Resolve agent arguments from the legacy comma-delimited env var and the
+/// structured JSON env var.
+///
+/// Selection is explicit:
+/// - neither set → no configured args (default-value handling follows in
+///   `normalize_agent_args`)
+/// - JSON only → parse strictly as `Vec<String>`, no shell splitting
+/// - legacy only → today's comma-delimited behavior, unchanged
+/// - both set → startup error explaining the conflict
+/// - invalid JSON → startup error; do not launch the agent
+pub fn resolve_agent_args(
+    command: &str,
+    legacy_args: Vec<String>,
+    json_args: Option<&str>,
+) -> Result<Vec<String>, ConfigError> {
+    match json_args {
+        Some(json) if !json.trim().is_empty() => {
+            if !(legacy_args.is_empty()
+                || legacy_args.len() == 1 && legacy_args[0] == "acp")
+            {
+                return Err(ConfigError::ConfigFile(
+                    "BUZZ_ACP_AGENT_ARGS and BUZZ_ACP_AGENT_ARGS_JSON are both set; \
+                     use only one. JSON is the canonical structured transport; \
+                     the legacy comma-delimited variable must be unset or removed."
+                        .into(),
+                ));
+            }
+            let parsed: Vec<String> = serde_json::from_str(json).map_err(|e| {
+                ConfigError::ConfigFile(format!(
+                    "BUZZ_ACP_AGENT_ARGS_JSON is not a valid JSON array of strings: {e}"
+                ))
+            })?;
+            // Apply the same default-value fallback as normalize_agent_args,
+            // but do NOT filter empty strings — JSON is a lossless transport
+            // where an explicit "" is a meaningful argv element.
+            let Some(default_args) = default_agent_args(command) else {
+                return Ok(parsed);
+            };
+            if parsed.is_empty() {
+                return Ok(default_args);
+            }
+            if parsed.len() == 1
+                && parsed[0].eq_ignore_ascii_case("acp")
+                && default_args.is_empty()
+            {
+                return Ok(default_args);
+            }
+            Ok(parsed)
+        }
+        _ => Ok(normalize_agent_args(command, legacy_args)),
+    }
 }
 
 /// Propagate legacy env-var aliases to their canonical names.
@@ -972,7 +1010,11 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let agent_args = resolve_agent_args(
+            &agent_command,
+            args.agent_args,
+            args.agent_args_json.as_deref(),
+        )?;
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1653,56 +1695,121 @@ mod tests {
         );
     }
 
-    // --- shlex-based splitting for space-separated args (#6017) ---
+    // --- BUZZ_ACP_AGENT_ARGS_JSON structured transport (#6017) ---
 
     #[test]
-    fn normalize_agent_args_shell_splits_space_separated_entries() {
-        // The most common case: a single comma-delimited entry containing
-        // spaces is shell-split into separate argv elements.
+    fn resolve_agent_args_json_parses_array() {
+        // JSON array is parsed strictly — no shell splitting.
+        let args = resolve_agent_args(
+            "custom-agent",
+            vec!["acp".into()],
+            Some(r#"["-m","my-model","--reasoning","low"]"#),
+        )
+        .unwrap();
+        assert_eq!(args, vec!["-m", "my-model", "--reasoning", "low"]);
+    }
+
+    #[test]
+    fn resolve_agent_args_json_preserves_spaces_in_values() {
+        // An argument containing a space is one argv element.
+        let args = resolve_agent_args(
+            "custom-agent",
+            vec!["acp".into()],
+            Some(r#"["--label=hello world"]"#),
+        )
+        .unwrap();
+        assert_eq!(args, vec!["--label=hello world"]);
+    }
+
+    #[test]
+    fn resolve_agent_args_json_preserves_windows_paths() {
+        // Backslashes in Windows paths are preserved, not interpreted as
+        // POSIX escape characters.
+        let args = resolve_agent_args(
+            "custom-agent",
+            vec!["acp".into()],
+            Some(r#"["--config=C:\\Program Files\\Agent\\config.toml"]"#),
+        )
+        .unwrap();
         assert_eq!(
-            normalize_agent_args("custom-agent", vec!["-m my-model --reasoning low".into()]),
-            vec!["-m", "my-model", "--reasoning", "low"]
+            args,
+            vec!["--config=C:\\Program Files\\Agent\\config.toml"]
         );
     }
 
     #[test]
-    fn normalize_agent_args_preserves_comma_delimited_no_spaces() {
-        // Existing comma-delimited entries without spaces are unchanged.
-        assert_eq!(
-            normalize_agent_args("codex-acp", vec!["-c".into(), "model=gpt-5".into()]),
-            vec!["-c", "model=gpt-5"]
-        );
+    fn resolve_agent_args_json_preserves_empty_args_and_quotes() {
+        // Empty strings and values starting with -- are preserved exactly.
+        let args = resolve_agent_args(
+            "custom-agent",
+            vec!["acp".into()],
+            Some(r#"["","--verbose","--label=has \"quotes\""]"#),
+        )
+        .unwrap();
+        assert_eq!(args, vec!["", "--verbose", "--label=has \"quotes\""]);
     }
 
     #[test]
-    fn normalize_agent_args_shell_splits_quoted_strings() {
-        // Quoted strings with spaces are preserved as single argv elements.
-        assert_eq!(
-            normalize_agent_args("custom-agent", vec![r#"-c "my model name""#.into()]),
-            vec!["-c", "my model name"]
-        );
-        assert_eq!(
-            normalize_agent_args("custom-agent", vec!["-c 'my model name'".into()]),
-            vec!["-c", "my model name"]
-        );
+    fn resolve_agent_args_legacy_only_unchanged() {
+        // Legacy comma-delimited behavior is unchanged — no shell splitting.
+        let args = resolve_agent_args(
+            "custom-agent",
+            vec!["-c".into(), "model=gpt-5".into()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(args, vec!["-c", "model=gpt-5"]);
     }
 
     #[test]
-    fn normalize_agent_args_shell_splits_tab_delimited() {
-        // Tabs are whitespace too — shlex treats them as delimiters.
-        assert_eq!(
-            normalize_agent_args("custom-agent", vec!["-m\tmy-model".into()]),
-            vec!["-m", "my-model"]
+    fn resolve_agent_args_both_set_is_error() {
+        // Both JSON and non-default legacy args is a startup error.
+        let result = resolve_agent_args(
+            "custom-agent",
+            vec!["-c".into(), "model=gpt-5".into()],
+            Some(r#"["--verbose"]"#),
         );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("both set"), "error should mention conflict: {msg}");
     }
 
     #[test]
-    fn normalize_agent_args_preserves_malformed_quoting() {
-        // Unmatched quote: shlex returns None, we preserve the original entry.
-        assert_eq!(
-            normalize_agent_args("custom-agent", vec!["-c 'unmatched".into()]),
-            vec!["-c 'unmatched"]
+    fn resolve_agent_args_json_with_default_legacy_is_ok() {
+        // JSON takes precedence when legacy is at its default ("acp").
+        let args = resolve_agent_args(
+            "custom-agent",
+            vec!["acp".into()],
+            Some(r#"["--verbose"]"#),
+        )
+        .unwrap();
+        assert_eq!(args, vec!["--verbose"]);
+    }
+
+    #[test]
+    fn resolve_agent_args_invalid_json_is_error() {
+        let result = resolve_agent_args(
+            "custom-agent",
+            vec!["acp".into()],
+            Some("not valid json"),
         );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("not a valid JSON array"), "error should mention invalid JSON: {msg}");
+    }
+
+    #[test]
+    fn resolve_agent_args_neither_set_uses_default() {
+        // No JSON, legacy at default for goose → ["acp"].
+        let args = resolve_agent_args("goose", vec!["acp".into()], None).unwrap();
+        assert_eq!(args, vec!["acp"]);
+    }
+
+    #[test]
+    fn resolve_agent_args_empty_json_uses_default() {
+        // Empty JSON array → provider default.
+        let args = resolve_agent_args("goose", vec!["acp".into()], Some("[]")).unwrap();
+        assert_eq!(args, vec!["acp"]);
     }
 
     #[test]
