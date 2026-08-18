@@ -106,6 +106,45 @@ const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 type LatestLiveEntry = { sessionId: string; timestamp: string; seq: number };
 const latestLiveSessionByAgentChannel = new Map<string, LatestLiveEntry>();
 
+// Highest successfully applied observer sequence per runtime pair + startNonce.
+// Relay replay is newest-first, so delivery order can apply ready and then a
+// stale waking from the same generation. A new nonce starts a new domain.
+const appliedLifecycleSeqByPairNonce = new Map<string, number>();
+
+function lifecycleSequenceKey(
+  agentPubkey: string,
+  payload: unknown,
+): string | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const record = payload as { relayUrl?: unknown; startNonce?: unknown };
+  if (
+    typeof record.relayUrl !== "string" ||
+    typeof record.startNonce !== "string"
+  ) {
+    return null;
+  }
+  return `${normalizePubkey(agentPubkey)}\0${record.relayUrl}\0${record.startNonce}`;
+}
+
+function shouldApplyLifecycleFrame(
+  agentPubkey: string,
+  event: ObserverEvent,
+): boolean {
+  const key = lifecycleSequenceKey(agentPubkey, event.payload);
+  if (key === null) return false;
+  const applied = appliedLifecycleSeqByPairNonce.get(key);
+  return applied === undefined || event.seq > applied;
+}
+
+function recordAppliedLifecycleFrame(
+  agentPubkey: string,
+  event: ObserverEvent,
+): void {
+  const key = lifecycleSequenceKey(agentPubkey, event.payload);
+  if (key === null) return;
+  appliedLifecycleSeqByPairNonce.set(key, event.seq);
+}
+
 function liveSessionKey(agentPubkey: string, channelId: string | null): string {
   return `${normalizePubkey(agentPubkey)}:${channelId ?? ""}`;
 }
@@ -493,9 +532,11 @@ async function processLiveObserverEvents(
     } else if (parsed.kind === "control_result") {
       dispatchControlResult(agentPubkey, parsed.payload);
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
+      if (!shouldApplyLifecycleFrame(agentPubkey, parsed)) continue;
       try {
         await putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload);
         if (activeGeneration !== generation) return;
+        recordAppliedLifecycleFrame(agentPubkey, parsed);
       } catch (error) {
         if (activeGeneration !== generation) return;
         console.debug("Late/untracked lifecycle frame dropped:", error);
@@ -894,6 +935,7 @@ export function resetAgentObserverStore() {
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
+  appliedLifecycleSeqByPairNonce.clear();
   agentManagementListeners.clear();
   onSessionConfigCaptured = null;
   connectionState = "idle";

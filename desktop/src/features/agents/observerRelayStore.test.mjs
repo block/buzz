@@ -9,7 +9,7 @@ import {
 
 const AGENT = "a".repeat(64);
 
-function lifecycleEvent(seq, lifecycle) {
+function lifecycleEvent(seq, lifecycle, startNonce = "gen-1") {
   return {
     seq,
     timestamp: `2026-08-15T00:00:0${seq}Z`,
@@ -19,7 +19,8 @@ function lifecycleEvent(seq, lifecycle) {
     sessionId: null,
     turnId: null,
     payload: {
-      relay_url: "ws://localhost:3000",
+      relayUrl: "ws://localhost:3000",
+      startNonce,
       lifecycle,
       pid: 123,
     },
@@ -109,4 +110,43 @@ test("drops the remainder of a lifecycle batch after a store reset", async () =>
 
   assert.deepEqual(started, ["waking"]);
   assert.deepEqual(getAgentObserverSnapshot(AGENT).events, []);
+});
+
+test("newest-first replay does not regress ready to stale waking", async () => {
+  const started = [];
+  const tauriInternals = {
+    invoke: (command, args) => {
+      assert.equal(command, "put_managed_agent_runtime_lifecycle");
+      started.push(args.payload.lifecycle);
+      return Promise.resolve({});
+    },
+  };
+  globalThis.__TAURI_INTERNALS__ = tauriInternals;
+  globalThis.window = { __TAURI_INTERNALS__: tauriInternals };
+
+  await _testProcessLiveObserverEvents(AGENT, [
+    lifecycleEvent(2, "ready"),
+    lifecycleEvent(1, "waking"),
+  ]);
+
+  assert.deepEqual(started, ["ready"]);
+});
+
+test("a new startNonce restarts the lifecycle sequence domain", async () => {
+  const started = [];
+  const tauriInternals = {
+    invoke: (_command, args) => {
+      started.push(`${args.payload.startNonce}:${args.payload.lifecycle}`);
+      return Promise.resolve({});
+    },
+  };
+  globalThis.__TAURI_INTERNALS__ = tauriInternals;
+  globalThis.window = { __TAURI_INTERNALS__: tauriInternals };
+
+  await _testProcessLiveObserverEvents(AGENT, [
+    lifecycleEvent(2, "ready", "gen-1"),
+    lifecycleEvent(1, "waking", "gen-2"),
+  ]);
+
+  assert.deepEqual(started, ["gen-1:ready", "gen-2:waking"]);
 });
