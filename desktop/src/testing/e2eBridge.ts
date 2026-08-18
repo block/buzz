@@ -12213,6 +12213,21 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_relay_agents":
         return handleListRelayAgents(activeConfig);
+      case "revalidate_relay_agents": {
+        const agents = await handleListRelayAgents(activeConfig);
+        const { pubkeys, channelId } = payload as {
+          pubkeys: string[];
+          channelId?: string;
+        };
+        const requested = new Set(
+          pubkeys.map((pubkey) => pubkey.toLowerCase()),
+        );
+        return agents.filter(
+          (agent) =>
+            requested.has(agent.pubkey.toLowerCase()) &&
+            (!channelId || agent.channel_ids.includes(channelId)),
+        );
+      }
       case "list_personas":
         return handleListPersonas();
       case "create_persona":

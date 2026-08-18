@@ -1198,6 +1198,24 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
 
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
@@ -1206,12 +1224,20 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
   await quinnRow.click();
   await page.keyboard.type("hello");
   await expect(input).toHaveText("@quinn hello");
+  const baselineCommands = await readCommandLog(page);
   await page.getByTestId("send-message").click();
-  await page.getByRole("button", { name: "Invite", exact: true }).click();
 
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
     .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
+  );
+  expect(commandCount(commands, "list_relay_agents")).toBe(
+    commandCount(baselineCommands, "list_relay_agents"),
+  );
 });
 
 test("managed agents keep their p tag when relay discovery fails before send", async ({

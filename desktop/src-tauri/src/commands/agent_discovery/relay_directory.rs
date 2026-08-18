@@ -91,6 +91,14 @@ fn retain_verified_owner(
 pub(crate) async fn list_relay_agents_for_state(
     state: &AppState,
 ) -> Result<Vec<RelayAgentInfo>, String> {
+    list_relay_agents_for_selection(state, None, None).await
+}
+
+async fn list_relay_agents_for_selection(
+    state: &AppState,
+    requested_pubkeys: Option<&std::collections::HashSet<String>>,
+    channel_id: Option<&str>,
+) -> Result<Vec<RelayAgentInfo>, String> {
     let viewer_pubkey = current_user_pubkey(state)?;
     let owner_only = owner_only_relay_directory();
     let relay_pubkey = identity_archive::fetch_relay_self(state)
@@ -100,18 +108,22 @@ pub(crate) async fn list_relay_agents_for_state(
     // Membership is the authoritative and bounded candidate source. Only
     // channels visible to this identity are read, and only bot-role p-tags can
     // drive the downstream managed-policy and owner-profile lookups.
-    let membership_events = query_all_relay_pages(
-        state,
-        serde_json::json!({
-            "kinds": [39002],
-            "authors": [&relay_pubkey],
-            "#p": [&viewer_pubkey],
-        }),
-    )
-    .await
-    .map_err(|error| format!("relay agent channel-membership query failed: {error}"))?;
-    let member_agent_channel_ids =
+    let mut membership_filter = serde_json::json!({
+        "kinds": [39002],
+        "authors": [&relay_pubkey],
+        "#p": [&viewer_pubkey],
+    });
+    if let Some(channel_id) = channel_id {
+        membership_filter["#d"] = serde_json::json!([channel_id]);
+    }
+    let membership_events = query_all_relay_pages(state, membership_filter)
+        .await
+        .map_err(|error| format!("relay agent channel-membership query failed: {error}"))?;
+    let mut member_agent_channel_ids =
         nostr_convert::member_agent_channel_ids_from_events(&membership_events, &relay_pubkey);
+    if let Some(requested_pubkeys) = requested_pubkeys {
+        member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
+    }
     let candidate_pubkeys: Vec<String> = member_agent_channel_ids.keys().cloned().collect();
     if candidate_pubkeys.is_empty() {
         return Ok(Vec::new());
@@ -184,6 +196,27 @@ pub(crate) async fn list_relay_agents_for_state(
 #[tauri::command]
 pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
     list_relay_agents_for_state(&state).await
+}
+
+/// Revalidate only the selected relay agents in the target channel.
+///
+/// This preserves the full directory command for autocomplete while keeping
+/// send-time authorization bounded by the actual mention set and destination.
+#[tauri::command]
+pub async fn revalidate_relay_agents(
+    pubkeys: Vec<String>,
+    channel_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<RelayAgentInfo>, String> {
+    let requested_pubkeys = pubkeys
+        .into_iter()
+        .filter_map(|pubkey| nostr::PublicKey::from_hex(&pubkey).ok())
+        .map(|pubkey| pubkey.to_hex())
+        .collect::<std::collections::HashSet<_>>();
+    if requested_pubkeys.is_empty() {
+        return Ok(Vec::new());
+    }
+    list_relay_agents_for_selection(&state, Some(&requested_pubkeys), channel_id.as_deref()).await
 }
 
 #[cfg(test)]
