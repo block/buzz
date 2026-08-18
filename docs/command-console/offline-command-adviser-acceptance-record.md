@@ -26,6 +26,7 @@
 | Thread-context query regression | Pass | 716 `buzz-acp` unit tests and strict clippy; root and reply filters are explicitly limited to message kinds 9 and 40002 so the private agent-skill guard cannot reject adviser thread recall |
 | Qualified model exact/FIFO canaries | Pass | `GEMMA64 READY`; three requests generated in order 1, 2, 3 with no overlap or second LLM |
 | Full repository gate | Pass | `just ci`, 17 August 2026 |
+| Published candidate CI | Pass | Every required PR #27 check completed successfully on 18 August 2026, including both desktop integration shards, relay E2E, security, Rust lint, cross-compilation, and the macOS release build |
 
 ## Installed component preflight
 
@@ -39,6 +40,14 @@
 | Active skills | Pass | one verified learned projection exists |
 | Bundle manifest | Pass | `1ac2d4363a02a4ab4b425930c25595bc6af8fbd44cd3d81e64140f4a88168767`; metadata-only inventory of the final installed app and local runtime, with no duplicate model payload |
 | Online readiness | Pass as designed | final installed app, manifest, disk reserve, model, relay, RAG, Memory, and skills all passed; `ready:false` only because the external default route was correctly observed |
+
+A fresh online readiness run on 18 August 2026 initially failed only the disk
+reserve check. The preceding full repository verification had recreated 13 GiB
+of disposable Cargo output in the main checkout and additional per-worktree
+Rust targets. Cleaning only those reproducible `target` directories restored
+212,287,397,888 free bytes against the required 209,659,449,344 bytes. The
+same run then returned `components_ready:true`; no application data, model,
+RAG snapshot, Memory state, recovery artefact, or source worktree was removed.
 
 Phase 5.1 added global local/cloud routing and offline RAG prefetch. Physical
 testing then exposed one runtime defect: the adviser requested an ID-only root
