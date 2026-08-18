@@ -23,6 +23,7 @@ use nostr::{Event, PublicKey};
 use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
+use crate::subscription::{ConnId, SubId};
 
 use super::ingest::{reject_with_transport, IngestAuth, IngestError};
 
@@ -202,23 +203,34 @@ pub async fn filter_fanout_by_access(
         }
     }
 
-    let mut allowed = Vec::with_capacity(matches.len());
+    // Collect (conn_id, sub_id, pubkey) for connections with a known pubkey.
+    // Skip connections without one — they cannot match the access gate.
+    let mut candidates: Vec<(ConnId, SubId, Vec<u8>)> = Vec::with_capacity(matches.len());
     for (conn_id, sub_id) in matches {
         let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
             continue;
         };
-        match state
-            .is_member_cached(community_id, channel_id, &pubkey)
-            .await
-        {
-            Ok(true) => allowed.push((conn_id, sub_id)),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
-            }
-        }
+        candidates.push((conn_id, sub_id, pubkey.to_vec()));
     }
-    allowed
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let pubkeys: Vec<Vec<u8>> = candidates.iter().map(|(_, _, pk)| pk.clone()).collect();
+    let allowed_pubkeys = match state
+        .membership_pairs_cached(community_id, channel_id, &pubkeys)
+        .await
+    {
+        Ok(set) => set,
+        Err(e) => {
+            warn!(%channel_id, "fan-out access filter: batched membership lookup failed: {e}");
+            return Vec::new();
+        }
+    };
+    candidates
+        .into_iter()
+        .filter(|(_, _, pk)| allowed_pubkeys.contains(pk))
+        .map(|(conn_id, sub_id, _)| (conn_id, sub_id))
+        .collect()
 }
 
 /// Deliver one event to this relay's local subscribers through the access gate.

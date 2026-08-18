@@ -66,12 +66,12 @@ fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
     }
 
     for (tag_key, tag_values) in f.generic_tags.iter() {
-        let tag_key_str = tag_key.to_string();
+        let tag_key_str = tag_key.as_str();
         let has_match = tag_values.iter().any(|filter_val| {
             ev.event
                 .tags
                 .iter()
-                .filter(|t| t.kind().to_string() == tag_key_str)
+                .filter(|t| t.kind().as_str() == tag_key_str)
                 .filter_map(|t| t.content())
                 .any(|event_val| event_val == filter_val.as_str())
         });
@@ -81,7 +81,7 @@ fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
         // fallback ONLY when the event has no h-tags at all — if the event
         // has explicit h-tags, those are authoritative and must match.
         if !has_match && tag_key_str == "h" {
-            let event_has_h_tags = ev.event.tags.iter().any(|t| t.kind().to_string() == "h");
+            let event_has_h_tags = ev.event.tags.iter().any(|t| t.kind().as_str() == "h");
             if !event_has_h_tags {
                 if let Some(ch_id) = ev.channel_id {
                     let ch_str = ch_id.to_string();

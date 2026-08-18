@@ -185,6 +185,7 @@ async fn search_finds_event_in_same_community() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("search ok");
@@ -233,6 +234,7 @@ async fn search_does_not_return_other_community_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -250,6 +252,7 @@ async fn search_does_not_return_other_community_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -294,6 +297,7 @@ async fn kind0_search_by_display_name_works_without_flattening() {
                 page: 1,
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
+                cursor: None,
             })
             .await
             .unwrap();
@@ -354,6 +358,7 @@ async fn short_kind0_prefix_prioritizes_exact_lexeme_on_a_noisy_page() {
             page: 1,
             per_page: 3,
             mode: buzz_search::SearchMode::Prefix,
+            cursor: None,
         })
         .await
         .expect("short profile prefix search ok");
@@ -420,6 +425,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("full text search ok");
@@ -445,6 +451,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            cursor: None,
         })
         .await
         .expect("prefix search ok");
@@ -464,6 +471,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            cursor: None,
         })
         .await
         .expect("multi-token prefix search ok");
@@ -482,6 +490,7 @@ async fn prefix_mode_matches_final_token_prefix_without_changing_full_text() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            cursor: None,
         })
         .await
         .expect("completed-token exact + trailing-prefix search ok");
@@ -531,6 +540,7 @@ async fn prefix_mode_handles_tsquery_boundary_punctuation() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            cursor: None,
         })
         .await
         .expect("prefix punctuation search ok");
@@ -589,6 +599,7 @@ async fn prefix_mode_preserves_storage_level_privacy_exclusions() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::Prefix,
+            cursor: None,
         })
         .await
         .expect("prefix privacy search ok");
@@ -669,6 +680,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -688,6 +700,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -706,6 +719,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -724,6 +738,7 @@ async fn channel_scope_restricts_results() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -763,6 +778,7 @@ async fn deleted_events_are_excluded() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -794,6 +810,7 @@ async fn empty_query_returns_empty_result_no_roundtrip() {
                 page: 1,
                 per_page: 10,
                 mode: buzz_search::SearchMode::FullText,
+                cursor: None,
             })
             .await
             .unwrap();
@@ -861,6 +878,7 @@ async fn since_until_filters() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -905,6 +923,7 @@ async fn pagination_works() {
             page: 1,
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -922,6 +941,7 @@ async fn pagination_works() {
             page: 3,
             per_page: 3,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -1014,6 +1034,7 @@ async fn channel_less_only_excludes_per_channel_events() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .unwrap();
@@ -1062,6 +1083,7 @@ async fn nul_bytes_in_query_are_sanitized() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("NUL-containing search query should not bubble a Postgres error");
@@ -1105,6 +1127,7 @@ async fn enormous_page_number_is_clamped() {
             page: u32::MAX,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("huge page number should be bounded, not error");
@@ -1134,6 +1157,7 @@ async fn very_long_query_is_bounded_before_pg_parse() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("long search query should be capped before Postgres parses it");
@@ -1275,6 +1299,7 @@ async fn excluded_kinds_are_storage_level_unsearchable() {
             page: 1,
             per_page: 10,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("search ok");
@@ -1371,6 +1396,7 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
             page: 1,
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("search ok");
@@ -1478,6 +1504,7 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
             page: 1,
             per_page: 100,
             mode: buzz_search::SearchMode::FullText,
+            cursor: None,
         })
         .await
         .expect("search ok");

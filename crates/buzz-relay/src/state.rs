@@ -984,6 +984,56 @@ impl AppState {
         Ok(result)
     }
 
+    /// Batched membership lookup with per-pair caching. Returns the subset of
+    /// `(channel_id, pubkey)` pairs that are active members, in one DB
+    /// round-trip via [`Db::membership_pairs`]. Populates the per-pair cache
+    /// for both hits and misses so subsequent single-pair calls hit cache.
+    pub async fn membership_pairs_cached(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<std::collections::HashSet<Vec<u8>>, buzz_db::DbError> {
+        if pubkeys.is_empty() {
+            return Ok(Default::default());
+        }
+        // Walk the cache first; collect misses for a single batched DB call.
+        let mut misses: Vec<Vec<u8>> = Vec::new();
+        let mut hit_set: std::collections::HashSet<Vec<u8>> = Default::default();
+        for pk in pubkeys {
+            let key = (community_id, channel_id, pk.clone());
+            match self.membership_cache.get(&key) {
+                Some(true) => {
+                    metrics::counter!("buzz_membership_cache_hits_total").increment(1);
+                    hit_set.insert(pk.clone());
+                }
+                Some(false) => {
+                    metrics::counter!("buzz_membership_cache_hits_total").increment(1);
+                    // cached negative — do not insert
+                }
+                None => {
+                    metrics::counter!("buzz_membership_cache_misses_total").increment(1);
+                    misses.push(pk.clone());
+                }
+            }
+        }
+        if !misses.is_empty() {
+            let channel_ids = vec![channel_id];
+            let pairs = self
+                .db
+                .membership_pairs(community_id, &channel_ids, &misses)
+                .await?;
+            let active: std::collections::HashSet<Vec<u8>> =
+                pairs.into_iter().map(|(_, pk)| pk).collect();
+            for pk in &misses {
+                let key = (community_id, channel_id, pk.clone());
+                self.membership_cache.insert(key, active.contains(pk));
+            }
+            hit_set.extend(active);
+        }
+        Ok(hit_set)
+    }
+
     /// Invalidate caches after a membership change (add/remove member).
     ///
     /// Drops the local moka entries AND fire-and-forget publishes the same drop

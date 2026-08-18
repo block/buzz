@@ -14,7 +14,7 @@ use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use buzz_auth::{generate_challenge, AuthContext, LimitType};
+use buzz_auth::{generate_challenge, AuthContext, LimitType, RateLimitConfig};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
@@ -491,7 +491,7 @@ async fn recv_loop(
                             break;
                         }
                         trace!(len = text.len(), "frame received");
-                        handle_text_message(text.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
+                        handle_text_message(&text, Arc::clone(&conn), Arc::clone(&state)).await;
                     }
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let max_frame_bytes = state.config.max_frame_bytes;
@@ -512,7 +512,7 @@ async fn recv_loop(
                         // Binary frames: attempt UTF-8 decode and treat as text. Some clients
                         // (notably certain Nostr libraries) send text payloads in binary frames.
                         // NIP-01 is text-only, but accepting binary is a common relay extension.
-                        if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+                        if let Ok(text) = std::str::from_utf8(&bytes) {
                             handle_text_message(text, Arc::clone(&conn), Arc::clone(&state)).await;
                         }
                     }
@@ -544,7 +544,7 @@ async fn recv_loop(
     }
 }
 
-async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Arc<AppState>) {
+async fn handle_text_message(text: &str, conn: Arc<ConnectionState>, state: Arc<AppState>) {
     let msg = match ClientMessage::parse(&text) {
         Ok(m) => m,
         Err(e) => {
@@ -649,6 +649,20 @@ fn request_rejection_message(sub_id: Option<&str>, reason: &str) -> String {
     }
 }
 
+/// Pick the messages-per-minute rate-limit tier for a principal on the WS path.
+///
+/// Agents are gated at the elevated tier; humans at the human cap. The
+/// platform-tier cap is reserved for relay platform agents and is selected
+/// by the platform-owner code path (see `handlers::event`); it is env-parsed
+/// here so the selector above is the single source of truth for tier wiring.
+fn rate_limit_tier(limits: &RateLimitConfig, is_agent: bool) -> u64 {
+    if is_agent {
+        limits.agent_elevated_messages_per_min
+    } else {
+        limits.human_messages_per_min
+    }
+}
+
 async fn enforce_ws_admission(
     msg: &ClientMessage,
     conn: &ConnectionState,
@@ -688,11 +702,7 @@ async fn enforce_ws_admission(
     }
 
     if is_event {
-        let message_limit = if is_agent {
-            limits.agent_standard_messages_per_min
-        } else {
-            limits.human_messages_per_min
-        };
+        let message_limit = rate_limit_tier(limits, is_agent);
         let message_result = crate::admission::check_principal(
             state.admission_rate_limiter.as_ref(),
             &conn.tenant,
@@ -1006,6 +1016,36 @@ mod tests {
         let state = state.lock().expect("mock sink poisoned");
         assert_eq!(state.flush_count, 1);
         assert_eq!(state.messages.len(), 1, "no fallback close is appended");
+    }
+
+    #[test]
+    fn rate_limit_tier_picks_elevated_for_agent() {
+        // Distinct values per tier so a regression to `agent_standard` (9) or
+        // `agent_platform` (13) would surface here. The selector must read
+        // `agent_elevated_messages_per_min` (11) for the agent branch.
+        let limits = RateLimitConfig {
+            human_messages_per_min: 7,
+            agent_standard_messages_per_min: 9,
+            agent_elevated_messages_per_min: 11,
+            agent_platform_messages_per_min: 13,
+            ..Default::default()
+        };
+        assert_eq!(rate_limit_tier(&limits, true), 11);
+    }
+
+    #[test]
+    fn rate_limit_tier_picks_human_for_non_agent() {
+        // Distinct values per tier so a regression to any agent cap would
+        // surface here. The selector must read `human_messages_per_min` (7)
+        // for the non-agent branch.
+        let limits = RateLimitConfig {
+            human_messages_per_min: 7,
+            agent_standard_messages_per_min: 9,
+            agent_elevated_messages_per_min: 11,
+            agent_platform_messages_per_min: 13,
+            ..Default::default()
+        };
+        assert_eq!(rate_limit_tier(&limits, false), 7);
     }
 
     #[tokio::test]
