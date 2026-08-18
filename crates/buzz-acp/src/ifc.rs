@@ -2,8 +2,9 @@
 //!
 //! This module is deliberately isolated from ACP transport and prompt formatting. In
 //! `off` mode it is not constructed at all. In `audit` mode it observes the data that
-//! the existing harness admits, evaluates the proposal's rules, and emits structured
-//! decisions without changing runtime behavior.
+//! the existing harness admits and emits structured decisions without changing runtime
+//! behavior. In `isolate` mode the harness also uses its domain key to route or replace
+//! ACP children before state crosses an audience, context, epoch, or capability boundary.
 //!
 //! Comments prefixed with "Paper" refer to the matching section in the
 //! "Practical information-flow for Buzz agents" design paper.
@@ -16,6 +17,7 @@ use nostr::{Alphabet, Event, Filter, Kind, PublicKey, SingleLetterTag};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::config::InformationFlowMode;
 use crate::queue::FlushBatch;
 use crate::relay::RestClient;
 
@@ -289,6 +291,25 @@ impl CapabilitySet {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct MembershipEpoch(String);
 
+/// Opaque routing key for one complete execution domain.
+///
+/// The pool may compare and log this value, but only this module constructs it.
+/// That keeps worker routing coupled to the complete paper definition rather
+/// than a caller-selected subset such as channel ID or audience alone.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct DomainKey(String);
+
+impl DomainKey {
+    pub(crate) fn fingerprint(&self) -> String {
+        short_fingerprint(&self.0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 /// Paper: `D = (Audience, Context, Epoch, Capabilities)`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ExecutionDomain {
@@ -308,6 +329,10 @@ impl ExecutionDomain {
         hash_field(&mut hasher, self.epoch.0.as_bytes());
         self.capabilities.stable_hash(&mut hasher);
         hex::encode(hasher.finalize())
+    }
+
+    fn key(&self) -> DomainKey {
+        DomainKey(self.id())
     }
 
     fn resource_label(&self) -> ResourceLabel {
@@ -574,6 +599,7 @@ enum ResolutionError {
     EmptyRestrictedAudience,
     AgentNotMember,
     RequesterNotMember,
+    NoOwner,
     VerificationTask,
 }
 
@@ -595,19 +621,21 @@ impl fmt::Display for ResolutionError {
             Self::EmptyRestrictedAudience => "restricted channel has no human audience",
             Self::AgentNotMember => "executing agent is absent from channel membership",
             Self::RequesterNotMember => "trigger requester is absent from channel membership",
+            Self::NoOwner => "owner-private domain requires a resolved agent owner",
             Self::VerificationTask => "signature verification task failed",
         };
         f.write_str(message)
     }
 }
 
-/// Stateless policy front-end retained by `PromptContext` only in audit mode.
+/// Stateless policy front-end retained by `PromptContext` in audit or isolate mode.
 pub(crate) struct Auditor {
     realm: RealmId,
     rest_client: RestClient,
     relay_self: Option<PublicKey>,
     agent: Principal,
     owner: Option<Principal>,
+    mode: InformationFlowMode,
 }
 
 impl Auditor {
@@ -617,6 +645,7 @@ impl Auditor {
         relay_self: Option<&str>,
         agent: PublicKey,
         owner: Option<PublicKey>,
+        mode: InformationFlowMode,
     ) -> Self {
         Self {
             realm: RealmId::from_relay_url(relay_url),
@@ -624,68 +653,80 @@ impl Auditor {
             relay_self: relay_self.and_then(|value| PublicKey::from_hex(value).ok()),
             agent: Principal::from_key(agent),
             owner: owner.map(Principal::from_key),
+            mode,
         }
     }
 
-    /// Begin one audit turn. Failure to derive a trustworthy domain does not
-    /// block the turn in audit mode, but permanently marks this process state as
-    /// having unknown provenance so later publish checks cannot claim safety.
-    pub(crate) async fn begin_turn(
+    /// Resolve one signed channel batch before it is assigned to an ACP child.
+    /// The caller decides whether an unresolved turn is merely audited or denied.
+    pub(crate) async fn resolve_turn(
         &self,
         batch: &FlushBatch,
         turn_id: &str,
-        agent_index: usize,
-        process: &mut ProcessAuditState,
+        agent_index: Option<usize>,
     ) -> ActiveTurn {
         let verified = match verify_trigger_batch(batch).await {
             Ok(verified) => {
-                log_rule(
+                log_rule(RuleLog {
+                    mode: self.mode,
                     turn_id,
                     agent_index,
-                    None,
-                    "event_admission",
-                    "allow",
-                    "all trigger IDs, signatures, and channel bindings verified",
-                    false,
-                );
+                    domain_id: None,
+                    rule: "event_admission",
+                    decision: "allow",
+                    reason: "all trigger IDs, signatures, and channel bindings verified",
+                    enforced: self.mode.isolates_processes(),
+                });
                 verified
             }
             Err(error) => {
-                process.confinement.mark_unknown();
-                log_rule(
+                log_rule(RuleLog {
+                    mode: self.mode,
                     turn_id,
                     agent_index,
-                    None,
-                    "event_admission",
-                    "deny",
-                    &error.to_string(),
-                    false,
+                    domain_id: None,
+                    rule: "event_admission",
+                    decision: "deny",
+                    reason: &error.to_string(),
+                    enforced: self.mode.isolates_processes(),
+                });
+                return ActiveTurn::unresolved(
+                    turn_id,
+                    agent_index,
+                    self.owner.clone(),
+                    self.mode,
+                    TurnOrigin::Channel,
                 );
-                return ActiveTurn::unresolved(turn_id, agent_index, self.owner.clone());
             }
         };
 
         let domain = match self.resolve_domain(&verified).await {
             Ok(domain) => domain,
             Err(error) => {
-                process.confinement.mark_unknown();
-                log_rule(
+                log_rule(RuleLog {
+                    mode: self.mode,
                     turn_id,
                     agent_index,
-                    None,
-                    "domain_resolution",
-                    "deny",
-                    &error.to_string(),
-                    false,
+                    domain_id: None,
+                    rule: "domain_resolution",
+                    decision: "deny",
+                    reason: &error.to_string(),
+                    enforced: self.mode.isolates_processes(),
+                });
+                return ActiveTurn::unresolved(
+                    turn_id,
+                    agent_index,
+                    self.owner.clone(),
+                    self.mode,
+                    TurnOrigin::Channel,
                 );
-                return ActiveTurn::unresolved(turn_id, agent_index, self.owner.clone());
             }
         };
 
         let domain_id = domain.id();
         tracing::info!(
             target: "buzz_acp::ifc",
-            ifc_mode = "audit",
+            ifc_mode = %self.mode,
             turn_id,
             agent_index,
             domain_id = %domain_id,
@@ -702,28 +743,73 @@ impl Auditor {
             "ifc execution domain resolved"
         );
 
-        let reuse = process.enter(&domain);
-        log_rule(
-            turn_id,
-            agent_index,
-            Some(&domain_id),
-            "reuse",
-            reuse.result(),
-            reuse.reason,
-            false,
-        );
-
-        let turn = ActiveTurn {
+        ActiveTurn {
             turn_id: turn_id.to_string(),
             agent_index,
             domain: Some(domain),
             owner: self.owner.clone(),
+            mode: self.mode,
+            origin: TurnOrigin::Channel,
+        }
+    }
+
+    /// Heartbeats carry no external event audience. They run in an owner-only
+    /// domain so they cannot reuse a public or conversation-bound ACP child.
+    pub(crate) fn resolve_heartbeat(
+        &self,
+        turn_id: &str,
+        agent_index: Option<usize>,
+    ) -> ActiveTurn {
+        let Some(owner) = self.owner.clone() else {
+            log_rule(RuleLog {
+                mode: self.mode,
+                turn_id,
+                agent_index,
+                domain_id: None,
+                rule: "domain_resolution",
+                decision: "deny",
+                reason: &ResolutionError::NoOwner.to_string(),
+                enforced: self.mode.isolates_processes(),
+            });
+            return ActiveTurn::unresolved(
+                turn_id,
+                agent_index,
+                None,
+                self.mode,
+                TurnOrigin::Heartbeat,
+            );
         };
-        turn.observe_domain_input(process, "trigger_events");
-        turn.observe_domain_input(process, "channel_metadata");
-        turn.log_capability_policy();
-        turn.log_unmediated_coverage();
-        turn
+        let context = DomainContext::OwnerPrivate {
+            realm: self.realm.clone(),
+            owner: owner.clone(),
+        };
+        let domain = ExecutionDomain {
+            audience: ConfidentialityLabel::restricted(self.realm.clone(), BTreeSet::from([owner])),
+            context,
+            epoch: MembershipEpoch("owner-heartbeat-v1".to_string()),
+            capabilities: bot_capabilities(),
+        };
+        tracing::info!(
+            target: "buzz_acp::ifc",
+            ifc_mode = %self.mode,
+            turn_id,
+            agent_index,
+            domain_id = %domain.id(),
+            realm = %self.realm.fingerprint(),
+            context = domain.context.kind(),
+            audience = "restricted",
+            reader_count = 1,
+            epoch = %short_fingerprint(&domain.epoch.0),
+            "ifc execution domain resolved"
+        );
+        ActiveTurn {
+            turn_id: turn_id.to_string(),
+            agent_index,
+            domain: Some(domain),
+            owner: self.owner.clone(),
+            mode: self.mode,
+            origin: TurnOrigin::Heartbeat,
+        }
     }
 
     async fn resolve_domain(
@@ -827,22 +913,119 @@ impl Auditor {
     }
 }
 
-/// One resolved (or conservatively unresolved) invocation audit.
+#[derive(Clone, Copy)]
+enum TurnOrigin {
+    Channel,
+    Heartbeat,
+}
+
+/// One resolved (or conservatively unresolved) invocation policy.
 pub(crate) struct ActiveTurn {
     turn_id: String,
-    agent_index: usize,
+    agent_index: Option<usize>,
     domain: Option<ExecutionDomain>,
     owner: Option<Principal>,
+    mode: InformationFlowMode,
+    origin: TurnOrigin,
 }
 
 impl ActiveTurn {
-    fn unresolved(turn_id: &str, agent_index: usize, owner: Option<Principal>) -> Self {
+    fn unresolved(
+        turn_id: &str,
+        agent_index: Option<usize>,
+        owner: Option<Principal>,
+        mode: InformationFlowMode,
+        origin: TurnOrigin,
+    ) -> Self {
         Self {
             turn_id: turn_id.to_string(),
             agent_index,
             domain: None,
             owner,
+            mode,
+            origin,
         }
+    }
+
+    pub(crate) fn domain_key(&self) -> Option<DomainKey> {
+        self.domain.as_ref().map(ExecutionDomain::key)
+    }
+
+    pub(crate) fn assign_agent(&mut self, agent_index: usize) {
+        self.agent_index = Some(agent_index);
+    }
+
+    /// Commit the inputs that are about to enter the selected ACP process.
+    /// Resolution happens before routing; this step happens only after the
+    /// process is either proven reusable or replaced for this domain.
+    pub(crate) fn enter_process(&self, process: &mut ProcessAuditState) {
+        let Some(domain) = self.domain.as_ref() else {
+            process.confinement.mark_unknown();
+            return;
+        };
+        let domain_id = domain.id();
+        let reuse = process.enter(domain);
+        log_rule(RuleLog {
+            mode: self.mode,
+            turn_id: &self.turn_id,
+            agent_index: self.agent_index,
+            domain_id: Some(&domain_id),
+            rule: "reuse",
+            decision: reuse.result(),
+            reason: reuse.reason,
+            enforced: self.mode.isolates_processes(),
+        });
+        match self.origin {
+            TurnOrigin::Channel => {
+                self.observe_domain_input(process, "trigger_events");
+                self.observe_domain_input(process, "channel_metadata");
+            }
+            TurnOrigin::Heartbeat => {
+                self.observe_domain_input(process, "heartbeat_trigger");
+            }
+        }
+        self.log_capability_policy();
+        self.log_unmediated_coverage();
+    }
+
+    /// Whether owner-private material may enter this turn's domain. This is
+    /// checked before the broker fetches core memory in isolate mode.
+    pub(crate) fn permits_owner_private_input(&self) -> bool {
+        let (Some(domain), Some(owner)) = (self.domain.as_ref(), self.owner.as_ref()) else {
+            return false;
+        };
+        let mut readers = BTreeSet::new();
+        readers.insert(owner.clone());
+        RuleEvaluator::read(
+            domain,
+            &ResourceLabel {
+                confidentiality: ConfidentialityLabel::restricted(
+                    domain.audience.realm.clone(),
+                    readers,
+                ),
+                context: ResourceContext::OwnerPrivate {
+                    realm: domain.audience.realm.clone(),
+                    owner: owner.clone(),
+                },
+            },
+        )
+        .allowed
+    }
+
+    pub(crate) fn log_blocked_owner_private_input(&self, source: &'static str) {
+        tracing::info!(
+            target: "buzz_acp::ifc",
+            ifc_mode = %self.mode,
+            turn_id = %self.turn_id,
+            agent_index = self.agent_index,
+            domain_id = self.domain.as_ref().map(ExecutionDomain::id),
+            rule = "read",
+            source,
+            decision = "deny",
+            reason = "owner-private input cannot flow to this execution domain",
+            enforced = true,
+            "ifc rule evaluated"
+        );
     }
 
     /// Observe channel-bound material such as message history, a channel
@@ -854,23 +1037,22 @@ impl ActiveTurn {
     ) {
         let Some(domain) = self.domain.as_ref() else {
             process.confinement.mark_unknown();
-            log_rule(
-                &self.turn_id,
-                self.agent_index,
-                None,
-                "read",
-                "deny",
-                "execution domain is unresolved",
-                false,
-            );
+            log_rule(RuleLog {
+                mode: self.mode,
+                turn_id: &self.turn_id,
+                agent_index: self.agent_index,
+                domain_id: None,
+                rule: "read",
+                decision: "deny",
+                reason: "execution domain is unresolved",
+                enforced: self.mode.isolates_processes(),
+            });
             return;
         };
         self.observe_resource(process, source, domain.resource_label());
     }
 
-    /// Observe owner-scoped core memory. In the current harness the same NIP-AE
-    /// core can be injected into every channel session; audit mode makes the
-    /// resulting illegal flow visible without yet changing that behavior.
+    /// Observe owner-scoped core memory after the caller has admitted it.
     pub(crate) fn observe_owner_private(
         &self,
         process: &mut ProcessAuditState,
@@ -878,15 +1060,17 @@ impl ActiveTurn {
     ) {
         let (Some(domain), Some(owner)) = (self.domain.as_ref(), self.owner.as_ref()) else {
             process.confinement.mark_unknown();
-            log_rule(
-                &self.turn_id,
-                self.agent_index,
-                self.domain.as_ref().map(ExecutionDomain::id).as_deref(),
-                "read",
-                "deny",
-                "owner-private input lacks a resolved owner or domain",
-                false,
-            );
+            let domain_id = self.domain.as_ref().map(ExecutionDomain::id);
+            log_rule(RuleLog {
+                mode: self.mode,
+                turn_id: &self.turn_id,
+                agent_index: self.agent_index,
+                domain_id: domain_id.as_deref(),
+                rule: "read",
+                decision: "deny",
+                reason: "owner-private input lacks a resolved owner or domain",
+                enforced: self.mode.isolates_processes(),
+            });
             return;
         };
         let mut readers = BTreeSet::new();
@@ -939,7 +1123,7 @@ impl ActiveTurn {
         process.confinement.mark_unknown();
         tracing::info!(
             target: "buzz_acp::ifc",
-            ifc_mode = "audit",
+            ifc_mode = %self.mode,
             turn_id = %self.turn_id,
             agent_index = self.agent_index,
             domain_id = self.domain.as_ref().map(ExecutionDomain::id),
@@ -963,14 +1147,16 @@ impl ActiveTurn {
             return;
         };
         let decision = RuleEvaluator::read(domain, &resource);
-        // Audit mode does not suppress a denied input. Since the real model sees
-        // it, the confinement label must still include it; otherwise the later
-        // publish decision would incorrectly claim the process remained clean.
-        process.confinement.observe(&resource);
+        // Audit mode records denied inputs because the model still sees them.
+        // Isolate mode records only admitted inputs; denied owner-private input
+        // is stopped before the broker fetches it.
+        if decision.allowed || !self.mode.isolates_processes() {
+            process.confinement.observe(&resource);
+        }
         let domain_id = domain.id();
         tracing::info!(
             target: "buzz_acp::ifc",
-            ifc_mode = "audit",
+            ifc_mode = %self.mode,
             turn_id = %self.turn_id,
             agent_index = self.agent_index,
             domain_id = %domain_id,
@@ -978,7 +1164,7 @@ impl ActiveTurn {
             source,
             decision = decision.result(),
             reason = decision.reason,
-            enforced = false,
+            enforced = self.mode.isolates_processes(),
             "ifc rule evaluated"
         );
     }
@@ -999,7 +1185,7 @@ impl ActiveTurn {
             let decision = RuleEvaluator::call(domain, operation);
             tracing::info!(
                 target: "buzz_acp::ifc",
-                ifc_mode = "audit",
+                ifc_mode = %self.mode,
                 turn_id = %self.turn_id,
                 agent_index = self.agent_index,
                 domain_id = %domain_id,
@@ -1020,15 +1206,16 @@ impl ActiveTurn {
     /// current ACP harness does not receive and bind the agent's final message.
     pub(crate) fn audit_reply(&self, process: &ProcessAuditState) {
         let Some(domain) = self.domain.as_ref() else {
-            log_rule(
-                &self.turn_id,
-                self.agent_index,
-                None,
-                "publish",
-                "deny",
-                "execution domain is unresolved",
-                false,
-            );
+            log_rule(RuleLog {
+                mode: self.mode,
+                turn_id: &self.turn_id,
+                agent_index: self.agent_index,
+                domain_id: None,
+                rule: "publish",
+                decision: "deny",
+                reason: "execution domain is unresolved",
+                enforced: false,
+            });
             return;
         };
         let digest: [u8; 32] = Sha256::digest(b"audit-only-unbound-output").into();
@@ -1042,7 +1229,7 @@ impl ActiveTurn {
         );
         tracing::info!(
             target: "buzz_acp::ifc",
-            ifc_mode = "audit",
+            ifc_mode = %self.mode,
             turn_id = %self.turn_id,
             agent_index = self.agent_index,
             domain_id = %domain.id(),
@@ -1056,16 +1243,21 @@ impl ActiveTurn {
     }
 
     fn log_unmediated_coverage(&self) {
+        let gaps = if self.mode.isolates_processes() {
+            "ambient_workspace, credential_bearing_mcp, direct_buzz_publication, static_capability_inventory, operating_system_isolation"
+        } else {
+            "shared_agent_process, ambient_workspace, credential_bearing_mcp, direct_buzz_publication, static_capability_inventory, operating_system_isolation"
+        };
         tracing::warn!(
             target: "buzz_acp::ifc",
-            ifc_mode = "audit",
+            ifc_mode = %self.mode,
             turn_id = %self.turn_id,
             agent_index = self.agent_index,
             domain_id = self.domain.as_ref().map(ExecutionDomain::id),
             rule = "confinement_coverage",
             decision = "not_proven",
             enforced = false,
-            gaps = "shared_agent_process, ambient_workspace, credential_bearing_mcp, direct_buzz_publication, static_capability_inventory, operating_system_isolation",
+            gaps,
             "ifc audit cannot prove confinement while these paths bypass policy"
         );
     }
@@ -1197,14 +1389,7 @@ fn effective_turn_capabilities(
 ) -> CapabilitySet {
     let conversation =
         CapabilitySet::from_names(["buzz.read.current", "buzz.publish.current", "memory.domain"]);
-    let bot = CapabilitySet::from_names([
-        "buzz.read.current",
-        "buzz.publish.current",
-        "memory.domain",
-        "email.read",
-        "drive.read",
-        "shell.host",
-    ]);
+    let bot = bot_capabilities();
     let requester_is_owner = owner.is_some_and(|owner| {
         !trigger.requesters.is_empty()
             && trigger
@@ -1229,6 +1414,17 @@ fn effective_turn_capabilities(
     CapabilitySet::effective(&bot, &requester, &domain)
 }
 
+fn bot_capabilities() -> CapabilitySet {
+    CapabilitySet::from_names([
+        "buzz.read.current",
+        "buzz.publish.current",
+        "memory.domain",
+        "email.read",
+        "drive.read",
+        "shell.host",
+    ])
+}
+
 fn hash_field(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value.len().to_be_bytes());
     hasher.update(value);
@@ -1239,18 +1435,31 @@ fn short_fingerprint(value: &str) -> String {
     hex::encode(&digest[..6])
 }
 
-fn log_rule(
-    turn_id: &str,
-    agent_index: usize,
-    domain_id: Option<&str>,
+struct RuleLog<'a> {
+    mode: InformationFlowMode,
+    turn_id: &'a str,
+    agent_index: Option<usize>,
+    domain_id: Option<&'a str>,
     rule: &'static str,
     decision: &'static str,
-    reason: &str,
+    reason: &'a str,
     enforced: bool,
-) {
+}
+
+fn log_rule(entry: RuleLog<'_>) {
+    let RuleLog {
+        mode,
+        turn_id,
+        agent_index,
+        domain_id,
+        rule,
+        decision,
+        reason,
+        enforced,
+    } = entry;
     tracing::info!(
         target: "buzz_acp::ifc",
-        ifc_mode = "audit",
+        ifc_mode = %mode,
         turn_id,
         agent_index,
         domain_id,
@@ -1469,6 +1678,46 @@ mod tests {
         assert!(RuleEvaluator::reuse(&first, &same).allowed);
         assert!(!RuleEvaluator::reuse(&first, &new_epoch).allowed);
         assert!(!RuleEvaluator::reuse(&first, &new_context).allowed);
+        assert_eq!(first.key(), same.key());
+        assert_ne!(first.key(), new_epoch.key());
+        assert_ne!(first.key(), new_context.key());
+    }
+
+    #[test]
+    fn owner_private_input_is_admitted_only_to_the_owner_domain() {
+        let owner = principal("alice");
+        let owner_turn = ActiveTurn {
+            turn_id: "owner".into(),
+            agent_index: Some(0),
+            domain: Some(ExecutionDomain {
+                audience: label(&["alice"]),
+                context: DomainContext::OwnerPrivate {
+                    realm: realm(),
+                    owner: owner.clone(),
+                },
+                epoch: MembershipEpoch("owner-v1".into()),
+                capabilities: bot_capabilities(),
+            }),
+            owner: Some(owner.clone()),
+            mode: InformationFlowMode::Isolate,
+            origin: TurnOrigin::Channel,
+        };
+        let public_turn = ActiveTurn {
+            turn_id: "public".into(),
+            agent_index: Some(1),
+            domain: Some(ExecutionDomain {
+                audience: public_label(),
+                context: DomainContext::RealmPublic(realm()),
+                epoch: MembershipEpoch("public-v1".into()),
+                capabilities: CapabilitySet::default(),
+            }),
+            owner: Some(owner),
+            mode: InformationFlowMode::Isolate,
+            origin: TurnOrigin::Channel,
+        };
+
+        assert!(owner_turn.permits_owner_private_input());
+        assert!(!public_turn.permits_owner_private_input());
     }
 
     #[test]
@@ -1826,12 +2075,12 @@ mod tests {
             Some(&relay.public_key().to_hex()),
             agent.public_key(),
             Some(owner.public_key()),
+            InformationFlowMode::Audit,
         );
         let mut process = ProcessAuditState::default();
-        let turn = auditor
-            .begin_turn(&batch, "test-turn", 0, &mut process)
-            .await;
-        let domain = turn.domain.expect("resolved domain");
+        let turn = auditor.resolve_turn(&batch, "test-turn", Some(0)).await;
+        turn.enter_process(&mut process);
+        let domain = turn.domain.as_ref().expect("resolved domain");
 
         assert!(matches!(domain.context, DomainContext::OwnerPrivate { .. }));
         assert_eq!(domain.audience.readers.explicit_count(), Some(1));

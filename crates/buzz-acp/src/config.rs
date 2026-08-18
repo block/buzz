@@ -138,11 +138,12 @@ pub enum PermissionMode {
     Plan,
 }
 
-/// Information-flow mode for the experimental audience policy.
+/// Information-flow mode for audience-scoped agent execution.
 ///
 /// `Off` preserves the existing harness path without membership queries or policy
-/// bookkeeping. `Audit` evaluates and logs the design-paper rules but does not alter
-/// prompts, tools, session reuse, or publication.
+/// bookkeeping. `Audit` evaluates and logs the design-paper rules without changing
+/// runtime behavior. `Isolate` additionally binds each ACP child process and all of
+/// its retained state to one execution domain.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum InformationFlowMode {
     /// Do not construct or invoke the experimental policy evaluator.
@@ -150,6 +151,8 @@ pub enum InformationFlowMode {
     Off,
     /// Evaluate and log policy without changing the existing turn.
     Audit,
+    /// Replace an ACP child before it crosses an execution-domain boundary.
+    Isolate,
 }
 
 impl std::fmt::Display for InformationFlowMode {
@@ -157,7 +160,20 @@ impl std::fmt::Display for InformationFlowMode {
         match self {
             Self::Off => f.write_str("off"),
             Self::Audit => f.write_str("audit"),
+            Self::Isolate => f.write_str("isolate"),
         }
+    }
+}
+
+impl InformationFlowMode {
+    /// Whether the harness must resolve and account for execution domains.
+    pub(crate) fn enabled(self) -> bool {
+        self != Self::Off
+    }
+
+    /// Whether execution-domain boundaries change ACP process reuse.
+    pub(crate) fn isolates_processes(self) -> bool {
+        self == Self::Isolate
     }
 }
 
@@ -466,8 +482,9 @@ pub struct CliArgs {
     )]
     pub permission_mode: PermissionMode,
 
-    /// Evaluate the audience-scoped information-flow design without enforcing it.
-    /// `off` is the default and leaves the existing harness behavior unchanged.
+    /// Apply the audience-scoped information-flow policy. `audit` only logs;
+    /// `isolate` also confines ACP process reuse and retained state by domain.
+    /// `off` is the default and leaves existing harness behavior unchanged.
     #[arg(
         long,
         env = "BUZZ_ACP_INFORMATION_FLOW",
@@ -2244,7 +2261,7 @@ channels = "ALL"
     }
 
     #[test]
-    fn information_flow_is_default_off_and_audit_is_explicit() {
+    fn information_flow_modes_are_explicit_and_default_off() {
         let key = "0".repeat(64);
         let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
         assert_eq!(default.information_flow, InformationFlowMode::Off);
@@ -2257,6 +2274,17 @@ channels = "ALL"
             "audit",
         ]);
         assert_eq!(audit.information_flow, InformationFlowMode::Audit);
+
+        let isolate = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--information-flow",
+            "isolate",
+        ]);
+        assert_eq!(isolate.information_flow, InformationFlowMode::Isolate);
+        assert!(isolate.information_flow.enabled());
+        assert!(isolate.information_flow.isolates_processes());
     }
 
     #[test]

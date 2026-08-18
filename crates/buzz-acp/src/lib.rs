@@ -2177,17 +2177,35 @@ async fn tokio_main() -> Result<()> {
     let agent_owner_pubkey = startup_owner
         .as_deref()
         .and_then(|hex| nostr::PublicKey::from_hex(hex).ok());
-    let ifc_auditor = (config.information_flow == InformationFlowMode::Audit).then(|| {
-        tracing::warn!(
-            target: "buzz_acp::ifc",
-            "information-flow audit enabled; decisions are logged but not enforced"
-        );
+    let ifc_auditor = config.information_flow.enabled().then(|| {
+        if config.information_flow == InformationFlowMode::Audit {
+            tracing::warn!(
+                target: "buzz_acp::ifc",
+                "information-flow audit enabled; decisions are logged but not enforced"
+            );
+        } else {
+            tracing::warn!(
+                target: "buzz_acp::ifc",
+                "information-flow isolation enabled; ACP process reuse and owner-core reads are enforced, but tool and publication paths remain unmediated"
+            );
+        }
         ifc::Auditor::new(
             &config.relay_url,
             relay.rest_client(),
             relay_self.as_deref(),
             config.keys.public_key(),
             agent_owner_pubkey,
+            config.information_flow,
+        )
+    });
+    let ifc_process_spec = config.information_flow.isolates_processes().then(|| {
+        pool::AgentProcessSpec::new(
+            config.agent_command.clone(),
+            config.agent_args.clone(),
+            config.persona_env_vars.clone(),
+            config.has_generated_codex_config,
+            config.model.clone(),
+            observer.clone(),
         )
     });
     let ctx = Arc::new(PromptContext {
@@ -2218,6 +2236,8 @@ async fn tokio_main() -> Result<()> {
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
         ifc_auditor,
+        information_flow: config.information_flow,
+        ifc_process_spec,
         agent_keys: config.keys.clone(),
         agent_owner_pubkey,
         memory_enabled: config.memory_enabled,
@@ -2475,7 +2495,7 @@ async fn tokio_main() -> Result<()> {
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -2524,7 +2544,7 @@ async fn tokio_main() -> Result<()> {
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
             for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await
             {
                 typing_channels.insert(channel_id, thread_tags);
             }
@@ -3005,6 +3025,7 @@ async fn tokio_main() -> Result<()> {
                             if pool_ready {
                                 for (channel_id, thread_tags) in
                                     dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                        .await
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -3105,6 +3126,7 @@ async fn tokio_main() -> Result<()> {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                .await
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3203,7 +3225,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3228,7 +3250,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3383,7 +3405,7 @@ async fn tokio_main() -> Result<()> {
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3411,7 +3433,7 @@ async fn tokio_main() -> Result<()> {
                             None,
                         );
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3825,7 +3847,7 @@ fn try_native_steer(
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
 /// Flush queued work to available agents.
-fn dispatch_pending(
+async fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
@@ -3843,8 +3865,20 @@ fn dispatch_pending(
             .last()
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
-        let affinity_hit = pool.has_session_for(channel_id);
-        let mut agent = match pool.try_claim(Some(channel_id)) {
+        let turn_id = Uuid::new_v4().to_string();
+        let mut prepared_ifc_turn = if ctx.information_flow.isolates_processes() {
+            match ctx.ifc_auditor.as_ref() {
+                Some(auditor) => Some(auditor.resolve_turn(&batch, &turn_id, None).await),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let domain = prepared_ifc_turn
+            .as_ref()
+            .and_then(crate::ifc::ActiveTurn::domain_key);
+        let affinity_hit = pool.has_affinity_for(channel_id, domain.as_ref());
+        let agent = match pool.try_claim(Some(channel_id), domain.as_ref()) {
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
@@ -3854,6 +3888,9 @@ fn dispatch_pending(
                 break;
             }
         };
+        if let Some(turn) = prepared_ifc_turn.as_mut() {
+            turn.assign_agent(agent.index);
+        }
         tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
 
         let recoverable_batch = match ctx.dedup_mode {
@@ -3865,8 +3902,9 @@ fn dispatch_pending(
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
 
-        // Mid-turn non-cancelling steer seam: install the per-turn steer
-        // receiver on the read loop so the main loop's mode-gate fork
+        // Mid-turn non-cancelling steer seam: pass the per-turn receiver to
+        // the prompt task so it is installed after any domain-driven process
+        // replacement. The main loop's mode-gate fork
         // (see the `if accepted && queue.is_channel_in_flight(...)` block
         // in the relay event branch of the main `select!` loop) can drive
         // it via the matching sender stored in `TaskMeta.steer_tx`.
@@ -3875,20 +3913,22 @@ fn dispatch_pending(
         // advertised `_session/steering` capability, and acks
         // `ExpectedRunIdMissing` (→ cancel+merge) when it has neither.
         let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
-        agent.acp.install_steer_rx(rx);
         let steer_tx = Some(tx);
 
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
-        let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
                 agent,
-                Some(batch),
-                None,
+                pool::PromptDispatch {
+                    batch: Some(batch),
+                    prompt_text: None,
+                    prepared_ifc_turn,
+                    steer_rx: Some(rx),
+                },
                 ctx_clone,
                 result_tx,
                 Some(control_rx),
@@ -4505,10 +4545,24 @@ fn dispatch_heartbeat(
     if *heartbeat_in_flight {
         return;
     }
-    let agent = match pool.try_claim(None) {
+    let turn_id = Uuid::new_v4().to_string();
+    let mut prepared_ifc_turn = if ctx.information_flow.isolates_processes() {
+        ctx.ifc_auditor
+            .as_ref()
+            .map(|auditor| auditor.resolve_heartbeat(&turn_id, None))
+    } else {
+        None
+    };
+    let domain = prepared_ifc_turn
+        .as_ref()
+        .and_then(crate::ifc::ActiveTurn::domain_key);
+    let agent = match pool.try_claim(None, domain.as_ref()) {
         Some(a) => a,
         None => return,
     };
+    if let Some(turn) = prepared_ifc_turn.as_mut() {
+        turn.assign_agent(agent.index);
+    }
 
     let prompt_text = ctx
         .heartbeat_prompt
@@ -4517,14 +4571,17 @@ fn dispatch_heartbeat(
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
-    let turn_id = Uuid::new_v4().to_string();
     let task_turn_id = turn_id.clone();
 
     let abort_handle = pool.join_set.spawn(async move {
         pool::run_prompt_task(
             agent,
-            None,
-            Some(prompt_text),
+            pool::PromptDispatch {
+                batch: None,
+                prompt_text: Some(prompt_text),
+                prepared_ifc_turn,
+                steer_rx: None,
+            },
             ctx_clone,
             result_tx,
             None,
@@ -4842,7 +4899,7 @@ async fn initialize_agent_pool(
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
 /// borrowing `Config`. All respawn/refill paths use this.
-async fn spawn_and_init(
+pub(crate) async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],

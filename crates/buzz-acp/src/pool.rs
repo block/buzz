@@ -34,7 +34,7 @@ use crate::acp::{
     resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer, ModelSwitchMethod,
     StopReason, SystemPromptTransport,
 };
-use crate::config::{compose_session_title, DedupMode, PermissionMode};
+use crate::config::{compose_session_title, DedupMode, InformationFlowMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
@@ -132,6 +132,10 @@ pub struct SessionState {
     /// Process-level IFC audit state. This is intentionally not cleared when an
     /// ACP session is invalidated: a live process does not forget prior input.
     pub ifc_audit: crate::ifc::ProcessAuditState,
+    /// Complete execution domain to which this ACP child is bound in isolate
+    /// mode. It survives session invalidation and changes only when the child
+    /// process itself is replaced.
+    pub ifc_domain: Option<crate::ifc::DomainKey>,
 }
 
 impl SessionState {
@@ -556,6 +560,39 @@ impl ChannelInfoResolver {
     }
 }
 
+/// Everything needed to replace an ACP child when a slot crosses an execution
+/// domain. Constructed only in isolate mode so off/audit keep the existing
+/// process lifecycle and configuration footprint.
+#[derive(Clone)]
+pub(crate) struct AgentProcessSpec {
+    command: String,
+    args: Vec<String>,
+    extra_env: Vec<(String, String)>,
+    has_generated_codex_config: bool,
+    configured_model: Option<String>,
+    observer: Option<observer::ObserverHandle>,
+}
+
+impl AgentProcessSpec {
+    pub(crate) fn new(
+        command: String,
+        args: Vec<String>,
+        extra_env: Vec<(String, String)>,
+        has_generated_codex_config: bool,
+        configured_model: Option<String>,
+        observer: Option<observer::ObserverHandle>,
+    ) -> Self {
+        Self {
+            command,
+            args,
+            extra_env,
+            has_generated_codex_config,
+            configured_model,
+            observer,
+        }
+    }
+}
+
 pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
@@ -590,9 +627,14 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
-    /// Present only for `--information-flow=audit`. `None` is the default fast
-    /// path and performs no membership queries or IFC bookkeeping.
+    /// Present for information-flow audit or isolation. `None` is the default
+    /// fast path and performs no membership queries or IFC bookkeeping.
     pub ifc_auditor: Option<crate::ifc::Auditor>,
+    /// Information-flow behavior selected at startup.
+    pub information_flow: InformationFlowMode,
+    /// Spawn configuration used only when isolate mode must replace an ACP
+    /// child before binding it to another domain.
+    pub ifc_process_spec: Option<AgentProcessSpec>,
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
@@ -634,16 +676,26 @@ impl AgentPool {
 
     /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
     ///
-    /// Pass 1: prefer an agent that already has a session for `channel_id`.
-    /// Pass 2: any idle agent.
+    /// Pass 1: prefer a compatible live session for `channel_id`.
+    /// Pass 2: prefer an agent bound to the resolved execution domain.
+    /// Pass 3: prefer an unbound agent, then fall back to any idle agent.
     ///
     /// Returns `None` if all agents are checked out.
-    pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
+    pub fn try_claim(
+        &mut self,
+        channel_id: Option<Uuid>,
+        domain: Option<&crate::ifc::DomainKey>,
+    ) -> Option<OwnedAgent> {
         // Pass 1: prefer agent with existing session for this channel.
         if let Some(cid) = channel_id {
             let idx = self.agents.iter().position(|slot| {
                 slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(&cid))
+                    .map(|agent| {
+                        agent.state.sessions.contains_key(&cid)
+                            && domain.is_none_or(|requested| {
+                                agent.state.ifc_domain.as_ref() == Some(requested)
+                            })
+                    })
                     .unwrap_or(false)
             });
             if let Some(i) = idx {
@@ -651,9 +703,32 @@ impl AgentPool {
             }
         }
 
-        // Pass 2: first idle agent.
+        // Pass 2: prefer a process already bound to the resolved domain. This
+        // lets all public channels share their public worker while keeping
+        // restricted conversations on their own workers.
+        if let Some(domain) = domain {
+            if let Some(index) = self.agents.iter().position(|slot| {
+                slot.as_ref()
+                    .and_then(|agent| agent.state.ifc_domain.as_ref())
+                    == Some(domain)
+            }) {
+                return self.agents[index].take();
+            }
+        }
+
+        // Pass 3: a process that has never consumed domain-scoped input can be
+        // bound without a restart.
+        if let Some(index) = self.agents.iter().position(|slot| {
+            slot.as_ref()
+                .is_some_and(|agent| agent.state.ifc_domain.is_none())
+        }) {
+            return self.agents[index].take();
+        }
+
+        // Pass 4: first idle agent. Isolate mode replaces it before use if its
+        // binding differs; off/audit mode preserve the historical behavior.
         let idx = self.agents.iter().position(|slot| slot.is_some());
-        idx.map(|i| self.agents[i].take().unwrap())
+        idx.and_then(|i| self.agents[i].take())
     }
 
     /// Return an agent to its slot after a task completes.
@@ -677,13 +752,21 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
-    /// Whether any idle agent already has a session for `channel_id`.
-    /// Used to compute `affinity_hit` before calling `try_claim`.
-    pub fn has_session_for(&self, channel_id: Uuid) -> bool {
-        self.agents.iter().any(|slot| {
-            slot.as_ref()
-                .map(|a| a.state.sessions.contains_key(&channel_id))
-                .unwrap_or(false)
+    /// Whether an idle process has either a live channel session or a matching
+    /// execution-domain binding for this turn.
+    pub fn has_affinity_for(
+        &self,
+        channel_id: Uuid,
+        domain: Option<&crate::ifc::DomainKey>,
+    ) -> bool {
+        self.agents.iter().flatten().any(|agent| {
+            let domain_matches =
+                domain.is_none_or(|requested| agent.state.ifc_domain.as_ref() == Some(requested));
+            domain_matches
+                && (agent.state.sessions.contains_key(&channel_id)
+                    || domain.is_some_and(|requested| {
+                        agent.state.ifc_domain.as_ref() == Some(requested)
+                    }))
         })
     }
 
@@ -1468,32 +1551,257 @@ fn send_prompt_result(
     });
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DomainBindingAction {
+    BindFresh,
+    Reuse,
+    Replace,
+}
+
+fn domain_binding_action(
+    current: Option<&crate::ifc::DomainKey>,
+    requested: &crate::ifc::DomainKey,
+) -> DomainBindingAction {
+    match current {
+        None => DomainBindingAction::BindFresh,
+        Some(current) if current == requested => DomainBindingAction::Reuse,
+        Some(_) => DomainBindingAction::Replace,
+    }
+}
+
+/// Bind an ACP child to one complete execution domain before any turn input is
+/// delivered. Crossing a domain boundary replaces the child, which clears its
+/// model context, ACP sessions, process group, and harness-side session state.
+/// Files and credentials outside that process group still require the separate
+/// OS-confinement work described by the design.
+async fn bind_agent_to_domain(
+    agent: &mut OwnedAgent,
+    requested: crate::ifc::DomainKey,
+    spec: Option<&AgentProcessSpec>,
+    turn_id: &str,
+) -> Result<(), AcpError> {
+    match domain_binding_action(agent.state.ifc_domain.as_ref(), &requested) {
+        DomainBindingAction::BindFresh => {
+            tracing::info!(
+                target: "buzz_acp::ifc",
+                ifc_mode = "isolate",
+                turn_id,
+                agent_index = agent.index,
+                domain = %requested.fingerprint(),
+                rule = "process_binding",
+                decision = "allow",
+                action = "bind_fresh",
+                enforced = true,
+                "ifc worker routing decision"
+            );
+            agent.state.ifc_domain = Some(requested);
+            Ok(())
+        }
+        DomainBindingAction::Reuse => {
+            tracing::info!(
+                target: "buzz_acp::ifc",
+                ifc_mode = "isolate",
+                turn_id,
+                agent_index = agent.index,
+                domain = %requested.fingerprint(),
+                rule = "process_binding",
+                decision = "allow",
+                action = "reuse",
+                enforced = true,
+                "ifc worker routing decision"
+            );
+            Ok(())
+        }
+        DomainBindingAction::Replace => {
+            let previous = agent
+                .state
+                .ifc_domain
+                .as_ref()
+                .map(crate::ifc::DomainKey::fingerprint)
+                .unwrap_or_else(|| "unbound".to_string());
+            tracing::warn!(
+                target: "buzz_acp::ifc",
+                ifc_mode = "isolate",
+                turn_id,
+                agent_index = agent.index,
+                previous_domain = %previous,
+                requested_domain = %requested.fingerprint(),
+                rule = "process_binding",
+                decision = "deny",
+                action = "replace_process",
+                enforced = true,
+                "ACP child cannot cross execution-domain boundary"
+            );
+            let spec = spec.ok_or_else(|| {
+                AcpError::InformationFlow(
+                    "isolate mode has no ACP process replacement configuration".to_string(),
+                )
+            })?;
+            const REPLACEMENT_TIMEOUT: Duration = Duration::from_secs(60);
+            let replacement = tokio::time::timeout(
+                REPLACEMENT_TIMEOUT,
+                crate::spawn_and_init(
+                    &spec.command,
+                    &spec.args,
+                    &spec.extra_env,
+                    spec.has_generated_codex_config,
+                    agent.index,
+                    spec.observer.clone(),
+                ),
+            )
+            .await
+            .map_err(|_| {
+                AcpError::InformationFlow(format!(
+                    "replacement ACP child did not initialize within {REPLACEMENT_TIMEOUT:?}"
+                ))
+            })?
+            .map_err(|error| AcpError::InformationFlow(error.to_string()))?;
+
+            let (new_acp, protocol_version, agent_name) = replacement;
+            let mut old_acp = std::mem::replace(&mut agent.acp, new_acp);
+            old_acp.shutdown().await;
+
+            // Paper: "Confinement invariant." Process replacement is the only
+            // operation that clears retained domain state. Session rotation is
+            // intentionally insufficient because the old child may remember.
+            agent.state = SessionState::default();
+            agent.state.ifc_domain = Some(requested.clone());
+            agent.model_capabilities = None;
+            agent.desired_model = spec.configured_model.clone();
+            agent.model_overridden = false;
+            agent.agent_name = agent_name;
+            agent.goose_system_prompt_supported = None;
+            agent.protocol_version = protocol_version;
+
+            tracing::info!(
+                target: "buzz_acp::ifc",
+                ifc_mode = "isolate",
+                turn_id,
+                agent_index = agent.index,
+                domain = %requested.fingerprint(),
+                rule = "process_binding",
+                decision = "allow",
+                action = "replacement_bound",
+                enforced = true,
+                "fresh ACP child bound to execution domain"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Values that must move together from pool dispatch into one prompt task.
+/// Keeping the prepared domain beside the batch prevents the task from routing
+/// on one membership snapshot and prompting with another.
+pub(crate) struct PromptDispatch {
+    pub(crate) batch: Option<FlushBatch>,
+    pub(crate) prompt_text: Option<String>,
+    pub(crate) prepared_ifc_turn: Option<crate::ifc::ActiveTurn>,
+    pub(crate) steer_rx: Option<tokio::sync::mpsc::Receiver<SteerRequest>>,
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
-/// 1. Resolve or create a session (channel or heartbeat).
-/// 2. Send `initial_message` on new channel sessions (if configured).
-/// 3. Fetch conversation context if needed (thread reply or DM).
-/// 4. Build the prompt text from batch + context.
-/// 5. Send the actual prompt with turn timeout.
+/// 1. Bind or replace the ACP child for the prepared execution domain.
+/// 2. Resolve or create a session (channel or heartbeat).
+/// 3. Send `initial_message` on new channel sessions (if configured).
+/// 4. Fetch conversation context if needed (thread reply or DM).
+/// 5. Build and send the prompt with the configured turn timeouts.
 /// 6. Handle all error paths, always returning the agent via `result_tx`.
 ///
 /// The agent is ALWAYS returned — even on panic the `JoinSet` detects the
 /// abort and the caller uses `task_map` to recover the agent index.
-pub async fn run_prompt_task(
+pub(crate) async fn run_prompt_task(
     mut agent: OwnedAgent,
-    batch: Option<FlushBatch>,
-    prompt_text: Option<String>,
+    dispatch: PromptDispatch,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
+    let PromptDispatch {
+        batch,
+        prompt_text,
+        prepared_ifc_turn,
+        steer_rx,
+    } = dispatch;
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
+
+    // Resolve the complete execution domain before the ACP child receives any
+    // prompt, memory, session, or tool state. Isolate-mode channel dispatch
+    // normally prepares this before pool selection so the domain is the routing
+    // key; audit mode resolves here to preserve the old non-blocking dispatcher.
+    let ifc_turn = match prepared_ifc_turn {
+        Some(turn) => Some(turn),
+        None => match (&ctx.ifc_auditor, batch.as_ref()) {
+            (Some(auditor), Some(batch)) => Some(
+                auditor
+                    .resolve_turn(batch, &turn_id, Some(agent.index))
+                    .await,
+            ),
+            (Some(auditor), None) => Some(auditor.resolve_heartbeat(&turn_id, Some(agent.index))),
+            (None, _) => None,
+        },
+    };
+
+    if ctx.information_flow.isolates_processes() {
+        let Some(turn) = ifc_turn.as_ref() else {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::InformationFlow(
+                    "execution domain policy is unavailable".to_string(),
+                )),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        };
+        let Some(domain) = turn.domain_key() else {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(AcpError::InformationFlow(
+                    "signed execution domain could not be resolved".to_string(),
+                )),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        };
+        if let Err(error) =
+            bind_agent_to_domain(&mut agent, domain, ctx.ifc_process_spec.as_ref(), &turn_id).await
+        {
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(error),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        }
+    }
+
+    if let Some(turn) = ifc_turn.as_ref() {
+        turn.enter_process(&mut agent.state.ifc_audit);
+    }
+
+    // Install steering only after domain binding. A replacement ACP child must
+    // receive this turn's receiver; installing it on the retired child would
+    // silently disable non-cancelling steering for the first turn in a domain.
+    if let Some(steer_rx) = steer_rx {
+        agent.acp.install_steer_rx(steer_rx);
+    }
+
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
@@ -1568,20 +1876,6 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
-    // IFC is attached at the last point where Buzz events are still typed and
-    // signed. A standalone ACP proxy sees only rendered prompt strings and
-    // cannot reconstruct trustworthy requesters, audiences, or membership
-    // epochs. In audit mode failures are logged and the existing turn proceeds.
-    let ifc_turn = if let (Some(auditor), Some(batch)) = (&ctx.ifc_auditor, batch.as_ref()) {
-        Some(
-            auditor
-                .begin_turn(batch, &turn_id, agent.index, &mut agent.state.ifc_audit)
-                .await,
-        )
-    } else {
-        None
-    };
-
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `[System]` user-message
@@ -1607,7 +1901,11 @@ pub async fn run_prompt_task(
     // `SessionState::invalidate_channel`).
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
-    if ctx.memory_enabled {
+    let owner_memory_allowed = !ctx.information_flow.isolates_processes()
+        || ifc_turn
+            .as_ref()
+            .is_some_and(crate::ifc::ActiveTurn::permits_owner_private_input);
+    if ctx.memory_enabled && owner_memory_allowed {
         if let (PromptSource::Channel(cid), Some(owner_pk)) =
             (&source, ctx.agent_owner_pubkey.as_ref())
         {
@@ -1643,6 +1941,14 @@ pub async fn run_prompt_task(
                     agent.state.core_sections.insert(*cid, rendered);
                 }
             }
+        }
+    } else if ctx.memory_enabled
+        && ctx.information_flow.isolates_processes()
+        && matches!(&source, PromptSource::Channel(_))
+        && ctx.agent_owner_pubkey.is_some()
+    {
+        if let Some(turn) = ifc_turn.as_ref() {
+            turn.log_blocked_owner_private_input("agent_core_memory");
         }
     }
 
@@ -4471,6 +4777,142 @@ mod tests {
     }
 
     #[test]
+    fn domain_binding_requires_replacement_only_across_domains() {
+        let first = crate::ifc::DomainKey::for_test("first");
+        let second = crate::ifc::DomainKey::for_test("second");
+
+        assert_eq!(
+            domain_binding_action(None, &first),
+            DomainBindingAction::BindFresh
+        );
+        assert_eq!(
+            domain_binding_action(Some(&first), &first),
+            DomainBindingAction::Reuse
+        );
+        assert_eq!(
+            domain_binding_action(Some(&first), &second),
+            DomainBindingAction::Replace
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_replacement_clears_every_session_state_store() {
+        let old_acp = AcpClient::spawn(
+            "bash",
+            &["-c".into(), "while IFS= read -r line; do :; done".into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn old ACP child");
+        let old_domain = crate::ifc::DomainKey::for_test("old-domain");
+        let new_domain = crate::ifc::DomainKey::for_test("new-domain");
+        let channel = Uuid::new_v4();
+        let mut state = SessionState {
+            ifc_domain: Some(old_domain),
+            ..SessionState::default()
+        };
+        state.sessions.insert(channel, "old-session".into());
+        state.turn_counts.insert(channel, 7);
+        state.core_sections.insert(channel, "private core".into());
+        state
+            .canvas_sections
+            .insert(channel, "private canvas".into());
+        state
+            .deliveries
+            .insert(channel, ChannelDeliveryState::default());
+        state.heartbeat_session = Some("old-heartbeat".into());
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp: old_acp,
+            state,
+            model_capabilities: None,
+            desired_model: Some("old-model".into()),
+            model_overridden: true,
+            agent_name: "old-agent".into(),
+            goose_system_prompt_supported: Some(true),
+            protocol_version: 1,
+        };
+        let replacement_script = r#"IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentInfo":{"name":"replacement-agent"}}}'
+while IFS= read -r line; do :; done"#;
+        let spec = AgentProcessSpec::new(
+            "bash".into(),
+            vec!["-c".into(), replacement_script.into()],
+            vec![],
+            false,
+            Some("configured-model".into()),
+            None,
+        );
+
+        bind_agent_to_domain(&mut agent, new_domain.clone(), Some(&spec), "test-turn")
+            .await
+            .expect("replace child");
+
+        assert_eq!(agent.state.ifc_domain.as_ref(), Some(&new_domain));
+        assert!(agent.state.sessions.is_empty());
+        assert!(agent.state.turn_counts.is_empty());
+        assert!(agent.state.core_sections.is_empty());
+        assert!(agent.state.canvas_sections.is_empty());
+        assert!(agent.state.deliveries.is_empty());
+        assert!(agent.state.heartbeat_session.is_none());
+        assert_eq!(agent.desired_model.as_deref(), Some("configured-model"));
+        assert!(!agent.model_overridden);
+        assert_eq!(agent.agent_name, "replacement-agent");
+        assert_eq!(agent.protocol_version, 2);
+        agent.acp.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pool_claim_prefers_the_matching_domain_over_slot_order() {
+        let spawn_inert = || async {
+            AcpClient::spawn(
+                "bash",
+                &["-c".into(), "while IFS= read -r line; do :; done".into()],
+                &[],
+                false,
+            )
+            .await
+            .expect("spawn inert ACP child")
+        };
+        let first_domain = crate::ifc::DomainKey::for_test("first-domain");
+        let requested_domain = crate::ifc::DomainKey::for_test("requested-domain");
+        let make_agent = |index, acp, domain| OwnedAgent {
+            index,
+            acp,
+            state: SessionState {
+                ifc_domain: Some(domain),
+                ..SessionState::default()
+            },
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+        let channel = Uuid::new_v4();
+        let mut first = make_agent(0, spawn_inert().await, first_domain);
+        // A stale session from an older membership epoch must not outrank the
+        // freshly resolved domain.
+        first.state.sessions.insert(channel, "stale-session".into());
+        let second = make_agent(1, spawn_inert().await, requested_domain.clone());
+        let mut pool = AgentPool::from_slots(vec![Some(first), Some(second)]);
+
+        let mut claimed = pool
+            .try_claim(Some(channel), Some(&requested_domain))
+            .expect("matching process");
+        assert_eq!(claimed.index, 1);
+
+        claimed.acp.shutdown().await;
+        for slot in pool.agents_mut() {
+            if let Some(mut agent) = slot.take() {
+                agent.acp.shutdown().await;
+            }
+        }
+    }
+
+    #[test]
     fn public_session_forwards_channel_origin_to_mcp() {
         let channel_id = Uuid::new_v4();
         let servers = mcp_servers_with_git_origin(
@@ -5724,8 +6166,12 @@ done"#
         for turn in 1..=3 {
             run_prompt_task(
                 agent,
-                None,
-                Some(format!("heartbeat-{turn}")),
+                PromptDispatch {
+                    batch: None,
+                    prompt_text: Some(format!("heartbeat-{turn}")),
+                    prepared_ifc_turn: None,
+                    steer_rx: None,
+                },
                 Arc::clone(&ctx),
                 result_tx.clone(),
                 None,
@@ -5839,8 +6285,12 @@ done"#
             };
             run_prompt_task(
                 agent,
-                Some(batch),
-                None,
+                PromptDispatch {
+                    batch: Some(batch),
+                    prompt_text: None,
+                    prepared_ifc_turn: None,
+                    steer_rx: None,
+                },
                 Arc::clone(&ctx),
                 result_tx.clone(),
                 None,
@@ -6014,8 +6464,12 @@ done"#
         for (turn_id, batch) in [("merged-turn", merged_batch), ("next-turn", next_batch)] {
             run_prompt_task(
                 agent,
-                Some(batch),
-                None,
+                PromptDispatch {
+                    batch: Some(batch),
+                    prompt_text: None,
+                    prepared_ifc_turn: None,
+                    steer_rx: None,
+                },
                 Arc::clone(&ctx),
                 result_tx.clone(),
                 None,
@@ -6148,7 +6602,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "live-session".into(),
         ));
         let agent = pool
-            .try_claim(Some(channel_id))
+            .try_claim(Some(channel_id), None)
             .expect("claim returned agent");
 
         let mut ctx = make_prompt_context_no_owner();
@@ -6173,8 +6627,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let (result_tx, mut result_rx) = mpsc::unbounded_channel();
         run_prompt_task(
             agent,
-            Some(batch),
-            None,
+            PromptDispatch {
+                batch: Some(batch),
+                prompt_text: None,
+                prepared_ifc_turn: None,
+                steer_rx: None,
+            },
             Arc::new(ctx),
             result_tx,
             None,
@@ -7655,6 +8113,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
             ifc_auditor: None,
+            information_flow: InformationFlowMode::Off,
+            ifc_process_spec: None,
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
