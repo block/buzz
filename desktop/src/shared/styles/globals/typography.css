@@ -26,7 +26,7 @@
     --conversation-message-line-height: calc(var(--buzz-type-rem) * 1.25);
     --conversation-author-line-height: var(--buzz-type-rem);
     --conversation-body-gap: 0.125rem;
-    --conversation-row-padding-block: 0.375rem;
+    --conversation-row-padding-block: 0.25rem;
     --conversation-paragraph-gap: 0.5rem;
     --conversation-list-item-gap: 0.375rem;
     --conversation-timestamp-font-size: calc(var(--buzz-type-rem) * 0.75);

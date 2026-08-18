@@ -487,7 +487,7 @@ test.describe("inbox refactor screenshots", () => {
       .poll(readConversationMetrics)
       .toEqual([
         { fontSize: "14px", lineHeight: "20px" },
-        { paddingBottom: "6px", paddingTop: "6px" },
+        { paddingBottom: "4px", paddingTop: "4px" },
         2,
         { fontSize: "14px", lineHeight: "16px" },
         { fontSize: "14px", lineHeight: "20px" },
@@ -571,7 +571,7 @@ test.describe("inbox refactor screenshots", () => {
       .toEqual([
         "17.6px",
         { fontSize: "15.4px", lineHeight: "22px" },
-        { paddingBottom: "6px", paddingTop: "6px" },
+        { paddingBottom: "4px", paddingTop: "4px" },
         2,
         { fontSize: "15.4px", lineHeight: "17.6px" },
         { fontSize: "15.4px", lineHeight: "22px" },
