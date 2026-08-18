@@ -17,7 +17,6 @@ import type {
   HomeFeedResponse,
   ManagedAgent,
   ManagedAgentBackend,
-  RelayAgent,
   RelayMember,
   RelayMemberRole,
   PresenceLookup,
@@ -97,18 +96,6 @@ type RawSearchResponse = {
   found: number;
 };
 
-type RawRelayAgent = {
-  pubkey: string;
-  owner_pubkey?: string | null;
-  name: string;
-  agent_type: string;
-  channels: string[];
-  channel_ids: string[];
-  capabilities: string[];
-  status: RelayAgent["status"];
-  respond_to?: RelayAgent["respondTo"];
-  respond_to_allowlist?: string[];
-};
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
 export type RawManagedAgent = {
   pubkey: string;
@@ -615,21 +602,6 @@ export async function createAuthEvent(input: {
   const eventJson = await invokeTauri<string>("create_auth_event", input);
   return JSON.parse(eventJson) as RelayEvent;
 }
-function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
-  return {
-    pubkey: agent.pubkey,
-    ownerPubkey: agent.owner_pubkey ?? null,
-    name: agent.name,
-    agentType: agent.agent_type,
-    channels: agent.channels,
-    channelIds: agent.channel_ids ?? [],
-    capabilities: agent.capabilities,
-    status: agent.status,
-    respondTo: agent.respond_to ?? null,
-    respondToAllowlist: agent.respond_to_allowlist ?? [],
-  };
-}
-
 export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   return {
     pubkey: agent.pubkey,
@@ -771,12 +743,6 @@ export async function changeRelayMemberRole(
   newRole: string,
 ): Promise<void> {
   await invokeTauri("change_relay_member_role", { targetPubkey, newRole });
-}
-
-export async function listRelayAgents(): Promise<RelayAgent[]> {
-  return (await invokeTauri<RawRelayAgent[]>("list_relay_agents")).map(
-    fromRawRelayAgent,
-  );
 }
 
 export async function listManagedAgents(): Promise<ManagedAgent[]> {

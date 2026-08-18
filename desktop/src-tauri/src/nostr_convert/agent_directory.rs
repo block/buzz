@@ -138,6 +138,8 @@ fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<
         status: "offline".to_string(),
         respond_to: Some(content.respond_to),
         respond_to_allowlist: content.respond_to_allowlist,
+        device_id: content.device_id,
+        device_label: content.device_label,
     })
 }
 

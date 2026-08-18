@@ -444,6 +444,58 @@ fn managed_agent_directory_accepts_only_the_verified_owner_policy() {
     assert_eq!(agents[0].respond_to_allowlist, vec![viewer_pubkey]);
 }
 
+/// The device label reaches the directory only through an owner-verified
+/// coordinate, and stays `None` for a record published by a build that predates
+/// device identity.
+#[test]
+fn managed_agent_directory_surfaces_the_owner_verified_device_label() {
+    let agent_keys = Keys::generate();
+    let owner_keys = Keys::generate();
+    let agent_pubkey = agent_keys.public_key().to_hex();
+
+    let auth_tag_json =
+        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+            .expect("compute auth tag");
+    let auth_tag_values: Vec<String> =
+        serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+    let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Bumble"}"#)
+        .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+        .sign_with_keys(&agent_keys)
+        .expect("sign profile");
+
+    let stamped = EventBuilder::new(
+        Kind::Custom(30177),
+        serde_json::json!({
+            "name": "Bumble",
+            "parallelism": 1,
+            "respond_to": "anyone",
+            "device_id": "0123456789abcdef0123456789abcdef",
+            "device_label": "mfeth-win",
+        })
+        .to_string(),
+    )
+    .tags([Tag::parse(["d", agent_pubkey.as_str()]).expect("parse d tag")])
+    .sign_with_keys(&owner_keys)
+    .expect("sign managed-agent event");
+
+    let agents = relay_agents_from_managed_agent_events(&[stamped], std::slice::from_ref(&profile));
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        agents[0].device_id.as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
+    assert_eq!(agents[0].device_label.as_deref(), Some("mfeth-win"));
+
+    // An unstamped record from an older build yields no label — never a
+    // fabricated one.
+    let unstamped = managed_agent_event(&owner_keys, &agent_pubkey, "Bumble", "anyone", &[]);
+    let agents =
+        relay_agents_from_managed_agent_events(&[unstamped], std::slice::from_ref(&profile));
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].device_id, None);
+    assert_eq!(agents[0].device_label, None);
+}
+
 #[test]
 fn managed_agent_directory_rejects_agents_without_verified_owner_profiles() {
     let owner_keys = Keys::generate();

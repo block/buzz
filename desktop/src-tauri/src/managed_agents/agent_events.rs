@@ -21,6 +21,11 @@
 //! - `backend` — `Provider { config }` is an opaque blob that may hold secrets.
 //! - any runtime field (`runtime_pid`, `last_*`, `backend_agent_id`, …) — these
 //!   mutate on every start/stop and describe transient process state.
+//!
+//! The device fields (`device_id` / `device_label`) ARE publishable: they name
+//! the install that holds this instance's secret — public, non-secret, and
+//! user-editable — and they do not mutate on start/stop, so they are identity,
+//! not runtime state.
 
 use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 use nostr::{EventBuilder, Kind, Tag};
@@ -57,6 +62,13 @@ pub struct ManagedAgentEventContent {
     /// public keys, not secrets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
+    /// Opaque id of the device that holds this instance's secret and runs
+    /// it. Absent on events published before device identity shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Human label for that device. Public, non-secret, user-editable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_label: Option<String>,
 }
 
 /// Project a `ManagedAgentRecord` onto the content fields published in
@@ -77,6 +89,10 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
     // restore path. This branch retires once every record is
     // definition-backed (B5 backfill).
     let definition_linked = record.persona_id.is_some();
+    // Device fields describe the INSTANCE (which install holds its secret),
+    // never the definition, so they are emitted regardless of slimming.
+    // `None` before the Tauri setup hook runs — unit tests publish no stamp.
+    let device = crate::device_identity::current();
     ManagedAgentEventContent {
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
@@ -103,6 +119,8 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         parallelism: record.parallelism,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        device_id: device.as_ref().map(|d| d.device_id.clone()),
+        device_label: device.as_ref().map(|d| d.device_label.clone()),
     }
 }
 
@@ -456,6 +474,76 @@ mod tests {
         assert!(!json.contains("env_vars"));
         assert!(!json.contains("agent_command"));
         assert!(!json.contains("backend"));
+    }
+
+    /// Zero-churn contract: `device_identity::current()` is `None` outside a
+    /// booted app, so the projection serializes exactly as it did before the
+    /// device fields existed. This is why no other test in the crate changed.
+    #[test]
+    fn projection_omits_device_fields_without_a_device_identity() {
+        assert!(
+            crate::device_identity::current().is_none(),
+            "unit tests must never boot the device identity"
+        );
+        let content = agent_event_content(&sample_agent());
+        assert_eq!(content.device_id, None);
+        assert_eq!(content.device_label, None);
+
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(!json.contains("deviceId"), "{json}");
+        assert!(!json.contains("device_id"), "{json}");
+        assert!(!json.contains("deviceLabel"), "{json}");
+        assert!(!json.contains("device_label"), "{json}");
+    }
+
+    /// Mixed-fleet back-compat: a 30177 event published by a build that predates
+    /// device identity parses cleanly, with both fields absent rather than an
+    /// invented value.
+    #[test]
+    fn from_event_without_device_keys_yields_none() {
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+        let content = serde_json::json!({
+            "name": "Bumble",
+            "parallelism": 1,
+            "respond_to": "owner-only",
+        });
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content.to_string())
+            .tags(vec![Tag::parse(["d", "agentpubkeyhex"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let event = nostr::Event::from_json(event.as_json()).unwrap();
+
+        let parsed = managed_agent_content_from_event(&event).unwrap();
+        assert_eq!(parsed.device_id, None);
+        assert_eq!(parsed.device_label, None);
+    }
+
+    /// The forward direction of the same contract: an event that DOES carry the
+    /// device fields round-trips them.
+    #[test]
+    fn from_event_reads_device_fields_when_present() {
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+        let content = serde_json::json!({
+            "name": "Bumble",
+            "parallelism": 1,
+            "respond_to": "owner-only",
+            "device_id": "0123456789abcdef0123456789abcdef",
+            "device_label": "mfeth-win",
+        });
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content.to_string())
+            .tags(vec![Tag::parse(["d", "agentpubkeyhex"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let event = nostr::Event::from_json(event.as_json()).unwrap();
+
+        let parsed = managed_agent_content_from_event(&event).unwrap();
+        assert_eq!(
+            parsed.device_id.as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(parsed.device_label.as_deref(), Some("mfeth-win"));
     }
 
     #[test]

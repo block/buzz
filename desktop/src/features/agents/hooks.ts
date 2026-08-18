@@ -37,12 +37,13 @@ import {
   installAcpRuntime,
   invokeTauri,
   listManagedAgents,
-  listRelayAgents,
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
+import { getDeviceIdentity } from "@/shared/api/tauriDeviceIdentity";
+import { listRelayAgents } from "@/shared/api/tauriRelayAgents";
 import {
   setManagedAgentAutoRestart,
   setManagedAgentStartOnAppLaunch,
@@ -351,6 +352,24 @@ export function useManagedAgentPrereqsQuery(
         mcpCommand: normalizedMcpCommand || undefined,
       }),
     staleTime: 15_000,
+  });
+}
+
+export const deviceIdentityQueryKey = ["device-identity"] as const;
+
+/**
+ * The device identity of this install.
+ *
+ * Machine-scoped, NOT community-scoped: it must survive a community
+ * switch, so it is deliberately absent from `resetCommunityState()` in
+ * `desktop/src/features/communities/useCommunityInit.ts`. Do not add it
+ * there.
+ */
+export function useDeviceIdentityQuery() {
+  return useQuery({
+    queryKey: deviceIdentityQueryKey,
+    queryFn: getDeviceIdentity,
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 
