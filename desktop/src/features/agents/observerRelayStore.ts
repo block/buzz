@@ -120,6 +120,10 @@ const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 type LatestLiveEntry = { sessionId: string; timestamp: string; seq: number };
 const latestLiveSessionByAgentChannel = new Map<string, LatestLiveEntry>();
 
+function liveSessionKey(agentPubkey: string, channelId: string | null): string {
+  return `${normalizePubkey(agentPubkey)}:${channelId ?? ""}`;
+}
+
 export function getLatestLiveSessionId(
   agentPubkey: string | null | undefined,
   channelId: string | null | undefined,
