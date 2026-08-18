@@ -384,16 +384,14 @@ struct RunningSync {
 /// state. So there is no cycle to deadlock on.
 ///
 /// **What this token does not cover.** It serializes archive lifecycle against
-/// archive lifecycle. It does not serialize against
-/// [`NativeRelayClient::session`], which the persona catalog and unread
-/// catch-up call without one: a scope-changing `session` landing between
-/// `ensure_session` and `attach_archive` would shut the returned session down,
-/// and attaching to an already-cancelled session is silent — the sender is
-/// installed but its socket loop has already exited, so archive sync would sit
-/// dead until the next lifecycle edge. That window predates this change and the
-/// renderer gates those features to the same scope, so it is theoretical today;
-/// it is recorded here so this token is not read as a guarantee it does not
-/// make.
+/// archive lifecycle, and nothing else needs it to: [`NativeRelayClient::session`]
+/// — the persona catalog's and unread catch-up's entry point — cannot replace
+/// the installed scope at all. It shares the session only on an exact scope
+/// match and otherwise leases a private one, so a finite request that arrives
+/// while a different scope is installed can neither shut this session down nor
+/// steal its archive sender. That is the only reason holding the token across
+/// acquisition is sufficient rather than merely necessary; if a second
+/// destructive path is ever added, it must take this token too.
 ///
 /// The fields are private and the type is un-constructible outside this module,
 /// so the stale-start path is a compile error rather than a race to remember.

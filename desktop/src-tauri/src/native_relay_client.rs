@@ -75,11 +75,12 @@ pub(crate) struct MatchedEvent {
     pub(crate) event: Box<Event>,
 }
 
-/// Handle to a running session. Dropping it does not stop the session; call
-/// [`RelaySession::shutdown`] so the socket closes deterministically.
 /// App-wide owner of the one native socket for the active `(relay, pubkey)`
-/// scope. Features subscribe independently, while scope replacement cancels
-/// the old socket before exposing the new one.
+/// scope. Features subscribe independently.
+///
+/// Only the archive lifecycle may replace the installed scope, and only while
+/// holding [`crate::archive::sync::ArchiveOwnership`]; see [`Self::session`]
+/// for why finite callers get a non-destructive lease instead.
 #[derive(Default)]
 pub(crate) struct NativeRelayClient {
     current: Mutex<Option<ManagedSession>>,
@@ -90,7 +91,51 @@ struct ManagedSession {
     session: Arc<RelaySession>,
 }
 
+/// A session borrowed by a finite-request caller, plus whether that caller owns
+/// it. Dropping the lease shuts down a private session and leaves a shared one
+/// running for the feature that installed it.
+///
+/// Exists because a finite caller cannot be trusted to shut the session down by
+/// hand: it must not call [`RelaySession::shutdown`] on the shared session, and
+/// it must call it on a private one or the socket outlives the request. Tying
+/// both to the drop makes the correct behavior the only reachable one.
+pub(crate) struct SessionLease {
+    session: Arc<RelaySession>,
+    /// Set only for a session this lease alone can see, which is therefore the
+    /// lease's to cancel.
+    private: bool,
+}
+
+impl std::ops::Deref for SessionLease {
+    type Target = RelaySession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl SessionLease {
+    /// Clones the underlying handle for a task that outlives this binding, as
+    /// the catch-up fan-out does. Only the lease cancels the session, so the
+    /// clone must not outlive it.
+    pub(crate) fn handle(&self) -> Arc<RelaySession> {
+        Arc::clone(&self.session)
+    }
+}
+
+impl Drop for SessionLease {
+    fn drop(&mut self) {
+        if self.private {
+            self.session.shutdown();
+        }
+    }
+}
+
 impl NativeRelayClient {
+    /// Installs the session for `scope`, shutting down whatever scope held the
+    /// slot. Destructive on entry, so every caller must already hold proof it
+    /// is the current owner — today that is
+    /// [`crate::archive::sync::ArchiveOwnership`].
     async fn ensure_session(&self, relay_url: String, keys: Keys) -> Arc<RelaySession> {
         let scope = (relay_url.clone(), keys.public_key().to_hex());
         let mut current = self.current.lock().await;
@@ -108,8 +153,54 @@ impl NativeRelayClient {
         session
     }
 
-    pub(crate) async fn session(&self, relay_url: String, keys: Keys) -> Arc<RelaySession> {
-        self.ensure_session(relay_url, keys).await
+    /// Leases a session for a finite request, never displacing another scope.
+    ///
+    /// Finite callers (persona catalog, unread catch-up) hold no ownership
+    /// proof and cannot obtain one: they are not part of the archive lifecycle.
+    /// So this is the non-destructive half of the split — it shares the
+    /// installed session when the scope matches, and otherwise runs the request
+    /// on a private session that the lease shuts down on drop.
+    ///
+    /// A mismatch is deliberately NOT treated as "the caller is stale". These
+    /// commands are not ordered against archive lifecycle in either direction:
+    /// a catalog fetch for the community the user just opened routinely arrives
+    /// *before* that community's `start_archive_sync`, while the previous
+    /// scope's session is still installed. From inside this lock an early
+    /// caller and a late one are indistinguishable — both differ from the
+    /// installed scope — so refusing (or fencing on a generation counter, which
+    /// answers the same question) would fail the current caller as often as the
+    /// stale one. Serving both on their own socket is correct for either, and
+    /// whichever is genuinely stale has its result discarded by the scope
+    /// re-check each command performs before returning.
+    ///
+    /// Filling an empty slot is deliberate: at startup the catalog fetch
+    /// commonly precedes archive sync, and installing here means the archive
+    /// start that follows reuses this socket instead of opening a second one.
+    pub(crate) async fn session(&self, relay_url: String, keys: Keys) -> SessionLease {
+        let scope = (relay_url.clone(), keys.public_key().to_hex());
+        let mut current = self.current.lock().await;
+        if let Some(managed) = current.as_ref() {
+            return if managed.scope == scope {
+                SessionLease {
+                    session: Arc::clone(&managed.session),
+                    private: false,
+                }
+            } else {
+                SessionLease {
+                    session: start_managed(relay_url, keys, None),
+                    private: true,
+                }
+            };
+        }
+        let session = start_managed(relay_url, keys, None);
+        *current = Some(ManagedSession {
+            scope,
+            session: Arc::clone(&session),
+        });
+        SessionLease {
+            session,
+            private: false,
+        }
     }
 
     /// Returns the shared session for `(relay_url, keys)` plus the archive

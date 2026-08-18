@@ -751,3 +751,146 @@ fn retry_hints_parse_the_relays_canonical_format() {
     assert_eq!(parse_retry_in_seconds("rate-limited: quota exceeded"), None);
     assert_eq!(parse_retry_in_seconds("retry in s"), None);
 }
+
+// ── Scope fencing at the client boundary ─────────────────────────────────────
+//
+// `ensure_session` is destructive on entry: a different scope's socket is shut
+// down before the new one is installed. The archive lifecycle earns that right
+// with `ArchiveOwnership`; the persona catalog and unread catch-up hold no such
+// proof and reach the client through `session` instead.
+//
+// These tests drive `ensure_session` directly rather than `archive_session`,
+// because `ArchiveOwnership` is un-constructible outside `archive::sync` — the
+// compiler already enforces that half. `archive_session` delegates to
+// `ensure_session` with no other effect on the slot, so this stages the exact
+// state a live archive leaves behind.
+//
+// The relay URLs never accept a connection. Nothing here waits on a socket:
+// the session task is spawned, its connect fails, and it backs off — while the
+// slot bookkeeping and cancellation these tests assert on are synchronous.
+
+/// A scope's relay URL. Distinct ports, on a closed loopback address, so the
+/// two scopes are unequal and neither can connect.
+fn scope_url(port: u16) -> String {
+    format!("ws://127.0.0.1:{port}")
+}
+
+async fn installed_session(client: &NativeRelayClient) -> Option<Arc<RelaySession>> {
+    client
+        .current
+        .lock()
+        .await
+        .as_ref()
+        .map(|managed| Arc::clone(&managed.session))
+}
+
+/// The required regression: a finite request that resumes after the scope
+/// switched must not disturb the new scope's live session.
+///
+/// Staged in the order the bug needs — archive A installed, scope switches and
+/// archive B installs, and only then does A's delayed fetch acquire. Against
+/// the unfenced `session` (a straight `ensure_session` call) A's late arrival
+/// shut B's socket down and installed its own, leaving B's archive attached to
+/// a cancelled session: no events, no error, until the next lifecycle edge.
+#[tokio::test]
+async fn a_stale_finite_request_cannot_displace_the_new_scopes_session() {
+    let client = NativeRelayClient::default();
+    let scope_a = (scope_url(9), Keys::generate());
+    let scope_b = (scope_url(10), Keys::generate());
+
+    let archive_a = client
+        .ensure_session(scope_a.0.clone(), scope_a.1.clone())
+        .await;
+    let archive_b = client
+        .ensure_session(scope_b.0.clone(), scope_b.1.clone())
+        .await;
+    assert!(
+        archive_a.cancel.is_cancelled(),
+        "the archive lifecycle must still replace its own scope's session"
+    );
+
+    // Scope A's in-flight catalog/catch-up command, resuming late.
+    let stale = client.session(scope_a.0.clone(), scope_a.1.clone()).await;
+
+    assert!(
+        !archive_b.cancel.is_cancelled(),
+        "a stale finite request cancelled the live scope's session; its archive \
+         is now attached to a dead socket and will sit silent until the next \
+         lifecycle edge"
+    );
+    let installed = installed_session(&client)
+        .await
+        .expect("the slot must still hold a session");
+    assert!(
+        Arc::ptr_eq(&installed, &archive_b),
+        "a stale finite request replaced the installed session, so the next \
+         same-scope caller shares the wrong socket"
+    );
+    assert!(
+        !Arc::ptr_eq(&stale.session, &archive_b),
+        "the stale request must run on its own session, not the live scope's"
+    );
+
+    // Its own session is the lease's to end, and it must actually end: an
+    // un-cancelled private session leaks a reconnecting socket per request.
+    let private = stale.handle();
+    drop(stale);
+    assert!(
+        private.cancel.is_cancelled(),
+        "dropping a private lease must shut its session down"
+    );
+}
+
+/// The sharing half, and the mutant that matters: making every lease private
+/// would satisfy the test above while quietly undoing the one-socket design and
+/// letting a finite request's drop cancel the archive's session.
+#[tokio::test]
+async fn a_same_scope_lease_shares_the_installed_session_and_never_ends_it() {
+    let client = NativeRelayClient::default();
+    let (relay_url, keys) = (scope_url(11), Keys::generate());
+
+    let archive = client.ensure_session(relay_url.clone(), keys.clone()).await;
+    let lease = client.session(relay_url.clone(), keys.clone()).await;
+    assert!(
+        Arc::ptr_eq(&lease.session, &archive),
+        "a same-scope finite request must multiplex over the installed socket \
+         rather than opening a second one"
+    );
+
+    drop(lease);
+    assert!(
+        !archive.cancel.is_cancelled(),
+        "dropping a shared lease cancelled the archive's session"
+    );
+    assert!(
+        installed_session(&client)
+            .await
+            .is_some_and(|installed| Arc::ptr_eq(&installed, &archive)),
+        "the shared session must stay installed after a lease is dropped"
+    );
+}
+
+/// A lease taken before any archive start installs, so the archive start that
+/// follows reuses that socket instead of opening a second one. This is the
+/// common boot order: the catalog fetch runs before archive sync.
+#[tokio::test]
+async fn the_first_lease_installs_a_session_the_archive_then_reuses() {
+    let client = NativeRelayClient::default();
+    let (relay_url, keys) = (scope_url(12), Keys::generate());
+
+    let lease = client.session(relay_url.clone(), keys.clone()).await;
+    let leased = lease.handle();
+    drop(lease);
+    assert!(
+        !leased.cancel.is_cancelled(),
+        "the first lease owns the slot, so dropping it must not cancel the \
+         session the archive is about to reuse"
+    );
+
+    let archive = client.ensure_session(relay_url, keys).await;
+    assert!(
+        Arc::ptr_eq(&archive, &leased),
+        "the archive start must reuse the installed session rather than \
+         replacing an identically scoped one"
+    );
+}
