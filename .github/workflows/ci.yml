@@ -92,6 +92,10 @@ jobs:
           scripts/test-mobile-release-candidate-publisher.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: Desktop dev-state reset contract
+        run: |
+          scripts/test-reset-desktop-dev-state.sh
+          scripts/test-reset-desktop-standalone-state.sh
       - name: File size ratchet unit tests
         run: node --test scripts/check-file-sizes-core.test.mjs
 
