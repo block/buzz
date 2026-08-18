@@ -111,7 +111,8 @@ fn behavior_edit_cascades_to_inheriting_instance() {
         &[],
         &updated,
     )
-    .unwrap();
+    .unwrap()
+    .linked;
 
     assert!(touched);
     assert_eq!(records[0].respond_to, RespondTo::Anyone);
@@ -140,7 +141,8 @@ fn behavior_edit_preserves_instance_override() {
         &[],
         &updated,
     )
-    .unwrap();
+    .unwrap()
+    .linked;
 
     assert!(touched, "mirror refresh still counts as a touch");
     assert_eq!(
@@ -206,7 +208,8 @@ fn behavior_clear_restores_default_on_inheriting_instance() {
         &[],
         &cleared,
     )
-    .unwrap();
+    .unwrap()
+    .linked;
 
     assert!(touched);
     assert_eq!(records[0].respond_to, RespondTo::OwnerOnly);
@@ -279,7 +282,8 @@ fn empty_allowlist_definition_skips_adoption_without_failing() {
         &[],
         &broken,
     )
-    .unwrap();
+    .unwrap()
+    .linked;
 
     assert!(touched, "mirror refresh still counts as a touch");
     assert_eq!(
@@ -384,7 +388,8 @@ fn unsafe_definition_state_still_cascades_parallelism() {
         &[],
         &updated,
     )
-    .unwrap();
+    .unwrap()
+    .linked;
 
     assert!(touched);
     // Gate held back...
@@ -411,7 +416,8 @@ fn allowlist_ordering_does_not_read_as_a_pin() {
         &[a.clone(), b.clone()], // same set, opposite order
         &updated,
     )
-    .unwrap();
+    .unwrap()
+    .linked;
 
     assert!(touched);
     assert_eq!(records[0].respond_to, RespondTo::Anyone);
@@ -439,4 +445,80 @@ fn allowlist_duplicate_is_not_the_same_set() {
     // Read as a deliberate pin — untouched.
     assert_eq!(records[0].respond_to, RespondTo::Allowlist);
     assert_eq!(records[0].respond_to_allowlist, vec![a.clone(), a]);
+}
+
+/// @xtranger51's production desync on #4115, with their store bytes: an
+/// instance minted before this cascade existed, against a definition already
+/// edited during the buggy era. It matches neither the old mode nor the old
+/// allowlist, so the plain inheriting test reads it as a pin and it stays
+/// stuck on owner-only forever. Unset mirrors mark it as pre-fix.
+#[test]
+fn pre_fix_record_at_mint_default_heals_instead_of_reading_as_a_pin() {
+    let principal = "bc6a".to_string() + &"0".repeat(60);
+    let mut records = vec![agent("persona-1", "A1", RespondTo::OwnerOnly)];
+    records[0].respond_to_allowlist = vec![];
+    // Mirrors absent — this record predates the cascade.
+    records[0].definition_respond_to = None;
+    records[0].definition_respond_to_allowlist = vec![];
+
+    let updated = persona(Some("allowlist"), vec![principal.clone()], None);
+
+    let cascade = propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::Allowlist, // definition was already edited pre-fix
+        std::slice::from_ref(&principal),
+        &updated,
+    )
+    .unwrap();
+
+    assert!(cascade.linked);
+    assert_eq!(records[0].respond_to, RespondTo::Allowlist);
+    assert_eq!(records[0].respond_to_allowlist, vec![principal]);
+    assert_eq!(cascade.adopted, vec!["pubkey-A1".to_string()]);
+}
+
+/// The heal must not swallow a deliberate pin. A pre-fix record whose gate is
+/// NOT the mint default was set by hand, so it stays put.
+#[test]
+fn pre_fix_record_with_a_non_default_gate_is_still_a_pin() {
+    let mut records = vec![agent("persona-1", "A1", RespondTo::Anyone)];
+    records[0].definition_respond_to = None;
+    let updated = persona(Some("allowlist"), vec!["c".repeat(64)], None);
+
+    let cascade = propagate_persona_behavior(
+        &mut records,
+        "persona-1",
+        RespondTo::Allowlist,
+        &["d".repeat(64)],
+        &updated,
+    )
+    .unwrap();
+
+    assert_eq!(records[0].respond_to, RespondTo::Anyone);
+    assert!(cascade.adopted.is_empty());
+}
+
+/// Only records whose effective gate actually changed are republished: the
+/// behavioral triple is in the kind:30177 projection, but a mirror-only
+/// refresh does not change it, so retaining would be a guaranteed no-op.
+#[test]
+fn mirror_only_refresh_does_not_ask_for_a_relay_republish() {
+    let mut records = vec![agent("persona-1", "A1", RespondTo::Anyone)];
+    records[0].definition_respond_to = Some("anyone".to_string());
+    records[0].definition_parallelism = Some(1);
+    // Definition edit changes ONLY parallelism; the gate is already correct.
+    let updated = persona(Some("anyone"), vec![], Some(3));
+
+    let cascade =
+        propagate_persona_behavior(&mut records, "persona-1", RespondTo::Anyone, &[], &updated)
+            .unwrap();
+
+    assert!(cascade.linked);
+    assert_eq!(records[0].parallelism, 3);
+    assert_eq!(records[0].respond_to, RespondTo::Anyone);
+    assert!(
+        cascade.adopted.is_empty(),
+        "gate unchanged — nothing to republish"
+    );
 }
