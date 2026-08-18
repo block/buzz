@@ -39,7 +39,7 @@ each capability.
 | Offline Phase 2 — Mac-local RAG | Complete and merged | [PR #24](https://github.com/NavigatorRAN/buzz/pull/24), merged as `35dabbe89` | Preserve snapshot identity and semantic canary |
 | Offline Phase 3 — adaptive memory | Complete and merged | [PR #25](https://github.com/NavigatorRAN/buzz/pull/25), merged as `4e804b51a` | Preserve append-only history and local active recall |
 | Offline Phase 4 — autonomous skills | Complete and merged | [PR #26](https://github.com/NavigatorRAN/buzz/pull/26), merged as `87fe1a26c` | Preserve immutable skills, verified projection, and rollback |
-| Offline Phase 5 — disconnected acceptance | Final candidate installed; automated gates and CI pass; owner has proved one disconnected adviser can use the local model and RAG | Draft [PR #27](https://github.com/NavigatorRAN/buzz/pull/27); final manifest `1ac2d4363a02a4ab4b425930c25595bc6af8fbd44cd3d81e64140f4a88168767` | Run two-/three-adviser journeys, local Memory readback, restart matrix, cold restart, and eight-hour soak |
+| Offline Phase 5 — disconnected acceptance | Final candidate installed; automated gates and CI pass; owner accepted the disconnected multi-adviser, local RAG, and local Memory journey with interrupted-brief resume recorded as a residual limitation | Draft [PR #27](https://github.com/NavigatorRAN/buzz/pull/27); final manifest `1ac2d4363a02a4ab4b425930c25595bc6af8fbd44cd3d81e64140f4a88168767` | Run the service-restart matrix, cold restart, and eight-hour disconnected soak |
 
 Living Ship, the v0.5.2 integration line, the controlled sync to pinned upstream
 tag `desktop-v0.5.8`, and repository baseline promotion are complete. PR #17

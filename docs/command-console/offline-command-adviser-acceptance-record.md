@@ -62,7 +62,7 @@ Encrypted backups and recovery material are at `/Users/matthewwarren/Command Adv
 
 ## Physical acceptance
 
-These gates are deliberately open. They cannot be closed by repository tests.
+These gates cannot be closed by repository tests.
 
 The first owner-controlled isolation on 17 August 2026 proved every local
 component ready, but exposed a false-negative macOS route classification
@@ -75,16 +75,34 @@ Mac-local RAG MCP server. It also exposed and reproduced the thread-context
 HTTP 403 described above. This evidence closes the basic local model/RAG path,
 but not the multi-adviser, Memory, recovery, restart, or soak gates.
 
+A second owner-controlled disconnected run on 18 August 2026 returned
+`ready:true`, `components_ready:true`, `disconnected_observed:true`, and
+`no_external_gateway` while the signed app, exact model, relay, semantic RAG,
+Memory MCP, active skill projection, manifest, and disk reserve all passed.
+The owner completed the two- and three-adviser journeys, local doctrine/RAG
+use, and local Memory write/readback, and reported no other failure. The owner
+confirmed the disconnected product is usable.
+
+The interrupted Daily Command Brief did not resume after Command Adviser was
+quit and relaunched. The owner explicitly accepts this residual limitation for
+Phase 5: an interrupted brief must be started again after relaunch. Automatic
+resume is not represented as working and remains eligible for a later product
+refinement; it does not reopen the accepted local model, RAG, Memory, or
+multi-adviser paths.
+
 - [x] external default route absent while loopback services remain available;
 - [x] one-adviser installed-app journey reaches the local model and RAG through capacity one;
-- [ ] two- and three-adviser installed-app journeys complete through capacity one;
-- [ ] local RAG citation and local Memory write/readback are present;
-- [ ] interrupted Daily Command Brief resumes without duplicate publication;
+- [x] two- and three-adviser installed-app journeys complete through capacity one;
+- [x] local RAG citation and local Memory write/readback are present;
+- [x] interrupted Daily Command Brief behaviour is owner accepted with a recorded deviation: the run does not resume after app relaunch and must be started again;
 - [ ] app, LM Studio, RAG, Memory, and relay restart canaries pass;
 - [ ] cold Mac restart restores the exact runtime and pending work;
 - [ ] eight-hour overnight soak passes with zero cloud attempts and bounded growth; and
-- [ ] owner confirms the installed disconnected product is usable.
+- [x] owner confirms the installed disconnected product is usable.
 
 ## Acceptance decision
 
-**IN PROGRESS.** Phase 5 is not sea-going accepted until the physical gates above pass. Optional Phase 6 model refinement remains closed.
+**IN PROGRESS.** The short disconnected user journey is accepted, including
+the explicit interrupted-brief deviation. Phase 5 is not sea-going accepted
+until the service-restart, cold-restart, and eight-hour soak gates pass.
+Optional Phase 6 model refinement remains closed.
