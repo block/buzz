@@ -454,8 +454,14 @@ relay-release: _ensure-migrations
     cargo run -p buzz-relay --release
 
 
+# Fail fast on Linux when the Tauri desktop app's native system libraries are
+# missing (no-op on other platforms); see CONTRIBUTING.md "Linux: Tauri system
+# libraries". Runs as the first dev prerequisite, before bootstrap builds.
+_check-tauri-linux-deps:
+    ./scripts/check-tauri-linux-deps.sh
+
 # Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
+dev *ARGS: _check-tauri-linux-deps bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
