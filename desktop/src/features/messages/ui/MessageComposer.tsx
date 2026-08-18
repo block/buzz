@@ -1,5 +1,6 @@
 import * as React from "react";
 import { EditorContent } from "@tiptap/react";
+import { toast } from "sonner";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
@@ -42,6 +43,11 @@ import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import { readClipboardImage } from "@/shared/api/tauriMedia";
+import {
+  clipboardPasteErrorMessage,
+  firstClipboardFile,
+  shouldReadNativeClipboardImage,
+} from "@/features/messages/lib/clipboardFile";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -735,6 +741,23 @@ function MessageComposerImpl({
   // ── Media paste + ⌘K link shortcut via Tiptap editorProps ──────────
   const uploadFileRef = React.useRef(media.uploadFile);
   uploadFileRef.current = media.uploadFile;
+  const uploadNativeClipboardImage = React.useCallback(async () => {
+    try {
+      const bytes = await readClipboardImage();
+      // Copy into a browser-owned ArrayBuffer: Tauri's Uint8Array is typed as
+      // ArrayBufferLike, while File accepts ArrayBuffer.
+      const imageBytes = new Uint8Array(bytes.byteLength);
+      imageBytes.set(bytes);
+      await uploadFileRef.current(
+        new File([imageBytes.buffer], "clipboard-image.png", {
+          type: "image/png",
+        }),
+      );
+    } catch (error) {
+      toast.error(clipboardPasteErrorMessage(error));
+    }
+  }, []);
+
   React.useEffect(() => {
     if (!richText.editor) return;
     richText.editor.setOptions({
@@ -745,43 +768,18 @@ function MessageComposerImpl({
           // Any actual file (image, video, document, …) pastes as an
           // attachment. String/text items have kind "string", so plain-text
           // and code-block paste fall through to the handlers below.
-          const items = Array.from(event.clipboardData?.items ?? []);
-          const mediaItem = items.find((item) => item.kind === "file");
-          if (mediaItem) {
-            const file = mediaItem.getAsFile();
-            if (file) {
-              void uploadFileRef.current(file);
-            }
+          const mediaFile = firstClipboardFile(event.clipboardData);
+          if (mediaFile) {
+            void uploadFileRef.current(mediaFile);
             return true;
           }
-          // WebKitGTK can dispatch a paste event without turning a Wayland
-          // image offer into a `DataTransferItem`. Fall back to the native
-          // clipboard only when the webview did not expose normal text, so
-          // ordinary text and code-block paste keep their existing behavior.
-          const hasTextItem = items.some((item) =>
-            item.type.startsWith("text/"),
-          );
-          const hasImageMime = items.some((item) =>
-            item.type.startsWith("image/"),
-          );
-          if ((items.length === 0 && !hasTextItem) || hasImageMime) {
+          // WebKitGTK can withhold both the File and MIME type for a valid
+          // Wayland screenshot. Empty browser payloads have no useful default
+          // paste behavior, so ask the native clipboard while preserving
+          // ordinary non-empty text/HTML paste.
+          if (shouldReadNativeClipboardImage(event.clipboardData)) {
             event.preventDefault();
-            void readClipboardImage()
-              .then((bytes) => {
-                if (!bytes) return;
-                // Copy into a browser-owned ArrayBuffer: Tauri's Uint8Array
-                // is typed as ArrayBufferLike, while File accepts ArrayBuffer.
-                const imageBytes = new Uint8Array(bytes.byteLength);
-                imageBytes.set(bytes);
-                return uploadFileRef.current(
-                  new File([imageBytes.buffer], "clipboard-image.png", {
-                    type: "image/png",
-                  }),
-                );
-              })
-              // A non-image clipboard is normal; leave it to the existing
-              // webview paste path rather than surfacing an upload error.
-              .catch(() => undefined);
+            void uploadNativeClipboardImage();
             return true;
           }
 
@@ -830,7 +828,30 @@ function MessageComposerImpl({
         },
       },
     });
-  }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
+  }, [
+    media.setPendingImeta,
+    richText.editor,
+    scrollComposerToBottom,
+    uploadNativeClipboardImage,
+  ]);
+
+  // WebKitGTK can consume image clipboard events before ProseMirror reaches
+  // editorProps.handlePaste. Intercept native-image candidates at the editor
+  // DOM capture phase.
+  React.useEffect(() => {
+    const editor = richText.editor;
+    if (!editor) return;
+    const handleNativeImagePaste = (event: ClipboardEvent) => {
+      if (!shouldReadNativeClipboardImage(event.clipboardData)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void uploadNativeClipboardImage();
+    };
+    const dom = editor.view.dom;
+    dom.addEventListener("paste", handleNativeImagePaste, true);
+    return () => dom.removeEventListener("paste", handleNativeImagePaste, true);
+  }, [richText.editor, uploadNativeClipboardImage]);
+
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled =
     composerDisabled ||
