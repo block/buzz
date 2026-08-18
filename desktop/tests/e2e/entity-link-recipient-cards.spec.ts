@@ -200,6 +200,22 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   const missingRepoChip = row.getByRole("button", {
     name: "Open repository missing-repo",
   });
+  await expect(missingRepoChip).toHaveClass(/buzz-link-unavailable/);
+  const missingRepoColors = await missingRepoChip.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "hsl(var(--secondary))";
+    probe.style.color = "hsl(var(--secondary-foreground) / 0.7)";
+    document.body.append(probe);
+    const semanticStyles = getComputedStyle(probe);
+    const result = {
+      actual: [styles.backgroundColor, styles.color],
+      expected: [semanticStyles.backgroundColor, semanticStyles.color],
+    };
+    probe.remove();
+    return result;
+  });
+  expect(missingRepoColors.actual).toEqual(missingRepoColors.expected);
   // Failed metadata falls back to the chip's stable identity instead of
   // removing the tooltip or leaving a type-only footer.
   await missingRepoChip.hover();
@@ -424,7 +440,24 @@ test("missing message links remain unavailable and preserve exact-message naviga
     name: "Open message in channel random",
   });
   await expect(missingLink).toHaveText("random");
-  await expect(missingLink).not.toHaveClass(/buzz-link-deleted/);
+  await expect(missingLink).toHaveClass(/buzz-link-unavailable/);
+  await expect
+    .poll(() =>
+      missingLink.evaluate((element) => {
+        const styles = getComputedStyle(element);
+        const probe = document.createElement("span");
+        probe.style.backgroundColor = "hsl(var(--secondary))";
+        probe.style.color = "hsl(var(--secondary-foreground) / 0.7)";
+        document.body.append(probe);
+        const semanticStyles = getComputedStyle(probe);
+        const result =
+          styles.backgroundColor === semanticStyles.backgroundColor &&
+          styles.color === semanticStyles.color;
+        probe.remove();
+        return result;
+      }),
+    )
+    .toBe(true);
   await missingLink.hover();
   await expect(page.getByRole("tooltip")).toHaveCount(0);
 

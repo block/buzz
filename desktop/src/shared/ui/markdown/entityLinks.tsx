@@ -3,6 +3,7 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useProjectsQuery } from "@/features/projects/hooks";
 import type { Project } from "@/features/projects/projectModels";
+import { cn } from "@/shared/lib/cn";
 import {
   entityLinkProjectRouteId,
   isEntityLink,
@@ -312,7 +313,7 @@ export function renderEntityLinkAnchor({
         href={href}
         icon={presentation.icon}
         aria-label={presentation.ariaLabel}
-        className="max-w-64"
+        className={cn("max-w-64", metadata === null && "buzz-link-unavailable")}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
       >

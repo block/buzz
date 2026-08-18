@@ -151,7 +151,10 @@ export function MessageLinkPill({
         href={permalink}
         icon="message"
         aria-label={`Open message in channel ${channelLabel}`}
-        className="max-w-64"
+        className={cn(
+          "max-w-64",
+          metadata.state.kind === "unavailable" && "buzz-link-unavailable",
+        )}
         interactive={interactive}
         onOpenLink={() => onOpenMessageLink(link)}
       >
