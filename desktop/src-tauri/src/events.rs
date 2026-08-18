@@ -219,6 +219,14 @@ pub fn build_delete_channel(channel_id: Uuid) -> Result<EventBuilder, String> {
 // ── Membership ───────────────────────────────────────────────────────────────
 
 /// Kind 9000 — add member.
+///
+/// `.allow_self_tagging()` is required: the agent's own auto-add path
+/// (e.g. `huddle/agents.rs` grants the ephemeral channel's bot role to
+/// the agent's own pubkey) carries a `p` tag matching the signer. Without
+/// the opt-in, `nostr` 0.44's `EventBuilder` scrubs that `p` tag and the
+/// relay rejects the event with `invalid: missing p tag` (see #6241 for
+/// the SDK-side root cause; the desktop builder is a parallel
+/// implementation that must apply the same fix).
 pub fn build_add_member(
     channel_id: Uuid,
     target_pubkey: &str,
@@ -232,17 +240,25 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(vec!["role", r])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Kind 9001 — remove member.
+///
+/// `.allow_self_tagging()` mirrors `build_add_member`: a self-targeted
+/// remove-member (an agent removing its own pubkey) must not have its
+/// `p` tag scrubbed during signing.
 pub fn build_remove_member(channel_id: Uuid, target_pubkey: &str) -> Result<EventBuilder, String> {
     check_pubkey(target_pubkey)?;
     let tags = vec![
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(9001), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -774,6 +790,60 @@ mod tests {
         let channel_id = Uuid::new_v4();
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());
         assert!(build_update_channel(channel_id, Some("###"), None, None, None).is_err());
+    }
+
+    /// Self-targeted add-member: the agent signs the kind:9000 for its own
+    /// pubkey (e.g. ephemeral channel bot-role auto-add). Without
+    /// `.allow_self_tagging()` the `p` tag is scrubbed and the relay
+    /// rejects with `invalid: missing p tag` (see #6241).
+    #[test]
+    fn add_member_preserves_self_targeted_p_tag() {
+        let channel_id = Uuid::new_v4();
+        let signer_secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+        )
+        .unwrap();
+        let signer = Keys::new(signer_secret);
+        let self_pk = signer.public_key().to_hex();
+        let builder = build_add_member(channel_id, &self_pk, Some("bot")).expect("build");
+        let ev = builder.sign_with_keys(&signer).expect("sign");
+        assert_eq!(ev.kind, Kind::Custom(9000));
+        let tags: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(
+            tags.iter()
+                .any(|t| t.first().map(|s| s.as_str()) == Some("p")
+                    && t.get(1).map(|s| s.as_str()) == Some(self_pk.as_str())),
+            "self-targeted p tag must survive signing, got tags {tags:?}"
+        );
+        assert!(
+            tags.iter()
+                .any(|t| t.first().map(|s| s.as_str()) == Some("role")
+                    && t.get(1).map(|s| s.as_str()) == Some("bot")),
+            "role tag must be present, got tags {tags:?}"
+        );
+    }
+
+    /// Self-targeted remove-member: actor == target. Mirrors the add-member
+    /// self-path: the `p` tag must survive signing.
+    #[test]
+    fn remove_member_preserves_self_targeted_p_tag() {
+        let channel_id = Uuid::new_v4();
+        let signer_secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000004",
+        )
+        .unwrap();
+        let signer = Keys::new(signer_secret);
+        let self_pk = signer.public_key().to_hex();
+        let builder = build_remove_member(channel_id, &self_pk).expect("build");
+        let ev = builder.sign_with_keys(&signer).expect("sign");
+        assert_eq!(ev.kind, Kind::Custom(9001));
+        let tags: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(
+            tags.iter()
+                .any(|t| t.first().map(|s| s.as_str()) == Some("p")
+                    && t.get(1).map(|s| s.as_str()) == Some(self_pk.as_str())),
+            "self-targeted p tag must survive signing, got tags {tags:?}"
+        );
     }
     /// Builder layout regression for the NIP-IA owner-of-agent archive flow.
     /// Compares against `docs/nips/NIP-IA.md` §Vector 1.
