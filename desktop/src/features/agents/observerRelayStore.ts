@@ -288,7 +288,7 @@ function appendAgentEvents(
   }
   if (added.length === 0) return null;
 
-  const sortedAdded = added.sort(compareObserverEvents);
+  const sortedAdded = [...added].sort(compareObserverEvents);
   const sorted = allAtEnd
     ? [...current, ...sortedAdded]
     : [...current, ...sortedAdded].sort(compareObserverEvents);
@@ -448,25 +448,42 @@ function processLiveObserverEvents(
   // callbacks. Those callbacks historically observed their triggering frame
   // in the raw/transcript stores; batching must preserve that visibility while
   // deferring only the global external-store publication.
-  // `addedEvents` is the payload external-store subscribers receive;
+  //
+  // Dispatch iterates the ACCEPTED events, not the raw envelope: the observer
+  // relay requests a five-minute replay on reconnect, so an already-seen frame
+  // can re-arrive. `appendAgentEvents` drops those as duplicates and returns
+  // only the newly-accepted set; dispatching that set keeps a replayed
+  // `control_result` from re-settling a live model switch, and likewise
+  // prevents any other side-effect listener (latest-live tracking, management
+  // requests, session-config capture, lifecycle) from firing twice for one
+  // frame.
+  //
+  // `accepted` is also the payload external-store subscribers receive;
   // `observerChanged` additionally tracks circuit-only changes, which append
-  // nothing but must still repaint the badge (see the OR in the loop below).
-  const addedEvents = appendAgentEvents(agentPubkey, events);
-  let observerChanged = addedEvents !== null;
+  // nothing but must still repaint the badge (see the circuit loop below).
+  const accepted = appendAgentEvents(agentPubkey, events);
+  let observerChanged = accepted !== null;
 
+  // Circuit state is driven by the FULL envelope, not the accepted subset.
+  // appendAgentEvents' per-agent eviction floor and applyCircuitEvent's
+  // per-slot ordering gate compare against different reference points, so a
+  // circuit event can be rejected by one and accepted by the other (e.g. a
+  // late-delivered frame after a relay reconnect, at/before the agent's floor
+  // but the first event ever seen for its slot). Feeding this pass only the
+  // accepted events would silently drop those transitions. Replay is not a
+  // concern here the way it is for the dispatch loop below: applyCircuitEvent
+  // has its own per-slot ordering gate and rejects re-arriving frames.
+  // OR the two signals so a circuit-only change still notifies subscribers,
+  // matching every other ingestion path in this file
+  // (ingestArchivedObserverEvents, injectObserverEventsForE2E,
+  // syncAgentObserverEvents).
   for (const parsed of events) {
-    // appendAgentEvents' per-agent eviction floor and applyCircuitEvent's
-    // per-slot ordering gate compare against different reference points, so a
-    // circuit event can be rejected by one and accepted by the other (e.g. a
-    // late-delivered frame after a relay reconnect, at/before the agent's
-    // floor but the first event ever seen for its slot). OR the two signals
-    // so a circuit-only change still notifies subscribers — matches every
-    // other ingestion path in this file (ingestArchivedObserverEvents,
-    // injectObserverEventsForE2E, syncAgentObserverEvents).
     if (applyCircuitEvent(agentPubkey, parsed)) {
       observerChanged = true;
     }
+  }
 
+  for (const parsed of accepted ?? []) {
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
     // so we never attribute a session to the wrong channel.
@@ -496,7 +513,9 @@ function processLiveObserverEvents(
       void putAgentSessionConfig(agentPubkey, parsed.payload);
       onSessionConfigCaptured?.(agentPubkey);
     } else if (parsed.kind === "control_result") {
-      dispatchControlResult(agentPubkey, parsed.payload);
+      // Thread the envelope's channelId into the frame so the ModelPicker can
+      // count a terminal switch result once per distinct channel.
+      dispatchControlResult(agentPubkey, parsed.payload, parsed.channelId);
     } else if (parsed.kind === "managed_agent_runtime_lifecycle") {
       void putManagedAgentRuntimeLifecycle(agentPubkey, parsed.payload).catch(
         (error) => {
@@ -508,8 +527,8 @@ function processLiveObserverEvents(
 
   // Preserve the harness's envelope backpressure: retained state was committed
   // before specialized callbacks, but external-store subscribers publish once.
-  if (addedEvents) {
-    notifyListeners({ agentPubkey, events: addedEvents });
+  if (accepted) {
+    notifyListeners({ agentPubkey, events: accepted });
   } else if (observerChanged) {
     // Circuit-only change: no events were retained, so there is no targeted
     // payload to publish, but circuit subscribers still need waking.
@@ -639,7 +658,11 @@ function isControlResultFrame(payload: unknown): payload is ControlResultFrame {
   );
 }
 
-function dispatchControlResult(agentPubkey: string, payload: unknown) {
+function dispatchControlResult(
+  agentPubkey: string,
+  payload: unknown,
+  channelId: string | null,
+) {
   if (!isControlResultFrame(payload)) {
     return;
   }
@@ -647,8 +670,13 @@ function dispatchControlResult(agentPubkey: string, payload: unknown) {
   if (!subscribers) {
     return;
   }
+  // The channelId lives on the observer envelope, not the inner payload, so
+  // stamp it onto the frame here. Listeners (the ModelPicker) count a terminal
+  // switch result once per distinct channel; the envelope is the only place a
+  // late `control_result` carries its channel identity.
+  const frame: ControlResultFrame = { ...payload, channelId };
   for (const subscriber of subscribers) {
-    subscriber(payload);
+    subscriber(frame);
   }
 }
 

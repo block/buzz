@@ -14,6 +14,7 @@ use crate::{
     util::now_iso,
 };
 
+use super::claude_config::{apply_claude_model_env, apply_effort_env};
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
@@ -775,17 +776,8 @@ pub fn spawn_agent_child(
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
-    // ── Git credential helper for Buzz relay ──────────────────────────
-    //
-    // Agents need to clone/push repos hosted on the Buzz relay's git
-    // server, which authenticates via NIP-98. The `git-credential-nostr`
-    // binary signs auth events using the agent's nostr key.
-    //
-    // We configure git via GIT_CONFIG_COUNT env vars (ephemeral, no
-    // filesystem writes) scoped to the relay's git URL so we don't
-    // interfere with other remotes (e.g. GitHub).
-    //
-    // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
+    // Git credential helper: NIP-98 auth for Buzz relay git via git-credential-nostr.
+    // Ephemeral GIT_CONFIG_COUNT env vars scoped to relay HTTP URL; NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY.
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
         let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
 
@@ -810,16 +802,26 @@ pub fn spawn_agent_child(
         );
     }
 
-    // ── User env vars: definition floor + global + live persona + agent overrides ──
-    //
-    // `descriptor.env` is the fully-layered result from `resolve_effective_harness_descriptor`:
-    // baked floor → runtime metadata → definition env (harness author defaults) →
-    // global → live persona → per-agent, with reserved-key and malformed-key filtering
-    // applied. Writing it last lets user-provided values win over every Buzz-set env
-    // written above — reserved keys were already stripped from descriptor.env so they
-    // cannot clobber BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY, etc.
+    // User env (descriptor.env): fully-layered floor→runtime→definition→global→persona→agent,
+    // reserved-key filtered. Written last so user-explicit values win over Buzz-set env.
     for (key, value) in &descriptor.env {
         command.env(key, value);
+    }
+
+    // B5: carry persisted effort; harness resolves thought_level configId at first session.
+    // Written AFTER descriptor.env so the canonical persisted value wins over any
+    // user-supplied BUZZ_ACP_EFFORT_LEVEL entry, mirroring the A1 model-authority pattern
+    // (ANTHROPIC_MODEL is applied post-loop for the same reason). When effort_level is
+    // None there is no canonical value to assert, so env passthrough stands — user env
+    // legitimately seeds startup effort in that case.
+    apply_effort_env(&mut command, record.effort_level.as_deref());
+
+    // A1: for local claude agents, ANTHROPIC_MODEL is the single startup model authority.
+    // BUZZ_ACP_MODEL is removed (live ACP switches only; two authorities in the same env
+    // would be ambiguous).
+    if record.backend == super::BackendKind::Local && runtime_meta.is_some_and(|r| r.id == "claude")
+    {
+        apply_claude_model_env(&mut command, effective_model.as_deref());
     }
     configure_runtime_cli(&mut command, runtime_meta);
 
