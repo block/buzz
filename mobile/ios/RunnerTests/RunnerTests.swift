@@ -403,6 +403,157 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  func testNativeMessageActionsPreserveRequestedGroupsAndHeight() throws {
+    let actionArguments: [[String: Any]] = [
+      [
+        "id": "reply", "title": "Reply",
+        "symbol": "arrowshape.turn.up.left", "group": "primary",
+      ],
+      [
+        "id": "copyText", "title": "Copy text",
+        "symbol": "doc.on.doc", "group": "utility",
+      ],
+      [
+        "id": "delete", "title": "Delete message",
+        "symbol": "trash", "group": "destructive", "destructive": true,
+      ],
+    ]
+    let definitions = try actionArguments.map { arguments in
+      try XCTUnwrap(NativeMessageActionDefinition(arguments: arguments))
+    }
+
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.populatedGroups(actions: definitions),
+      [.primary, .utility, .destructive]
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.separatorCount(actions: definitions),
+      2
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceLayout.preferredHeight(
+        actions: definitions,
+        compatibleWith: UITraitCollection(
+          preferredContentSizeCategory: .large
+        )
+      ),
+      153
+    )
+  }
+
+  @MainActor
+  func testNativeMessageActionRowUsesUIKitTypographyAndSelection() throws {
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "reply", "title": "Reply",
+          "symbol": "arrowshape.turn.up.left", "group": "primary",
+        ]
+      )
+    )
+    var selected = false
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      onSelected: { selected = true }
+    )
+
+    XCTAssertEqual(
+      row.actionTitleLabel.font.fontDescriptor.object(forKey: .textStyle) as? String,
+      UIFont.TextStyle.body.rawValue
+    )
+    XCTAssertNotNil(row.actionImageView.image)
+    row.sendActions(for: .touchUpInside)
+    XCTAssertTrue(selected)
+  }
+
+  @MainActor
+  func testNativeMessageActionRowExpandsForAccessibilityTypography() throws {
+    let traits = UITraitCollection(
+      preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge
+    )
+    let definition = try XCTUnwrap(
+      NativeMessageActionDefinition(
+        arguments: [
+          "id": "followThread", "title": "Follow thread",
+          "symbol": "bell", "group": "utility",
+        ]
+      )
+    )
+    let row = NativeMessageActionRowControl(
+      definition: definition,
+      foregroundColor: .label,
+      destructiveColor: .systemRed,
+      compatibleWith: traits,
+      onSelected: {}
+    )
+    let fittingSize = row.systemLayoutSizeFitting(
+      CGSize(width: 288, height: UIView.layoutFittingCompressedSize.height),
+      withHorizontalFittingPriority: .required,
+      verticalFittingPriority: .fittingSizeLevel
+    )
+    row.frame = CGRect(origin: .zero, size: fittingSize)
+    row.layoutIfNeeded()
+    let labelFrame = row.convert(
+      row.actionTitleLabel.bounds,
+      from: row.actionTitleLabel
+    )
+
+    XCTAssertGreaterThan(fittingSize.height, 48)
+    XCTAssertGreaterThan(labelFrame.height, 0)
+    XCTAssertGreaterThanOrEqual(
+      labelFrame.minY,
+      NativeMessageActionSurfaceLayout.rowVerticalPadding
+    )
+    XCTAssertLessThanOrEqual(
+      labelFrame.maxY,
+      fittingSize.height - NativeMessageActionSurfaceLayout.rowVerticalPadding
+    )
+    XCTAssertEqual(row.actionTitleLabel.numberOfLines, 0)
+    XCTAssertFalse(row.actionTitleLabel.adjustsFontSizeToFitWidth)
+  }
+
+  @MainActor
+  func testNativeMessageActionSurfaceUsesSystemMaterial() {
+    let effect = NativeMessageActionSurfaceAppearance.backdropEffect(
+      reduceTransparency: false
+    )
+    if #available(iOS 26.0, *) {
+      XCTAssertTrue(effect is UIGlassEffect)
+      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 33)
+    } else {
+      XCTAssertTrue(effect is UIBlurEffect)
+      XCTAssertEqual(NativeMessageActionSurfaceLayout.cornerRadius, 12)
+    }
+    XCTAssertNil(
+      NativeMessageActionSurfaceAppearance.backdropEffect(
+        reduceTransparency: true
+      )
+    )
+  }
+
+  func testNativeMessageActionListDoesNotHideDialogSiblings() {
+    XCTAssertFalse(
+      NativeMessageActionSurfaceAppearance.actionListAccessibilityViewIsModal
+    )
+  }
+
+  func testNativeMessageActionSurfaceMatchesFlutterInterfaceStyle() {
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "dark"),
+      .dark
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "light"),
+      .light
+    )
+    XCTAssertEqual(
+      NativeMessageActionSurfaceAppearance.interfaceStyle(from: "system"),
+      .unspecified
+    )
+  }
+
   private func displayP3Image(red: CGFloat, green: CGFloat, blue: CGFloat) throws -> UIImage {
     let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
     let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
