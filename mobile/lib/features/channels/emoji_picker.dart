@@ -154,7 +154,11 @@ class _EmojiPickerContent extends HookConsumerWidget {
     final activeSection = useMemoized(
       () => ValueNotifier(
         scrollController.hasClients
-            ? _activeSectionIndex(offsets, scrollController.offset)
+            ? _activeSectionIndex(
+                offsets,
+                scrollController.offset,
+                maxScrollExtent: scrollController.position.maxScrollExtent,
+              )
             : 0,
       ),
       [sections],
@@ -167,6 +171,7 @@ class _EmojiPickerContent extends HookConsumerWidget {
         activeSection.value = _activeSectionIndex(
           offsets,
           scrollController.offset,
+          maxScrollExtent: scrollController.position.maxScrollExtent,
         );
       }
 

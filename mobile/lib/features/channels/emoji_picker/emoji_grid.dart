@@ -63,7 +63,19 @@ List<double> _sectionOffsets(List<_EmojiSection> sections) {
 }
 
 /// Which section owns [offset] — the one whose header is pinned right now.
-int _activeSectionIndex(List<double> offsets, double offset) {
+/// At the clamped bottom, the final visible section owns the viewport even when
+/// it is too short for its header to reach the top.
+int _activeSectionIndex(
+  List<double> offsets,
+  double offset, {
+  required double maxScrollExtent,
+}) {
+  if (offsets.isEmpty) return 0;
+  if (maxScrollExtent > 0 &&
+      offset >= maxScrollExtent - precisionErrorTolerance) {
+    return offsets.length - 1;
+  }
+
   var active = 0;
   for (var i = 0; i < offsets.length; i++) {
     // Half a header of slack so the highlight flips as a header reaches the

@@ -381,6 +381,37 @@ void main() {
       expect(offset(), closeTo(28 + 25 * 40, 0.5));
     });
 
+    testWidgets(
+      'a bottom-clamped final section stays highlighted after a rail tap',
+      (tester) async {
+        await _pumpPicker(tester, prefs: await _prefs(), dataset: _tallDataset);
+        final colors = Theme.of(
+          tester.element(find.byType(EmojiPickerSheet)),
+        ).colorScheme;
+        Color iconColor(String tooltip) => tester
+            .widget<Icon>(
+              find.descendant(
+                of: find.byTooltip(tooltip),
+                matching: find.byType(Icon),
+              ),
+            )
+            .color!;
+
+        await tester.tap(find.byTooltip('Custom'));
+        await tester.pumpAndSettle();
+
+        final grid = tester.widget<CustomScrollView>(
+          find.byKey(const ValueKey('emoji-picker-grid')),
+        );
+        expect(
+          grid.controller!.offset,
+          closeTo(grid.controller!.position.maxScrollExtent, 0.5),
+        );
+        expect(iconColor('Custom'), colors.primary);
+        expect(iconColor('Animals & Nature'), colors.onSurfaceVariant);
+      },
+    );
+
     testWidgets('the custom section only exists when the palette has emoji', (
       tester,
     ) async {
