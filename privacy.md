@@ -4,7 +4,7 @@ title: "Buzz Privacy Notice"
 
 # Buzz Privacy Notice
 
-*Last Updated: July 15, 2026*
+*Last Updated: August 18, 2026*
 
 [Home](index.html) · [Terms of service](terms.html) · [Support](support.html)
 
@@ -112,7 +112,7 @@ We will keep your personal information only for the period necessary to fulfill 
 
 * your account data for as long as you keep your account open or as needed to provide you with our Services;
 
-* messages, media files and attachments, and other user content are retained for up to 180 days by default, or for a shorter period if you delete them;
+* messages, media files and attachments, and other user content are retained for up to 365 days by default, or for a shorter period if you delete them;
 
 * if you contact our support team (for example, at [help@buzz.xyz](mailto:help@buzz.xyz)), we retain data related to your request for as long as needed to respond to and resolve it; and
 
