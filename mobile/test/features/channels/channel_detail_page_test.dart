@@ -7,6 +7,8 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' as http_testing;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
@@ -14,9 +16,11 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
+import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
+import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -33,6 +37,9 @@ import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
+import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -176,6 +183,7 @@ Widget _buildTestable({
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
+  _FakeTypingNotifier? typingNotifier,
   String? canvasContent,
   String? initialMessageId,
   String? initialThreadRootId,
@@ -184,6 +192,7 @@ Widget _buildTestable({
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
   RelaySessionNotifier? relaySessionNotifier,
+  http.Client? mediaClient,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -197,7 +206,7 @@ Widget _buildTestable({
       ).overrideWith(() => fakeMessagesNotifier),
       channelTypingProvider(
         _channelId,
-      ).overrideWith(() => _FakeTypingNotifier(typing)),
+      ).overrideWith(() => typingNotifier ?? _FakeTypingNotifier(typing)),
       userCacheProvider.overrideWith(
         () => userCacheNotifier ?? _FakeUserCacheNotifier(users),
       ),
@@ -235,6 +244,12 @@ Widget _buildTestable({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      if (mediaClient != null) ...[
+        mediaGetAuthServiceProvider.overrideWithValue(
+          MediaGetAuthService(baseUrl: 'https://relay.example', nsec: null),
+        ),
+        mediaHttpClientProvider.overrideWithValue(mediaClient),
+      ],
       if (relaySessionNotifier != null)
         relaySessionProvider.overrideWith(() => relaySessionNotifier),
       // Compose bar drafts persist through SharedPreferences.
@@ -341,6 +356,86 @@ void main() {
   });
 
   group('ChannelDetailPage', () {
+    testWidgets('uses the shared 32px masked presence avatar in DM headers', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      final avatar = tester.widget<MaskedAvatarBadge>(avatarFinder);
+      expect(tester.getSize(avatarFinder), const Size.square(32));
+      expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
+      expect(avatar.badge, isNotNull);
+      expect(
+        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
+        findsOneWidget,
+      );
+      final name = tester.widget<Text>(
+        find.byKey(const ValueKey('dm-header-name')),
+      );
+      final presence = tester.widget<Text>(
+        find.byKey(const ValueKey('dm-header-presence')),
+      );
+      expect(name.style?.fontSize, 16);
+      expect(name.style?.fontWeight, FontWeight.w500);
+      expect(presence.style?.fontSize, 14);
+      expect(presence.style?.fontWeight, FontWeight.w400);
+      expect(find.byTooltip('View members'), findsNothing);
+    });
+
+    testWidgets('keeps the Members action for group DMs', (tester) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Group direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 3,
+        participants: const ['Self', 'Alice', 'Bob'],
+        participantPubkeys: const ['self', 'alice', 'bob'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('View members'), findsOneWidget);
+    });
+
     testWidgets(
       'restores the previous channel replay priority after a nested pop',
       (tester) async {
@@ -669,6 +764,10 @@ void main() {
       expect(find.text('Forum threads are not on mobile yet'), findsNothing);
       // The compose bar for stream messages should not appear.
       expect(find.text('Message…'), findsNothing);
+      final scaffold = tester.widget<FrostedScaffold>(
+        find.byType(FrostedScaffold).first,
+      );
+      expect(scaffold.resizeToAvoidBottomInset, isTrue);
     });
 
     testWidgets('renders video attachments from imeta tags in the timeline', (
@@ -729,6 +828,12 @@ void main() {
               joinedAt: DateTime(2025),
               displayName: 'Alice',
             ),
+            ChannelMember(
+              pubkey: 'agent',
+              role: 'bot',
+              joinedAt: DateTime(2025),
+              displayName: 'Agent',
+            ),
           ],
         ),
       );
@@ -740,6 +845,65 @@ void main() {
       expect(find.text('Alice'), findsOneWidget);
       expect(find.text('Member'), findsOneWidget);
       expect(find.text('Owner'), findsOneWidget);
+      expect(find.text('People · 2'), findsOneWidget);
+      expect(find.text('Agents · 1'), findsOneWidget);
+      expect(find.text('PEOPLE — 2'), findsNothing);
+      expect(find.text('BOTS — 1'), findsNothing);
+    });
+
+    testWidgets('members sheet has no divider and pads a one-member list', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'owner',
+              joinedAt: DateTime(2025),
+              displayName: 'Self',
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('View members'));
+      await tester.pumpAndSettle();
+
+      final contentPadding = find.byKey(
+        const ValueKey('members-sheet-content-padding'),
+      );
+      expect(contentPadding, findsOneWidget);
+      expect(
+        find.descendant(of: contentPadding, matching: find.byType(Divider)),
+        findsNothing,
+      );
+      expect(
+        (tester.widget<Padding>(contentPadding).padding as EdgeInsets).bottom,
+        0,
+      );
+      final viewport = tester.widget<ConstrainedBox>(
+        find.byKey(const ValueKey('members-sheet-viewport')),
+      );
+      expect(viewport.constraints.maxHeight, 400 + Grid.md);
+      expect(
+        (tester
+                    .widget<ListView>(
+                      find.byKey(const ValueKey('members-sheet-list')),
+                    )
+                    .padding!
+                as EdgeInsets)
+            .bottom,
+        Grid.md,
+      );
+      expect(
+        find.byKey(const ValueKey('buzz-sheet-surface-margin')),
+        findsNothing,
+      );
+      expect(find.text('People · 1'), findsOneWidget);
+      expect(tester.widget<Text>(find.text('People · 1')).style?.fontSize, 14);
     });
 
     testWidgets('hides composer for archived channels', (tester) async {
@@ -987,8 +1151,22 @@ void main() {
       expect(aliceUsername.style?.fontSize, messageMetadataTextStyle.fontSize);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
       expect(aliceUsername.style?.height, messageMetadataTextStyle.height);
-      expect(aliceTimestamp.style?.fontSize, messageMetadataTextStyle.fontSize);
+      expect(
+        aliceTimestamp.style?.fontSize,
+        messageTimestampTextStyle.fontSize,
+      );
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
+      expect(
+        aliceTimestamp.style?.fontSize,
+        lessThan(aliceText.style!.fontSize!),
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('message-row-msg1')),
+          matching: find.text('·'),
+        ),
+        findsNothing,
+      );
       final helloContent = findRichText('Hello world!');
       final helloText = tester.widget<RichText>(helloContent);
       expect(
@@ -1022,6 +1200,46 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('channel-jump-to-latest')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('keeps animated message avatars static and transparent', (
+      tester,
+    ) async {
+      const posterUrl = 'https://relay.example/media/alice-poster.png';
+      const animationUrl = 'https://relay.example/media/alice-avatar.png';
+      final profileUrl =
+          '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}';
+      final mediaClient = http_testing.MockClient(
+        (_) async => http.Response.bytes(_transparentPng, 200),
+      );
+      addTearDown(mediaClient.close);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(id: 'animated-avatar', pubkey: 'alice', content: 'Hello'),
+          ],
+          users: {
+            'alice': UserProfile(
+              pubkey: 'alice',
+              displayName: 'Alice',
+              avatarUrl: profileUrl,
+            ),
+          },
+          mediaClient: mediaClient,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<CircleAvatar>(find.byType(CircleAvatar)).backgroundColor,
+        Colors.transparent,
+      );
+      expect(tester.widget<MediaImage>(find.byType(MediaImage)).url, posterUrl);
+      expect(
+        find.byKey(const ValueKey('progressive-animated-avatar-animation')),
         findsNothing,
       );
     });
@@ -2087,6 +2305,61 @@ void main() {
       },
     );
 
+    testWidgets(
+      'seeds an already-visible Android keyboard into the channel tail layout',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          addTearDown(tester.view.reset);
+
+          final messages = [
+            for (var i = 0; i < 20; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: i == 19
+                    ? List.filled(8, 'Tall latest message').join('\n')
+                    : 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: messages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final latestMessage = find.byKey(
+            const ValueKey('channel-message-group-msg19'),
+          );
+          final composerDock = find.byKey(
+            const ValueKey('channel-composer-dock'),
+          );
+          expect(latestMessage, findsOneWidget);
+          expect(
+            tester.getBottomLeft(latestMessage).dy,
+            closeTo(tester.getTopLeft(composerDock).dy, 1),
+          );
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
     testWidgets('keeps a short followed tail flush through composer resize', (
       tester,
     ) async {
@@ -2292,6 +2565,182 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets(
+      'Latest reveals the channel tail while the Android keyboard stays open',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+          addTearDown(tester.view.reset);
+
+          final messages = [
+            for (var i = 0; i < 40; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: messages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(find.text('Message #general'));
+          await tester.pump();
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          await tester.pump();
+          await tester.pump(androidImeMetricsSettleDelay);
+          await tester.pumpAndSettle();
+
+          final textField = tester.widget<TextField>(find.byType(TextField));
+          expect(textField.focusNode?.hasFocus, isTrue);
+
+          final messageList = find.byKey(
+            const ValueKey('channel-message-list'),
+          );
+          final messageListElement = tester.element(messageList);
+          UserScrollNotification(
+            metrics: FixedScrollMetrics(
+              minScrollExtent: 0,
+              maxScrollExtent: 100,
+              pixels: 0,
+              viewportDimension: 100,
+              axisDirection: AxisDirection.down,
+              devicePixelRatio: 1,
+            ),
+            context: messageListElement,
+            direction: ScrollDirection.reverse,
+          ).dispatch(messageListElement);
+          tester
+              .widget<ScrollablePositionedList>(messageList)
+              .itemScrollController!
+              .jumpTo(index: 39);
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsOneWidget,
+          );
+
+          await tester.tap(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+          );
+          await tester.pumpAndSettle();
+
+          final latestMessage = find.byKey(
+            const ValueKey('channel-message-group-msg39'),
+          );
+          final composerDock = find.byKey(
+            const ValueKey('channel-composer-dock'),
+          );
+          expect(latestMessage, findsOneWidget);
+          expect(textField.focusNode?.hasFocus, isTrue);
+          expect(
+            tester.getBottomLeft(latestMessage).dy,
+            closeTo(tester.getTopLeft(composerDock).dy, 1),
+          );
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+          );
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets(
+      'keeps the Latest gap stable above the Android composer and keyboard',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 24);
+          addTearDown(tester.view.reset);
+
+          final initialMessages = [
+            for (var i = 0; i < 40; i++)
+              _textMsg(
+                id: 'msg$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ];
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: initialMessages,
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final messageList = find.byKey(
+            const ValueKey('channel-message-list'),
+          );
+          final messageListElement = tester.element(messageList);
+          UserScrollNotification(
+            metrics: FixedScrollMetrics(
+              minScrollExtent: 0,
+              maxScrollExtent: 100,
+              pixels: 0,
+              viewportDimension: 100,
+              axisDirection: AxisDirection.down,
+              devicePixelRatio: 1,
+            ),
+            context: messageListElement,
+            direction: ScrollDirection.reverse,
+          ).dispatch(messageListElement);
+          tester
+              .widget<ScrollablePositionedList>(messageList)
+              .itemScrollController!
+              .jumpTo(index: 39);
+          await tester.pumpAndSettle();
+
+          final latestSurface = find.byKey(
+            const ValueKey('channel-jump-to-latest-surface'),
+          );
+          final composerDock = find.byKey(
+            const ValueKey('channel-composer-dock'),
+          );
+          double latestGap() =>
+              tester.getTopLeft(composerDock).dy -
+              tester.getBottomLeft(latestSurface).dy;
+
+          final collapsedGap = latestGap();
+          expect(collapsedGap, closeTo(Grid.xs, 0.5));
+
+          await tester.tap(find.text('Message #general'));
+          await tester.pump();
+          await tester.pump();
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          await tester.pump();
+          await tester.pump(androidImeMetricsSettleDelay);
+          await tester.pumpAndSettle();
+
+          expect(find.byType(TextField), findsOneWidget);
+          expect(latestGap(), closeTo(collapsedGap, 0.5));
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
 
     testWidgets(
       'keeps follow mode off while a tall newest message stays visible',
@@ -2887,6 +3336,107 @@ void main() {
       expect(find.text('Copy public key'), findsOneWidget);
       expect(find.byType(UserProfileSheet), findsOneWidget);
     });
+
+    testWidgets(
+      'profile sheet shows the poster before autoplay and restores it on tap',
+      (tester) async {
+        const posterUrl = 'https://relay.example/media/alice-poster.png';
+        const animationUrl = 'https://relay.example/media/alice-avatar.png';
+        final profileUrl =
+            '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}';
+        final animationResponse = Completer<http.Response>();
+        final mediaClient = http_testing.MockClient(
+          (request) => request.url.toString() == animationUrl
+              ? animationResponse.future
+              : Future.value(http.Response.bytes(_transparentPng, 200)),
+        );
+        addTearDown(mediaClient.close);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'sys-huddle-animated-avatar',
+                kind: EventKind.huddleStarted,
+                pubkey: 'alice',
+              ),
+            ],
+            users: {
+              'alice': UserProfile(
+                pubkey: 'alice',
+                displayName: 'Alice',
+                avatarUrl: profileUrl,
+              ),
+            },
+            mediaClient: mediaClient,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byType(CircleAvatar));
+        await tester.pumpAndSettle();
+
+        expect(find.byType(UserProfileSheet), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-poster')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const ValueKey('progressive-animated-avatar-animation-loading'),
+          ),
+          findsOneWidget,
+        );
+
+        animationResponse.complete(http.Response.bytes(_transparentPng, 200));
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey('progressive-animated-avatar-animation-ready'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-poster')),
+          findsNothing,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('selected-profile-avatar')));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-animation')),
+          findsNothing,
+        );
+        expect(
+          tester
+              .widget<MediaImage>(
+                find.descendant(
+                  of: find.byKey(const ValueKey('selected-profile-avatar')),
+                  matching: find.byType(MediaImage),
+                ),
+              )
+              .url,
+          posterUrl,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('selected-profile-avatar')));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-animation')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('progressive-animated-avatar-poster')),
+          findsNothing,
+        );
+      },
+    );
 
     testWidgets('opens a profile sheet from a generic system avatar', (
       tester,
@@ -3803,7 +4353,7 @@ void main() {
       await tester.pumpAndSettle();
       final initialPushCount = observer.pushCount;
 
-      await tester.tap(find.text('#random'));
+      await tester.tap(find.text('random'));
       await tester.pumpAndSettle();
 
       expect(observer.pushCount, initialPushCount + 1);
@@ -3835,7 +4385,7 @@ void main() {
       await tester.pumpAndSettle();
 
       channelsNotifier.setChannels([_testChannel]);
-      await tester.tap(find.text('#random'));
+      await tester.tap(find.text('random'));
       await tester.pump();
 
       expect(find.text('Channel could not be opened'), findsOneWidget);
@@ -3889,7 +4439,7 @@ void main() {
       await tester.pumpAndSettle();
       final initialPushCount = observer.pushCount;
 
-      await tester.tap(find.text('#random').last);
+      await tester.tap(find.text('random').last);
       await tester.pumpAndSettle();
 
       expect(observer.pushCount, initialPushCount + 1);
@@ -3993,6 +4543,20 @@ void main() {
           .dy;
       expect(headY, lessThan(oldestReplyY));
       expect(oldestReplyY, lessThan(newestReplyY));
+      final threadTimestamp = tester.widget<Text>(
+        find.byKey(const ValueKey('thread-message-timestamp-thread-root')),
+      );
+      expect(
+        threadTimestamp.style?.fontSize,
+        messageTimestampTextStyle.fontSize,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('thread-message-row-thread-root')),
+          matching: find.text('·'),
+        ),
+        findsNothing,
+      );
     });
 
     testWidgets('thread keeps its tail above a growing composer dock', (
@@ -4077,16 +4641,707 @@ void main() {
       // that metrics change too.
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
-      await tester.pumpAndSettle();
+      await tester.pump();
+      await tester.pump(androidImeMetricsSettleDelay);
+      await tester.pump();
 
       expect(
         tester.getBottomLeft(latestReply).dy,
         lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
       );
+      expect(
+        tester
+            .state<ScrollableState>(
+              find
+                  .descendant(
+                    of: find.byKey(const ValueKey('thread-message-list')),
+                    matching: find.byType(Scrollable),
+                  )
+                  .first,
+            )
+            .position
+            .isScrollingNotifier
+            .value,
+        isFalse,
+        reason: 'Keyboard layout correction must not start a scroll animation.',
+      );
+    });
+
+    testWidgets('short thread keeps its head stable when the keyboard opens', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'A short thread',
+        createdAt: 1000,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: const {'thread-root': []},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final head = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      final initialHeadY = tester.getTopLeft(head).dy;
+      expect(initialHeadY, lessThan(300));
+
+      await tester.tap(find.text('Reply in thread…').hitTestable());
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump();
+      await tester.pump(androidImeMetricsSettleDelay);
+      await tester.pump();
+
+      expect(
+        tester.getTopLeft(head).dy,
+        closeTo(initialHeadY, 1),
+        reason: 'A fully visible short thread should remain head-anchored.',
+      );
+    });
+
+    for (final replyCount in [0, 1]) {
+      testWidgets(
+        'cached writable $replyCount-reply thread defers dock correction until measured',
+        (tester) async {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+          final rootEvent = _textMsg(
+            id: 'thread-root',
+            pubkey: 'alice',
+            content: 'Short root',
+            createdAt: 1000,
+          );
+          final replies = [
+            if (replyCount == 1)
+              _textMsg(
+                id: 'reply-0',
+                pubkey: 'bob',
+                content: 'Short reply',
+                createdAt: 1100,
+                extraTags: const [
+                  ['e', 'thread-root', '', 'reply'],
+                ],
+              ),
+          ];
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [rootEvent],
+              threadReplies: {'thread-root': replies},
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+          final routeMessages = formatTimeline([rootEvent, ...replies]);
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: routeMessages.first,
+                allMessages: routeMessages,
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+              ),
+            ),
+          );
+
+          await tester.pump();
+          expect(tester.takeException(), isNull);
+          final earlyDock = tester.widget<ComposerDockSizeReporter>(
+            find.byType(ComposerDockSizeReporter).last,
+          );
+
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+          earlyDock.onHeightChanged(200);
+          await tester.pumpAndSettle();
+          expect(tester.takeException(), isNull);
+          final composerSurface = find.byKey(
+            const ValueKey('composer-surface'),
+          );
+          final tail = find.byKey(
+            ValueKey(
+              replyCount == 0
+                  ? 'thread-message-group-thread-root'
+                  : 'thread-message-group-reply-0',
+            ),
+          );
+          expect(tail, findsOneWidget);
+          expect(
+            tester.getTopLeft(tail).dy,
+            greaterThanOrEqualTo(frostedAppBarHeight(tester.element(tail))),
+          );
+          expect(
+            tester.getBottomLeft(tail).dy,
+            lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+          );
+        },
+      );
+    }
+
+    testWidgets(
+      'cached initial thread settles between the app bar and measured composer',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: i == 29
+                  ? List.filled(33, 'Tall latest reply').join('\n')
+                  : 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final latestReply = find.byKey(
+          const ValueKey('thread-message-group-reply-29'),
+        );
+        final latestRect = tester.getRect(latestReply);
+        final context = tester.element(latestReply);
+        final composerTop = tester
+            .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+            .dy;
+        expect(
+          latestRect.top,
+          greaterThanOrEqualTo(frostedAppBarHeight(context)),
+        );
+        expect(latestRect.bottom, lessThanOrEqualTo(composerTop));
+      },
+    );
+
+    testWidgets('read-only cached thread still settles on its tail', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: false,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-29'),
+      );
+      expect(latestReply, findsOneWidget);
+      expect(
+        tester.getTopLeft(latestReply).dy,
+        greaterThanOrEqualTo(frostedAppBarHeight(tester.element(latestReply))),
+      );
     });
 
     testWidgets(
-      'initial thread hydration keeps the head visible instead of following the tail',
+      'user drag abandons pending hydration settle until returning to tail',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 35; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final provisional = formatTimeline([rootEvent, ...replies.take(30)]);
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: provisional.first,
+              allMessages: provisional,
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        await tester.drag(list, const Offset(0, -100));
+        await tester.pumpAndSettle();
+        final anchor = find.byKey(
+          const ValueKey('thread-message-group-reply-10'),
+        );
+        final anchorTop = tester.getTopLeft(anchor).dy;
+
+        completer.complete(replies);
+        await tester.pumpAndSettle();
+
+        expect(anchor, findsOneWidget);
+        expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-34')),
+          findsNothing,
+        );
+
+        for (var i = 0; i < 12; i++) {
+          await tester.drag(list, const Offset(0, -100));
+          await tester.pumpAndSettle();
+        }
+        final latestReply = find.byKey(
+          const ValueKey('thread-message-group-reply-34'),
+        );
+        expect(latestReply, findsOneWidget);
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.getBottomLeft(latestReply).dy,
+          lessThanOrEqualTo(
+            tester
+                .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+                .dy,
+          ),
+        );
+      },
+    );
+
+    testWidgets('active drag cancels a queued hydrated deep-link jump', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 35; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final completer = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': completer.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final provisional = formatTimeline([rootEvent, ...replies.take(30)]);
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: provisional.first,
+            allMessages: provisional,
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'reply-5',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final anchor = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      final anchorTop = tester.getTopLeft(anchor).dy;
+      completer.complete(replies);
+      await tester.pump();
+
+      // Authoritative hydration has queued the deep-link jump. A primary drag
+      // takes ownership before the shared deferred-intent boundary executes it.
+      tester
+          .widget<KeyboardDismissOnDrag>(find.byType(KeyboardDismissOnDrag))
+          .onUserScrollStart!();
+      await tester.pumpAndSettle();
+
+      expect(anchor, findsOneWidget);
+      expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+    });
+
+    testWidgets('user drag invalidates an already queued hydration settle', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 35; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final completer = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': completer.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final provisional = formatTimeline([rootEvent, ...replies.take(30)]);
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: provisional.first,
+            allMessages: provisional,
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final anchor = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      final anchorTop = tester.getTopLeft(anchor).dy;
+      completer.complete(replies);
+      await tester.pump();
+
+      // Hydration has scheduled the settle's second post-frame callback. A
+      // drag starts before another frame can run it.
+      tester
+          .widget<KeyboardDismissOnDrag>(find.byType(KeyboardDismissOnDrag))
+          .onUserScrollStart!();
+      await tester.pumpAndSettle();
+
+      expect(anchor, findsOneWidget);
+      expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-34')),
+        findsNothing,
+      );
+    });
+
+    testWidgets(
+      'keyboard-open initial hydration settles within the list viewport',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: i == 29
+                  ? List.filled(15, 'Tall latest reply').join('\n')
+                  : 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        final listHeight = tester.getSize(list).height;
+        final mediaQueryHeight = MediaQuery.sizeOf(tester.element(list)).height;
+        expect(
+          listHeight,
+          closeTo(mediaQueryHeight, 0.5),
+          reason: 'Android keeps the thread viewport fixed behind the IME.',
+        );
+
+        completer.complete(replies);
+        await tester.pumpAndSettle();
+
+        final latestReply = find.byKey(
+          const ValueKey('thread-message-group-reply-29'),
+        );
+        final latestRect = tester.getRect(latestReply);
+        final context = tester.element(latestReply);
+        final composerTop = tester
+            .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+            .dy;
+        expect(
+          latestRect.top,
+          greaterThanOrEqualTo(frostedAppBarHeight(context)),
+        );
+        expect(latestRect.bottom, lessThanOrEqualTo(composerTop));
+      },
+    );
+
+    testWidgets('short initial thread hydration remains top-anchored', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        _textMsg(
+          id: 'reply-1',
+          pubkey: 'bob',
+          content: 'First reply',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+        _textMsg(
+          id: 'reply-2',
+          pubkey: 'bob',
+          content: 'Second reply',
+          createdAt: 1101,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+      ];
+      final completer = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': completer.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final headFinder = find.byKey(
+        const ValueKey('thread-message-group-thread-root'),
+      );
+      final initialHeadY = tester.getTopLeft(headFinder).dy;
+
+      completer.complete(replies);
+      await tester.pumpAndSettle();
+
+      expect(headFinder, findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-2')),
+        findsOneWidget,
+      );
+      expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+    });
+
+    testWidgets(
+      'slow initial hydration requests the frame that settles the latest reply',
       (tester) async {
         final rootEvent = _textMsg(
           id: 'thread-root',
@@ -4134,27 +5389,1021 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(
-          find.byKey(const ValueKey('thread-message-group-thread-root')),
-          findsOneWidget,
-        );
 
         completer.complete(replies);
+        await tester.pump();
+        expect(tester.binding.hasScheduledFrame, isTrue);
         await tester.pumpAndSettle();
 
         expect(
           find.byKey(const ValueKey('thread-message-group-thread-root')),
-          findsOneWidget,
+          findsNothing,
         );
         expect(
           find.byKey(const ValueKey('thread-message-group-reply-29')),
-          findsNothing,
+          findsOneWidget,
         );
       },
     );
 
     testWidgets(
-      'deep-linking an older reply does not resume tail following on keyboard resize',
+      'initial thread hydration settles on the latest reply after pagination',
+      (tester) async {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+
+        completer.complete(replies);
+        await tester.pump();
+        final latestLiveReply = _textMsg(
+          id: 'reply-live',
+          pubkey: 'bob',
+          content: List.filled(10, 'Tall live reply').join('\n'),
+          createdAt: 1200,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+        messagesNotifier.setMessages([rootEvent, latestLiveReply]);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-thread-root')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-live')),
+          findsOneWidget,
+        );
+        final listRect = tester.getRect(
+          find.byKey(const ValueKey('thread-message-list')),
+        );
+        final latestReply = find.byKey(
+          const ValueKey('thread-message-group-reply-live'),
+        );
+        final latestRect = tester.getRect(latestReply);
+        final composerTop = tester
+            .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+            .dy;
+        expect(latestRect.bottom, lessThanOrEqualTo(composerTop));
+        expect(latestRect.bottom, greaterThan(listRect.center.dy));
+      },
+    );
+
+    testWidgets(
+      'active primary drag rejects queued remote and local reply tail work',
+      (tester) async {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
+            threadReplies: {'thread-root': replies},
+          ),
+        );
+        await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final lifecycle = tester.widget<KeyboardDismissOnDrag>(
+          find.byType(KeyboardDismissOnDrag),
+        );
+        lifecycle.onUserScrollStart!();
+        final anchor = find.byKey(
+          const ValueKey('thread-message-group-reply-20'),
+        );
+        final anchorTop = tester.getTopLeft(anchor).dy;
+        final remoteReply = _textMsg(
+          id: 'reply-remote',
+          pubkey: 'bob',
+          content: 'Remote',
+          createdAt: 1200,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+        messagesNotifier.setMessages([rootEvent, remoteReply]);
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+        final localReply = _textMsg(
+          id: 'reply-local',
+          pubkey: 'self',
+          content: 'Local',
+          createdAt: 1201,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+        messagesNotifier.setMessages([rootEvent, remoteReply, localReply]);
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+        lifecycle.onUserScrollEnd!();
+      },
+    );
+
+    testWidgets('idle detached local reply retains force-visible behavior', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          messagesNotifier: messagesNotifier,
+          threadReplies: {'thread-root': replies},
+        ),
+      );
+      await tester.pumpAndSettle();
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final list = find.byKey(const ValueKey('thread-message-list'));
+      for (var i = 0; i < 4; i++) {
+        await tester.drag(list, const Offset(0, 100));
+        await tester.pumpAndSettle();
+      }
+      final localReply = _textMsg(
+        id: 'reply-local',
+        pubkey: 'self',
+        content: 'Local',
+        createdAt: 1200,
+        extraTags: const [
+          ['e', 'thread-root', '', 'reply'],
+        ],
+      );
+      messagesNotifier.setMessages([rootEvent, localReply]);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-local')),
+        findsOneWidget,
+      );
+
+      final laterRemoteReplies = [
+        for (var i = 0; i < 10; i++)
+          _textMsg(
+            id: 'reply-after-local-$i',
+            pubkey: 'bob',
+            content: List.filled(8, 'Tall remote reply $i').join('\n'),
+            createdAt: 1300 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      messagesNotifier.setMessages([
+        rootEvent,
+        localReply,
+        ...laterRemoteReplies,
+      ]);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-after-local-9')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+      'short followed thread stays top-anchored after viewport resize',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 3; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+          ),
+        );
+        await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: false,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final head = find.byKey(
+          const ValueKey('thread-message-group-thread-root'),
+        );
+        final latest = find.byKey(
+          const ValueKey('thread-message-group-reply-2'),
+        );
+        final initialHeadTop = tester.getTopLeft(head).dy;
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 100);
+        await tester.pumpAndSettle();
+
+        expect(latest, findsOneWidget);
+        expect(tester.getTopLeft(head).dy, closeTo(initialHeadTop, 0.5));
+      },
+    );
+
+    for (final layout in <({String name, bool isMember, bool isArchived})>[
+      (name: 'non-member', isMember: false, isArchived: false),
+      (name: 'archived', isMember: true, isArchived: true),
+      (name: 'writable member', isMember: true, isArchived: false),
+    ]) {
+      for (final tail in <({String name, bool isLong})>[
+        (name: 'short', isLong: false),
+        (name: 'long', isLong: true),
+      ]) {
+        testWidgets(
+          '${layout.name} typing transitions preserve a followed ${tail.name} tail',
+          (tester) async {
+            tester.view.physicalSize = const Size(400, 800);
+            tester.view.devicePixelRatio = 1;
+            addTearDown(tester.view.reset);
+            final rootEvent = _textMsg(
+              id: 'thread-root',
+              pubkey: 'alice',
+              content: 'Root',
+              createdAt: 1000,
+            );
+            final replyCount = tail.isLong ? 30 : 6;
+            final replies = [
+              for (var i = 0; i < replyCount; i++)
+                _textMsg(
+                  id: 'reply-$i',
+                  pubkey: 'bob',
+                  content: i == replyCount - 1 && tail.isLong
+                      ? List.filled(8, 'Tall latest reply').join('\n')
+                      : 'Reply $i',
+                  createdAt: 1100 + i,
+                  extraTags: const [
+                    ['e', 'thread-root', '', 'reply'],
+                  ],
+                ),
+            ];
+            final typingNotifier = _FakeTypingNotifier(const []);
+            await tester.pumpWidget(
+              _buildTestable(
+                messages: [rootEvent],
+                typingNotifier: typingNotifier,
+                threadReplies: {'thread-root': replies},
+                disableAnimations: true,
+              ),
+            );
+            await tester.pumpAndSettle();
+            final threadHead = formatTimeline([rootEvent]).single;
+            Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+              MaterialPageRoute<void>(
+                builder: (_) => ThreadDetailPage(
+                  threadHead: threadHead,
+                  allMessages: [threadHead],
+                  channelId: _channelId,
+                  currentPubkey: 'self',
+                  isMember: layout.isMember,
+                  isArchived: layout.isArchived,
+                ),
+              ),
+            );
+            await tester.pumpAndSettle();
+            final latest = find.byKey(
+              ValueKey('thread-message-group-reply-${replyCount - 1}'),
+            );
+            final head = find.byKey(
+              const ValueKey('thread-message-group-thread-root'),
+            );
+            final initialHeadTop = tail.isLong
+                ? null
+                : tester.getTopLeft(head).dy;
+            final list = find.byKey(const ValueKey('thread-message-list'));
+            final initialHeight = tester.getSize(list).height;
+            void expectTailWithinList() {
+              final latestRect = tester.getRect(latest);
+              final listRect = tester.getRect(list);
+              expect(
+                latestRect.top,
+                greaterThanOrEqualTo(
+                  frostedAppBarHeight(tester.element(latest)),
+                ),
+              );
+              if (tail.isLong) {
+                expect(latestRect.bottom, lessThanOrEqualTo(listRect.bottom));
+              }
+            }
+
+            expectTailWithinList();
+            typingNotifier.setEntries(const [
+              TypingEntry(
+                pubkey: 'bob',
+                threadHeadId: 'thread-root',
+                expiresAtMs: 9999999999999,
+              ),
+            ]);
+            await tester.pumpAndSettle();
+            expectTailWithinList();
+            if (initialHeadTop != null) {
+              expect(tester.getTopLeft(head).dy, closeTo(initialHeadTop, 0.5));
+            }
+            if (!layout.isMember || layout.isArchived) {
+              expect(tester.getSize(list).height, lessThan(initialHeight));
+            }
+            typingNotifier.setEntries(const []);
+            await tester.pumpAndSettle();
+            expectTailWithinList();
+            if (initialHeadTop != null) {
+              expect(tester.getTopLeft(head).dy, closeTo(initialHeadTop, 0.5));
+            }
+            expect(tester.getSize(list).height, closeTo(initialHeight, 0.5));
+          },
+        );
+      }
+
+      testWidgets(
+        '${layout.name} typing transitions preserve a detached anchor',
+        (tester) async {
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.reset);
+          final rootEvent = _textMsg(
+            id: 'thread-root',
+            pubkey: 'alice',
+            content: 'Root',
+            createdAt: 1000,
+          );
+          final replies = [
+            for (var i = 0; i < 30; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: 'bob',
+                content: 'Reply $i',
+                createdAt: 1100 + i,
+                extraTags: const [
+                  ['e', 'thread-root', '', 'reply'],
+                ],
+              ),
+          ];
+          final typingNotifier = _FakeTypingNotifier(const []);
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [rootEvent],
+              typingNotifier: typingNotifier,
+              threadReplies: {'thread-root': replies},
+              disableAnimations: true,
+            ),
+          );
+          await tester.pumpAndSettle();
+          final threadHead = formatTimeline([rootEvent]).single;
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: threadHead,
+                allMessages: [threadHead],
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: layout.isMember,
+                isArchived: layout.isArchived,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final list = find.byKey(const ValueKey('thread-message-list'));
+          for (var i = 0; i < 4; i++) {
+            await tester.drag(list, const Offset(0, 100));
+            await tester.pumpAndSettle();
+          }
+          final listRect = tester.getRect(list);
+          final anchor =
+              [
+                for (var i = 0; i < replies.length; i++)
+                  find.byKey(ValueKey('thread-message-group-reply-$i')),
+              ].firstWhere(
+                (candidate) =>
+                    candidate.evaluate().length == 1 &&
+                    listRect.overlaps(tester.getRect(candidate)),
+              );
+          final anchorTop = tester.getTopLeft(anchor).dy;
+          typingNotifier.setEntries(const [
+            TypingEntry(
+              pubkey: 'bob',
+              threadHeadId: 'thread-root',
+              expiresAtMs: 9999999999999,
+            ),
+          ]);
+          await tester.pumpAndSettle();
+          expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+          typingNotifier.setEntries(const []);
+          await tester.pumpAndSettle();
+          expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+        },
+      );
+    }
+
+    for (final layout in [
+      (name: 'non-member', isMember: false, isArchived: false),
+      (name: 'archived', isMember: true, isArchived: true),
+    ]) {
+      testWidgets('${layout.name} no-dock tail resumes full-viewport follow', (
+        tester,
+      ) async {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
+            threadReplies: {'thread-root': replies},
+          ),
+        );
+        await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: layout.isMember,
+              isArchived: layout.isArchived,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final lifecycle = tester.widget<KeyboardDismissOnDrag>(
+          find.byType(KeyboardDismissOnDrag),
+        );
+        lifecycle.onUserScrollStart!();
+        lifecycle.onUserScrollEnd!();
+        await tester.pumpAndSettle();
+        messagesNotifier.setMessages([
+          rootEvent,
+          _textMsg(
+            id: 'reply-remote',
+            pubkey: 'bob',
+            content: 'Remote tail',
+            createdAt: 9999,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+        ]);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-remote')),
+          findsOneWidget,
+        );
+      });
+    }
+
+    testWidgets(
+      'composer-covered tail remains detached after drag-end settlement',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
+            threadReplies: {'thread-root': replies},
+          ),
+        );
+        await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        final latest = find.byKey(
+          const ValueKey('thread-message-group-reply-29'),
+        );
+        final composer = find.byKey(const ValueKey('composer-surface'));
+        await tester.drag(list, const Offset(0, 24));
+        await tester.pumpAndSettle();
+        expect(
+          tester.getBottomLeft(latest).dy,
+          greaterThan(tester.getTopLeft(composer).dy),
+        );
+        expect(
+          tester.getBottomLeft(latest).dy,
+          lessThanOrEqualTo(tester.getBottomLeft(list).dy),
+        );
+        final visibleBeforeRemote = tester
+            .widgetList<Widget>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget.key is ValueKey<String> &&
+                    (widget.key! as ValueKey<String>).value.startsWith(
+                      'thread-message-group-',
+                    ),
+              ),
+            )
+            .map((widget) => widget.key)
+            .toSet();
+        final anchorKey = visibleBeforeRemote.firstWhere(
+          (key) => key != latest.evaluate().single.widget.key,
+        );
+        final anchor = find.byKey(anchorKey!);
+        final detachedTop = tester.getTopLeft(anchor).dy;
+
+        messagesNotifier.setMessages([
+          rootEvent,
+          _textMsg(
+            id: 'reply-remote',
+            pubkey: 'bob',
+            content: 'Remote tail',
+            createdAt: 9999,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widgetList<Widget>(
+                find.byWidgetPredicate(
+                  (widget) => visibleBeforeRemote.contains(widget.key),
+                ),
+              )
+              .map((widget) => widget.key),
+          isNotEmpty,
+        );
+        expect(tester.getTopLeft(anchor).dy, closeTo(detachedTop, 0.5));
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(anchor).dy, closeTo(detachedTop, 0.5));
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+        expect(tester.getTopLeft(anchor).dy, closeTo(detachedTop, 0.5));
+      },
+    );
+
+    testWidgets('invalid writable dock geometry cannot resume tail follow', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          messagesNotifier: messagesNotifier,
+          threadReplies: {'thread-root': replies},
+        ),
+      );
+      await tester.pumpAndSettle();
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      tester
+          .widget<ComposerDockSizeReporter>(
+            find.byType(ComposerDockSizeReporter).last,
+          )
+          .onHeightChanged(0);
+      await tester.pumpAndSettle();
+      final lifecycle = tester.widget<KeyboardDismissOnDrag>(
+        find.byType(KeyboardDismissOnDrag),
+      );
+      lifecycle.onUserScrollStart!();
+      lifecycle.onUserScrollEnd!();
+      await tester.pumpAndSettle();
+      final anchor = find.byKey(
+        const ValueKey('thread-message-group-reply-29'),
+      );
+      final anchorTop = tester.getTopLeft(anchor).dy;
+
+      messagesNotifier.setMessages([
+        rootEvent,
+        _textMsg(
+          id: 'reply-remote',
+          pubkey: 'bob',
+          content: 'Remote tail',
+          createdAt: 9999,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+    });
+
+    testWidgets('new drag invalidates deferred drag-end resumption', (
+      tester,
+    ) async {
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          messagesNotifier: messagesNotifier,
+          threadReplies: {'thread-root': replies},
+        ),
+      );
+      await tester.pumpAndSettle();
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      var lifecycle = tester.widget<KeyboardDismissOnDrag>(
+        find.byType(KeyboardDismissOnDrag),
+      );
+      lifecycle.onUserScrollStart!();
+      lifecycle.onUserScrollEnd!();
+      await tester.pump();
+      lifecycle = tester.widget<KeyboardDismissOnDrag>(
+        find.byType(KeyboardDismissOnDrag),
+      );
+      lifecycle.onUserScrollStart!();
+      await tester.pumpAndSettle();
+      final anchor = find.byKey(
+        const ValueKey('thread-message-group-reply-29'),
+      );
+      final anchorTop = tester.getTopLeft(anchor).dy;
+
+      messagesNotifier.setMessages([
+        rootEvent,
+        _textMsg(
+          id: 'reply-remote',
+          pubkey: 'bob',
+          content: 'Remote tail',
+          createdAt: 9999,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+      ]);
+      await tester.pumpAndSettle();
+
+      expect(tester.getTopLeft(anchor).dy, closeTo(anchorTop, 0.5));
+      tester
+          .widget<KeyboardDismissOnDrag>(find.byType(KeyboardDismissOnDrag))
+          .onUserScrollEnd!();
+    });
+
+    testWidgets(
+      'dragging away opts out, then returning to the tail resumes keyboard realignment',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        for (var i = 0; i < 4; i++) {
+          await tester.drag(list, const Offset(0, 100));
+          await tester.pumpAndSettle();
+        }
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsOneWidget,
+          reason: 'Browsing away from the tail should offer Latest.',
+        );
+        final visibleBeforeResize = tester
+            .widgetList<Widget>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget.key is ValueKey<String> &&
+                    (widget.key! as ValueKey<String>).value.startsWith(
+                      'thread-message-group-',
+                    ),
+              ),
+            )
+            .map((widget) => widget.key)
+            .toSet();
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+        );
+        expect(
+          tester
+              .widgetList<Widget>(
+                find.byWidgetPredicate(
+                  (widget) => visibleBeforeResize.contains(widget.key),
+                ),
+              )
+              .map((widget) => widget.key),
+          isNotEmpty,
+        );
+
+        // Return the viewport to its original geometry while opt-out remains
+        // active. This must not itself pull the list back to the tail.
+        tester.view.viewInsets = FakeViewPadding.zero;
+        await tester.pumpAndSettle();
+
+        // Returning to the tail is a deliberate choice to resume following.
+        // Only the scroll-end callback may clear the opt-out state, so this
+        // reverse drag must complete before geometry changes re-align the tail.
+        for (var i = 0; i < 12; i++) {
+          await tester.drag(list, const Offset(0, -100));
+          await tester.pumpAndSettle();
+        }
+        final latestReply = find.byKey(
+          const ValueKey('thread-message-group-reply-29'),
+        );
+        expect(latestReply, findsOneWidget);
+
+        final composerSurface = find.byKey(const ValueKey('composer-surface'));
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        expect(
+          tester.getBottomLeft(latestReply).dy,
+          lessThanOrEqualTo(tester.getTopLeft(composerSurface).dy),
+        );
+      },
+    );
+
+    testWidgets(
+      'deep-link stays put through passive resize until composer focus follows tail',
       (tester) async {
         tester.view.physicalSize = const Size(400, 800);
         tester.view.devicePixelRatio = 1;
@@ -4218,13 +6467,427 @@ void main() {
           const ValueKey('thread-message-group-reply-5'),
         );
         expect(target, findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsOneWidget,
+        );
 
-        await tester.tap(find.text('Reply in thread…').hitTestable());
-        await tester.pumpAndSettle();
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         await tester.pumpAndSettle();
 
         expect(target, findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets('iOS composer focus and Latest fully reveal the final reply', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      tester.view.viewPadding = const FakeViewPadding(bottom: 20);
+      addTearDown(tester.view.reset);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Reply in thread…').hitTestable());
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-29'),
+      );
+      final composerSurface = find.byKey(const ValueKey('composer-surface'));
+      final focusedReplyBottom = tester.getBottomLeft(latestReply).dy;
+      final composerTop = tester.getTopLeft(composerSurface).dy;
+
+      final list = find.byKey(const ValueKey('thread-message-list'));
+      final listElement = tester.element(list);
+      ScrollStartNotification(
+        metrics: FixedScrollMetrics(
+          minScrollExtent: 0,
+          maxScrollExtent: 100,
+          pixels: 0,
+          viewportDimension: 100,
+          axisDirection: AxisDirection.down,
+          devicePixelRatio: 1,
+        ),
+        context: listElement,
+        dragDetails: DragStartDetails(),
+      ).dispatch(listElement);
+      tester
+          .widget<ScrollablePositionedList>(list)
+          .itemScrollController!
+          .jumpTo(index: 5);
+      await tester.pumpAndSettle();
+      final latestButton = find.byKey(const ValueKey('thread-jump-to-latest'));
+      final latestButtonWasVisible = latestButton.evaluate().length == 1;
+      await tester.tap(latestButton);
+      await tester.pumpAndSettle();
+      final latestReplyBottom = tester.getBottomLeft(latestReply).dy;
+      debugDefaultTargetPlatformOverride = previousPlatform;
+
+      expect(
+        focusedReplyBottom,
+        lessThanOrEqualTo(composerTop),
+        reason: 'Focusing the composer must retain the final reply above it.',
+      );
+      expect(latestButtonWasVisible, isTrue);
+      expect(
+        latestReplyBottom,
+        lessThanOrEqualTo(composerTop),
+        reason: 'Latest must reveal the final reply above the iOS composer.',
+      );
+    });
+
+    for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+      testWidgets(
+        'thread composer focus returns to the tail on ${platform.name}',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = platform;
+          tester.view.physicalSize = const Size(400, 800);
+          tester.view.devicePixelRatio = 1;
+          tester.view.viewPadding = const FakeViewPadding(bottom: 20);
+          addTearDown(tester.view.reset);
+
+          final rootEvent = _textMsg(
+            id: 'thread-root',
+            pubkey: 'alice',
+            content: 'Thread root',
+            createdAt: 1000,
+          );
+          final replies = [
+            for (var i = 0; i < 30; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: 'bob',
+                content: 'Reply $i',
+                createdAt: 1100 + i,
+                extraTags: const [
+                  ['e', 'thread-root', '', 'reply'],
+                ],
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [rootEvent],
+              threadReplies: {'thread-root': replies},
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final threadHead = formatTimeline([rootEvent]).single;
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: threadHead,
+                allMessages: [threadHead],
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+                initialMessageId: 'reply-5',
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const ValueKey('thread-jump-to-latest')),
+            findsOneWidget,
+          );
+
+          await tester.tap(find.text('Reply in thread…').hitTestable());
+          await tester.pump();
+          tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+          await tester.pump();
+          if (platform == TargetPlatform.android) {
+            await tester.pump(androidImeMetricsSettleDelay);
+          }
+          await tester.pumpAndSettle();
+
+          final latestReply = find.byKey(
+            const ValueKey('thread-message-group-reply-29'),
+          );
+          final composerSurface = find.byKey(
+            const ValueKey('composer-surface'),
+          );
+          final focusNode = tester
+              .widget<TextField>(find.byType(TextField))
+              .focusNode!;
+          final latestReplyBottom = tester.getBottomLeft(latestReply).dy;
+          final composerTop = tester.getTopLeft(composerSurface).dy;
+          final latestButtonIsVisible = find
+              .byKey(const ValueKey('thread-jump-to-latest'))
+              .evaluate()
+              .isNotEmpty;
+          debugDefaultTargetPlatformOverride = previousPlatform;
+
+          expect(focusNode.hasFocus, isTrue);
+          expect(latestReplyBottom, lessThanOrEqualTo(composerTop));
+          expect(latestButtonIsVisible, isFalse);
+        },
+      );
+    }
+
+    testWidgets(
+      'thread shows Latest after browsing history and returns to tail',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+
+        await tester.drag(list, const Offset(0, 500));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsOneWidget,
+        );
+
+        final threadScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
+        await tester.pump(const Duration(milliseconds: 50));
+
+        expect(
+          threadScrollable.position.isScrollingNotifier.value,
+          isTrue,
+          reason: 'An explicit Latest tap should retain its navigation motion.',
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
+        final settledTailY = tester
+            .getTopLeft(find.byKey(const ValueKey('thread-tail-anchor')))
+            .dy;
+        await tester.pump(const Duration(milliseconds: 250));
+        expect(
+          tester
+              .getTopLeft(find.byKey(const ValueKey('thread-tail-anchor')))
+              .dy,
+          closeTo(settledTailY, 0.5),
+          reason: 'Latest must not be followed by a corrective rebound.',
+        );
+      },
+    );
+
+    testWidgets(
+      'a newly sent thread reply follows the tail without animation',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 20; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier([rootEvent]);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            messagesNotifier: messagesNotifier,
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Me'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final list = find.byKey(const ValueKey('thread-message-list'));
+        final threadScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        final localReply = _textMsg(
+          id: 'reply-local',
+          pubkey: 'self',
+          content: 'My new reply',
+          createdAt: 2000,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        );
+
+        messagesNotifier.setMessages([rootEvent, localReply]);
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-local')),
+          findsOneWidget,
+        );
+        expect(
+          threadScrollable.position.isScrollingNotifier.value,
+          isFalse,
+          reason: 'Reply-driven tail correction must be instant.',
+        );
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+        );
       },
     );
 
@@ -4533,6 +7196,8 @@ class _FakeTypingNotifier extends ChannelTypingNotifier {
 
   @override
   List<TypingEntry> build() => _entries;
+
+  void setEntries(List<TypingEntry> entries) => state = entries;
 }
 
 class _SynchronousReadStateNotifier extends ReadStateNotifier {
@@ -4661,6 +7326,10 @@ List<String> _replayedChannelIds(_RecordingRelaySocket socket) => socket
           ((message[2] as Map<String, dynamic>)['#h'] as List).single as String,
     )
     .toList();
+
+final _transparentPng = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+);
 
 class _TestNavigatorObserver extends NavigatorObserver {
   int pushCount = 0;

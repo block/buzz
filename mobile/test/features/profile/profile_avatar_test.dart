@@ -5,13 +5,20 @@ import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 
 void main() {
-  Widget harness({bool showPresence = true, String presence = 'online'}) {
+  Widget harness({
+    bool showPresence = true,
+    String presence = 'online',
+    String? avatarUrl,
+  }) {
     return ProviderScope(
       overrides: [
-        profileProvider.overrideWith(_FakeProfileNotifier.new),
+        profileProvider.overrideWith(
+          () => _FakeProfileNotifier(avatarUrl: avatarUrl),
+        ),
         presenceProvider.overrideWith(() => _FakePresenceNotifier(presence)),
       ],
       child: MaterialApp(
@@ -31,6 +38,14 @@ void main() {
       find.byType(MaskedAvatarBadge),
     );
     expect(badge.geometry, AvatarBadgeMaskGeometry.presenceDot);
+    expect(
+      tester
+          .widget<ColoredBox>(
+            find.byKey(const ValueKey('profile-avatar-background')),
+          )
+          .color,
+      AppTheme.light().colorScheme.primaryContainer,
+    );
     expect(
       tester.widget<ClipPath>(find.byType(ClipPath).last).clipper,
       isA<AvatarBadgeMaskClipper>(),
@@ -86,12 +101,43 @@ void main() {
       findsNothing,
     );
   });
+
+  testWidgets('keeps an animated avatar poster background transparent', (
+    tester,
+  ) async {
+    const posterUrl = 'https://relay.example/media/poster.png';
+    const animationUrl = 'https://relay.example/media/animation.png';
+    final avatarUrl =
+        '$posterUrl#buzz-anim=${Uri.encodeComponent(animationUrl)}';
+
+    await tester.pumpWidget(harness(avatarUrl: avatarUrl));
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<ColoredBox>(
+            find.byKey(const ValueKey('profile-avatar-background')),
+          )
+          .color,
+      Colors.transparent,
+    );
+    expect(
+      tester
+          .widget<AvatarImageContent>(find.byType(AvatarImageContent))
+          .imageUrl,
+      posterUrl,
+    );
+  });
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {
+  _FakeProfileNotifier({this.avatarUrl});
+
+  final String? avatarUrl;
+
   @override
   Future<UserProfile?> build() async =>
-      const UserProfile(pubkey: 'aabb', displayName: 'Test');
+      UserProfile(pubkey: 'aabb', displayName: 'Test', avatarUrl: avatarUrl);
 }
 
 class _FakePresenceNotifier extends PresenceNotifier {

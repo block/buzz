@@ -1,10 +1,12 @@
-import { ChevronRight, FolderGit2, MessageSquare } from "lucide-react";
+import { ChevronRight, FolderGit2 } from "lucide-react";
 import type * as React from "react";
 
 import type { Project } from "@/features/projects/hooks";
+import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
 import { channelChrome, topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
+import type { EntityLinkTab } from "@/shared/lib/entityLink";
+import { ShareLinkButton } from "./ShareLinkButton";
 
 export type ProjectDetailWorkItemCrumb = {
   category: string;
@@ -13,21 +15,28 @@ export type ProjectDetailWorkItemCrumb = {
 };
 
 export function ProjectDetailChrome({
+  actions,
   activeTabCrumb,
   activeWorkItemCrumb,
   chromeRef,
-  onGoChannel,
   onGoProjectHome,
   onGoProjects,
   project,
+  shareTab,
 }: {
+  /** Repository-scoped controls, rendered left of the project-wide ones. */
+  actions?: React.ReactNode;
   activeTabCrumb: string | null;
   activeWorkItemCrumb: ProjectDetailWorkItemCrumb | null;
   chromeRef: React.Ref<HTMLDivElement>;
-  onGoChannel: (channelId: string) => void;
   onGoProjectHome: () => void;
   onGoProjects: () => void;
   project: Project;
+  /**
+   * Workspace tab the copied link should open (`undefined` = overview), so
+   * sharing from the PR or issue list lands recipients on that same list.
+   */
+  shareTab?: EntityLinkTab;
 }) {
   return (
     <div
@@ -106,17 +115,14 @@ export function ProjectDetailChrome({
             </span>
           )}
         </nav>
-        {project.projectChannelId ? (
-          <Button
-            className="h-8 shrink-0 gap-1.5"
-            onClick={() => onGoChannel(project.projectChannelId as string)}
-            size="sm"
-            variant="outline"
-          >
-            <MessageSquare className="h-4 w-4" />
-            Open Discussion
-          </Button>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {actions}
+          <ShareLinkButton
+            label="Copy project link"
+            link={projectShareLink(project, shareTab)}
+            testId="project-detail-copy-link"
+          />
+        </div>
       </div>
     </div>
   );

@@ -29,6 +29,8 @@ pub mod agents;
 pub mod audio_output;
 mod commands;
 pub mod jitter;
+#[cfg(test)]
+mod latency_bench;
 pub mod models;
 pub mod pipeline;
 pub mod playout;
@@ -69,7 +71,8 @@ pub(super) fn drain_until_shutdown<T>(
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use commands::{
-    interrupt_huddle_speech, remove_agent_from_huddle, set_huddle_manual_mic_unmuted,
+    add_agent_to_huddle, interrupt_huddle_speech, remove_agent_from_huddle,
+    set_huddle_manual_mic_unmuted,
 };
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
 pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
@@ -91,7 +94,7 @@ use agent_tts_routing::{
 pub use pipeline::check_pipeline_hotstart;
 use pipeline::{
     await_inflight_tts_start, maybe_start_stt_pipeline, maybe_start_tts_pipeline,
-    post_connect_setup, start_auto_enabled_transcription, PostConnectOutcome,
+    post_connect_setup, PostConnectOutcome,
 };
 use relay_api::{
     count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
@@ -914,86 +917,4 @@ pub async fn speak_agent_message(
     .inspect_err(|_| {
         eprintln!("buzz-desktop: tts stage=queue status=failed reason=closed route_id={route_id}")
     })
-}
-
-/// Add an agent to the active huddle.
-///
-/// Steps:
-/// 1. Validates the huddle is in the Connected or Active phase.
-/// 2. Adds the agent to both the ephemeral and parent channels (kind:9000).
-/// 3. Only appends the agent pubkey to `agent_pubkeys` if the ephemeral add
-///    succeeded — failed adds (policy rejection) are NOT p-tagged.
-///
-/// Returns a structured `AgentAddResult` so the frontend can surface
-/// parent-channel errors without treating them as hard failures.
-///
-/// The running ACP process for this agent auto-subscribes when it receives
-/// the kind:9000 membership notification — no separate process spawn needed.
-#[tauri::command]
-pub async fn add_agent_to_huddle(
-    agent_pubkey: String,
-    state: State<'_, AppState>,
-) -> Result<agents::AgentAddResult, String> {
-    validate_pubkey_hex(&agent_pubkey)?;
-
-    let (eph_id, parent_id, huddle_generation) = {
-        let hs = state.huddle()?;
-        if !matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active) {
-            return Err("no active huddle".to_string());
-        }
-
-        // Enforce agent cap on incremental adds too.
-        let current_agent_count = hs
-            .agent_pubkeys
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
-        if current_agent_count >= MAX_HUDDLE_AGENTS {
-            return Err(format!(
-                "agent limit reached: {} (max {})",
-                current_agent_count, MAX_HUDDLE_AGENTS
-            ));
-        }
-
-        let eph = hs
-            .ephemeral_channel_id
-            .clone()
-            .ok_or("no ephemeral channel")?;
-        let parent = hs.parent_channel_id.clone().ok_or("no parent channel")?;
-        (eph, parent, hs.huddle_generation)
-    };
-
-    let eph_uuid = Uuid::parse_str(&eph_id).map_err(|e| e.to_string())?;
-    let parent_uuid = Uuid::parse_str(&parent_id).map_err(|e| e.to_string())?;
-
-    // Returns Err only if the ephemeral add fails — parent failure is in the result.
-    let result = agents::add_agent_to_huddle(eph_uuid, parent_uuid, &agent_pubkey, &state).await?;
-
-    // Ephemeral add succeeded — register it only if this is still the huddle
-    // that initiated the relay operation.
-    let transcription_auto_enabled = {
-        let mut hs = state.huddle()?;
-        if !hs.is_current_huddle(&eph_id, huddle_generation) {
-            return Ok(result);
-        }
-        let mut pubkeys = hs.agent_pubkeys.lock().unwrap_or_else(|e| e.into_inner());
-        if !pubkeys.contains(&agent_pubkey) {
-            pubkeys.push(agent_pubkey.clone());
-        }
-        drop(pubkeys);
-        if !hs.participants.contains(&agent_pubkey) {
-            hs.participants.push(agent_pubkey.clone());
-        }
-        hs.maybe_auto_enable_transcription_for_agents()
-    };
-
-    // No guidelines re-post needed — the agent sees the original kind:48106
-    // guidelines via EOSE replay when it subscribes to the ephemeral channel.
-    if transcription_auto_enabled {
-        start_auto_enabled_transcription(&state, &eph_id).await;
-    } else {
-        state.emit_huddle_state_changed();
-    }
-
-    Ok(result)
 }

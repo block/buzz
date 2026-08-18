@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/security/sensitive_action_authorizer.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/tappable_flapping_bee.dart';
@@ -36,6 +38,7 @@ class PairingPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final pairingState = ref.watch(pairingProvider);
+    final enrolledBiometrics = ref.watch(enrolledBiometricsProvider);
     final codeController = useTextEditingController();
     final fallbackScannerVisible = useState(false);
     final pairingCodeExpanded = useState(false);
@@ -127,6 +130,16 @@ class PairingPage extends HookConsumerWidget {
                     sasCode: pairingState.sasCode ?? '------',
                     confirmed: pairingState.userConfirmedSas,
                     sendsIdentityToDesktop: pairingState.sendsIdentityToDesktop,
+                    protectSensitiveActions:
+                        pairingState.protectSensitiveActions,
+                    biometricLabel: biometricProtectionLabel(
+                      defaultTargetPlatform,
+                      enrolledBiometrics.value ?? const [],
+                    ),
+                    errorMessage: pairingState.errorMessage,
+                    onProtectionChanged: (value) => ref
+                        .read(pairingProvider.notifier)
+                        .setProtectSensitiveActions(value),
                     onConfirm: () =>
                         ref.read(pairingProvider.notifier).confirmSas(),
                     onDeny: () => ref.read(pairingProvider.notifier).denySas(),
@@ -196,6 +209,10 @@ class _SasVerificationView extends StatelessWidget {
   final String sasCode;
   final bool confirmed;
   final bool sendsIdentityToDesktop;
+  final bool protectSensitiveActions;
+  final String biometricLabel;
+  final String? errorMessage;
+  final ValueChanged<bool> onProtectionChanged;
   final VoidCallback onConfirm;
   final VoidCallback onDeny;
 
@@ -203,6 +220,10 @@ class _SasVerificationView extends StatelessWidget {
     required this.sasCode,
     required this.confirmed,
     required this.sendsIdentityToDesktop,
+    required this.protectSensitiveActions,
+    required this.biometricLabel,
+    required this.errorMessage,
+    required this.onProtectionChanged,
     required this.onConfirm,
     required this.onDeny,
   });
@@ -265,6 +286,32 @@ class _SasVerificationView extends StatelessWidget {
             color: context.colors.onSurfaceVariant,
           ),
         ),
+
+        const SizedBox(height: Grid.sm),
+
+        if (!sendsIdentityToDesktop)
+          CheckboxListTile(
+            key: const Key('protect-sensitive-actions-checkbox'),
+            value: protectSensitiveActions,
+            onChanged: confirmed
+                ? null
+                : (value) => onProtectionChanged(value ?? false),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            title: Text(biometricLabel),
+            subtitle: const Text('For secure actions'),
+          ),
+
+        if (errorMessage != null) ...[
+          const SizedBox(height: Grid.xs),
+          Text(
+            errorMessage!,
+            textAlign: TextAlign.center,
+            style: context.textTheme.bodySmall?.copyWith(
+              color: context.colors.error,
+            ),
+          ),
+        ],
 
         const SizedBox(height: Grid.lg),
 

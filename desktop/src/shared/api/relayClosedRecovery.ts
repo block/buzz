@@ -73,7 +73,7 @@ function recoverLiveSubscriptionFromClosed({
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
 }) {
-  subscription.resolveReady?.();
+  subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
 
   const closedClass = classifyRelayClosed(message);
@@ -157,7 +157,7 @@ export function handleSubscriptionEose({
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "live") {
-    subscription.resolveReady?.();
+    subscription.resolveReady?.("eose");
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;
     clearClosedRetry(subscription);

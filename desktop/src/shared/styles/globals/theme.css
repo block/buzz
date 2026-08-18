@@ -181,6 +181,27 @@
 }
 
 /*
+ * Keep Buzz's established production selected tint available independently
+ * from the optional prominent treatment.
+ */
+:root {
+  --sidebar-row-subtle-active-surface: rgb(0 0 0 / 7%);
+}
+
+:root.dark {
+  --sidebar-row-subtle-active-surface: rgb(255 255 255 / 16%);
+}
+
+/* The prominent treatment is exclusive to Buzz's painted gradient. */
+:root[data-buzz-sidebar] {
+  --sidebar-row-active-surface: rgb(255 255 255 / 82%);
+}
+
+:root[data-buzz-sidebar].dark {
+  --sidebar-row-active-surface: rgb(255 255 255 / 18%);
+}
+
+/*
  * Buzz theme - sidebar gradient.
  *
  * Buzz reuses the GitHub Light palette for every base color; its one
@@ -204,8 +225,8 @@
  * floating chip should retain its own fill rather than becoming transparent
  * over the full-app gradient.
  *
- * Item hover/active states use `bg-sidebar-accent` / `bg-sidebar-active`
- * (distinct tokens) and are intentionally left untouched.
+ * Shared row state colors are applied below so Buzz and flat themes use the
+ * same hover/selection hierarchy.
  */
 :root[data-buzz-sidebar] {
   --buzz-gradient-top: var(--buzz-gradient-light-top);
@@ -219,7 +240,6 @@
   --buzz-hover-surface: rgb(0 0 0 / 4%);
   --buzz-sidebar-scrollbar-thumb: var(--buzz-hover-surface);
   --buzz-active-fill: 0 0% 0%;
-  --buzz-active-surface: rgb(0 0 0 / 7%);
   --buzz-active-foreground: var(--foreground);
 }
 
@@ -237,11 +257,6 @@
   --buzz-chrome-foreground: rgb(255 255 255 / 50%);
   --buzz-hover-surface: rgb(255 255 255 / 4%);
   --buzz-active-fill: 0 0% 100%;
-  --buzz-active-surface: color-mix(
-    in srgb,
-    hsl(var(--buzz-active-fill)) 16%,
-    transparent
-  );
   --buzz-active-foreground: 0 0% 100%;
 }
 
@@ -425,22 +440,31 @@
 }
 
 /*
- * Active nav pill: use a subtle 7% black tint in light mode and drop the drop
- * shadow so the selection sits flat on the gradient (Buzz-only; other themes
- * keep `shadow-xs`). Higher specificity than the active utilities and
- * unlayered, so it wins.
+ * By default, selected navigation uses a darker version of the hover tint,
+ * matching Buzz's established production treatment. The optional prominent
+ * preference repaints that same row with the higher-contrast tab surface.
  */
 :root[data-buzz-sidebar] [data-testid="app-sidebar"] [data-active="true"],
 :root[data-buzz-sidebar] [data-testid="settings-sidebar"] [data-active="true"] {
-  background-color: var(--buzz-active-surface);
+  background-color: var(--sidebar-row-subtle-active-surface);
+  box-shadow: none;
+}
+
+:root[data-buzz-sidebar][data-prominent-active-tab]
+  [data-testid="app-sidebar"]
+  [data-active="true"],
+:root[data-buzz-sidebar][data-prominent-active-tab]
+  [data-testid="settings-sidebar"]
+  [data-active="true"] {
+  --sidebar-active-foreground: var(--sidebar-foreground);
+  background-color: var(--sidebar-row-active-surface);
   box-shadow: none;
 }
 
 /*
- * Hover on non-active nav items uses the theme-specific translucent neutral
- * fill instead of the grey `--sidebar-accent`. Active items are excluded so
- * they retain the active surface. Covers both top-level menu buttons and
- * channel sub-buttons, in the app nav and the settings nav.
+ * Hover on non-active Buzz nav items uses the established 4% theme-specific
+ * tint. Active items are excluded so they retain the selected surface. Covers
+ * both top-level menu buttons and channel sub-buttons in app and Settings nav.
  */
 :root[data-buzz-sidebar]
   [data-testid="app-sidebar"]
@@ -461,13 +485,24 @@
  * Row actions such as the DM close button are siblings of the menu button.
  * Hovering them still activates the row's Tailwind `group-hover` treatment,
  * so cover the whole menu item to keep that sibling-hover path on the same
- * Buzz neutral surface instead of falling back to the legacy accent.
+ * neutral surface instead of falling back to the legacy accent.
  */
 :root[data-buzz-sidebar]
   [data-testid="app-sidebar"]
   :where([data-sidebar="menu-item"]:hover)
   > [data-sidebar="menu-button"]:not([data-active="true"]) {
   background-color: var(--buzz-hover-surface);
+}
+
+/*
+ * Navigation clicks stay spatially still. The subtle compression begins only
+ * after the sidebar's drag sensor crosses its reorder threshold and is removed
+ * entirely when the user prefers reduced motion.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  :where([data-sidebar-drag-state="dragging"], [data-sidebar-drag-overlay]) {
+    transform: scale(0.985);
+  }
 }
 
 /*
@@ -604,19 +639,42 @@
   color: var(--buzz-nav-fg);
 }
 
+/* Follow Buzz's selected appearance, independent of the OS color scheme. */
+.dark .sidebar-muted-content {
+  opacity: 0.45;
+}
+
 /*
- * Translucency (Buzz theme).
+ * Glass background.
  *
- * ThemeProvider toggles `data-buzz-translucent` for Buzz themes. Keep the
- * frosted layer on the outer canvases only; nested sidebar/header/footer
- * surfaces pass through so the nav reads as one continuous pane.
+ * ThemeProvider installs native macOS vibrancy before toggling
+ * `data-glass-background`. Keep the frosted layer on the outer canvases only;
+ * nested sidebar/header/footer surfaces pass through so the navigation reads
+ * as one continuous pane while the center content surface remains opaque.
  */
-:root[data-buzz-translucent] {
-  --buzz-translucency-gradient-alpha: 70%;
+:root[data-glass-background] {
+  --glass-sidebar-surface: hsl(
+    var(--sidebar-background) /
+    var(--glass-background-opacity, 65%)
+  );
+  --buzz-translucency-gradient-alpha: var(--glass-background-opacity, 65%);
   --buzz-translucency-wash-alpha: 2.4%;
 }
 
-:root[data-buzz-translucent] .buzz-theme-gradient-layer-light {
+/* The regular Buzz theme keeps an opaque copy of the gradient beneath its
+ * color layers. Remove that backing while glass is enabled so the translucent
+ * wash can reveal the native macOS vibrancy view. */
+:root[data-glass-background] .buzz-theme-gradient-underlay {
+  background: transparent;
+}
+
+/* Non-Buzz themes use their existing sidebar color as the glass tint. */
+:root[data-glass-background]:not([data-buzz-sidebar])
+  .buzz-theme-gradient-layer {
+  background-color: var(--glass-sidebar-surface);
+}
+
+:root[data-glass-background] .buzz-theme-gradient-layer-light {
   /* Buzz color wash above a neutral frost wash. */
   background-image:
     linear-gradient(
@@ -653,7 +711,7 @@
   background-repeat: no-repeat, no-repeat;
 }
 
-:root[data-buzz-translucent] .buzz-theme-gradient-layer-dark {
+:root[data-glass-background] .buzz-theme-gradient-layer-dark {
   background-image:
     linear-gradient(
       to bottom,
@@ -689,7 +747,7 @@
   background-repeat: no-repeat, no-repeat;
 }
 
-:root[data-buzz-translucent]:not(.dark)
+:root[data-glass-background][data-buzz-sidebar]:not(.dark)
   [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar {
   background-color: transparent;
   background-image:
@@ -727,7 +785,7 @@
   background-repeat: no-repeat, no-repeat;
 }
 
-:root[data-buzz-translucent].dark
+:root[data-glass-background][data-buzz-sidebar].dark
   [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar {
   background-color: transparent;
   background-image:
@@ -765,63 +823,87 @@
   background-repeat: no-repeat, no-repeat;
 }
 
-:root[data-buzz-translucent] [data-testid="app-sidebar"],
-:root[data-buzz-translucent] [data-buzz-glass-inset],
-:root[data-buzz-translucent] [data-buzz-glass-footer-wrap],
-:root[data-buzz-translucent]
+:root[data-glass-background]:not([data-buzz-sidebar])
+  [data-sidebar="sidebar"][data-mobile="true"].bg-sidebar {
+  background-color: var(--glass-sidebar-surface);
+  background-image: none;
+}
+
+:root[data-glass-background] .group\/sidebar-wrapper,
+:root[data-glass-background] [data-testid="app-sidebar"],
+:root[data-glass-background] [data-testid="settings-sidebar"],
+:root[data-glass-background] [data-buzz-glass-inset],
+:root[data-glass-background] [data-buzz-glass-footer-wrap],
+:root[data-glass-background]
   .group\/sidebar-wrapper
   .bg-sidebar:not([data-buzz-flat]),
-:root[data-buzz-translucent]
+:root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-testid="sidebar-pinned-header"],
-:root[data-buzz-translucent]
+:root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-sidebar="footer"] {
   background-color: transparent;
   background-image: none;
 }
 
+:root[data-glass-background]
+  [data-testid="settings-sidebar"]
+  [data-sidebar="sidebar"] {
+  background-color: transparent;
+  background-image: none;
+}
+
 /* Remove edge fades and stacking contexts that made header/footer look separate. */
-:root[data-buzz-translucent]
+:root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-testid="sidebar-pinned-header"],
-:root[data-buzz-translucent] [data-buzz-glass-inset],
-:root[data-buzz-translucent]
+:root[data-glass-background] [data-buzz-glass-inset],
+:root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-buzz-glass-footer-wrap],
-:root[data-buzz-translucent]
+:root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-sidebar="footer"] {
   isolation: auto;
   z-index: auto;
 }
 
-:root[data-buzz-translucent]
+:root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-testid="sidebar-pinned-header"]::before,
-:root[data-buzz-translucent]
+:root[data-glass-background]
   [data-testid="app-sidebar"]
   [data-sidebar="footer"]::before {
   background: none;
 }
 
 /* Let the native transparent window show through behind the sidebar glass. */
-:root[data-buzz-translucent],
-:root[data-buzz-translucent] body {
+:root[data-glass-background],
+:root[data-glass-background] body,
+:root[data-glass-background] #root {
+  /* WebKit otherwise paints an opaque page canvas above native vibrancy. */
+  background: transparent;
+}
+
+/* The outer shell stays clear; the app surface owns the translucent tint. */
+:root[data-glass-background] .buzz-huddle-shell {
+  background: transparent;
+}
+
+:root[data-glass-background] .buzz-huddle-app-surface {
   background-color: transparent;
   background-image: none;
+  isolation: isolate;
 }
 
-/* The outer shell stays clear; the app surface owns the gradient above. */
-:root[data-buzz-translucent] .buzz-huddle-shell {
+:root[data-glass-background] .buzz-huddle-app-surface::after {
   background: transparent;
 }
 
-:root[data-buzz-translucent] .buzz-huddle-app-surface::after {
-  background: transparent;
-}
-
-:root[data-buzz-translucent] .buzz-huddle-app-surface-open::after {
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="true"]
+  .buzz-huddle-app-surface-open::after {
   background: hsl(var(--buzz-huddle-drawer-surface));
 }
 
@@ -833,9 +915,9 @@
   background-image: none;
 }
 
-:root[data-buzz-sidebar][data-buzz-translucent]
-  .buzz-huddle-shell[data-huddle-open="true"] {
-  background-color: hsl(var(--buzz-huddle-drawer-surface));
+:root[data-buzz-sidebar][data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"][data-huddle-open="true"] {
+  background-color: transparent;
   background-image: none;
 }
 
@@ -849,4 +931,37 @@
   pointer-events: none;
   position: absolute;
   z-index: 0;
+}
+
+/* In the main glass window, let vibrancy continue around the Huddle controls
+ * and present the tray as an inset four-corner surface. The dedicated Huddle
+ * window keeps the full-width dark control dock above. */
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"]
+  .buzz-huddle-drawer-backdrop {
+  background: transparent;
+}
+
+:root[data-buzz-sidebar][data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"][data-huddle-open="true"]::before {
+  content: none;
+}
+
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"]
+  .buzz-huddle-drawer-slot {
+  padding: var(--buzz-huddle-drawer-inset);
+}
+
+:root[data-glass-background]
+  .buzz-huddle-shell[data-huddle-window="false"]
+  .buzz-huddle-drawer-slot
+  > .buzz-huddle-drawer {
+  border-radius: calc(
+    var(--buzz-huddle-drawer-radius) -
+    var(--buzz-huddle-drawer-inset)
+  );
+  height: 100%;
+  padding-block: var(--buzz-huddle-drawer-inset);
+  padding-inline: var(--buzz-huddle-drawer-inset);
 }

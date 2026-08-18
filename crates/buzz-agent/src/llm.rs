@@ -4,13 +4,11 @@ use std::sync::Arc;
 
 use reqwest::Client;
 use serde_json::{json, Map, Value};
-use tokio::sync::Mutex;
-use tokio::time::Instant;
 
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
 use crate::config::{
-    is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_openai_route,
-    Config, OpenAiApi, Provider, ThinkingEffort,
+    is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_databricks_v2,
+    normalize_effort_for_provider, Config, OpenAiApi, Provider, ThinkingEffort,
 };
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
@@ -25,58 +23,10 @@ const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
 const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
 const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
-const MESH_VIRTUAL_MODEL_ID: &str = "mesh";
-const MESH_AUTO_MODEL_ID: &str = "auto";
-const MESH_AUTO_CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(5);
-const MESH_AUTO_CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const MESH_AUTO_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
-const MESH_AUTO_ENABLE_OBSERVATIONS: u8 = 2;
-const MESH_MOA_UNAVAILABLE_MESSAGE: &str = "MoA requires ≥2 models available in the mesh";
 
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.
 type OpenAiParse = fn(Value) -> Result<LlmResponse, AgentError>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MeshCatalogObservation {
-    Available,
-    Unavailable,
-    Unknown,
-}
-
-fn mesh_catalog_supports_collective(catalog: &Value) -> Option<bool> {
-    let models = catalog.get("data").and_then(Value::as_array)?;
-    let mut has_virtual_mesh = false;
-    let mut physical_models = BTreeSet::new();
-    for id in models
-        .iter()
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        if id == MESH_VIRTUAL_MODEL_ID {
-            has_virtual_mesh = true;
-        } else if id != MESH_AUTO_MODEL_ID {
-            physical_models.insert(id.replace("@main", ""));
-        }
-    }
-    Some(has_virtual_mesh && physical_models.len() >= 2)
-}
-
-fn looks_like_unstructured_tool_call(text: &str) -> bool {
-    let text = text.trim_start().to_ascii_lowercase();
-    text.starts_with("<|tool_call")
-        || text.starts_with("<tool_call")
-        || text.starts_with("[tool_call]")
-}
-
-#[derive(Debug, Default)]
-struct MeshAutoState {
-    last_checked: Option<Instant>,
-    consecutive_available: u8,
-    collective_enabled: bool,
-    cooldown_until: Option<Instant>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DatabricksV2Route {
@@ -92,10 +42,6 @@ pub struct Llm {
     /// == Auto`. Subsequent OpenAI calls then go straight to Responses
     /// for the lifetime of the process.
     auto_upgraded: AtomicBool,
-    /// Hysteretic view of whether mesh-llm currently advertises its virtual
-    /// Mixture-of-Agents model. A TTL, confirmation count, and failure cooldown
-    /// let long-running agents adapt without bouncing as peers briefly flap.
-    mesh_auto_state: Mutex<MeshAutoState>,
     /// Bearer-token source for OpenAI-family requests. Static for OpenAI
     /// (the `OPENAI_COMPAT_API_KEY` env var) and Databricks-with-token
     /// (the `DATABRICKS_TOKEN` env var); a refreshable PKCE engine for
@@ -125,7 +71,6 @@ impl Llm {
         Ok(Self {
             http,
             auto_upgraded: AtomicBool::new(false),
-            mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
         })
     }
@@ -144,7 +89,15 @@ impl Llm {
             Provider::Anthropic => self
                 .post_anthropic(
                     cfg,
-                    &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
+                    &anthropic_body(
+                        cfg,
+                        system_prompt,
+                        history,
+                        tools,
+                        effective_model,
+                        effort,
+                        "anthropic",
+                    ),
                 )
                 .await
                 .and_then(parse_anthropic),
@@ -162,45 +115,39 @@ impl Llm {
                     .and_then(parse_openai_with_reasoning_details)
             }
             Provider::OpenAi | Provider::Databricks => {
-                self.openai_request(
-                    cfg,
-                    effective_model,
-                    !tools.is_empty(),
-                    |use_responses, request_model| {
-                        // Normalize effort for model-specific availability. Startup no longer rejects
-                        // `max` for pure OpenAI/Databricks; this per-model table is the single authority
-                        // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
-                        // models, and still applies corrections like none→minimal on the gpt-5 base.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
-                        if use_responses {
-                            (
-                                responses_body(
-                                    cfg,
-                                    system_prompt,
-                                    history,
-                                    tools,
-                                    request_model,
-                                    e,
-                                ),
-                                parse_responses as OpenAiParse,
-                            )
-                        } else {
-                            (
-                                openai_body(cfg, system_prompt, history, tools, request_model, e),
-                                parse_openai as OpenAiParse,
-                            )
-                        }
-                    },
-                )
+                let provider_str = match cfg.provider {
+                    Provider::OpenAi => "openai",
+                    Provider::Databricks => "databricks",
+                    _ => unreachable!(),
+                };
+                self.openai_request(cfg, effective_model, |use_responses, request_model| {
+                    // Normalize effort via the manifest: resolve the actual provider/model
+                    // record and apply resolve_openai_effort over its supported_efforts.
+                    // Adopted exact-record corrections (e.g. databricks-gpt-5-4-mini →
+                    // [low,medium,high]) are enforced here; the openai fallback's effort set
+                    // carries the former "unknown model: max→xhigh, others pass" behavior.
+                    let e = effort
+                        .map(|ef| normalize_effort_for_provider(provider_str, request_model, ef));
+                    if use_responses {
+                        (
+                            responses_body(cfg, system_prompt, history, tools, request_model, e),
+                            parse_responses as OpenAiParse,
+                        )
+                    } else {
+                        (
+                            openai_body(cfg, system_prompt, history, tools, request_model, e),
+                            parse_openai as OpenAiParse,
+                        )
+                    }
+                })
                 .await
             }
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, effective_model, |route| match route {
                     DatabricksV2Route::OpenAiResponses => {
-                        // OpenAI Responses path: normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                        // OpenAI Responses path: normalize effort via manifest normalization_policy.
+                        let e = effort
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
                         (
                             responses_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_responses as OpenAiParse,
@@ -210,14 +157,22 @@ impl Llm {
                         // Anthropic Messages path: normalize effort (none|minimal → omit).
                         let e = effort.and_then(normalize_effort_for_anthropic_route);
                         (
-                            anthropic_body(cfg, system_prompt, history, tools, effective_model, e),
+                            anthropic_body(
+                                cfg,
+                                system_prompt,
+                                history,
+                                tools,
+                                effective_model,
+                                e,
+                                "databricks_v2",
+                            ),
                             parse_anthropic as OpenAiParse,
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
-                        let e =
-                            effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
+                        // MLflow Chat path (OpenAI-shaped): normalize effort via manifest.
+                        let e = effort
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
                         (
                             openai_body(cfg, system_prompt, history, tools, effective_model, e),
                             parse_openai as OpenAiParse,
@@ -227,6 +182,17 @@ impl Llm {
                 .await
             }
         };
+        // Stamp the actually-requested model into the response so the usage
+        // accumulation path can derive pricingIdentity. For OpenAi/Databricks
+        // this is done per-response inside openai_request_for_model (where the
+        // resolved request_model is known after mesh/auto resolution). For the
+        // remaining providers the effective_model IS the request model.
+        let result = result.map(|mut r| {
+            if r.request_model.is_none() {
+                r.request_model = Some(effective_model.to_string());
+            }
+            r
+        });
         // Stamp the effective model into Llm errors so log lines carry
         // `llm: (model-name) 404 Not Found: …` instead of the bare status.
         // The `llm: ` prefix comes from `Display for AgentError::Llm`; the
@@ -305,37 +271,32 @@ impl Llm {
                 }
                 Provider::OpenAi | Provider::Databricks => {
                     let r = self
-                        .openai_request(
-                            cfg,
-                            effective_model,
-                            false,
-                            |use_responses, request_model| {
-                                if use_responses {
-                                    (
-                                        json!({
-                                            "model": request_model,
-                                            "max_output_tokens": max_output_tokens,
-                                            "instructions": system_prompt,
-                                            "input": user_prompt,
-                                        }),
-                                        parse_responses as OpenAiParse,
-                                    )
-                                } else {
-                                    (
-                                        json!({
-                                            "model": request_model,
-                                            "stream": false,
-                                            "max_completion_tokens": max_output_tokens,
-                                            "messages": [
-                                                { "role": "system", "content": system_prompt },
-                                                { "role": "user", "content": user_prompt },
-                                            ],
-                                        }),
-                                        parse_openai as OpenAiParse,
-                                    )
-                                }
-                            },
-                        )
+                        .openai_request(cfg, effective_model, |use_responses, request_model| {
+                            if use_responses {
+                                (
+                                    json!({
+                                        "model": request_model,
+                                        "max_output_tokens": max_output_tokens,
+                                        "instructions": system_prompt,
+                                        "input": user_prompt,
+                                    }),
+                                    parse_responses as OpenAiParse,
+                                )
+                            } else {
+                                (
+                                    json!({
+                                        "model": request_model,
+                                        "stream": false,
+                                        "max_completion_tokens": max_output_tokens,
+                                        "messages": [
+                                            { "role": "system", "content": system_prompt },
+                                            { "role": "user", "content": user_prompt },
+                                        ],
+                                    }),
+                                    parse_openai as OpenAiParse,
+                                )
+                            }
+                        })
                         .await?;
                     Ok(r.text)
                 }
@@ -396,7 +357,7 @@ impl Llm {
 
     async fn post_anthropic(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
         let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-        post(&self.http, &url, body, false, cfg.llm_timeout, |r| {
+        post(&self.http, &url, body, cfg.llm_timeout, |r| {
             r.header("x-api-key", &cfg.api_key)
                 .header("anthropic-version", &cfg.anthropic_api_version)
         })
@@ -404,196 +365,21 @@ impl Llm {
         .map_err(PostError::into_agent)
     }
 
-    /// OpenAI dispatch with Buzz's relay-mesh `auto` policy layered over the
-    /// normal endpoint selection. When enabled, a live virtual `mesh` model is
-    /// preferred; if the mesh contracts between discovery and inference, retry
-    /// the same request once through the router's ordinary `auto` model.
+    /// OpenAI dispatch. The configured model is sent as given: callers that
+    /// route through a mesh (Buzz shared compute) resolve their own model name
+    /// before spawning the agent, so nothing here needs to know about meshes.
     async fn openai_request<F>(
         &self,
         cfg: &Config,
         effective_model: &str,
-        tools_supplied: bool,
         mut build: F,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnMut(bool, &str) -> (Value, OpenAiParse) + Send,
     {
-        let request_model = self.resolve_openai_model(cfg, effective_model).await;
-        let adaptive_mesh =
-            effective_model == MESH_AUTO_MODEL_ID && request_model == MESH_VIRTUAL_MODEL_ID;
-
-        let first = self
-            .openai_request_for_model(cfg, &request_model, &mut build)
-            .await;
-        match first {
-            Err(PostError::MeshFallback(detail)) if adaptive_mesh => {
-                self.cool_down_collective().await;
-                tracing::warn!(
-                    configured_model = effective_model,
-                    attempted_model = MESH_VIRTUAL_MODEL_ID,
-                    fallback_model = MESH_AUTO_MODEL_ID,
-                    provider_message = detail,
-                    "relay-mesh auto: collective request failed; retrying once with auto"
-                );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
-            }
-            Ok(response)
-                if adaptive_mesh
-                    && tools_supplied
-                    && response.tool_calls.is_empty()
-                    && looks_like_unstructured_tool_call(&response.text) =>
-            {
-                self.cool_down_collective().await;
-                tracing::warn!(
-                    configured_model = effective_model,
-                    attempted_model = MESH_VIRTUAL_MODEL_ID,
-                    fallback_model = MESH_AUTO_MODEL_ID,
-                    "relay-mesh auto: collective response emitted unstructured tool markup; retrying once with auto"
-                );
-                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
-                    .await
-                    .map_err(PostError::into_agent)
-            }
-            Ok(response) => Ok(response),
-            Err(error) => Err(error.into_agent()),
-        }
-    }
-
-    async fn cool_down_collective(&self) {
-        let now = Instant::now();
-        let mut state = self.mesh_auto_state.lock().await;
-        state.last_checked = Some(now);
-        state.consecutive_available = 0;
-        state.collective_enabled = false;
-        state.cooldown_until = Some(now + MESH_AUTO_COOLDOWN);
-    }
-
-    /// Resolve the model for one OpenAI-family request. Explicit model choices
-    /// are never changed. Relay-mesh `auto` dynamically follows the short-lived
-    /// `/models` catalog so long-running agents can adopt or leave MoA without
-    /// being restarted.
-    async fn resolve_openai_model(&self, cfg: &Config, effective_model: &str) -> String {
-        if cfg.provider != Provider::OpenAi
-            || !cfg.prefer_mesh_for_auto
-            || effective_model != MESH_AUTO_MODEL_ID
-        {
-            return effective_model.to_string();
-        }
-
-        let mut state = self.mesh_auto_state.lock().await;
-        let now = Instant::now();
-        if let Some(cooldown_until) = state.cooldown_until {
-            if now < cooldown_until {
-                return MESH_AUTO_MODEL_ID.to_string();
-            }
-            state.cooldown_until = None;
-        }
-        if state
-            .last_checked
-            .is_some_and(|checked_at| checked_at.elapsed() < MESH_AUTO_CATALOG_TTL)
-        {
-            return if state.collective_enabled {
-                MESH_VIRTUAL_MODEL_ID.to_string()
-            } else {
-                MESH_AUTO_MODEL_ID.to_string()
-            };
-        }
-
-        let observation = self.observe_mesh_virtual_model(cfg).await;
-        let checked_at = Instant::now();
-        state.last_checked = Some(checked_at);
-        match observation {
-            MeshCatalogObservation::Available => {
-                state.consecutive_available = state.consecutive_available.saturating_add(1);
-                if state.consecutive_available >= MESH_AUTO_ENABLE_OBSERVATIONS {
-                    state.collective_enabled = true;
-                }
-            }
-            MeshCatalogObservation::Unavailable => {
-                if state.collective_enabled {
-                    state.cooldown_until = Some(checked_at + MESH_AUTO_COOLDOWN);
-                }
-                state.consecutive_available = 0;
-                state.collective_enabled = false;
-            }
-            // A failed catalog check is not evidence that a previously stable
-            // mesh disappeared. Preserve the last confirmed state; inference
-            // itself remains authoritative and has the narrow 503 fallback.
-            MeshCatalogObservation::Unknown => {}
-        }
-        let request_model = if state.collective_enabled {
-            MESH_VIRTUAL_MODEL_ID
-        } else {
-            MESH_AUTO_MODEL_ID
-        };
-        tracing::debug!(
-            configured_model = effective_model,
-            request_model,
-            "relay-mesh auto: resolved request model from live catalog"
-        );
-        request_model.to_string()
-    }
-
-    async fn observe_mesh_virtual_model(&self, cfg: &Config) -> MeshCatalogObservation {
-        let url = format!("{}/models", cfg.base_url.trim_end_matches('/'));
-        let bearer = match self.auth.bearer().await {
-            Ok(bearer) => bearer,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: catalog auth unavailable; preserving last confirmed route"
-                );
-                return MeshCatalogObservation::Unknown;
-            }
-        };
-        let response = match self
-            .http
-            .get(&url)
-            .bearer_auth(bearer)
-            .timeout(MESH_AUTO_CATALOG_TIMEOUT)
-            .send()
+        self.openai_request_for_model(cfg, effective_model, &mut build)
             .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: catalog probe failed; preserving last confirmed route"
-                );
-                return MeshCatalogObservation::Unknown;
-            }
-        };
-        if !response.status().is_success() {
-            tracing::debug!(
-                status = %response.status(),
-                "relay-mesh auto: catalog probe was not successful; preserving last confirmed route"
-            );
-            return MeshCatalogObservation::Unknown;
-        }
-        match response.json::<Value>().await {
-            Ok(catalog) => {
-                let Some(available) = mesh_catalog_supports_collective(&catalog) else {
-                    tracing::debug!(
-                        "relay-mesh auto: catalog response has no data array; preserving last confirmed route"
-                    );
-                    return MeshCatalogObservation::Unknown;
-                };
-                if available {
-                    MeshCatalogObservation::Available
-                } else {
-                    MeshCatalogObservation::Unavailable
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "relay-mesh auto: invalid catalog response; preserving last confirmed route"
-                );
-                MeshCatalogObservation::Unknown
-            }
-        }
+            .map_err(PostError::into_agent)
     }
 
     /// Dispatch one OpenAI request for an already-resolved model. Endpoint
@@ -618,6 +404,10 @@ impl Llm {
                 self.post_openai(cfg, "/responses", &body, request_model)
                     .await?,
             )
+            .map(|mut r| {
+                r.request_model = Some(request_model.to_string());
+                r
+            })
             .map_err(PostError::from);
         }
         let (body, parse) = build(false, request_model);
@@ -625,7 +415,12 @@ impl Llm {
             .post_openai(cfg, "/chat/completions", &body, request_model)
             .await
         {
-            Ok(value) => parse(value).map_err(PostError::from),
+            Ok(value) => parse(value)
+                .map(|mut r| {
+                    r.request_model = Some(request_model.to_string());
+                    r
+                })
+                .map_err(PostError::from),
             Err(PostError::Agent(error))
                 if cfg.openai_api == OpenAiApi::Auto && self.try_upgrade(&error) =>
             {
@@ -634,6 +429,10 @@ impl Llm {
                     self.post_openai(cfg, "/responses", &body, request_model)
                         .await?,
                 )
+                .map(|mut r| {
+                    r.request_model = Some(request_model.to_string());
+                    r
+                })
                 .map_err(PostError::from)
             }
             Err(error) => Err(error),
@@ -649,7 +448,7 @@ impl Llm {
     where
         F: FnOnce(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
     {
-        let route = databricks_v2_route_for_model(effective_model);
+        let route = databricks_v2_route(effective_model);
         let (body, parse) = build(route);
         parse(
             self.post_openai(cfg, databricks_v2_path(route), &body, effective_model)
@@ -697,14 +496,9 @@ impl Llm {
         let mut bearer = self.auth.bearer().await.map_err(PostError::from)?;
         let mut refreshed = false;
         loop {
-            match post(
-                &self.http,
-                &url,
-                body_ref,
-                effective_model == MESH_VIRTUAL_MODEL_ID,
-                cfg.llm_timeout,
-                |r| r.bearer_auth(&bearer),
-            )
+            match post(&self.http, &url, body_ref, cfg.llm_timeout, |r| {
+                r.bearer_auth(&bearer)
+            })
             .await
             {
                 Err(PostError::Agent(AgentError::LlmAuth(_))) if !refreshed => {
@@ -774,6 +568,7 @@ fn anthropic_body(
     tools: &[ToolDef],
     effective_model: &str,
     effort: Option<ThinkingEffort>,
+    provider: &str,
 ) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     let mut pending: Vec<Value> = Vec::new();
@@ -845,8 +640,12 @@ fn anthropic_body(
     let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
         "system": system_value, "messages": messages });
     if let Some(e) = effort {
-        let (thinking, output_config) =
-            crate::config::anthropic_thinking_config(effective_model, e, cfg.max_output_tokens);
+        let (thinking, output_config) = crate::config::anthropic_thinking_config(
+            provider,
+            effective_model,
+            e,
+            cfg.max_output_tokens,
+        );
         if let Some(t) = thinking {
             body["thinking"] = t;
         }
@@ -1167,56 +966,33 @@ fn is_responses_required_error(body: &str) -> bool {
         || b.contains("use the responses api")
 }
 
-/// OpenAI-family code names that appear as their own segment in a Databricks v2
-/// endpoint name (the GPT-5 launch aliases). The `gpt` family itself is matched
-/// separately by segment prefix so `gpt`, `gpt5`, and the `gpt` of a split
-/// `gpt-5` all qualify.
-const DATABRICKS_V2_OPENAI_CODE_NAMES: &[&str] = &["sol", "luna", "terra"];
-
-/// Anthropic (Claude) family and release code names that appear as their own
-/// segment in a Databricks v2 endpoint name — the `claude` prefix, the family
-/// names (`opus`, `sonnet`, `haiku`), and the release code names (`mythos`,
-/// `fable`). Getting a Claude model onto the Anthropic Messages route is what
-/// lets it carry a `cache_control` breakpoint; an endpoint that matches none of
-/// these falls through to the MLflow (OpenAI-wire) path, where Anthropic prompt
-/// caching is structurally impossible and the discount is silently lost.
-const DATABRICKS_V2_CLAUDE_NAMES: &[&str] =
-    &["claude", "opus", "sonnet", "haiku", "mythos", "fable"];
-
-/// Split a Databricks v2 endpoint name into its lowercase alphanumeric segments,
-/// breaking on any non-alphanumeric delimiter (`-`, `_`, `.`, `/`, …). E.g.
-/// `Databricks-Claude-Opus-5` -> `["databricks", "claude", "opus", "5"]`.
-fn model_name_segments(model: &str) -> Vec<String> {
-    model
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
-fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
-    // The v2 catalog exposes no family field, so the wire format is inferred
-    // from the endpoint name. Discovery deliberately keeps arbitrary custom
-    // aliases, so we match whole name *segments* rather than raw substrings: a
-    // substring test would misroute unrelated names — `consolidated-llama`
-    // (`sol`), `terraform-coder` (`terra`), `corpus-reranker`/`octopus-model`
-    // (`opus`) — onto a wire whose request shape their backend can't parse,
-    // turning a caching optimization into a hard request/parse failure. Segment
-    // matching still accepts real prefixed names like `goose-opus-5`.
-    let segments = model_name_segments(model);
-    let has_named_segment =
-        |names: &[&str]| segments.iter().any(|seg| names.contains(&seg.as_str()));
-    // `gpt` family: any segment beginning with `gpt` — covers `gpt`, `gpt5`, and
-    // the `gpt` segment of a split `gpt-5`, without matching mid-word.
-    let is_gpt_family = segments.iter().any(|seg| seg.starts_with("gpt"));
-    // OpenAI is checked before Claude so a name carrying both markers resolves
-    // to the OpenAI wire (preserving the prior `gpt-5`-first precedence).
-    if is_gpt_family || has_named_segment(DATABRICKS_V2_OPENAI_CODE_NAMES) {
-        DatabricksV2Route::OpenAiResponses
-    } else if has_named_segment(DATABRICKS_V2_CLAUDE_NAMES) {
-        DatabricksV2Route::AnthropicMessages
-    } else {
-        DatabricksV2Route::MlflowChatCompletions
+/// Resolve the Databricks v2 AI Gateway wire route for `model` from the manifest.
+///
+/// The route is a capability of the `(databricks_v2, model)` pair, owned by
+/// `scripts/model-capabilities.json` and resolved by the shared interpreter — the
+/// same authority that drives effort/label resolution. This function only maps the
+/// manifest's route enum onto the three concrete wire routes this dispatch path can
+/// serve; it holds no routing knowledge of its own.
+///
+/// The manifest enum carries two non-wire variants that cannot occur here for a
+/// concrete Databricks v2 model at dispatch time:
+/// - `NotApplicable` is produced only for non-`databricks_v2` providers, and this
+///   seam is reached only under `Provider::DatabricksV2`.
+/// - `RouteUnknown` is produced only for a blank model id, which `Config` rejects at
+///   startup (`DATABRICKS_MODEL` required) and `session/set_model` rejects at runtime
+///   (empty `modelId` → `invalid_params`), so `effective_model` is never blank here.
+///
+/// Both are folded into `MlflowChatCompletions` — the manifest's own concrete-unknown
+/// fallback and the route a blank id would historically have taken — so an unforeseen
+/// reshape degrades to the safe OpenAI-wire route rather than panicking.
+fn databricks_v2_route(model: &str) -> DatabricksV2Route {
+    use crate::model_capabilities::DatabricksV2Route as Manifest;
+    match crate::model_capabilities::resolve("databricks_v2", model).databricks_v2_wire_route {
+        Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
+        Manifest::AnthropicMessages => DatabricksV2Route::AnthropicMessages,
+        Manifest::MlflowChat | Manifest::NotApplicable | Manifest::RouteUnknown => {
+            DatabricksV2Route::MlflowChatCompletions
+        }
     }
 }
 
@@ -1330,27 +1106,33 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
-    let input_tokens = sum_usage(&v, &["input_tokens"]);
-    let output_tokens = sum_usage(&v, &["output_tokens"]);
+    let input_tokens = sum_usage(&v, &["input_tokens"]).and_then(SumUsageResult::into_exact);
+    let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // The Responses API nests the cache split under `input_tokens_details`.
     let cached_input_tokens = usage_first(
         &v,
         &["cache_read_input_tokens"],
         &[("input_tokens_details", "cached_tokens")],
     );
+    // Responses API does not expose cache-write tokens today; stays None.
+    let cache_write_tokens: Option<u64> = None;
     // Responses API reports a genuine provider total. Read it directly —
     // never derived, so it stays None when the provider omits it.
-    let total_tokens = sum_usage(&v, &["total_tokens"]);
+    let total_tokens = sum_usage(&v, &["total_tokens"]).and_then(SumUsageResult::into_exact);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed: false, // input_tokens is a single field; cannot overflow
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         total_tokens,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (openai_request_for_model) after parse.
+        request_model: None,
     })
 }
 
@@ -1358,9 +1140,32 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
     match s {
         Some("end_turn" | "stop") => ProviderStop::EndTurn,
         Some("tool_use" | "tool_calls") => ProviderStop::ToolUse,
-        Some("max_tokens" | "length") => ProviderStop::MaxTokens,
+        Some("max_tokens" | "length" | "model_context_window_exceeded") => ProviderStop::MaxTokens,
         Some("refusal" | "content_filter") => ProviderStop::Refusal,
         _ => ProviderStop::Other,
+    }
+}
+
+/// Result of a multi-field token sum — distinguishes a successful total from an
+/// arithmetic overflow so callers can propagate the overflow signal rather than
+/// silently clamping to `u64::MAX`.
+#[derive(Debug, PartialEq)]
+enum SumUsageResult {
+    /// At least one field was present and the total did not overflow.
+    Exact(u64),
+    /// At least one field was present but the cumulative sum overflowed `u64`.
+    Overflow,
+}
+
+impl SumUsageResult {
+    /// Returns `Some(n)` when exact, `None` when overflow or when the caller
+    /// needs to signal an explicit absence.  Single-field callers whose sums
+    /// cannot overflow use this to convert back to `Option<u64>`.
+    fn into_exact(self) -> Option<u64> {
+        match self {
+            SumUsageResult::Exact(n) => Some(n),
+            SumUsageResult::Overflow => None,
+        }
     }
 }
 
@@ -1369,23 +1174,42 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
 /// present is added; a field that is missing contributes 0. This keeps the
 /// result an inclusive total (so cached tokens are never silently dropped)
 /// while still distinguishing "no usage reported" from "usage was zero".
-fn sum_usage(v: &Value, fields: &[&str]) -> Option<u64> {
+///
+/// Returns [`SumUsageResult::Overflow`] if the cumulative total exceeds `u64::MAX`.
+/// Single-field callers whose sums cannot overflow may call `.into_exact()` to
+/// convert back to `Option<u64>` without loss.
+fn sum_usage(v: &Value, fields: &[&str]) -> Option<SumUsageResult> {
     let usage = v.get("usage")?;
     let mut total: u64 = 0;
     let mut saw_any = false;
+    let mut overflowed = false;
     for f in fields {
         if let Some(n) = usage.get(*f).and_then(Value::as_u64) {
-            total = total.saturating_add(n);
+            match total.checked_add(n) {
+                Some(t) => total = t,
+                None => overflowed = true,
+            }
             saw_any = true;
         }
     }
-    saw_any.then_some(total)
+    if !saw_any {
+        return None;
+    }
+    if overflowed {
+        Some(SumUsageResult::Overflow)
+    } else {
+        Some(SumUsageResult::Exact(total))
+    }
 }
 
 /// Input-token total for Anthropic / Databricks (Anthropic-style) responses.
 /// `input_tokens` alone EXCLUDES cached tokens, so we sum it with the two
 /// cache fields to get the inclusive total the context budget must gate on.
-fn anthropic_input_tokens(v: &Value) -> Option<u64> {
+///
+/// Returns [`SumUsageResult::Overflow`] when the sum of the three fields
+/// exceeds `u64::MAX` — the caller must propagate the overflow signal rather
+/// than clamping.
+fn anthropic_input_tokens(v: &Value) -> Option<SumUsageResult> {
     sum_usage(
         v,
         &[
@@ -1415,7 +1239,7 @@ fn anthropic_input_tokens(v: &Value) -> Option<u64> {
 /// The two never collide here: the router sends `claude*` models to the
 /// Anthropic route, so `parse_openai` only ever sees inclusive `prompt_tokens`.
 fn openai_chat_input_tokens(v: &Value) -> Option<u64> {
-    sum_usage(v, &["prompt_tokens"])
+    sum_usage(v, &["prompt_tokens"]).and_then(SumUsageResult::into_exact)
 }
 
 /// First present value among `usage.<field>` and `usage.<nested>.<leaf>` pairs.
@@ -1576,23 +1400,38 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
             }
         }
     }
-    let input_tokens = anthropic_input_tokens(&v);
-    let output_tokens = sum_usage(&v, &["output_tokens"]);
+    // anthropic_input_tokens() returns Option<SumUsageResult> because it sums
+    // three fields that can collectively overflow u64. Propagate the overflow
+    // signal via `input_tokens_overflowed` so the run loop can poison the
+    // turn accumulator rather than treating u64::MAX as an exact reading.
+    let (input_tokens, input_tokens_overflowed) = match anthropic_input_tokens(&v) {
+        Some(SumUsageResult::Exact(n)) => (Some(n), false),
+        Some(SumUsageResult::Overflow) => (None, true),
+        None => (None, false),
+    };
+    let output_tokens = sum_usage(&v, &["output_tokens"]).and_then(SumUsageResult::into_exact);
     // Anthropic reports the cache split flat on `usage`. Note this is already
     // part of `input_tokens` above, which sums it in deliberately.
     let cached_input_tokens = usage_first(&v, &["cache_read_input_tokens"], &[]);
+    // Anthropic reports cache-creation tokens as `cache_creation_input_tokens`;
+    // also a subset of `input_tokens` (already folded in above).
+    let cache_write_tokens = usage_first(&v, &["cache_creation_input_tokens"], &[]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed,
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         // Anthropic reports only category counts; NIP-AM forbids deriving a
         // total from them. Always None for this provider.
         total_tokens: None,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (complete) after parse.
+        request_model: None,
     })
 }
 
@@ -1690,21 +1529,29 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
     }
     dedupe_provider_ids(&mut tool_calls);
     let input_tokens = openai_chat_input_tokens(&v);
-    let output_tokens = sum_usage(&v, &["completion_tokens"]);
+    let output_tokens = sum_usage(&v, &["completion_tokens"]).and_then(SumUsageResult::into_exact);
     let cached_input_tokens = openai_chat_cached_tokens(&v);
+    // OpenAI Chat Completions reports cache-write tokens under
+    // `prompt_tokens_details.cache_write_tokens`. A subset of `prompt_tokens`.
+    let cache_write_tokens =
+        usage_first(&v, &[], &[("prompt_tokens_details", "cache_write_tokens")]);
     // OpenAI Chat Completions reports a genuine provider total. Read it
     // directly — never derived, so it stays None when the provider omits it.
-    let total_tokens = sum_usage(&v, &["total_tokens"]);
+    let total_tokens = sum_usage(&v, &["total_tokens"]).and_then(SumUsageResult::into_exact);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
         input_tokens,
+        input_tokens_overflowed: false, // prompt_tokens is a single field; cannot overflow
         cached_input_tokens,
+        cache_write_tokens,
         output_tokens,
         total_tokens,
         reasoning,
         reasoning_details: None,
+        // Stamped by the dispatch layer (openai_request_for_model) after parse.
+        request_model: None,
     })
 }
 
@@ -1974,23 +1821,16 @@ fn terminal_llm_error(elapsed: std::time::Duration, attempts: u32, detail: &str)
     ))
 }
 
-/// Internal HTTP failure that preserves a mesh-specific MoA failure as a
-/// typed signal. This covers both pre-inference eligibility rejection and a
-/// structured `moa_failure` from workers/reducers. It is consumed inside
-/// `openai_request`: an adaptive `auto` call falls back once, while an explicit
-/// `mesh` call is surfaced as the ordinary LLM error callers already
-/// understand.
+/// Internal HTTP failure wrapper for the OpenAI-family `post` helper.
 #[derive(Debug)]
 enum PostError {
     Agent(AgentError),
-    MeshFallback(String),
 }
 
 impl PostError {
     fn into_agent(self) -> AgentError {
         match self {
             Self::Agent(error) => error,
-            Self::MeshFallback(detail) => AgentError::Llm(detail),
         }
     }
 }
@@ -2001,37 +1841,10 @@ impl From<AgentError> for PostError {
     }
 }
 
-fn is_mesh_moa_unavailable_body(body: &str) -> bool {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some(MESH_MOA_UNAVAILABLE_MESSAGE)
-}
-
-fn is_mesh_moa_failure_body(body: &str) -> bool {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/type")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("moa_failure")
-}
-
 async fn post<F>(
     http: &Client,
     url: &str,
     body: &Value,
-    detect_mesh_fallback: bool,
     base_timeout: std::time::Duration,
     apply: F,
 ) -> Result<Value, PostError>
@@ -2095,13 +1908,6 @@ where
         }
         if status.is_server_error() || status == 429 || status.as_u16() == 499 {
             let body = read_error_body(resp).await;
-            let mesh_fallback = detect_mesh_fallback
-                && (status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-                    && is_mesh_moa_unavailable_body(&body)
-                    || status.is_server_error() && is_mesh_moa_failure_body(&body));
-            if mesh_fallback {
-                return Err(PostError::MeshFallback(format!("{status}: {body}")));
-            }
             if attempt + 1 < MAX_RETRIES {
                 tracing::warn!(
                     attempt = attempt + 1,
@@ -2788,6 +2594,7 @@ mod tests {
             system_prompt: "system".into(),
             max_rounds: 10,
             max_output_tokens: 1024,
+            max_token_recoveries: 3,
             llm_timeout: Duration::from_secs(10),
             tool_timeout: Duration::from_secs(10),
             mcp_init_timeout: Duration::from_secs(10),
@@ -2810,7 +2617,6 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
-            prefer_mesh_for_auto: false,
             hints_enabled: true,
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
@@ -2845,24 +2651,6 @@ mod tests {
                         "type": "server_error",
                         "code": "service_unavailable",
                     }
-                }),
-            }
-        }
-
-        fn moa_failure(status: u16, code: &str, message: &str) -> Self {
-            Self {
-                status,
-                body: json!({
-                    "choices": [{
-                        "finish_reason": "error",
-                        "message": { "content": message, "role": "assistant" },
-                    }],
-                    "error": {
-                        "message": message,
-                        "type": "moa_failure",
-                        "code": code,
-                    },
-                    "model": "mesh",
                 }),
             }
         }
@@ -2954,16 +2742,6 @@ mod tests {
         (base_url, captured)
     }
 
-    fn model_catalog(ids: &[&str]) -> Value {
-        json!({
-            "object": "list",
-            "data": ids
-                .iter()
-                .map(|id| json!({ "id": id, "object": "model" }))
-                .collect::<Vec<_>>(),
-        })
-    }
-
     fn chat_response(text: &str) -> Value {
         json!({
             "choices": [{
@@ -2988,43 +2766,6 @@ mod tests {
         .await
     }
 
-    async fn complete_model_with_tool(
-        llm: &Llm,
-        cfg: &Config,
-        model: &str,
-    ) -> Result<LlmResponse, AgentError> {
-        llm.complete(
-            cfg,
-            "system",
-            &[HistoryItem::User("add two numbers".into())],
-            &[ToolDef {
-                name: "add_numbers".into(),
-                description: "Add two numbers".into(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "a": {"type": "number"},
-                        "b": {"type": "number"}
-                    },
-                    "required": ["a", "b"]
-                }),
-            }],
-            model,
-        )
-        .await
-    }
-
-    async fn expire_mesh_catalog_check(llm: &Llm) {
-        llm.mesh_auto_state.lock().await.last_checked =
-            Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
-    }
-
-    async fn expire_mesh_auto_cooldown(llm: &Llm) {
-        let mut state = llm.mesh_auto_state.lock().await;
-        state.last_checked = Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
-        state.cooldown_until = Some(Instant::now() - std::time::Duration::from_secs(1));
-    }
-
     fn posted_models(requests: &[CapturedHttpRequest]) -> Vec<&str> {
         requests
             .iter()
@@ -3033,381 +2774,59 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
-    async fn mesh_auto_requires_two_stable_catalog_observations() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("direct")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("collective")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "direct"
-        );
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "collective"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto", "mesh"]);
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_does_not_enable_while_second_model_flaps() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("one")),
-            StubHttpResponse::ok(model_catalog(&["model-a"])),
-            StubHttpResponse::ok(chat_response("two")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("three")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("four")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        for _ in 0..4 {
-            complete_model(&llm, &config, "auto").await.unwrap();
-            expire_mesh_catalog_check(&llm).await;
-        }
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "auto", "auto", "mesh"]
-        );
-    }
-
-    #[test]
-    fn collective_catalog_requires_two_distinct_physical_models() {
-        assert_eq!(mesh_catalog_supports_collective(&json!({})), None);
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&[])),
-            Some(false)
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&["model-a", "mesh"])),
-            Some(false)
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&[
-                "org/model@main:Q4",
-                "org/model:Q4",
-                "mesh"
-            ])),
-            Some(false),
-            "two spellings of one model are not collective capacity"
-        );
-        assert_eq!(
-            mesh_catalog_supports_collective(&model_catalog(&["model-a", "model-b", "mesh"])),
-            Some(true)
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_tracks_models_appearing_disappearing_and_reappearing() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&[])),
-            StubHttpResponse::ok(chat_response("zero")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
-            StubHttpResponse::ok(chat_response("one")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("two-first-observation")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("two-stable")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
-            StubHttpResponse::ok(chat_response("contracted")),
-            StubHttpResponse::ok(model_catalog(&[])),
-            StubHttpResponse::ok(chat_response("empty-again")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("rejoin-first-observation")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("rejoined-stable")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        for call in 0..8 {
-            if call == 5 {
-                expire_mesh_auto_cooldown(&llm).await;
-            } else if call > 0 {
-                expire_mesh_catalog_check(&llm).await;
-            }
-            complete_model(&llm, &config, "auto").await.unwrap();
-        }
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "auto", "auto", "mesh", "auto", "auto", "auto", "mesh"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            8
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_falls_back_once_and_cools_down_when_mesh_contracts() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::error(503, MESH_MOA_UNAVAILABLE_MESSAGE),
-            StubHttpResponse::ok(chat_response("fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "fallback"
-        );
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "cooldown request must not re-probe the catalog"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_falls_back_once_when_moa_reducer_fails() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::moa_failure(
-                502,
-                "all_reducers_failed",
-                "Reducer failed: unsupported chat template",
-            ),
-            StubHttpResponse::ok(chat_response("fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "fallback"
-        );
-        assert_eq!(
-            complete_model(&llm, &config, "auto").await.unwrap().text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "mesh-specific failure must enter cooldown without re-probing"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_retries_unstructured_tool_markup_through_auto() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response("warmup")),
-            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
-            StubHttpResponse::ok(chat_response(
-                "<|tool_call>call:add_numbers{a:17,b:25}<tool_call|>",
-            )),
-            StubHttpResponse::ok(chat_response("safe fallback")),
-            StubHttpResponse::ok(chat_response("cooldown")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        expire_mesh_catalog_check(&llm).await;
-        assert_eq!(
-            complete_model_with_tool(&llm, &config, "auto")
-                .await
-                .unwrap()
-                .text,
-            "safe fallback"
-        );
-        assert_eq!(
-            complete_model_with_tool(&llm, &config, "auto")
-                .await
-                .unwrap()
-                .text,
-            "cooldown"
-        );
-
-        let requests = captured.lock().await;
-        assert_eq!(
-            posted_models(&requests),
-            vec!["auto", "mesh", "auto", "auto"]
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.path == "/v1/models")
-                .count(),
-            2,
-            "pseudo tool markup must enter cooldown without another catalog probe"
-        );
-    }
-
-    #[tokio::test]
-    async fn mesh_auto_catalog_failure_fails_open_to_auto() {
-        let (base_url, captured) = spawn_sequence_stub(vec![
-            StubHttpResponse::error(500, "catalog unavailable"),
-            StubHttpResponse::ok(chat_response("direct")),
-        ])
-        .await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto"]);
-    }
-
-    #[tokio::test]
-    async fn generic_openai_auto_does_not_probe_or_select_mesh() {
-        let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("provider auto"))]).await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = false;
-        let llm = Llm::new(&config).unwrap();
-
-        complete_model(&llm, &config, "auto").await.unwrap();
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["auto"]);
-        assert!(requests.iter().all(|request| request.path != "/v1/models"));
-    }
-
+    /// An explicit model is sent verbatim and never rewritten to something
+    /// else. A server error is retried under the *same* model (the ordinary
+    /// transport retry) and then surfaced -- there is no second model to fall
+    /// back to now that MeshLLM resolves `mesh` server-side.
     #[tokio::test]
     async fn explicit_models_are_never_rewritten_or_fallback_retried() {
-        let (base_url, captured) = spawn_sequence_stub(vec![StubHttpResponse::error(
-            503,
-            MESH_MOA_UNAVAILABLE_MESSAGE,
-        )])
+        let (base_url, captured) = spawn_sequence_stub(
+            (0..MAX_RETRIES)
+                .map(|_| StubHttpResponse::error(503, "upstream unavailable"))
+                .collect(),
+        )
         .await;
         let mut config = cfg(Provider::OpenAi);
         config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
         let llm = Llm::new(&config).unwrap();
 
         let error = complete_model(&llm, &config, "mesh").await.unwrap_err();
-        assert!(error.to_string().contains(MESH_MOA_UNAVAILABLE_MESSAGE));
+        assert!(error.to_string().contains("upstream unavailable"));
         let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["mesh"]);
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.method == "POST")
+                .all(|request| request.body.as_ref().and_then(|b| b.get("model"))
+                    == Some(&json!("mesh"))),
+            "every attempt must keep the explicit model: {:?}",
+            posted_models(&requests)
+        );
         assert!(requests.iter().all(|request| request.path != "/v1/models"));
     }
 
+    /// Whatever model the config names is what goes on the wire -- including
+    /// `auto`, which is a real provider model name for plain OpenAI hosts. A
+    /// caller routing through a mesh resolves its own name before spawning the
+    /// agent, so there is nothing to rewrite here and no catalog to probe.
     #[tokio::test]
-    async fn explicit_real_model_bypasses_mesh_auto_policy() {
-        let (base_url, captured) =
-            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("explicit"))]).await;
-        let mut config = cfg(Provider::OpenAi);
-        config.base_url = base_url;
-        config.prefer_mesh_for_auto = true;
-        let llm = Llm::new(&config).unwrap();
+    async fn the_configured_model_is_sent_verbatim() {
+        for model in ["auto", "mesh", "unsloth/Qwen3-8B-GGUF:Q4_K_M"] {
+            let (base_url, captured) =
+                spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("ok"))]).await;
+            let mut config = cfg(Provider::OpenAi);
+            config.base_url = base_url;
+            let llm = Llm::new(&config).unwrap();
 
-        let response = complete_model(&llm, &config, "model-a").await.unwrap();
-        assert_eq!(response.text, "explicit");
-        let requests = captured.lock().await;
-        assert_eq!(posted_models(&requests), vec!["model-a"]);
-        assert!(requests.iter().all(|request| request.path != "/v1/models"));
-    }
-
-    #[test]
-    fn mesh_unavailable_classifier_requires_exact_openai_error_message() {
-        assert!(is_mesh_moa_unavailable_body(
-            &StubHttpResponse::error(503, MESH_MOA_UNAVAILABLE_MESSAGE)
-                .body
-                .to_string()
-        ));
-        assert!(!is_mesh_moa_unavailable_body(
-            &StubHttpResponse::error(503, "some other outage")
-                .body
-                .to_string()
-        ));
-    }
-
-    #[test]
-    fn mesh_failure_classifier_requires_structured_moa_failure_type() {
-        assert!(is_mesh_moa_failure_body(
-            &StubHttpResponse::moa_failure(
-                502,
-                "all_reducers_failed",
-                "Reducer failed: unsupported chat template",
-            )
-            .body
-            .to_string()
-        ));
-        assert!(!is_mesh_moa_failure_body(
-            &StubHttpResponse::error(502, "some other bad gateway")
-                .body
-                .to_string()
-        ));
+            let response = complete_model(&llm, &config, model).await.unwrap();
+            assert_eq!(response.text, "ok");
+            let requests = captured.lock().await;
+            assert_eq!(posted_models(&requests), vec![model]);
+            assert!(
+                requests.iter().all(|request| request.path != "/v1/models"),
+                "no catalog probe belongs on this path"
+            );
+        }
     }
 
     fn image_history() -> Vec<HistoryItem> {
@@ -3446,6 +2865,7 @@ mod tests {
             &[],
             "model",
             None,
+            "anthropic",
         );
         let content = &body["messages"][2]["content"][0]["content"];
         assert_eq!(content[0]["type"], "text");
@@ -3692,6 +3112,17 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_context_window_exhaustion_is_truncation() {
+        let v = serde_json::json!({
+            "stop_reason": "model_context_window_exceeded",
+            "content": [{"type": "text", "text": "partial text"}],
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+        assert_eq!(r.text, "partial text");
+    }
+
+    #[test]
     fn truncated_anthropic_tool_use_is_discarded_not_rejected() {
         let v = serde_json::json!({
             "stop_reason": "max_tokens",
@@ -3719,8 +3150,13 @@ mod tests {
     }
 
     #[test]
-    fn databricks_v2_routes_by_model_family() {
+    fn databricks_v2_dispatch_routes_from_manifest() {
         use DatabricksV2Route::{AnthropicMessages, MlflowChatCompletions, OpenAiResponses};
+        // Exercises the production dispatch seam (`databricks_v2_route` +
+        // `databricks_v2_path`), not the interpreter — these are the exact
+        // functions `databricks_v2_request` calls to pick a wire. Expected
+        // values are the manifest-ratified answers (corpus class F et al.), so
+        // this is the wire-visible contract, not a restatement of the resolver.
         for (model, route, path) in [
             // OpenAI-shaped: the gpt family plus the GPT-5 code names.
             (
@@ -3728,9 +3164,6 @@ mod tests {
                 OpenAiResponses,
                 "/ai-gateway/openai/v1/responses",
             ),
-            ("gpt-4o", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
-            // The intentional dashless `gpt5` spelling still routes to OpenAI.
-            ("gpt5", OpenAiResponses, "/ai-gateway/openai/v1/responses"),
             (
                 "databricks-gpt-5-6-luna",
                 OpenAiResponses,
@@ -3741,49 +3174,34 @@ mod tests {
                 OpenAiResponses,
                 "/ai-gateway/openai/v1/responses",
             ),
-            (
-                "databricks-terra",
-                OpenAiResponses,
-                "/ai-gateway/openai/v1/responses",
-            ),
-            // Anthropic-shaped: the claude prefix, the family names, and the
-            // release code names — each must reach the cache-capable route even
-            // when the endpoint name omits the literal "claude".
+            // Anthropic-shaped: curated `databricks-claude-*` names keep the
+            // cache-capable Messages wire via the manifest prefix rule.
             (
                 "databricks-claude-opus-4-7",
                 AnthropicMessages,
                 "/ai-gateway/anthropic/v1/messages",
             ),
             (
-                "goose-opus-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-sonnet-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-haiku-4-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-mythos-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            (
-                "databricks-fable-5",
-                AnthropicMessages,
-                "/ai-gateway/anthropic/v1/messages",
-            ),
-            // Case-insensitive.
-            (
                 "Databricks-Claude-Opus-5",
                 AnthropicMessages,
                 "/ai-gateway/anthropic/v1/messages",
+            ),
+            // WIRE-VISIBLE CHANGE (corpus class F): an *uncurated* Claude
+            // code-name endpoint no longer routes to Anthropic Messages. The
+            // legacy segment classifier sent `goose-opus-5` to the cache-capable
+            // wire off the bare `opus` segment; the manifest treats only
+            // curated `databricks-claude-*` / exact records as Anthropic, so
+            // bare code names fall to the MLflow chat route (losing Anthropic
+            // prompt caching on those names). See the mutation guard below.
+            (
+                "goose-opus-5",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+            (
+                "opus-5",
+                MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
             ),
             // Unrecognised names still fall through to the MLflow chat route.
             (
@@ -3791,16 +3209,8 @@ mod tests {
                 MlflowChatCompletions,
                 "/ai-gateway/mlflow/v1/chat/completions",
             ),
-            (
-                "databricks-gemini-3-pro",
-                MlflowChatCompletions,
-                "/ai-gateway/mlflow/v1/chat/completions",
-            ),
             // Collision guard: short code names must match only as whole
             // segments, never as substrings of an unrelated custom alias.
-            // Each of these embeds a marker (`sol`, `terra`, `opus`) mid-word
-            // and must stay on the MLflow fallback, not adopt a wire its
-            // backend can't parse.
             (
                 "consolidated-llama",
                 MlflowChatCompletions,
@@ -3822,10 +3232,63 @@ mod tests {
                 "/ai-gateway/mlflow/v1/chat/completions",
             ),
         ] {
-            let got = databricks_v2_route_for_model(model);
+            let got = databricks_v2_route(model);
             assert_eq!(got, route, "model={model}");
             assert_eq!(databricks_v2_path(got), path, "model={model}");
         }
+    }
+
+    #[test]
+    fn databricks_v2_dispatch_is_pure_manifest_projection() {
+        // Mutation-bypass guard: the dispatch seam must be a pure projection of
+        // the manifest's resolved `databricks_v2_wire_route`, with no routing
+        // decision of its own. For every known DBv2 model (plus the legacy
+        // collision-guard and code-name cases), the seam's wire choice must
+        // equal the enum mapping of `resolve(...).databricks_v2_wire_route`.
+        //
+        // Reintroducing the deleted segment classifier — or any `if
+        // model.contains("opus")`-style shortcut that bypasses the manifest —
+        // disagrees with the manifest on `goose-opus-5` (segment → Anthropic,
+        // manifest → MLflow) and fails this test.
+        use crate::model_capabilities::{resolve, DatabricksV2Route as Manifest};
+        let expected = |model: &str| match resolve("databricks_v2", model).databricks_v2_wire_route
+        {
+            Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
+            Manifest::AnthropicMessages => DatabricksV2Route::AnthropicMessages,
+            Manifest::MlflowChat | Manifest::NotApplicable | Manifest::RouteUnknown => {
+                DatabricksV2Route::MlflowChatCompletions
+            }
+        };
+        let mut models: Vec<String> =
+            crate::model_capabilities::databricks_v2_known_models().to_vec();
+        // Uncurated / adversarial names the known-model list does not carry, so
+        // the guard covers the exact inputs the legacy classifier misrouted.
+        for extra in [
+            "goose-opus-5",
+            "opus-5",
+            "goose-claude-fable-5",
+            "consolidated-llama",
+            "terraform-coder",
+            "corpus-reranker",
+            "octopus-model",
+            "gpt-opus-5",
+        ] {
+            models.push(extra.to_string());
+        }
+        for model in &models {
+            assert_eq!(
+                databricks_v2_route(model),
+                expected(model),
+                "dispatch seam diverged from manifest authority for model={model}"
+            );
+        }
+        // The class-F case, stated as a hard fact so the guard's intent is
+        // legible: the manifest routes `goose-opus-5` to the MLflow wire, and
+        // the seam agrees — the legacy Anthropic answer is gone.
+        assert_eq!(
+            databricks_v2_route("goose-opus-5"),
+            DatabricksV2Route::MlflowChatCompletions
+        );
     }
 
     #[test]
@@ -3969,6 +3432,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         // Static prefix: system promoted to a structured block carrying the marker.
         assert_eq!(body["system"][0]["type"], "text");
@@ -3999,6 +3463,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
@@ -4019,6 +3484,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         // system stays a bare string; no marker anywhere.
         assert_eq!(body["system"], "sys");
@@ -4037,6 +3503,7 @@ mod tests {
             &[],
             "databricks-claude-opus-5",
             None,
+            "databricks_v2",
         );
         assert_eq!(body["system"], "");
         assert_eq!(
@@ -4056,6 +3523,7 @@ mod tests {
             &[],
             "model",
             None,
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -4076,6 +3544,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         // budget_tokens = min(32768, 4096-1024) = 3072
@@ -4095,6 +3564,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -4114,6 +3584,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         let t = body
             .get("thinking")
@@ -4133,6 +3604,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["budget_tokens"], 32_768);
     }
@@ -4150,6 +3622,7 @@ mod tests {
             &[],
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::Low),
+            "anthropic",
         );
         // Low budget (1024) fits exactly at the boundary — emitted without capping.
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
@@ -4168,6 +3641,7 @@ mod tests {
             &[],
             "claude-opus-4-7",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(
             body["thinking"]["type"], "adaptive",
@@ -4189,6 +3663,7 @@ mod tests {
             &[],
             "claude-opus-4-5",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 31_744); // min(32768, 32768-1024)
@@ -4208,6 +3683,7 @@ mod tests {
             &[],
             "gpt-4o",
             Some(ThinkingEffort::High),
+            "anthropic",
         );
         assert!(body.get("thinking").is_none(), "thinking must be absent");
         assert!(
@@ -4352,6 +3828,7 @@ mod tests {
             &[],
             "override-model",
             None,
+            "anthropic",
         );
         assert_eq!(body["model"], "override-model");
     }
@@ -4381,6 +3858,7 @@ mod tests {
             &[],
             "claude-opus-4-8",
             Some(ThinkingEffort::XHigh),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "xhigh");
@@ -4398,6 +3876,7 @@ mod tests {
             &[],
             "claude-opus-4-8",
             Some(ThinkingEffort::Max),
+            "anthropic",
         );
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["output_config"]["effort"], "max");
@@ -4461,17 +3940,17 @@ mod tests {
 
     // ---- DatabricksV2 route-aware effort normalization (body-level assertions) ----
     //
-    // The DBv2 `complete()` dispatch applies `normalize_effort_for_openai_route` /
+    // The DBv2 `complete()` dispatch applies `normalize_effort_for_databricks_v2` /
     // `normalize_effort_for_anthropic_route` before calling body builders. These tests
     // verify the body shape that results from the already-normalized effort values — i.e.,
     // they confirm the body builders correctly serialize the values the dispatch passes them.
 
     #[test]
     fn dbv2_openai_route_max_effort_clamped_to_xhigh_in_responses_body() {
-        // DBv2 GPT-5.5 route: max → clamped to xhigh by normalize_effort_for_openai_route
+        // DBv2 GPT-5.5 route: max → clamped to xhigh by normalize_effort_for_databricks_v2
         // before reaching responses_body. gpt-5.5 supports xhigh so the final value is xhigh.
         let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "gpt-5.5");
         let body = responses_body(
             &cfg_responses(),
             "system",
@@ -4489,7 +3968,7 @@ mod tests {
     #[test]
     fn dbv2_openai_route_max_effort_passes_through_for_gpt5_6() {
         let normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.6-sol");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "gpt-5.6-sol");
         let body = responses_body(
             &cfg_responses(),
             "system",
@@ -4506,10 +3985,10 @@ mod tests {
 
     #[test]
     fn dbv2_mlflow_route_max_effort_clamped_to_xhigh_in_openai_body() {
-        // DBv2 MLflow route (unknown model): max → clamped to xhigh by normalize_effort_for_openai_route.
+        // DBv2 MLflow route (unknown model): max → clamped to xhigh by normalize_effort_for_databricks_v2.
         // Unknown models pass through after the max→xhigh clamp.
         let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "llama-4");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "llama-4");
         let body = openai_body(
             &cfg(Provider::OpenAi),
             "system",
@@ -4529,14 +4008,14 @@ mod tests {
         // Verify that supported values pass through for the respective model families.
         // gpt-5.5 supports none (but not minimal); gpt-5 base supports minimal (but not none).
         let none_normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::None, "gpt-5.5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::None, "gpt-5.5");
         assert_eq!(
             none_normalized,
             ThinkingEffort::None,
             "OpenAI normalizer must not touch none for gpt-5.5"
         );
         let minimal_normalized =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Minimal, "gpt-5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Minimal, "gpt-5");
         assert_eq!(
             minimal_normalized,
             ThinkingEffort::Minimal,
@@ -4573,6 +4052,7 @@ mod tests {
             &[],
             "claude-opus-4-8",
             normalized, // None → omit thinking fields
+            "anthropic",
         );
         assert!(
             body.get("thinking").is_none(),
@@ -4597,6 +4077,7 @@ mod tests {
 
         // Before switch: claude-opus-4-8 with effort=max → adaptive shape, effort="max"
         let (thinking_before, oc_before) = crate::config::anthropic_thinking_config(
+            "anthropic",
             "claude-opus-4-8",
             ThinkingEffort::Max,
             32_768,
@@ -4607,7 +4088,7 @@ mod tests {
         // After switch to GPT-5.5 route: normalize max → xhigh for responses_body
         // (gpt-5.5 supports xhigh, so the clamp result is xhigh, not further reduced)
         let clamped =
-            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.5");
+            crate::config::normalize_effort_for_databricks_v2(ThinkingEffort::Max, "gpt-5.5");
         assert_eq!(clamped, ThinkingEffort::XHigh);
         let body_after = responses_body(
             &cfg_responses(),
@@ -4685,7 +4166,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -4756,7 +4236,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -4814,7 +4293,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -4912,7 +4390,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -4976,7 +4453,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({}),
-            false,
             Duration::from_secs(5),
             |b| b,
         )
@@ -5145,7 +4621,6 @@ mod tests {
             &client,
             &url,
             &serde_json::json!({"model": "x"}),
-            false,
             // Small base timeout so the body stall triggers quickly.
             Duration::from_secs(1),
             |b| b,
@@ -6124,6 +5599,98 @@ mod tests {
         assert_eq!(sum_usage(&v, &["input_tokens", "prompt_tokens"]), None);
     }
 
+    #[test]
+    fn sum_usage_exact_single_field() {
+        let v = serde_json::json!({"usage": {"input_tokens": 42}});
+        assert_eq!(
+            sum_usage(&v, &["input_tokens"]),
+            Some(SumUsageResult::Exact(42))
+        );
+    }
+
+    #[test]
+    fn sum_usage_exact_two_fields() {
+        let v = serde_json::json!({"usage": {"input_tokens": 100, "cache_read_input_tokens": 50}});
+        assert_eq!(
+            sum_usage(&v, &["input_tokens", "cache_read_input_tokens"]),
+            Some(SumUsageResult::Exact(150))
+        );
+    }
+
+    #[test]
+    fn sum_usage_overflow_two_fields_signals_overflow() {
+        // Reproducer from Thufir's finding: input_tokens = u64::MAX, cache_read = 1.
+        // Must return Overflow, not Exact(u64::MAX).
+        let v = serde_json::json!({
+            "usage": {
+                "input_tokens": u64::MAX,
+                "cache_read_input_tokens": 1_u64,
+                "cache_creation_input_tokens": 0_u64
+            }
+        });
+        assert_eq!(
+            sum_usage(
+                &v,
+                &[
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens"
+                ]
+            ),
+            Some(SumUsageResult::Overflow)
+        );
+    }
+
+    #[test]
+    fn parse_anthropic_input_overflow_sets_flag_and_clears_value() {
+        // The inclusive sum overflows; input_tokens must be None and the flag set.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": u64::MAX,
+                "cache_read_input_tokens": 1_u64,
+                "cache_creation_input_tokens": 0_u64,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, None, "overflowed value must be discarded");
+        assert!(r.input_tokens_overflowed, "overflow flag must be set");
+        // output_tokens unaffected by input overflow
+        assert_eq!(r.output_tokens, Some(7));
+    }
+
+    #[test]
+    fn parse_anthropic_normal_sum_does_not_set_flag() {
+        // Normal (non-overflow) path: flag stays false.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100_u64,
+                "cache_read_input_tokens": 900_u64,
+                "cache_creation_input_tokens": 50_u64,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1050));
+        assert!(!r.input_tokens_overflowed);
+    }
+
+    #[test]
+    fn parse_anthropic_absent_usage_does_not_set_flag() {
+        // Absent usage: flag stays false, input_tokens stays None.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}]
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, None);
+        assert!(!r.input_tokens_overflowed);
+    }
+
     /// A token source whose `bearer()` always hands back the same stale
     /// token and whose `refresh_now()` mints a distinct fresh one, counting
     /// each refresh. Lets a test assert exactly how many forced refreshes a
@@ -6210,7 +5777,6 @@ mod tests {
                 .build()
                 .unwrap(),
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
-            mesh_auto_state: Mutex::new(MeshAutoState::default()),
             auth,
         }
     }
@@ -7301,6 +6867,7 @@ mod tests {
             &[],
             "claude-opus-4-7",
             None,
+            "anthropic",
         );
         let messages = body["messages"].as_array().unwrap();
         let assistant = messages

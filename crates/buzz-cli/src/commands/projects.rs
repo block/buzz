@@ -4,8 +4,10 @@
 //!   1. Fetch the caller's own live head via `kinds:[30621] + authors:[self] + #d:[slug]`.
 //!   2. Mutate the tag set (strip `auth`, apply change).
 //!   3. Re-validate the full envelope through Layer A before submitting.
-//!   4. Set `created_at = head.created_at + 1` (never wall-clock) to avoid
-//!      overwriting a concurrently advancing head.
+//!   4. Set `created_at = max(client_now, head.created_at + 1)` so the
+//!      replacement dominates the observed head and uses wall clock for
+//!      ordinary stale heads. Unusually future heads may still hit the relay's
+//!      timestamp-drift guard until time advances.
 //!
 //! Limitations recorded in this phase:
 //!   - Relay hints are read-preserved but not authored (`--repo` carries
@@ -108,25 +110,45 @@ fn make_tag(parts: &[&str]) -> Result<Tag, CliError> {
 
 // ── Submit helper ─────────────────────────────────────────────────────────────
 
-async fn submit_project(client: &BuzzClient, builder: EventBuilder) -> Result<(), CliError> {
+/// Submit a project event and print the relay's write response.
+///
+/// `link_slug` carries the project's d-tag on creates whose slug fits the
+/// `buzz://` link charset; the response then also carries a `link` field,
+/// which renders as a rich preview card in Buzz Desktop when included in a
+/// chat message — agents announce projects with it (see base_prompt.md).
+async fn submit_project(
+    client: &BuzzClient,
+    builder: EventBuilder,
+    link_slug: Option<&str>,
+) -> Result<(), CliError> {
     let event = client.sign_event(builder)?;
+    let owner = event.pubkey.to_hex();
     let raw = client.submit_event(event).await?;
-    println!(
-        "{}",
-        parse_write_response(&raw, "project changed concurrently; retry")?
-    );
+    let response = parse_write_response(&raw, "project changed concurrently; retry")?;
+    match link_slug {
+        Some(slug) => crate::client::print_create_response(
+            &response,
+            "link",
+            &crate::links::project_link(&owner, slug),
+        ),
+        None => println!("{response}"),
+    }
     Ok(())
 }
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-/// Advance the `created_at` counter off an observed head.
-fn next_timestamp(head: &Event) -> Result<Timestamp, CliError> {
-    head.created_at
+/// Choose the later of client wall clock and the instant after the observed head.
+///
+/// The relay remains authoritative for timestamp drift: a sufficiently future
+/// head can require a timestamp that the relay will temporarily reject.
+fn next_timestamp(head: &Event, now: Timestamp) -> Result<Timestamp, CliError> {
+    let after_head = head
+        .created_at
         .as_secs()
         .checked_add(1)
-        .map(Timestamp::from)
-        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))
+        .ok_or_else(|| CliError::Other("project timestamp cannot be advanced".into()))?;
+    Ok(Timestamp::from(after_head.max(now.as_secs())))
 }
 
 /// Strip `auth` from a tag list and pass the resulting envelope through
@@ -207,7 +229,15 @@ pub async fn cmd_create(
     // ── Build via Layer B (enforces all writer policy) ────────────────────
     let builder = build_project(slug, name, description, &members, channel, visibility)
         .map_err(|e| CliError::Usage(e.to_string()))?;
-    submit_project(client, builder).await
+
+    // Slugs wider than the link charset stay linkless rather than emitting a
+    // `link` no client can parse.
+    submit_project(
+        client,
+        builder,
+        crate::links::is_linkable_dtag(slug).then_some(slug),
+    )
+    .await
 }
 
 /// `buzz projects get`
@@ -288,7 +318,7 @@ pub async fn cmd_add_repo(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     // Build the new tag set: keep existing tags (including hinted members),
     // append new members only if not already present (by coordinate).
@@ -320,7 +350,7 @@ pub async fn cmd_add_repo(
     }
 
     let builder = rebuild_project(&head.content, tags, next_ts)?;
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects remove-repo`
@@ -342,7 +372,7 @@ pub async fn cmd_remove_repo(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     // Verify all requested repos exist in the project.
     let existing_coords: std::collections::HashSet<String> = head
@@ -383,7 +413,7 @@ pub async fn cmd_remove_repo(
 
     // Single rebuild validates the full envelope and strips any remaining auth.
     let builder = rebuild_project(&head.content, tags, next_ts)?;
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects update`
@@ -434,7 +464,7 @@ pub async fn cmd_update(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     // Build the new tag set. For each singleton metadata field:
     //   - setter present: replace value (strip old, append new)
@@ -484,14 +514,14 @@ pub async fn cmd_update(
     let builder = build_project_with_tags(&head.content, tags)
         .map_err(|e| CliError::Other(format!("envelope validation failed: {e}")))?
         .custom_created_at(next_ts);
-    submit_project(client, builder).await
+    submit_project(client, builder, None).await
 }
 
 /// `buzz projects delete`
 ///
 /// Head-based and verified:
 ///   1. Fetch own live head — `NotFound` if absent.
-///   2. Build tombstone at `head.created_at + 1`.
+///   2. Build tombstone at `max(client_now, head.created_at + 1)`.
 ///   3. Submit.
 ///   4. Re-query the coordinate; if a newer head survived → `Conflict`.
 pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError> {
@@ -500,7 +530,7 @@ pub async fn cmd_delete(client: &BuzzClient, slug: &str) -> Result<(), CliError>
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
-    let next_ts = next_timestamp(&head)?;
+    let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     let pubkey_hex = client.keys().public_key().to_hex();
     let tombstone = build_delete_addressable(KIND_PROJECT, &pubkey_hex, slug)
@@ -979,31 +1009,51 @@ mod tests {
 
     // ── next_timestamp ordering ───────────────────────────────────────────────
 
-    /// `next_timestamp` must return `head.created_at + 1` regardless of the wall
-    /// clock.  NIP-MP Deletion rule: a tombstone older than the live head does
-    /// NOT remove it, so we must advance strictly off the observed head — never
-    /// use wall-clock time, which could be behind a head that was bumped
-    /// multiple times in the same second.
-    #[test]
-    fn next_timestamp_returns_head_plus_one_when_head_is_ahead_of_wall_clock() {
-        // Build a minimal signed event with a created_at far in the future.
+    fn project_head_at(created_at: u64) -> Event {
         let keys = nostr::Keys::generate();
-        let far_future_ts = Timestamp::from(9_999_999_999u64); // year 2286
         let tags = vec![
             make_test_tag(&["d", "platform"]),
             make_test_tag(&["a", &format!("30617:{OWNER_HEX}:buzz")]),
         ];
-        let builder = rebuild_project("", tags, far_future_ts).expect("valid head envelope");
-        let head = builder.sign_with_keys(&keys).expect("sign");
-        // Verify the event actually has our future timestamp.
-        assert_eq!(head.created_at, far_future_ts);
+        rebuild_project("", tags, Timestamp::from(created_at))
+            .expect("valid head envelope")
+            .sign_with_keys(&keys)
+            .expect("sign")
+    }
 
-        // next_timestamp must return far_future + 1, not now().
-        let next = next_timestamp(&head).expect("no overflow");
-        assert_eq!(
-            next.as_secs(),
-            far_future_ts.as_secs() + 1,
-            "tombstone must be strictly after head, even when head is far in the future"
+    #[test]
+    fn next_timestamp_uses_later_of_wall_clock_and_after_head() {
+        let cases = [
+            ("stale head", 100, 1_000, 1_000),
+            ("head equal to now", 1_000, 1_000, 1_001),
+            ("future head", 1_500, 1_000, 1_501),
+            ("last timestamp inside future boundary", 1_899, 1_000, 1_900),
+            (
+                "future boundary cannot be dominated inside the window",
+                1_900,
+                1_000,
+                1_901,
+            ),
+        ];
+
+        for (name, head_ts, now, expected) in cases {
+            let head = project_head_at(head_ts);
+            let next = next_timestamp(&head, Timestamp::from(now)).expect("no overflow");
+
+            assert_eq!(next.as_secs(), expected, "case: {name}");
+        }
+    }
+
+    #[test]
+    fn next_timestamp_rejects_overflowing_head() {
+        let head = project_head_at(u64::MAX);
+
+        let err = next_timestamp(&head, Timestamp::from(1_000u64))
+            .expect_err("maximum timestamp cannot be advanced");
+
+        assert!(
+            matches!(err, CliError::Other(ref message) if message == "project timestamp cannot be advanced"),
+            "unexpected error: {err}"
         );
     }
 

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import {
+  boundChannelSectionsStore,
   DEFAULT_STORE,
   readChannelSectionsStore,
   storageKey,
@@ -181,10 +182,10 @@ export function useChannelSections(
         order: maxOrder + 1,
       };
       setStore((current) => {
-        const next: ChannelSectionStore = {
+        const next = boundChannelSectionsStore({
           ...current,
           sections: [...current.sections, section],
-        };
+        });
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) return current;
         managerRef.current?.publishSections(next);
         return next;
@@ -301,10 +302,13 @@ export function useChannelSections(
         return;
       }
       setStore((prev) => {
-        const next: ChannelSectionStore = {
+        const assignments = { ...prev.assignments };
+        delete assignments[channelId];
+        assignments[channelId] = sectionId;
+        const next = boundChannelSectionsStore({
           ...prev,
-          assignments: { ...prev.assignments, [channelId]: sectionId },
-        };
+          assignments,
+        });
         if (!writeChannelSectionsStore(pubkey, next, relayUrl)) {
           return prev;
         }

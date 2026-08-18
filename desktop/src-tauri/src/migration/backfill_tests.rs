@@ -121,6 +121,7 @@ fn backfill_adopts_matching_folded_definition_without_manufacturing_duplicate() 
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
 
     let backfilled = backfill_standalone_agents_in_dir(&base(dir.path())).unwrap();
@@ -178,6 +179,7 @@ fn backfill_adopts_matching_folded_definition_without_manufacturing_duplicate() 
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
     assert_eq!(
         snapshot_before.canonical(),
@@ -342,6 +344,7 @@ fn backfill_preserves_goose_spawn_snapshot_against_openclaw_preset() {
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
     assert_eq!(snapshot_before.canonical()["command"], "goose");
 
@@ -364,6 +367,7 @@ fn backfill_preserves_goose_spawn_snapshot_against_openclaw_preset() {
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
 
     assert_eq!(
@@ -650,6 +654,7 @@ fn backfill_of_promptless_record_keeps_spawn_snapshot_stable() {
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
 
     backfill_standalone_agents_in_dir(&base(dir.path())).unwrap();
@@ -666,6 +671,7 @@ fn backfill_of_promptless_record_keeps_spawn_snapshot_stable() {
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
 
     assert_eq!(
@@ -700,6 +706,7 @@ fn backfill_of_prompted_record_keeps_spawn_snapshot_stable() {
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
 
     backfill_standalone_agents_in_dir(&base(dir.path())).unwrap();
@@ -716,6 +723,7 @@ fn backfill_of_prompted_record_keeps_spawn_snapshot_stable() {
         &[],
         "wss://ws.example",
         &Default::default(),
+        false,
     );
 
     assert_eq!(before.canonical(), after.canonical());
