@@ -29,30 +29,26 @@ pub(crate) fn is_command_adviser_persona(persona_id: &str) -> bool {
 }
 
 pub(crate) fn qualified_local_model(
-    persona_id: Option<&str>,
+    _persona_id: Option<&str>,
     runtime: Option<&crate::managed_agents::KnownAcpRuntime>,
 ) -> Option<&'static str> {
-    (persona_id.is_some_and(is_command_adviser_persona)
-        && runtime.is_some_and(|runtime| runtime.id == "buzz-lmstudio-agent"))
-    .then_some(crate::commands::QUALIFIED_INSTANCE_ID)
+    runtime
+        .is_some_and(|runtime| runtime.id == "buzz-lmstudio-agent")
+        .then_some(crate::commands::QUALIFIED_INSTANCE_ID)
 }
 
 pub(crate) fn should_publish_agent_output(
-    persona_id: Option<&str>,
+    _persona_id: Option<&str>,
     runtime: Option<&crate::managed_agents::KnownAcpRuntime>,
 ) -> bool {
-    persona_id.is_some_and(is_command_adviser_persona)
-        && runtime.is_some_and(|runtime| runtime.id == "buzz-lmstudio-agent")
+    runtime.is_some_and(|runtime| runtime.id == "buzz-lmstudio-agent")
 }
 
 pub(crate) fn routed_global_agent_config_for_app(
     app: &AppHandle,
-    persona_id: Option<&str>,
+    _persona_id: Option<&str>,
     global: &GlobalAgentConfig,
 ) -> GlobalAgentConfig {
-    if !persona_id.is_some_and(is_command_adviser_persona) {
-        return global.clone();
-    }
     let preference = app
         .path()
         .app_config_dir()
@@ -63,7 +59,10 @@ pub(crate) fn routed_global_agent_config_for_app(
                 .flatten()
         })
         .map(|config| config.routing_preference());
-    if preference != Some(ModelRoutingPreference::LocalFirst) {
+    if !matches!(
+        preference,
+        Some(ModelRoutingPreference::LocalFirst | ModelRoutingPreference::LocalOnly)
+    ) {
         return global.clone();
     }
     let mut routed = global.clone();

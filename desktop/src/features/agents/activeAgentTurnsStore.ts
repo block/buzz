@@ -592,6 +592,7 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
   return React.useSyncExternalStore(
     subscribeActiveAgentTurns,
     getActiveTurnsByChannel,
+    getActiveTurnsByChannel,
   );
 }
 

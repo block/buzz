@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { CommandConsoleScreen } from "./CommandConsoleScreen.tsx";
 import { CommandTeamStripView } from "./CommandTeamStrip.tsx";
+import { ModelRoutingControls } from "./ModelRoutingControls.tsx";
 
 function renderCommandConsole() {
   return renderToStaticMarkup(
@@ -35,6 +36,9 @@ test("CommandConsoleScreen renders the usable Command Adviser route", () => {
   assert.match(html, />COMMAND ADVISER</);
   assert.match(html, /Cloud models first/i);
   assert.match(html, /Local model first/i);
+  assert.match(html, /Local only/i);
+  assert.match(html, /all managed agents and generated work/i);
+  assert.match(html, /gemma4-26b-official/i);
   assert.match(html, /HMAS SUPPLY · A195/);
   assert.match(html, /STRENGTHEN THE SHIELD/);
   assert.match(html, /alt="HMAS Supply at sea"/);
@@ -62,4 +66,19 @@ test("CommandConsoleScreen installs the real advisory Daily Command Brief withou
   assert.match(html, />Daily Command Brief</);
   assert.match(html, /Advisory, non-accredited decision support/);
   assert.doesNotMatch(html, /not yet operational/i);
+});
+
+test("model routing cannot interrupt active agent work", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ModelRoutingControls, {
+      activeWork: true,
+      disabled: false,
+      error: null,
+      onChange: () => {},
+      preference: "cloud_first",
+    }),
+  );
+
+  assert.match(html, /active agent work must finish before switching/i);
+  assert.equal((html.match(/ disabled=""/g) ?? []).length, 3);
 });

@@ -4,6 +4,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { usePersonaConversation } from "@/features/agents/usePersonaConversation";
+import { useActiveAgentTurnsByChannel } from "@/features/agents/activeAgentTurnsStore";
 import { useCommandDecisionActions } from "@/features/command-console/hooks/useCommandDecisionActions";
 
 import { COMMAND_TEAM_PERSONAS } from "../domain/commandTeam";
@@ -55,6 +56,7 @@ type CommandConsoleContentProps = {
   systemStatus: ReturnType<typeof useCommandConsoleStatus>;
   commandBrief: ReturnType<typeof useDailyCommandBrief>;
   modelRouting: ReturnType<typeof useModelRoutingPreference>;
+  activeAgentWork: boolean;
 };
 
 function CommandConsoleContent({
@@ -63,6 +65,7 @@ function CommandConsoleContent({
   systemStatus,
   commandBrief,
   modelRouting,
+  activeAgentWork,
 }: CommandConsoleContentProps) {
   return (
     <div
@@ -74,6 +77,7 @@ function CommandConsoleContent({
         <CommandAdviserHero
           routingControls={
             <ModelRoutingControls
+              activeWork={activeAgentWork}
               disabled={
                 commandBrief.busy ||
                 modelRouting.loading ||
@@ -165,7 +169,9 @@ export function CommandConsoleScreen({
   const systemStatus = useCommandConsoleStatus();
   const commandBrief = useDailyCommandBrief();
   const modelRouting = useModelRoutingPreference();
+  const activeAgentWork = useActiveAgentTurnsByChannel().length > 0;
   const contentProps = {
+    activeAgentWork,
     commandTeam,
     systemStatus,
     commandBrief,

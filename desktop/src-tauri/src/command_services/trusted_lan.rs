@@ -114,6 +114,7 @@ pub(crate) enum ModelRoutingPreference {
     CloudFirst,
     #[default]
     LocalFirst,
+    LocalOnly,
 }
 
 impl ModelRoutingPreference {
@@ -121,6 +122,7 @@ impl ModelRoutingPreference {
         match self {
             Self::CloudFirst => "cloud_first",
             Self::LocalFirst => "local_first",
+            Self::LocalOnly => "local_only",
         }
     }
 }

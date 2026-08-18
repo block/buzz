@@ -12,14 +12,10 @@ pub fn record_agent_command_with_preferred_runtime(
     personas: &[AgentDefinition],
     preferred_runtime: Option<&str>,
 ) -> String {
-    // The Command Console route is an operational mode, not a weak default.
+    // The app-wide route is an operational mode, not a weak default.
     // It must replace stale per-agent pins created before the routing toggle
-    // governed managed adviser conversations.
-    if record
-        .persona_id
-        .as_deref()
-        .is_some_and(super::runtime::is_command_adviser_persona)
-    {
+    // governed managed-agent conversations.
+    if preferred_runtime.is_some() {
         if let Some(command) = preferred_runtime
             .map(str::trim)
             .filter(|runtime| !runtime.is_empty())
@@ -222,6 +218,31 @@ mod tests {
         assert_eq!(
             record_agent_command_with_preferred_runtime(&record, &[], Some("codex")),
             "codex-acp"
+        );
+    }
+
+    #[test]
+    fn app_wide_preference_routes_non_command_agent_away_from_cloud_pin() {
+        let mut record: ManagedAgentRecord = serde_json::from_value(serde_json::json!({
+            "pubkey": "b".repeat(64),
+            "name": "Keeper",
+            "relay_url": "ws://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "created_at": "2026-07-28T00:00:00Z",
+            "updated_at": "2026-07-28T00:00:00Z"
+        }))
+        .expect("minimal managed agent record");
+        record.persona_id = Some("builtin:keeper".to_string());
+        record.agent_command_override = Some("codex-acp".to_string());
+
+        assert_eq!(
+            record_agent_command_with_preferred_runtime(&record, &[], Some("buzz-lmstudio-agent")),
+            "buzz-lmstudio-agent"
         );
     }
 

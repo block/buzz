@@ -34,9 +34,7 @@ pub(crate) use lmstudio::{
 };
 
 mod command_adviser;
-pub(crate) use command_adviser::{
-    is_command_adviser_persona, qualified_local_model, routed_global_agent_config_for_app,
-};
+pub(crate) use command_adviser::{qualified_local_model, routed_global_agent_config_for_app};
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;

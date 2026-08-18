@@ -127,12 +127,8 @@ pub(crate) fn resolve_effective_harness_descriptor(
     personas: &[crate::managed_agents::types::AgentDefinition],
     global: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<EffectiveHarnessDescriptor, String> {
-    let command_adviser_route = record
-        .persona_id
-        .as_deref()
-        .is_some_and(super::runtime::is_command_adviser_persona)
-        && global.preferred_runtime.as_deref().is_some();
-    let effective_command = if command_adviser_route
+    let global_runtime_route = global.preferred_runtime.as_deref().is_some();
+    let effective_command = if global_runtime_route
         || (record.agent_command_override.is_none()
             && record.runtime.is_none()
             && record

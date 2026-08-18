@@ -52,13 +52,18 @@ fn status_for_with(
     inputs: StatusInputs<'_>,
 ) -> ManagedAgentRuntimeStatus {
     let StatusInputs { personas, global } = inputs;
+    let global = super::runtime::routed_global_agent_config_for_app(
+        app,
+        record.persona_id.as_deref(),
+        global,
+    );
     let command = super::record_agent_command_with_preferred_runtime(
         record,
         personas,
         global.preferred_runtime.as_deref(),
     );
     let metadata = super::known_acp_runtime(&command);
-    let effective = resolve_effective_agent_env(record, personas, metadata, global);
+    let effective = resolve_effective_agent_env(record, personas, metadata, &global);
     let local_setup = matches!(agent_readiness(&effective), AgentReadiness::Ready);
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
