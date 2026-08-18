@@ -49,7 +49,7 @@ function AddressMentionBadge({
       data-testid={`composer-address-lock-mention-badge-${pubkey}`}
       initial={false}
     >
-      <AtSign className="h-3 w-3" />
+      <AtSign className="h-2.5 w-2.5" />
     </motion.span>
   );
 }
@@ -111,7 +111,7 @@ export function ComposerAddressLocks({
               <TooltipTrigger asChild>
                 <button
                   aria-label={`Stop always mentioning ${agent.displayName}`}
-                  className="pointer-events-none absolute -right-1 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
+                  className="pointer-events-none absolute right-0 -top-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-background opacity-0 ring-2 ring-background transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
                   data-testid={`composer-address-lock-remove-${agent.pubkey}`}
                   onClick={() => onRemove(agent.pubkey)}
                   type="button"
