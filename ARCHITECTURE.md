@@ -673,6 +673,14 @@ Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent 
 
 **Does NOT:** persist state.
 
+**Desktop's relationship to `buzz-acp` — two independent spawn paths, same wire protocol:**
+
+Desktop (`desktop/src-tauri`) normally spawns `buzz-acp` itself, as an ordinary child process (`std::process::Command::new`, `desktop/src-tauri/src/managed_agents/runtime.rs:521`), passing the agent's credentials as environment variables on that call (`BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`; `runtime.rs:532-533`). A child process inherits the OS user account of whatever launched it — so an agent spawned this way runs under the *same account as Desktop itself* (Desktop's "Agents" panel manages exactly these locally-spawned processes: start/stop/status, one entry per spawned child).
+
+This is not the only valid way to run `buzz-acp`. It is a standalone binary with no dependency on being launched by Desktop, no IPC with Desktop, and no shared memory — it only needs the same three environment variables (`BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`, `BUZZ_AUTH_TAG`) to establish its own outbound WebSocket connection to the relay, authenticate via NIP-42, and begin operating. Any process supervisor capable of setting those env vars and starting the binary is a conforming launcher — a `launchd`/`systemd` unit under a different, more restricted OS account works today, no code change required. Once running, that independently-launched agent is indistinguishable, at the relay/channel level, from a Desktop-spawned one: it shows up as a normal channel member and its messages fan out the same way. It will *not* appear in Desktop's "Agents" panel, since Desktop never spawned it and holds no process handle to it — that panel is scoped to locally-spawned children, not to "every agent visible in this community."
+
+Net: the OS-process relationship (who spawned the agent, what account it inherits) and the relay-level relationship (channel membership, message visibility) are independent. Isolating an agent's OS permissions from Desktop's own account requires the second spawn path, not any change to how the agent participates in channels.
+
 ---
 
 ### buzz-admin — Operator CLI
