@@ -8,6 +8,14 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+/// A `cwd` value that `Path::is_absolute()` accepts on every platform this
+/// suite runs on. `/tmp` is absolute on Unix but not on Windows (it lacks a
+/// drive prefix), so `session/new` rejects it there with "cwd must be an
+/// absolute path" before the test ever reaches the behavior under test.
+fn test_cwd() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
 struct Harness {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
@@ -25,6 +33,11 @@ impl Harness {
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
             .env("BUZZ_AGENT_MAX_ROUNDS", "4")
+            // This suite predates the reply guard and asserts exact
+            // transcripts a nag would perturb; none of it exercises the
+            // guard itself, so it's pinned off (an explicit override in
+            // `extra` still wins, since that loop runs after this).
+            .env("BUZZ_AGENT_REQUIRE_REPLY", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -193,7 +206,10 @@ async fn handshake(h: &mut Harness) -> String {
     );
 
     let new_id = h
-        .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .send(
+            "session/new",
+            json!({ "cwd": test_cwd(), "mcpServers": [] }),
+        )
         .await;
     let new = h.recv_for_id(new_id).await;
     let sid = new["result"]["sessionId"].as_str().unwrap().to_owned();
