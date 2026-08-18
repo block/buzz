@@ -915,6 +915,142 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
     event.pubkey.to_bytes().to_vec()
 }
 
+const VALID_AGENT_STATUSES: &[&str] = &["online", "away", "offline"];
+const VALID_AGENT_RESPOND_TO: &[&str] = &["owner-only", "allowlist", "anyone"];
+const VALID_AGENT_CHANNEL_ADD_POLICIES: &[&str] = &["anyone", "owner_only", "nobody"];
+const MAX_AGENT_NAME_LEN: usize = 256;
+
+/// Validates and CAS-checks a `kind:10100` agent-directory publish before
+/// it's accepted.
+///
+/// `kind:10100` is a plain replaceable event (NIP-01: highest `created_at`
+/// wins on read), so without an explicit generation counter, two writers
+/// that both read an older record and republish it "whole" can silently
+/// clobber each other's fields depending on wall-clock timing — the exact
+/// failure mode reported against #5528/#5530/#5546. This makes the loss
+/// loud instead of silent: a publish whose `generation` isn't strictly
+/// greater than the currently stored value is rejected, forcing the writer
+/// to re-fetch and retry against the latest state
+/// (`buzz_sdk::builders::build_agent_profile_update` is the shared helper
+/// every writer should use to do that correctly).
+///
+/// Also enforces the schema `build_agent_profile_update` produces,
+/// independent of that helper, so a raw/malformed publish can't bypass
+/// validation: bounded `status`/`respond_to`/`channel_add_policy` enums,
+/// UUID-shaped `channel_ids`, a non-empty bounded `name` when present, and
+/// — the other half of the same reports — **no `respond_to_allowlist`
+/// field**. That field would publish the exact pubkeys allowed to trigger
+/// an `allowlist`-mode agent to every member of the community via a
+/// world-readable event; real enforcement already lives entirely in the
+/// harness process, so the public directory has no legitimate need for it.
+async fn validate_agent_profile_publish(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<(), IngestError> {
+    let content: serde_json::Value = serde_json::from_str(&event.content)
+        .map_err(|_| IngestError::Rejected("invalid: kind:10100 content must be JSON".into()))?;
+    let obj = content.as_object().ok_or_else(|| {
+        IngestError::Rejected("invalid: kind:10100 content must be a JSON object".into())
+    })?;
+
+    if obj.contains_key("respond_to_allowlist") {
+        return Err(IngestError::Rejected(
+            "invalid: respond_to_allowlist is not publishable — kind:10100 is community-visible; \
+             this field would disclose an agent's exact access list to every member. Enforcement \
+             belongs to the harness, not the public directory."
+                .into(),
+        ));
+    }
+
+    if let Some(name) = obj.get("name") {
+        let s = name
+            .as_str()
+            .ok_or_else(|| IngestError::Rejected("invalid: name must be a string".into()))?;
+        if s.is_empty() || s.chars().count() > MAX_AGENT_NAME_LEN {
+            return Err(IngestError::Rejected(format!(
+                "invalid: name must be 1..={MAX_AGENT_NAME_LEN} chars"
+            )));
+        }
+    }
+    if let Some(status) = obj.get("status") {
+        let s = status.as_str().unwrap_or_default();
+        if !VALID_AGENT_STATUSES.contains(&s) {
+            return Err(IngestError::Rejected(format!(
+                "invalid: status must be one of {VALID_AGENT_STATUSES:?}"
+            )));
+        }
+    }
+    if let Some(respond_to) = obj.get("respond_to") {
+        let s = respond_to.as_str().unwrap_or_default();
+        if !VALID_AGENT_RESPOND_TO.contains(&s) {
+            return Err(IngestError::Rejected(format!(
+                "invalid: respond_to must be one of {VALID_AGENT_RESPOND_TO:?}"
+            )));
+        }
+    }
+    if let Some(policy) = obj.get("channel_add_policy") {
+        let s = policy.as_str().unwrap_or_default();
+        if !VALID_AGENT_CHANNEL_ADD_POLICIES.contains(&s) {
+            return Err(IngestError::Rejected(format!(
+                "invalid: channel_add_policy must be one of {VALID_AGENT_CHANNEL_ADD_POLICIES:?}"
+            )));
+        }
+    }
+    if let Some(ids) = obj.get("channel_ids") {
+        let arr = ids
+            .as_array()
+            .ok_or_else(|| IngestError::Rejected("invalid: channel_ids must be an array".into()))?;
+        for id in arr {
+            let s = id.as_str().unwrap_or_default();
+            if uuid::Uuid::parse_str(s).is_err() {
+                return Err(IngestError::Rejected(format!(
+                    "invalid: channel_ids entries must be UUIDs (got: {s})"
+                )));
+            }
+        }
+    }
+
+    let new_generation = obj
+        .get("generation")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| {
+            IngestError::Rejected(
+                "invalid: kind:10100 requires a positive integer generation field \
+             (use buzz_sdk::builders::build_agent_profile_update to construct this event)"
+                    .into(),
+            )
+        })?;
+    if new_generation == 0 {
+        return Err(IngestError::Rejected(
+            "invalid: generation must be >= 1".into(),
+        ));
+    }
+
+    let pubkey_bytes = event.pubkey.to_bytes().to_vec();
+    let existing = state
+        .db
+        .get_latest_global_replaceable(tenant.community(), KIND_AGENT_PROFILE as i32, &pubkey_bytes)
+        .await
+        .map_err(|e| IngestError::Rejected(format!("db error: {e}")))?;
+
+    if let Some(existing) = existing {
+        let existing_generation: u64 =
+            serde_json::from_str::<serde_json::Value>(&existing.event.content)
+                .ok()
+                .and_then(|v| v.get("generation").and_then(|g| g.as_u64()))
+                .unwrap_or(0);
+        if new_generation <= existing_generation {
+            return Err(IngestError::Rejected(format!(
+                "invalid: stale generation ({new_generation} <= {existing_generation}) — \
+                 re-fetch the current record and retry"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
 /// or the actor must be the owning human of the agent that authored the target message.
 async fn validate_edit_ownership(
@@ -2740,6 +2876,10 @@ async fn ingest_event_inner(
             accepted: true,
             message: String::new(),
         });
+    }
+
+    if kind_u32 == KIND_AGENT_PROFILE {
+        validate_agent_profile_publish(tenant, state, &event).await?;
     }
 
     let tenant_media_base =

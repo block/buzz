@@ -112,6 +112,48 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
   );
 });
 
+test("relayAgentIsSharedWithUser: allowlist agents with no published allowlist are eligible in shared channels", () => {
+  const sharedChannelIds = new Set(["general"]);
+
+  // The public directory no longer carries respondToAllowlist (see
+  // buzz-relay's ingest rejection + buzz-sdk's build_agent_profile_update).
+  // A record with an empty/absent allowlist falls back to "anyone" behavior
+  // for eligibility — the harness remains the real enforcement point.
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      { respondTo: "allowlist", respondToAllowlist: [], channelIds: ["other"] },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  // No signed-in viewer and no legacy allowlist data — still falls back to
+  // channel-membership eligibility rather than requiring a pubkey to check.
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+    ),
+    true,
+  );
+});
+
 test("relayAgentCanRespondInChannel: requires exact channel membership and viewer access", () => {
   const agent = {
     respondTo: "allowlist",
