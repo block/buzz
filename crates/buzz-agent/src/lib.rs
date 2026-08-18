@@ -8,10 +8,11 @@ mod handoff;
 mod hints;
 mod llm;
 mod mcp;
+pub mod model_capabilities;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use catalog::{discover_databricks_models, ModelEntry};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -339,12 +340,15 @@ async fn resolve_models_catalog(
 ///
 /// This value is never written to `models_cache`; failed discovery must be retried by
 /// the next session rather than pinning degraded state for the process lifetime.
+///
+/// Only reached from the Databricks provider arm below, so the curated label is
+/// looked up from the Databricks manifest; `id` stays the raw configured value.
 fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
     let model = model.trim().to_string();
-    vec![ModelEntry {
-        id: model.clone(),
-        name: model,
-    }]
+    let name = crate::model_capabilities::databricks_registry_label(&model)
+        .unwrap_or(&model)
+        .to_string();
+    vec![ModelEntry { id: model, name }]
 }
 
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
@@ -1010,11 +1014,25 @@ mod tests {
 
     #[test]
     fn configured_model_fallback_is_trimmed_and_singular() {
+        // Unknown id: trimmed, and the raw id passes through as the name.
         assert_eq!(
             crate::configured_model_fallback("  configured-model  "),
             vec![ModelEntry {
                 id: "configured-model".into(),
                 name: "configured-model".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn configured_model_fallback_curates_known_databricks_id() {
+        // A configured Databricks id known to the manifest gets its curated
+        // label; `id` stays the raw wire/config value.
+        assert_eq!(
+            crate::configured_model_fallback("databricks-gpt-5-5"),
+            vec![ModelEntry {
+                id: "databricks-gpt-5-5".into(),
+                name: "GPT-5.5".into(),
             }]
         );
     }

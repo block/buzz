@@ -6,15 +6,14 @@ use super::managed_agent_definition::validate_create_definition;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
-        load_teams, managed_agent_avatar_url, normalize_agent_args, provider_deploy,
-        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
+        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
+        managed_agent_avatar_url, normalize_agent_args, resolve_provider_binary,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -25,6 +24,28 @@ use crate::{
 pub(super) fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
     Ok(keys.public_key().to_hex())
+}
+
+/// Build a summary from fresh disk state (personas, teams, global config).
+/// For one-shot command paths only — the 5s list poll calls
+/// `build_managed_agent_summary` directly with stores loaded once per call,
+/// not once per record.
+pub(super) fn summarize_from_disk(
+    app: &AppHandle,
+    record: &ManagedAgentRecord,
+    runtimes: &std::collections::HashMap<
+        crate::managed_agents::ManagedAgentRuntimeKey,
+        crate::managed_agents::ManagedAgentPairRuntime,
+    >,
+) -> Result<ManagedAgentSummary, String> {
+    build_managed_agent_summary(
+        app,
+        record,
+        runtimes,
+        &load_personas(app).unwrap_or_default(),
+        &load_teams(app).unwrap_or_default(),
+        &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
+    )
 }
 
 /// Retain a freshly authored managed-agent event in the local store, flagged
@@ -334,18 +355,11 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    let personas = load_personas(app).unwrap_or_default();
     let record = records
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    build_managed_agent_summary(
-        app,
-        record,
-        &runtimes,
-        &personas,
-        &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
-    )
+    summarize_from_disk(app, record, &runtimes)
 }
 
 pub(super) async fn start_local_agent_with_preflight(
@@ -437,76 +451,12 @@ pub(super) async fn start_local_agent_with_preflight(
         record,
         &runtimes,
         &personas,
+        &load_teams(app).unwrap_or_default(),
         &crate::managed_agents::load_global_agent_config(app).unwrap_or_default(),
     )
 }
 
-/// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
-/// spawn_blocking, and persists the result (backend_agent_id or last_error).
-///
-/// Idempotency: calling deploy on an already-deployed agent sends the same payload
-/// again. Providers are expected to handle this as an update-in-place or no-op —
-/// the protocol does not include an explicit `undeploy` operation (deferred to v2).
-///
-/// Returns Ok(()) on success, Err(message) on failure. Either way the record is
-/// updated and saved before returning.
-async fn deploy_to_provider(
-    app: &AppHandle,
-    state: &AppState,
-    pubkey: &str,
-    provider_id: &str,
-    config: &serde_json::Value,
-    agent_json: serde_json::Value,
-    cached_binary_path: Option<&str>,
-) -> Result<(), String> {
-    // Resolve via discovered candidates only. Cached path must match BOTH
-    // "is a discovered candidate" AND "belongs to this provider_id". A tampered
-    // record cannot redirect deploys to a different provider's binary.
-    let bin_path = cached_binary_path
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.exists())
-        .map(|p| p.canonicalize().unwrap_or(p))
-        .filter(|canonical| {
-            discover_provider_candidates().iter().any(|(id, cp)| {
-                id == provider_id && cp.canonicalize().ok().as_ref() == Some(canonical)
-            })
-        })
-        .map_or_else(|| resolve_provider_binary(provider_id), Ok)?;
-
-    let config_clone = config.clone();
-    let deploy_result =
-        tokio::task::spawn_blocking(move || provider_deploy(&bin_path, &agent_json, &config_clone))
-            .await
-            .map_err(|e| format!("spawn_blocking failed: {e}"))?;
-
-    // Persist result under lock.
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let rec = records
-        .iter_mut()
-        .find(|r| r.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-
-    match deploy_result {
-        Ok(backend_agent_id) => {
-            rec.backend_agent_id = Some(backend_agent_id);
-            rec.last_started_at = Some(now_iso());
-            rec.updated_at = now_iso();
-            rec.last_error = None;
-        }
-        Err(ref e) => {
-            rec.last_error = Some(e.clone());
-            rec.updated_at = now_iso();
-            save_managed_agents(app, &records)?;
-            return Err(e.clone());
-        }
-    }
-    save_managed_agents(app, &records)?;
-    Ok(())
-}
+pub(crate) use provider_deploy::deploy_to_provider;
 
 // Async so the blocking body (disk reads of agent/persona records, per-agent
 // process-liveness syscalls, and a possible save) runs on Tauri's worker pool
@@ -540,14 +490,22 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
 
         let personas = load_personas(&app).unwrap_or_default();
         // One disk read for the whole list — build_managed_agent_summary takes
-        // the config as a parameter precisely so this poll-every-5s call does
-        // not re-read it per record.
+        // teams and config as parameters precisely so this poll-every-5s call
+        // does not re-read them per record.
+        let teams = load_teams(&app).unwrap_or_default();
         let global_config =
             crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
         records
             .iter()
             .map(|record| {
-                build_managed_agent_summary(&app, record, &runtimes, &personas, &global_config)
+                build_managed_agent_summary(
+                    &app,
+                    record,
+                    &runtimes,
+                    &personas,
+                    &teams,
+                    &global_config,
+                )
             })
             .collect()
     })
@@ -870,6 +828,7 @@ pub async fn create_managed_agent(
             runtime_pid: None,
             backend: input.backend.clone(),
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path,
             persona_team_dir: None,
             persona_name_in_team: None,
@@ -919,15 +878,8 @@ pub async fn create_managed_agent(
         // before any .await — owner-authored, every agent (Will's ruling: no
         // is_builtin/persona-membership gate).
         retain_managed_agent_pending(&app, &state, record);
-        let personas = load_personas(&app).unwrap_or_default();
         (
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )?,
+            summarize_from_disk(&app, record, &runtimes)?,
             resolved_avatar_url,
         )
     };
@@ -956,14 +908,7 @@ pub async fn create_managed_agent(
                     .iter()
                     .find(|record| record.pubkey == pubkey)
                     .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
-                let personas = load_personas(&app).unwrap_or_default();
-                build_managed_agent_summary(
-                    &app,
-                    record,
-                    &runtimes,
-                    &personas,
-                    &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-                )?
+                summarize_from_disk(&app, record, &runtimes)?
             }
         }
     } else {
@@ -979,7 +924,7 @@ pub async fn create_managed_agent(
         &resolved_relay_url,
         &relay_ws_url_with_override(&state),
     );
-    let profile_sync_error = (sync_managed_agent_profile(
+    let mut profile_sync_error = (sync_managed_agent_profile(
         &state,
         &profile_relay_url,
         &agent_keys,
@@ -989,12 +934,11 @@ pub async fn create_managed_agent(
     )
     .await)
         .err();
+    profile_sync_error =
+        super::agent_models::flush_managed_agent_policy(&app, &state, profile_sync_error).await;
 
-    // ── Phase 5: provider deploy (async, outside lock) ───────────────────────
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
-            // Read the saved record to build the deploy payload (record has the
-            // canonical field values after Phase 3 normalization).
             let agent_json = {
                 let _g = state
                     .managed_agents_store_lock
@@ -1033,14 +977,7 @@ pub async fn create_managed_agent(
             .iter()
             .find(|r| r.pubkey == pubkey)
             .ok_or_else(|| "agent disappeared".to_string())?;
-        let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(
-            &app,
-            record,
-            &runtimes,
-            &personas,
-            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-        )?
+        summarize_from_disk(&app, record, &runtimes)?
     } else {
         agent
     };
@@ -1100,19 +1037,7 @@ pub async fn start_managed_agent(
         // profile reconcile (the create-time snapshot may be empty or stale for
         // a persona-inherited harness).
         let reconcile_personas = load_personas(&app).unwrap_or_default();
-        let reconcile_effective_command =
-            crate::managed_agents::record_agent_command(record, &reconcile_personas);
-
-        let reconcile = ProfileReconcileData {
-            private_key_nsec: record.private_key_nsec.clone(),
-            name: record.name.clone(),
-            relay_url: record.relay_url.clone(),
-            avatar_url: record.avatar_url.clone(),
-            auth_tag: record.auth_tag.clone(),
-            pubkey: record.pubkey.clone(),
-            agent_command: reconcile_effective_command,
-            persona_id: record.persona_id.clone(),
-        };
+        let reconcile = profile_reconcile_data(record, &reconcile_personas);
 
         let target = if record.backend == BackendKind::Local {
             StartTarget::Local
@@ -1161,14 +1086,7 @@ pub async fn start_managed_agent(
                 .iter()
                 .find(|r| r.pubkey == pubkey)
                 .ok_or_else(|| format!("agent {pubkey} not found"))?;
-            let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )
+            summarize_from_disk(&app, record, &runtimes)
         }
         StartTarget::Provider { backend, .. } => Err(format!(
             "agent {pubkey} has unsupported backend kind: {backend:?}"
@@ -1249,14 +1167,7 @@ pub async fn stop_managed_agent(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        let personas = load_personas(&app).unwrap_or_default();
-        build_managed_agent_summary(
-            &app,
-            record,
-            &runtimes,
-            &personas,
-            &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-        )
+        summarize_from_disk(&app, record, &runtimes)
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -1354,7 +1265,8 @@ pub async fn delete_managed_agent(
 #[path = "agents_deploy.rs"]
 mod deploy;
 pub(super) mod provider_access;
-use deploy::build_deploy_payload;
+mod provider_deploy;
+pub(super) use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::{deploy_payload_json, DeployProjections};
 #[cfg(test)]
@@ -1362,9 +1274,9 @@ use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
 
 #[path = "agents_profile.rs"]
 mod profile;
+pub(crate) use profile::*;
 #[cfg(test)]
 use profile::{profile_needs_sync, resolve_legacy_avatar};
-pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
 
 #[cfg(test)]
 #[path = "agents_tests.rs"]

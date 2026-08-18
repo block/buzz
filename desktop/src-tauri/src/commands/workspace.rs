@@ -132,6 +132,9 @@ pub async fn apply_workspace(
     app: AppHandle,
 ) -> Result<(), String> {
     let restore_app = app.clone();
+    // Capture the caller's relay before the blocking apply. Reading shared
+    // state afterward could pick up a newer concurrent community switch.
+    let profile_reconcile_relay = relay_url.clone();
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
 
@@ -213,6 +216,14 @@ pub async fn apply_workspace(
 
     let state = restore_app.state::<AppState>();
     super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
+    // The Bumble→Pollen migration may have renamed stopped agents. Reconcile
+    // their relay profiles independently of runtime restore; successful writes
+    // record this relay while retaining the agent for other communities, and
+    // failures retry on the next workspace apply.
+    crate::managed_agents::spawn_pending_profile_reconciliations(
+        &restore_app,
+        &profile_reconcile_relay,
+    );
 
     // Backfill this exact relay+owner scope only after the workspace has been
     // applied. Running at process boot would target the fallback relay and
@@ -222,16 +233,39 @@ pub async fn apply_workspace(
             // Adopt whatever the pre-scoping release left queued in the global
             // retention database BEFORE the scoped reconcile and flush run, so
             // stranded tombstones and archive requests publish on this boot
-            // instead of being abandoned by the storage cutover.
+            // instead of being abandoned by the storage cutover. Best-effort:
+            // it is not a prerequisite for the superseding head — the team leg
+            // below builds the repaired roster's head fresh from disk with a
+            // monotonic `created_at` regardless of what the legacy copy left.
             migrate_legacy_retention_into(&restore_app, &scope);
-            crate::event_sync::spawn_event_sync(
+            // Await the reconcile to completion — do NOT spawn it — and
+            // propagate its failure. The boot migration may have repaired team
+            // membership on disk; the frontend starts inbound history replay
+            // the moment `useCommunityInit` observes the applied workspace, and
+            // an old relay team head could otherwise win that race and overwrite
+            // the repaired `persona_ids`. The team leg is fatal (see
+            // `run_event_sync`): only its success durably retains the corrected
+            // head with a superseding `monotonic_created_at`, so
+            // `retain_inbound_event`'s equal/older guard rejects the stale head.
+            // On failure we return `Err` — the command reports failure,
+            // `useCommunityInit` never exposes the community, and inbound replay
+            // never starts against an un-superseded disk state.
+            crate::event_sync::run_event_sync_blocking(
                 restore_app.clone(),
                 scope.owner_keys,
                 scope.db_path,
             )
+            .await?;
         }
         Err(error) => {
-            eprintln!("buzz-desktop: scoped event-sync unavailable after workspace apply: {error}");
+            // Scope resolution is a prerequisite for establishing the
+            // superseding head, so its failure is fatal for the same reason:
+            // without a scope we cannot retain the repaired roster ahead of an
+            // inbound replay. Fail the command rather than silently opening the
+            // inbound lane.
+            return Err(format!(
+                "scoped event-sync unavailable after workspace apply: {error}"
+            ));
         }
     }
 

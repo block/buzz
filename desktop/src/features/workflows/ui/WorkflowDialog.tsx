@@ -83,7 +83,10 @@ export function WorkflowDialog({
   } | null>(null);
 
   const createMutation = useCreateWorkflowMutation(selectedChannelId);
-  const updateMutation = useUpdateWorkflowMutation(workflow?.id ?? "");
+  const updateMutation = useUpdateWorkflowMutation(
+    workflow?.id ?? "",
+    workflow?.revision ?? "",
+  );
   const mutation = mode === "edit" ? updateMutation : createMutation;
 
   const selectedChannel =
