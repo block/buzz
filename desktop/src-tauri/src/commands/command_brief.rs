@@ -217,38 +217,39 @@ pub fn get_model_routing_preference(
     })
 }
 
-fn restart_live_command_advisers(app: &AppHandle) {
+fn model_route_restart_targets<'a>(
+    records: &[crate::managed_agents::ManagedAgentRecord],
+    keys: impl Iterator<Item = &'a crate::managed_agents::ManagedAgentRuntimeKey>,
+) -> Vec<(String, String)> {
     use std::collections::HashSet;
+
+    let local_pubkeys = records
+        .iter()
+        .filter(|record| record.backend == crate::managed_agents::BackendKind::Local)
+        .map(|record| record.pubkey.as_str())
+        .collect::<HashSet<_>>();
+    keys.filter(|key| local_pubkeys.contains(key.pubkey.as_str()))
+        .map(|key| (key.pubkey.clone(), key.relay_url.clone()))
+        .collect()
+}
+
+fn restart_live_managed_agents(app: &AppHandle) {
     use tauri::Manager;
 
     let records = match crate::managed_agents::load_managed_agents(app) {
         Ok(records) => records,
         Err(error) => {
-            eprintln!("buzz-desktop: could not scan advisers after routing change: {error}");
+            eprintln!("buzz-desktop: could not scan agents after routing change: {error}");
             return;
         }
     };
-    let adviser_pubkeys = records
-        .iter()
-        .filter(|record| {
-            record
-                .persona_id
-                .as_deref()
-                .is_some_and(crate::managed_agents::runtime::is_command_adviser_persona)
-        })
-        .map(|record| record.pubkey.clone())
-        .collect::<HashSet<_>>();
     let targets = {
         let state = app.state::<AppState>();
         let runtimes = state
             .managed_agent_processes
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        runtimes
-            .keys()
-            .filter(|key| adviser_pubkeys.contains(&key.pubkey))
-            .map(|key| (key.pubkey.clone(), key.relay_url.clone()))
-            .collect::<Vec<_>>()
+        model_route_restart_targets(&records, runtimes.keys())
     };
     for (pubkey, relay_url) in targets {
         if let Err(error) = crate::managed_agents::restart_managed_agent_runtime(
@@ -257,14 +258,14 @@ fn restart_live_command_advisers(app: &AppHandle) {
             app.clone(),
         ) {
             eprintln!(
-                "buzz-desktop: adviser {pubkey} failed to restart after routing change: {error}"
+                "buzz-desktop: agent {pubkey} failed to restart after routing change: {error}"
             );
         }
     }
 }
 
-/// Persist one of the two fixed provider orders for subsequent briefs and
-/// Command Team conversations.
+/// Persist one of the fixed app-wide provider modes for subsequent generated
+/// work and managed-agent conversations.
 #[tauri::command]
 pub async fn set_model_routing_preference(
     app: AppHandle,
@@ -275,7 +276,7 @@ pub async fn set_model_routing_preference(
     save_routing_preference(&trusted_lan_config_path(&app)?, preference)
         .map_err(|_| command_error())?;
     let restart_app = app.clone();
-    tokio::task::spawn_blocking(move || restart_live_command_advisers(&restart_app))
+    tokio::task::spawn_blocking(move || restart_live_managed_agents(&restart_app))
         .await
         .map_err(|_| command_error())?;
     Ok(ModelRoutingPreferenceView { preference })
@@ -423,6 +424,65 @@ mod tests {
         TerminalAuditInput,
     };
     use crate::command_brief::types::CommandBrief;
+
+    fn managed_record(
+        pubkey_byte: char,
+        persona_id: &str,
+    ) -> crate::managed_agents::ManagedAgentRecord {
+        let mut record: crate::managed_agents::ManagedAgentRecord = serde_json::from_value(json!({
+            "pubkey": pubkey_byte.to_string().repeat(64),
+            "name": persona_id,
+            "relay_url": "ws://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "parallelism": 1,
+            "created_at": "2026-08-18T00:00:00Z",
+            "updated_at": "2026-08-18T00:00:00Z"
+        }))
+        .expect("managed record");
+        record.persona_id = Some(persona_id.to_string());
+        record
+    }
+
+    #[test]
+    fn model_route_restart_targets_include_every_running_local_agent() {
+        let command = managed_record('a', "builtin:command-navigation");
+        let keeper = managed_record('b', "builtin:keeper");
+        let mut remote = managed_record('c', "builtin:reviewer");
+        remote.backend = crate::managed_agents::BackendKind::Provider {
+            id: "remote".to_string(),
+            config: json!({}),
+        };
+        let records = vec![command.clone(), keeper.clone(), remote.clone()];
+        let keys = [
+            crate::managed_agents::ManagedAgentRuntimeKey::new(
+                command.pubkey.clone(),
+                "ws://localhost:3000",
+            )
+            .expect("command key"),
+            crate::managed_agents::ManagedAgentRuntimeKey::new(
+                keeper.pubkey.clone(),
+                "ws://localhost:3000",
+            )
+            .expect("keeper key"),
+            crate::managed_agents::ManagedAgentRuntimeKey::new(
+                remote.pubkey.clone(),
+                "ws://localhost:3000",
+            )
+            .expect("remote key"),
+        ];
+
+        assert_eq!(
+            model_route_restart_targets(&records, keys.iter()),
+            vec![
+                (command.pubkey, "ws://localhost:3000".to_string()),
+                (keeper.pubkey, "ws://localhost:3000".to_string()),
+            ]
+        );
+    }
 
     #[derive(Default)]
     struct AcceptingPublisher {

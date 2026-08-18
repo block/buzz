@@ -47,7 +47,7 @@ fn optional_loader_selects_only_a_valid_protected_trusted_lan_config() {
 }
 
 #[test]
-fn routing_preference_defaults_local_and_accepts_cloud_first() {
+fn routing_preference_defaults_local_and_accepts_all_supported_modes() {
     let example =
         String::from_utf8(include_bytes!("../../trusted-lan-sources.example.json").to_vec())
             .expect("fixture utf8");
@@ -59,7 +59,7 @@ fn routing_preference_defaults_local_and_accepts_cloud_first() {
         ModelRoutingPreference::LocalFirst
     );
 
-    let cloud_first = example;
+    let cloud_first = example.clone();
     let parsed =
         TrustedLanConfig::parse(cloud_first.as_bytes()).expect("cloud-first trusted LAN config");
     assert_eq!(
@@ -73,6 +73,17 @@ fn routing_preference_defaults_local_and_accepts_cloud_first() {
     assert_eq!(
         legacy.world_monitor().endpoint(),
         "https://api.worldmonitor.app/mcp"
+    );
+
+    let local_only_fixture = example.replace(
+        "\"model_routing_preference\": \"cloud_first\"",
+        "\"model_routing_preference\": \"local_only\"",
+    );
+    let local_only = TrustedLanConfig::parse(local_only_fixture.as_bytes())
+        .expect("local-only trusted LAN config");
+    assert_eq!(
+        local_only.routing_preference(),
+        ModelRoutingPreference::LocalOnly
     );
 }
 

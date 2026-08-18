@@ -13,6 +13,7 @@ mod hints;
 mod llm;
 pub mod lmstudio;
 mod mcp;
+mod trusted_lan_prefetch;
 pub mod types;
 mod wire;
 

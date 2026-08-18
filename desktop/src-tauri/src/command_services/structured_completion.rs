@@ -19,24 +19,25 @@ use crate::{
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAXIMUM_INPUT_BYTES: usize = 768 * 1024;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Attempt {
     Local,
     Cloud(CloudProvider),
 }
 
-fn attempts(preference: ModelRoutingPreference) -> [Attempt; 3] {
+fn attempts(preference: ModelRoutingPreference) -> Vec<Attempt> {
     match preference {
-        ModelRoutingPreference::CloudFirst => [
+        ModelRoutingPreference::CloudFirst => vec![
             Attempt::Cloud(CloudProvider::LiteLlm),
             Attempt::Cloud(CloudProvider::OpenAi),
             Attempt::Local,
         ],
-        ModelRoutingPreference::LocalFirst => [
+        ModelRoutingPreference::LocalFirst => vec![
             Attempt::Local,
             Attempt::Cloud(CloudProvider::LiteLlm),
             Attempt::Cloud(CloudProvider::OpenAi),
         ],
+        ModelRoutingPreference::LocalOnly => vec![Attempt::Local],
     }
 }
 
@@ -181,5 +182,13 @@ mod tests {
         let model = first_loaded_model(&catalog).expect("loaded model");
         assert_eq!(model.id, "qwen/loaded");
         assert_eq!(model.context_length, 65_536);
+    }
+
+    #[test]
+    fn local_only_structured_work_has_no_cloud_attempt() {
+        assert_eq!(
+            attempts(ModelRoutingPreference::LocalOnly),
+            [Attempt::Local]
+        );
     }
 }

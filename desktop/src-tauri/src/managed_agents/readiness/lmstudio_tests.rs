@@ -35,7 +35,7 @@ fn native_runtime_requires_a_structured_model() {
 }
 
 #[test]
-fn reserved_env_cannot_bypass_missing_structured_model() {
+fn reserved_env_cannot_override_the_qualified_local_model() {
     let definition: crate::managed_agents::AgentDefinition =
         serde_json::from_value(serde_json::json!({
             "id": "lm-persona",
@@ -56,10 +56,9 @@ fn reserved_env_cannot_bypass_missing_structured_model() {
     let effective =
         resolve_effective_agent_env(&record, &[], runtime, &GlobalAgentConfig::default());
 
-    assert!(!effective.env.contains_key("LM_STUDIO_MODEL"));
-    assert!(agent_readiness(&effective)
-        .requirements()
-        .contains(&Requirement::NormalizedField {
-            field: "model".to_string()
-        }));
+    assert_eq!(
+        effective.env.get("LM_STUDIO_MODEL").map(String::as_str),
+        Some(crate::commands::QUALIFIED_INSTANCE_ID)
+    );
+    assert!(agent_readiness(&effective).is_ready());
 }
