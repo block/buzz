@@ -1,6 +1,10 @@
 import type { ManagedAgent } from "@/shared/api/types";
-import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  type ImetaMedia,
+  mergeOutgoingTags,
+} from "@/features/messages/lib/imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
+import type { PreparedBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
@@ -17,6 +21,7 @@ export type PendingNonMemberMentionSend = {
   mentionPubkeys: string[];
   nonMemberPubkeys: string[];
   outgoingTags?: string[][];
+  preparedLinkPreviews?: PreparedBackgroundLinkPreviews | null;
   preparedManagedAgents?: ManagedAgent[];
   readyAgentPubkeys?: string[];
   savedContent: string;
@@ -37,6 +42,7 @@ export type SendMessageWithMentionFlowInput = {
   pendingImeta: ImetaMedia[];
   queuedAttachments?: QueuedMediaAttachment[];
   linkPreviewTags?: string[][];
+  preparedLinkPreviews?: PreparedBackgroundLinkPreviews | null;
   sentDraftKey: string | null | undefined;
   recoveryDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
@@ -44,6 +50,21 @@ export type SendMessageWithMentionFlowInput = {
   audienceGeneration?: number;
   audienceRevision?: number | null;
 };
+
+export async function resolvePreviewTags(
+  draft: Pick<PendingNonMemberMentionSend, "preparedLinkPreviews">,
+  mediaTags: string[][] | undefined,
+  outgoingTags: string[][] | undefined,
+): Promise<string[][] | null> {
+  const result = await draft.preparedLinkPreviews?.promise;
+  if (result?.status === "cancelled") return null;
+  return (
+    mergeOutgoingTags(mediaTags, [
+      ...(outgoingTags ?? []),
+      ...(result?.tags ?? []),
+    ]) ?? []
+  );
+}
 
 export function mergeOutgoingTagsWithReferenceMentions(
   outgoingTags: string[][] | undefined,

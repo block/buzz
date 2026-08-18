@@ -113,7 +113,6 @@ class ActivityPage extends HookConsumerWidget {
     final readState = ref.watch(readStateProvider);
     final localState = ref.watch(inboxLocalStateProvider);
     final drafts = ref.watch(composeDraftsProvider);
-    final dueReminderCount = ref.watch(dueReminderCountProvider);
     final allItems = ref.watch(inboxItemsProvider);
     final myPk = ref.watch(myPubkeyProvider);
 
@@ -380,8 +379,6 @@ class ActivityPage extends HookConsumerWidget {
         actions: [
           _ActivityActionsPill(
             filter: filter.value,
-            dueReminderCount: dueReminderCount,
-            draftCount: drafts.length,
             unreadOnly: unreadOnly.value,
             unreadCount: unreadVisibleCount,
             onFilterChanged: (f) => filter.value = f,

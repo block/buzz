@@ -137,8 +137,6 @@ class _DmAvatar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profiles = ref.watch(userCacheProvider);
-    final presenceMap = ref.watch(presenceCacheProvider);
     final normalizedCurrent = currentPubkey?.toLowerCase();
     final otherPubkeys = [
       for (final pk in channel.participantPubkeys)
@@ -171,7 +169,18 @@ class _DmAvatar extends ConsumerWidget {
     }
 
     final otherPubkey = visiblePubkeys.isNotEmpty ? visiblePubkeys.first : null;
-    final profile = otherPubkey != null ? profiles[otherPubkey] : null;
+    final profile = ref.watch(
+      userCacheProvider.select(
+        (profiles) => otherPubkey == null ? null : profiles[otherPubkey],
+      ),
+    );
+    final presence = ref.watch(
+      presenceCacheProvider.select(
+        (presenceMap) => otherPubkey == null
+            ? 'offline'
+            : (presenceMap[otherPubkey] ?? 'offline'),
+      ),
+    );
 
     // Trigger fetches if not cached yet.
     if (otherPubkey != null) {
@@ -187,10 +196,6 @@ class _DmAvatar extends ConsumerWidget {
         (channel.participants.isNotEmpty
             ? channel.participants.first[0].toUpperCase()
             : '?');
-    final presence = otherPubkey != null
-        ? (presenceMap[otherPubkey] ?? 'offline')
-        : 'offline';
-
     return SizedBox(
       width: _kDmAvatarSize,
       height: _kDmAvatarSize,

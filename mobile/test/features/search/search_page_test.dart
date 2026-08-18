@@ -316,6 +316,14 @@ void main() {
       reason: 'The active field translates upward into the title row.',
     );
     expect(find.byKey(const Key('search-header-filters')), findsOneWidget);
+    final filtersRect = tester.getRect(
+      find.byKey(const Key('search-header-filters')),
+    );
+    expect(
+      filtersRect.top - focusedRect.bottom,
+      Grid.xxs,
+      reason: 'Filters keep one compact spacing token below the controls.',
+    );
     final settledSlide = tester.widget<SlideTransition>(
       find.ancestor(of: cancel, matching: find.byType(SlideTransition)).first,
     );
@@ -330,6 +338,12 @@ void main() {
     expect(iconScale.scale, lessThan(1));
     expect(movingField.top, Grid.half);
     final appBarRect = tester.getRect(find.byType(FrostedAppBar));
+    expect(
+      appBarRect.bottom - filtersRect.bottom,
+      closeTo(Grid.xxs + 1, 0.01),
+      reason:
+          'The filter row keeps the same spacing below it, plus the divider.',
+    );
     expect(
       appBarRect.contains(focusedRect.center),
       isTrue,

@@ -74,6 +74,127 @@ async function dragSidebarRail(page: Page, deltaX: number) {
   await page.mouse.up();
 }
 
+test("sidebar rows separate hover, selected, and reorder states", async ({
+  page,
+}) => {
+  await loadTheme(page, "github-light");
+  await page.getByTestId("channel-general").click();
+
+  const selectedRow = page.getByTestId("channel-general");
+  const hoverRow = page.getByTestId("channel-random");
+
+  await page.mouse.move(600, 100);
+  const establishedActiveBackground = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "hsl(var(--sidebar-active))";
+    document.body.append(probe);
+    const background = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return background;
+  });
+  await expect(selectedRow).toHaveCSS(
+    "background-color",
+    establishedActiveBackground,
+  );
+  // The spacing and motion experiment must preserve the production selected
+  // row typography.
+  await expect(selectedRow).toHaveCSS("font-weight", "400");
+
+  const rowGap = await page.evaluate(() => {
+    const selected = document.querySelector<HTMLElement>(
+      '[data-testid="channel-general"]',
+    );
+    const following = document.querySelector<HTMLElement>(
+      '[data-testid="channel-random"]',
+    );
+    if (!selected || !following) return null;
+    const selectedBox = selected.getBoundingClientRect();
+    const followingBox = following.getBoundingClientRect();
+    return followingBox.top - selectedBox.bottom;
+  });
+  expect(rowGap).toBe(4);
+
+  const establishedHoverBackground = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "hsl(var(--sidebar-accent))";
+    document.body.append(probe);
+    const background = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return background;
+  });
+  await hoverRow.hover();
+  await expect(hoverRow).toHaveCSS(
+    "background-color",
+    establishedHoverBackground,
+  );
+
+  const activeForegroundTokens = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const sidebar = document.querySelector<HTMLElement>(
+      '[data-testid="app-sidebar"]',
+    );
+    if (!sidebar) return null;
+    return {
+      root: root.getPropertyValue("--sidebar-active-foreground").trim(),
+      sidebar: getComputedStyle(sidebar)
+        .getPropertyValue("--sidebar-active-foreground")
+        .trim(),
+    };
+  });
+  expect(activeForegroundTokens).not.toBeNull();
+  expect(activeForegroundTokens?.sidebar).toBe(activeForegroundTokens?.root);
+
+  const selectedBox = await selectedRow.boundingBox();
+  expect(selectedBox).not.toBeNull();
+  if (!selectedBox) return;
+
+  const draggableRow = selectedRow.locator("..");
+
+  await page.mouse.move(
+    selectedBox.x + selectedBox.width / 2,
+    selectedBox.y + selectedBox.height / 2,
+  );
+  await page.mouse.down();
+  await expect(selectedRow).toHaveCSS("transform", "none");
+  await expect(draggableRow).not.toHaveAttribute("data-sidebar-drag-state");
+
+  // Small pointer motion still counts as an ordinary click. The row only
+  // scales once dnd-kit's 6px reorder threshold has been crossed.
+  await page.mouse.move(
+    selectedBox.x + selectedBox.width / 2,
+    selectedBox.y + selectedBox.height / 2 + 3,
+    { steps: 3 },
+  );
+  await expect(draggableRow).not.toHaveAttribute("data-sidebar-drag-state");
+  await expect(draggableRow).toHaveCSS("transform", "none");
+
+  await page.mouse.move(
+    selectedBox.x + selectedBox.width / 2,
+    selectedBox.y + selectedBox.height / 2 + 8,
+    { steps: 5 },
+  );
+  await expect(draggableRow).toHaveAttribute(
+    "data-sidebar-drag-state",
+    "dragging",
+  );
+  await expect(page.getByTestId("sidebar-channel-drag-overlay")).toBeVisible();
+  await expect
+    .poll(() =>
+      draggableRow.evaluate((element) => getComputedStyle(element).transform),
+    )
+    .toBe("matrix(0.985, 0, 0, 0.985, 0, 0)");
+  await page.mouse.up();
+  await expect(draggableRow).not.toHaveAttribute("data-sidebar-drag-state");
+  await expect(
+    page.getByTestId("sidebar-channel-drag-overlay"),
+  ).not.toBeVisible();
+  await expect
+    .poll(() =>
+      draggableRow.evaluate((element) => getComputedStyle(element).transform),
+    )
+    .toBe("none");
+});
+
 test("add community starts with create and join choices", async ({ page }) => {
   await installMockBridge(page, {});
   await page.goto("/");
