@@ -193,6 +193,7 @@ Widget _buildTestable({
   Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
   Map<String, Future<List<NostrEvent>> Function()> threadReplyLoaders =
       const {},
+  Map<String, List<NostrEvent>> localThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
   bool disableRetries = false,
@@ -252,6 +253,15 @@ Widget _buildTestable({
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) => entry.value()),
+      for (final entry in localThreadReplies.entries)
+        threadLocalRepliesProvider(
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith(
+          () => _FakeThreadLocalRepliesNotifier(
+            ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+            entry.value,
+          ),
+        ),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -4517,6 +4527,9 @@ void main() {
           messages: [root, target],
           providerRetry: (retryCount, _) =>
               retryCount == 0 ? const Duration(seconds: 30) : null,
+          localThreadReplies: {
+            'root': [target],
+          },
           threadReplyLoaders: {
             'root': () {
               attempts++;
@@ -7639,6 +7652,15 @@ Channel _channel({required String id, required String name}) => Channel(
   memberCount: 3,
   isMember: true,
 );
+
+class _FakeThreadLocalRepliesNotifier extends ThreadLocalRepliesNotifier {
+  final List<NostrEvent> _replies;
+
+  _FakeThreadLocalRepliesNotifier(super.args, this._replies);
+
+  @override
+  List<NostrEvent> build() => _replies;
+}
 
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;

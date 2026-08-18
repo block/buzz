@@ -93,11 +93,12 @@ class ThreadDetailPage extends HookConsumerWidget {
     // page displays a nested branch. Query that root, then select this head's
     // direct children from the returned subtree below.
     final queryRootId = threadHead.rootId ?? threadHead.id;
-    final repliesState = ref.watch(
-      threadRepliesWithLocalProvider(
-        ThreadRepliesArgs(channelId: channelId, rootId: queryRootId),
-      ),
+    final repliesArgs = ThreadRepliesArgs(
+      channelId: channelId,
+      rootId: queryRootId,
     );
+    final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
+    final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
     // The thread query is one-shot and asks only for content kinds, so a
     // reaction, edit, or deletion that lands while the thread is open never
     // reaches it — a new pill (and its burst) only showed up after leaving and
@@ -118,8 +119,8 @@ class ThreadDetailPage extends HookConsumerWidget {
     // loading states provisional, but let the hydrated route snapshot drive
     // the one-shot target jump when the relay query has definitively failed.
     final canUseMessagesForInitialTarget =
-        fetchedReplies != null ||
-        (replyMessages.hasError && !replyMessages.retrying);
+        relayReplyState.value != null ||
+        (relayReplyState.hasError && !relayReplyState.retrying);
     final liveDeletionHidesHead = _isDeletedBy(
       liveChannelEvents,
       threadHead.id,
