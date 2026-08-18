@@ -4034,6 +4034,53 @@ mod tests {
         }
     }
 
+    /// Drive the complete NIP-98 `POST /events` boundary through the axum
+    /// router. Unlike `submit_with_tag`, this makes the production wrapper
+    /// authenticate the signed request and carry its timestamp into the
+    /// ownership policy.
+    async fn post_events_with_nip98_tag(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        agent: &Keys,
+        tag_json: &str,
+        auth_event_created_at: u64,
+    ) -> StatusCode {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let body = body_event(agent);
+        let url = nip98_expected_url(&state.config.relay_url, tenant, "/events");
+        let auth_event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", url.as_str()]).expect("u tag"),
+                Tag::parse(["method", "POST"]).expect("method tag"),
+            ])
+            .custom_created_at(nostr::Timestamp::from(auth_event_created_at))
+            .sign_with_keys(agent)
+            .expect("sign NIP-98 event");
+        let auth_event_json = serde_json::to_string(&auth_event).expect("serialize auth event");
+        let mut headers = nip98_auth_headers(&auth_event_json);
+        headers.insert(
+            header::HOST,
+            tenant.host().parse().expect("valid tenant host header"),
+        );
+        headers.insert("x-auth-tag", tag_json.parse().expect("header value"));
+
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/events")
+            .body(Body::from(body))
+            .expect("build request");
+        *request.headers_mut() = headers;
+
+        crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .expect("router oneshot")
+            .status()
+    }
+
     /// The regression itself: a direct relay member on a closed relay presents
     /// a valid attestation, and the owner is recorded. Before the fix this
     /// silently resolved to no owner, so `owner_only` policies had nothing to
@@ -4062,6 +4109,45 @@ mod tests {
             stored_owner(&state, &tenant, &agent.public_key()).await,
             Some(owner.public_key().to_bytes().to_vec()),
             "a direct member's verified owner must be recorded on a closed relay",
+        );
+    }
+
+    /// The outer HTTP regression boundary: the router must authenticate a real
+    /// NIP-98 request and preserve its signed timestamp through `submit_event`
+    /// into owner materialization. Supplying `None` at that handoff makes this
+    /// assertion fail while the inner-path test above remains green.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_outer_nip98_records_owner_for_direct_member() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("compute auth tag");
+        let status = post_events_with_nip98_tag(
+            &state,
+            &tenant,
+            &agent,
+            &tag,
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "real POST /events must succeed");
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "the outer NIP-98 wrapper must carry its signed timestamp into owner materialization",
         );
     }
 
@@ -4135,6 +4221,66 @@ mod tests {
             stored_owner(&state, &tenant, &agent.public_key()).await,
             Some(owner.public_key().to_bytes().to_vec()),
             "the same attestation inside its window must be recorded",
+        );
+    }
+
+    /// The real NIP-98 wrapper must apply strict attestation bounds to the
+    /// timestamp it verified. The inside-window control proves the expired
+    /// refusal is caused by the bound rather than a broken outer request.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_outer_nip98_refuses_expired_attestation() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let auth_event_created_at = nostr::Timestamp::now().as_secs();
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(
+            &owner,
+            &agent.public_key(),
+            &format!("created_at<{auth_event_created_at}"),
+        )
+        .expect("compute auth tag");
+        let expired_status =
+            post_events_with_nip98_tag(&state, &tenant, &agent, &tag, auth_event_created_at).await;
+
+        assert_eq!(
+            expired_status,
+            StatusCode::OK,
+            "expired ownership metadata must not reject the otherwise valid event",
+        );
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "an attestation at its strict upper bound must not materialize through the outer wrapper",
+        );
+
+        let inside_status = post_events_with_nip98_tag(
+            &state,
+            &tenant,
+            &agent,
+            &tag,
+            auth_event_created_at.saturating_sub(1),
+        )
+        .await;
+        assert_eq!(
+            inside_status,
+            StatusCode::OK,
+            "the same attestation inside its window must reach owner materialization",
+        );
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "the inside-window control must prove the expired refusal is not vacuous",
         );
     }
 
