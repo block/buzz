@@ -95,14 +95,16 @@ multi-adviser paths.
 - [x] two- and three-adviser installed-app journeys complete through capacity one;
 - [x] local RAG citation and local Memory write/readback are present;
 - [x] interrupted Daily Command Brief behaviour is owner accepted with a recorded deviation: the run does not resume after app relaunch and must be started again;
-- [ ] app, LM Studio, RAG, Memory, and relay restart canaries pass;
-- [ ] cold Mac restart restores the exact runtime and pending work;
-- [ ] eight-hour overnight soak passes with zero cloud attempts and bounded growth; and
+- [x] app, LM Studio, RAG, Memory, and relay restart canaries pass;
+- [x] cold Mac restart gate is closed by owner-accepted deviation; it was not physically tested;
+- [x] eight-hour overnight soak gate is closed by owner-accepted deviation; it was not physically tested; and
 - [x] owner confirms the installed disconnected product is usable.
 
 ## Acceptance decision
 
-**IN PROGRESS.** The short disconnected user journey is accepted, including
-the explicit interrupted-brief deviation. Phase 5 is not sea-going accepted
-until the service-restart, cold-restart, and eight-hour soak gates pass.
-Optional Phase 6 model refinement remains closed.
+**COMPLETE — OWNER ACCEPTED.** The disconnected user journey and controlled
+service-restart matrix passed. The owner explicitly accepts the interrupted-
+brief restart limitation and closes the cold-Mac-restart and eight-hour soak
+gates as documented deviations rather than completed tests. Phase 5 is
+accepted for the intended sea-going pilot on that basis. Optional Phase 6
+model refinement remains closed.
