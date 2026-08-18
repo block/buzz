@@ -1,4 +1,13 @@
 @layer components {
+  /* Primary navigation rows share one inactive hierarchy, including preview
+   * features that can appear between the permanent destinations. Keeping the
+   * treatment on the menu prevents newly gated rows from silently rendering
+   * at stronger emphasis than Inbox and Agents. */
+  .sidebar-primary-menu [data-sidebar="menu-button"]:not([data-active="true"])
+    > :is(svg, [data-sidebar="menu-label"]) {
+    opacity: 0.8;
+  }
+
   .buzz-side-panel-enter {
     animation: buzz-side-panel-enter 260ms cubic-bezier(0.32, 0.72, 0, 1) both;
     transform-origin: right center;

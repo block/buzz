@@ -88,6 +88,24 @@ import UserNotifications
       }
     }
 
+    if let jumpToLatestGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzJumpToLatestGlassButton"
+    ) {
+      jumpToLatestGlassRegistrar.register(
+        JumpToLatestGlassButtonFactory(messenger: messenger),
+        withId: "buzz/jump_to_latest_glass"
+      )
+    }
+
+    if let stickyDateGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzStickyDateGlassHeader"
+    ) {
+      stickyDateGlassRegistrar.register(
+        StickyDateGlassHeaderFactory(messenger: messenger),
+        withId: "buzz/sticky_date_glass"
+      )
+    }
+
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
     )

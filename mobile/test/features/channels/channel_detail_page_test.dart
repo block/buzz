@@ -1717,8 +1717,9 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsOneWidget,
       );
-      expect(find.text('Latest'), findsOneWidget);
+      expect(find.text('Latest'), findsNothing);
       expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byTooltip('Jump to latest message'), findsOneWidget);
     });
 
     testWidgets('loads history through the oldest unread boundary', (
@@ -2515,19 +2516,83 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsOneWidget,
       );
-      final latestSurface = tester.widget<Container>(
-        find.byKey(const ValueKey('channel-jump-to-latest-surface')),
+      final latestSurfaceFinder = find.byKey(
+        const ValueKey('channel-jump-to-latest-surface'),
       );
+      final latestSurface = tester.widget<Container>(latestSurfaceFinder);
       final latestDecoration = latestSurface.decoration! as BoxDecoration;
-      expect(latestDecoration.borderRadius, BorderRadius.circular(Radii.full));
+      expect(latestDecoration.shape, BoxShape.circle);
       expect(
         latestDecoration.color,
-        AppTheme.light().colorScheme.surface.withValues(alpha: 0.5),
+        AppTheme.light().colorScheme.surface.withValues(alpha: 0.72),
       );
       expect(
         (latestDecoration.border! as Border).top.color,
-        Colors.black.withValues(alpha: 0.04),
+        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.08),
       );
+      expect(
+        tester.getSize(find.byKey(const ValueKey('channel-jump-to-latest'))),
+        const Size.square(Grid.xl),
+      );
+      expect(
+        tester
+            .getCenter(find.byKey(const ValueKey('channel-jump-to-latest')))
+            .dx,
+        closeTo(tester.getCenter(messageList).dx, 0.1),
+      );
+      expect(
+        tester
+                .getTopLeft(find.byKey(const ValueKey('channel-composer-dock')))
+                .dy -
+            tester
+                .getBottomRight(
+                  find.byKey(const ValueKey('channel-jump-to-latest')),
+                )
+                .dy,
+        closeTo(Grid.xs, 0.1),
+      );
+      final latestSwitcher = tester.widget<AnimatedSwitcher>(
+        find.byKey(const ValueKey('channel-jump-to-latest-switcher')),
+      );
+      expect(latestSwitcher.duration, const Duration(milliseconds: 180));
+      expect(latestSwitcher.reverseDuration, const Duration(milliseconds: 160));
+      expect(latestSwitcher.switchInCurve, Curves.easeOutCubic);
+      expect(latestSwitcher.switchOutCurve, Curves.easeInCubic);
+      final latestScaleTransition = tester.widget<ScaleTransition>(
+        find.descendant(
+          of: find.byKey(const ValueKey('channel-jump-to-latest-switcher')),
+          matching: find.byType(ScaleTransition),
+        ),
+      );
+      expect(latestScaleTransition.alignment, Alignment.bottomCenter);
+      final visualAnchor = tester.widget<Align>(
+        find.byKey(const ValueKey('channel-jump-to-latest-visual-anchor')),
+      );
+      expect(visualAnchor.alignment, Alignment.bottomCenter);
+      expect(tester.getSize(latestSurfaceFinder), const Size.square(Grid.lg));
+      expect(
+        tester.getBottomRight(latestSurfaceFinder).dy,
+        closeTo(
+          tester
+              .getBottomRight(
+                find.byKey(const ValueKey('channel-jump-to-latest')),
+              )
+              .dy,
+          0.1,
+        ),
+      );
+      expect(find.text('Latest'), findsNothing);
+      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      for (final container in tester.widgetList<Container>(
+        find.descendant(
+          of: find.byKey(const ValueKey('channel-jump-to-latest')),
+          matching: find.byType(Container),
+        ),
+      )) {
+        if (container.decoration case final BoxDecoration decoration) {
+          expect(decoration.boxShadow, anyOf(isNull, isEmpty));
+        }
+      }
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -2549,6 +2614,30 @@ void main() {
 
       expect(findRichText('Newest live update'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('channel-jump-to-latest')));
+      await tester.pump();
+
+      ScaleTransition exitingScaleTransition() {
+        return tester.widget<ScaleTransition>(
+          find.ancestor(
+            of: find.byKey(const ValueKey('channel-jump-to-latest')),
+            matching: find.byType(ScaleTransition),
+          ),
+        );
+      }
+
+      for (var frame = 0; frame < 60; frame += 1) {
+        await tester.pump(const Duration(milliseconds: 16));
+        if (exitingScaleTransition().scale.status == AnimationStatus.reverse) {
+          break;
+        }
+      }
+      expect(exitingScaleTransition().scale.status, AnimationStatus.reverse);
+      await tester.pump(const Duration(milliseconds: 120));
+
+      final collapsedScaleTransition = exitingScaleTransition();
+      expect(collapsedScaleTransition.alignment, Alignment.bottomCenter);
+      expect(collapsedScaleTransition.scale.value, lessThan(0.1));
+
       await tester.pumpAndSettle();
 
       expect(findRichText('Newest live update'), findsOneWidget);
@@ -2743,6 +2832,74 @@ void main() {
     );
 
     testWidgets(
+      'pins the current day below the app bar after its divider scrolls away',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final firstDay =
+            DateTime(2025, 1, 1, 12).toUtc().millisecondsSinceEpoch ~/ 1000;
+        final messages = [
+          for (var day = 0; day < 3; day += 1)
+            for (var index = 0; index < 10; index += 1)
+              _textMsg(
+                id: 'day-$day-message-$index',
+                pubkey: 'alice',
+                content: 'Day $day message $index',
+                createdAt: firstDay + day * 86400 + index,
+              ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        final list = tester.widget<ScrollablePositionedList>(messageList);
+        list.itemScrollController!.jumpTo(index: 14, alignment: 0.8);
+        await tester.pumpAndSettle();
+
+        final stickyHeader = find.byKey(
+          const ValueKey('channel-sticky-date-header'),
+        );
+        final stickySurface = find.byKey(
+          const ValueKey('channel-sticky-date-header-surface'),
+        );
+        expect(stickyHeader, findsOneWidget);
+        expect(stickySurface, findsOneWidget);
+        expect(
+          find.descendant(
+            of: stickyHeader,
+            matching: find.text(formatDayHeading(firstDay + 86400)),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester.getTopLeft(stickySurface).dy,
+          closeTo(
+            frostedAppBarHeight(tester.element(stickyHeader)) + Grid.twelve,
+            1,
+          ),
+        );
+        expect(
+          find.descendant(
+            of: stickyHeader,
+            matching: find.byType(BackdropFilter),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
       'keeps follow mode off while a tall newest message stays visible',
       (tester) async {
         tester.view.physicalSize = const Size(400, 600);
@@ -2790,7 +2947,7 @@ void main() {
         expect(findRichText('Newest message line 0'), findsOneWidget);
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
-          findsOneWidget,
+          findsNothing,
         );
 
         messagesNotifier.setMessages([
