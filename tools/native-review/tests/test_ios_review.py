@@ -123,10 +123,19 @@ class IosReviewTests(unittest.TestCase):
         self.assertEqual(receipt["artifacts"], {
             "video": "video.mp4", "log": "flutter.log", "screenshot": "final.png"
         })
-        self.assertEqual(receipt["device"], {
+        self.assertEqual(receipt["isolation"]["device"], {
             "name": "Buzz Native Review owned-run", "device_type": "iPhone Test",
             "udid": "owned-device", "runtime": "runtime", "owned": True,
         })
+        self.assertEqual(receipt["flow"], "ios_pairing")
+        self.assertIn("started_at", receipt)
+        self.assertIn("finished_at", receipt)
+        self.assertEqual(receipt["steps"], [])
+        self.assertEqual(receipt["measurements"], {})
+        self.assertIn("machine", receipt["performance"])
+        schema = json.loads((MODULE_PATH.parent / "schemas/receipt.schema.json").read_text())
+        self.assertTrue(set(schema["required"]) <= set(receipt))
+        self.assertFalse(set(receipt) - set(schema["properties"]))
         self.assertIn(["xcrun", "simctl", "shutdown", "owned-device"], commands)
         self.assertIn(["xcrun", "simctl", "delete", "owned-device"], commands)
         self.assertFalse(any("erase" in command for command in commands))

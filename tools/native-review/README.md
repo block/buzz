@@ -67,10 +67,27 @@ thermal/load noise is reduced by repeated samples, not disguised as universal
 lab-grade benchmarking. Recording overhead is intentionally present in both
 cohorts because this tool measures the reviewer-visible workflow.
 
+## iOS Simulator
+
+The iOS lane runs the pairing integration journey on a simulator created uniquely
+for that run. It records video, Flutter logs, and a final screenshot, writes the
+same schema-versioned receipt shape as Desktop, then shuts down and deletes only
+the simulator UDID it created. It never erases, boots, or deletes an existing
+simulator. Host credentials are removed from child environments.
+
+```bash
+just native-review-ios 'iPhone 17 Pro'
+```
+
+Treat the owned-device boundary as mandatory: do not replace the generated UDID
+with a personal or shared simulator. The runner is reviewer-state protection,
+not hostile-code containment; use a disposable macOS account or VM for untrusted
+changes.
+
 ## Current limits
 
-macOS desktop and the local review-channel fixture are implemented. The schema
-covers role/name/identifier locators; native click, hover, text entry, keyboard
-shortcuts, scrolling, and waits; value/focus/existence assertions; window
-screenshots/video; and per-step semantic + AX snapshots. iOS Simulator remains
-a later phase.
+macOS desktop, the local review-channel fixture, and the iOS pairing Simulator
+journey are implemented. The desktop schema covers role/name/identifier locators;
+native click, hover, text entry, keyboard shortcuts, scrolling, and waits;
+value/focus/existence assertions; window screenshots/video; and per-step semantic
++ AX snapshots. Additional iOS journeys remain future work.

@@ -62,6 +62,43 @@ class JourneyTests(unittest.TestCase):
             with self.assertRaisesRegex(review_native.HarnessError, "scroll requires integer delta_y"):
                 review_native.load_journey(path)
 
+    def test_scroll_requires_locator(self):
+        source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
+        source = source.replace("    locate:\n      - {id: message-input-scroll}\n", "", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "invalid.yaml"
+            path.write_text(source)
+            with self.assertRaisesRegex(review_native.HarnessError, "scroll requires locate"):
+                review_native.load_journey(path)
+
+    def test_durations_and_boolean_scroll_delta_fail_closed(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        invalid_sources = {
+            "action": source.replace("duration_ms: 100", "duration_ms: -1", 1),
+            "sustained": source.replace(
+                "    expect:\n      exists: {role: window}\n",
+                "    expect:\n      exists: {role: window}\n    expect_for:\n      duration_ms: 0\n      condition: {exists: {role: window}}\n",
+                1,
+            ),
+            "timeout": source.replace("timeout_ms: 1000", "timeout_ms: true", 1),
+            "scroll": (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text().replace(
+                "delta_y: 240", "delta_y: true", 1
+            ),
+        }
+        for name, invalid in invalid_sources.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "invalid.yaml"
+                path.write_text(invalid)
+                with self.assertRaises(review_native.HarnessError):
+                    review_native.load_journey(path)
+
+    def test_non_finite_and_boolean_scroll_expectations_fail_closed(self):
+        for value in (True, float("inf"), float("nan")):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                review_native.HarnessError, "finite number"
+            ):
+                review_native.validate_expectation({"scroll_y_greater_than": value}, "expect")
+
     def test_value_expectation_uses_selected_element(self):
         driver = mock.Mock()
         driver.request.return_value = {"ok": True, "element": {"value": "draft"}}
@@ -305,6 +342,31 @@ metrics:
             candidate[0].write_text(json.dumps(payload))
             with self.assertRaisesRegex(review_native.HarnessError, "incompatible machines"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_duplicate_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            baseline[1] = baseline[0]
+            with self.assertRaisesRegex(review_native.HarnessError, "duplicate run_id"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_boolean_minimum_and_non_finite_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            budget = self.budget(root / "budget.yaml")
+            budget.write_text(budget.read_text().replace("minimum_samples: 3", "minimum_samples: true"))
+            with self.assertRaisesRegex(review_native.HarnessError, "minimum_samples"):
+                review_native.compare_performance(baseline, candidate, budget)
+            budget = self.budget(root / "budget.yaml")
+            payload = json.loads(candidate[0].read_text())
+            payload["measurements"]["tooltip_open_latency"]["value"] = float("inf")
+            candidate[0].write_text(json.dumps(payload))
+            with self.assertRaisesRegex(review_native.HarnessError, "finite numeric metric"):
+                review_native.compare_performance(baseline, candidate, budget)
 
     def test_comparison_rejects_mixed_revisions(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import platform
 import re
 import secrets
 import selectors
@@ -76,6 +77,20 @@ def flutter_environment() -> dict[str, str]:
     return env
 
 
+def utc_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def machine_fingerprint() -> dict[str, str]:
+    cpu = run(["sysctl", "-n", "machdep.cpu.brand_string"], check=False).stdout.strip()
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "cpu": cpu or "unknown",
+    }
+
+
 def provenance() -> dict[str, Any]:
     status = git("status", "--porcelain=v1", "--untracked-files=all")
     return {"head_sha": git("rev-parse", "HEAD"), "dirty": bool(status), "status": status.splitlines()}
@@ -112,16 +127,33 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
     run_id = f"ios-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
     run_dir = output_root / git("rev-parse", "--short=12", "HEAD") / "ios_pairing" / run_id
     run_dir.mkdir(parents=True)
-    receipt: dict[str, Any] = {"schema_version": 1, "run_id": run_id, "status": "failed", "failure": None,
-                              "provenance": prov, "artifacts": {}, "cleanup": {"status": "not_started"}}
+    started = utc_now()
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "flow": "ios_pairing",
+        "status": "failed",
+        "started_at": started,
+        "finished_at": started,
+        "failure": None,
+        "provenance": prov,
+        "isolation": {"kind": "run_owned_simulator", "device_type": device_name},
+        "artifacts": {},
+        "steps": [],
+        "measurements": {},
+        "performance": {"machine": machine_fingerprint()},
+        "cleanup": {"status": "not_started"},
+    }
     device: dict[str, Any] | None = None
     udid: str | None = None
     recorder: subprocess.Popen[str] | None = None
     try:
         device = create_review_device(device_name, run_id)
         udid = device["udid"]
-        receipt["device"] = {"name": device["name"], "device_type": device_name, "udid": udid,
-                             "runtime": device["runtimeIdentifier"], "owned": True}
+        receipt["isolation"]["device"] = {
+            "name": device["name"], "device_type": device_name, "udid": udid,
+            "runtime": device["runtimeIdentifier"], "owned": True,
+        }
         run(["xcrun", "simctl", "boot", udid])
         run(["xcrun", "simctl", "bootstatus", udid, "-b"], capture=False)
         video = run_dir / "video.mp4"
@@ -165,6 +197,7 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
         receipt["cleanup"] = {"status": "failed" if errors else "passed", "errors": errors}
         if errors:
             receipt["status"] = "failed"
+        receipt["finished_at"] = utc_now()
         (run_dir / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(run_dir)
     if receipt["status"] != "passed":

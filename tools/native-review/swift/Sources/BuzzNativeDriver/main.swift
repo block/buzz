@@ -331,12 +331,15 @@ final class WindowRecorder: @unchecked Sendable {
 
         captureTask = Task.detached { [weak self] in
             guard let self else { return }
-            let start = ContinuousClock.now
+            let frameInterval = Duration.milliseconds(1000 / 15)
             var frame: Int64 = 0
             while !Task.isCancelled {
+                if !writerInput.isReadyForMoreMediaData {
+                    try? await Task.sleep(for: frameInterval)
+                    continue
+                }
                 autoreleasepool {
-                    guard writerInput.isReadyForMoreMediaData,
-                          let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
+                    guard let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
                           let pool = pixelAdaptor.pixelBufferPool else { return }
                     var optionalBuffer: CVPixelBuffer?
                     guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &optionalBuffer) == kCVReturnSuccess,
@@ -356,8 +359,7 @@ final class WindowRecorder: @unchecked Sendable {
                     }
                     frame += 1
                 }
-                let target = start.advanced(by: .milliseconds(Int(frame * 1000 / 15)))
-                try? await Task.sleep(until: target)
+                try? await Task.sleep(for: frameInterval)
             }
         }
     }
@@ -528,11 +530,30 @@ struct BuzzNativeDriver {
                         } else if type == "type_text" {
                             try postText(action["text"] as? String ?? "")
                         } else if type == "scroll" {
+                            guard let (_, used) = selected else {
+                                throw DriverError.message("scroll requires a freshly selected element with current bounds")
+                            }
+                            var fresh: ElementDescription?
+                            if let path = semanticSnapshotPath,
+                               let element = semanticNodes(path: path, pid: pid).first(where: { matches($0, locator: used) }) {
+                                fresh = describe(element, locator: used)
+                            }
+                            if fresh == nil, let element = find(accessibilityRoots(app: app, pid: pid), locator: used) {
+                                fresh = describe(element, locator: used)
+                            }
+                            guard let element = fresh, let frame = element.frame else {
+                                throw DriverError.message("scroll requires a freshly selected element with current bounds")
+                            }
+                            selected = (element, used)
+                            let point = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
+                            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point,
+                                    mouseButton: .left)?.post(tap: .cghidEventTap)
                             let deltaY = Int32(action["delta_y"] as? Int ?? 0)
                             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                                       wheel1: deltaY, wheel2: 0, wheel3: 0) else {
                                 throw DriverError.message("could not create scroll event")
                             }
+                            event.location = point
                             event.post(tap: .cghidEventTap)
                         } else {
                             guard let (_, used) = selected else {

@@ -2,7 +2,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-# The repository pins Rust/Node tooling through Hermit; native review must build
-# with the same toolchain as the artifact it records.
+# Run through the locked native-review Python environment so a clean checkout
+# never depends on host-installed packages.
 source "$REPO_ROOT/bin/activate-hermit"
-exec python3 "$SCRIPT_DIR/review_native.py" "$@"
+exec uv run --frozen --project "$SCRIPT_DIR" python "$SCRIPT_DIR/review_native.py" "$@"

@@ -8,6 +8,7 @@ import datetime as dt
 import hashlib
 import http.server
 import json
+import math
 import os
 import pathlib
 import platform
@@ -148,8 +149,11 @@ def validate_expectation(expectation: Any, where: str) -> None:
     if "value" in expectation and not isinstance(expectation["value"], str):
         raise HarnessError(f"{where}.value must be a string")
     for key in ("scroll_y_greater_than", "scroll_y_less_than"):
-        if key in expectation and not isinstance(expectation[key], (int, float)):
-            raise HarnessError(f"{where}.{key} must be numeric")
+        value = expectation.get(key)
+        if key in expectation and (
+            not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value)
+        ):
+            raise HarnessError(f"{where}.{key} must be a finite number")
 
 
 def load_journey(path: pathlib.Path) -> dict[str, Any]:
@@ -192,7 +196,7 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
             raise HarnessError(f"{where}.act has unsupported type")
         if set(action) - {"type", "duration_ms", "key", "modifiers", "text", "delta_y"}:
             raise HarnessError(f"{where}.act contains an unsupported field")
-        if action_type in {"click", "move_pointer"} and locators is None:
+        if action_type in {"click", "move_pointer", "scroll"} and locators is None:
             raise HarnessError(f"{where}: {action_type} requires locate")
         if action_type == "press":
             if not isinstance(action.get("key"), str) or not action["key"]:
@@ -202,16 +206,30 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
                 raise HarnessError(f"{where}: press modifiers must be strings")
         if action_type == "type_text" and not isinstance(action.get("text"), str):
             raise HarnessError(f"{where}: type_text requires text")
-        if action_type == "scroll" and not isinstance(action.get("delta_y"), int):
+        duration = action.get("duration_ms")
+        if duration is not None and (
+            not isinstance(duration, int) or isinstance(duration, bool) or not 0 <= duration <= 30000
+        ):
+            raise HarnessError(f"{where}.act.duration_ms must be 0..30000")
+        if action_type == "scroll" and (
+            not isinstance(action.get("delta_y"), int) or isinstance(action.get("delta_y"), bool)
+        ):
             raise HarnessError(f"{where}: scroll requires integer delta_y")
         validate_expectation(step["expect"], f"{where}.expect")
         if "expect_for" in step:
             sustained = step["expect_for"]
             if not isinstance(sustained, dict) or set(sustained) != {"duration_ms", "condition"}:
                 raise HarnessError(f"{where}.expect_for requires duration_ms and condition")
+            sustained_duration = sustained["duration_ms"]
+            if (
+                not isinstance(sustained_duration, int)
+                or isinstance(sustained_duration, bool)
+                or not 1 <= sustained_duration <= 30000
+            ):
+                raise HarnessError(f"{where}.expect_for.duration_ms must be 1..30000")
             validate_expectation(sustained["condition"], f"{where}.expect_for.condition")
         timeout = step.get("timeout_ms", 5000)
-        if not isinstance(timeout, int) or not 0 < timeout <= 60000:
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 0 < timeout <= 60000:
             raise HarnessError(f"{where}.timeout_ms must be 1..60000")
         if "measure" in step:
             measurement = step["measure"]
@@ -701,6 +719,9 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
         if receipt.get("provenance", {}).get("dirty"):
             raise HarnessError(f"{label} receipt was captured from a dirty tree: {path}")
         receipts.append(receipt)
+    run_ids = [receipt.get("run_id") for receipt in receipts]
+    if len(set(run_ids)) != len(run_ids):
+        raise HarnessError(f"{label} cohort contains duplicate run_id values")
     return receipts
 
 
@@ -709,8 +730,12 @@ def metric_value(receipt: dict[str, Any], metric: str) -> float:
         value = receipt.get("performance", {}).get("process", {}).get(metric.removeprefix("process."))
     else:
         value = receipt.get("measurements", {}).get(metric, {}).get("value")
-    if not isinstance(value, (int, float)):
-        raise HarnessError(f"receipt {receipt.get('run_id')} has no numeric metric {metric}")
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+    ):
+        raise HarnessError(f"receipt {receipt.get('run_id')} has no finite numeric metric {metric}")
     return float(value)
 
 
@@ -742,7 +767,11 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     if budget["schema_version"] != 1 or not isinstance(budget["flow"], str):
         raise HarnessError("unsupported performance budget schema")
     minimum = budget["minimum_samples"]
-    if not isinstance(minimum, int) or minimum < PERFORMANCE_SAMPLE_MINIMUM:
+    if (
+        not isinstance(minimum, int)
+        or isinstance(minimum, bool)
+        or minimum < PERFORMANCE_SAMPLE_MINIMUM
+    ):
         raise HarnessError(f"minimum_samples must be at least {PERFORMANCE_SAMPLE_MINIMUM}")
     metrics = budget["metrics"]
     if not isinstance(metrics, dict) or not metrics:
@@ -751,7 +780,13 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     for name, limits in metrics.items():
         if (not isinstance(name, str) or not name or not isinstance(limits, dict) or not limits
                 or set(limits) - allowed_limits
-                or not all(isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 for value in limits.values())):
+                or not all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                    and value >= 0
+                    for value in limits.values()
+                )):
             raise HarnessError(f"invalid limits for performance metric {name}")
 
     baseline = load_receipts(baseline_paths, "baseline")
