@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.5.16
+
+### Desktop and shared changes
+
+- fix(desktop): restore release agent mentions ([#6182](https://github.com/block/buzz/pull/6182)) ([`ee992ff0822f44d1c308822f116cb9d26f9a3386`](https://github.com/block/buzz/commit/ee992ff0822f44d1c308822f116cb9d26f9a3386))
+- test(desktop): cover exact workflow batch limit ([#6168](https://github.com/block/buzz/pull/6168)) ([`f8692fa9b52ddcfeb4b95fb4862109983509f131`](https://github.com/block/buzz/commit/f8692fa9b52ddcfeb4b95fb4862109983509f131))
+
+### Other repository changes
+
+- None
+
+[Compare desktop-v0.5.15...desktop-v0.5.16](https://github.com/block/buzz/compare/desktop-v0.5.15...desktop-v0.5.16)
+
 ## v0.5.15
 
 ### Desktop and shared changes
