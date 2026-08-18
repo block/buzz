@@ -12,7 +12,6 @@ import {
 } from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
-import { WorkflowDetailPanel } from "@/features/workflows/ui/WorkflowDetailPanel";
 import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
 import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
 import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
@@ -35,13 +34,10 @@ type WorkflowsViewProps = {
   channels: Channel[];
   editor: WorkflowEditorRoute | null;
   onCloseEditor: () => void;
-  onCloseWorkflow: () => void;
   onCreateWorkflow: () => void;
   onDuplicateWorkflow: (workflowId: string) => void;
   onEditWorkflow: (workflowId: string) => void;
   onEditorPaneChange: (pane: WorkflowEditorPane) => void;
-  onViewWorkflow: (workflowId: string) => void;
-  selectedWorkflowId: string | null;
 };
 
 type WorkflowWithChannel = {
@@ -96,13 +92,10 @@ export function WorkflowsView({
   channels,
   editor,
   onCloseEditor,
-  onCloseWorkflow,
   onCreateWorkflow,
   onDuplicateWorkflow,
   onEditWorkflow,
   onEditorPaneChange,
-  onViewWorkflow,
-  selectedWorkflowId,
 }: WorkflowsViewProps) {
   const [deleteTarget, setDeleteTarget] = React.useState<Workflow | null>(null);
   const queryClient = useQueryClient();
@@ -292,7 +285,7 @@ export function WorkflowsView({
                   onEdit={handleEdit}
                   onToggleEnabled={handleToggleEnabled}
                   onTrigger={handleTrigger}
-                  onView={(selected) => onViewWorkflow(selected.id)}
+                  onView={handleEdit}
                   workflow={workflow}
                 />
               ))}
@@ -300,17 +293,6 @@ export function WorkflowsView({
           )}
         </div>
       </div>
-
-      {selectedWorkflowId ? (
-        <div className="w-[400px] shrink-0">
-          <WorkflowDetailPanel
-            key={selectedWorkflowId}
-            onClose={onCloseWorkflow}
-            onEdit={(workflow) => onEditWorkflow(workflow.id)}
-            workflowId={selectedWorkflowId}
-          />
-        </div>
-      ) : null}
 
       {editor && canOpenEditor ? (
         <WorkflowDialog

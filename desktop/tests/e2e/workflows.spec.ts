@@ -18,11 +18,14 @@ async function selectWorkflowChannel(
   page: import("@playwright/test").Page,
   dialog: import("@playwright/test").Locator,
 ) {
-  const channel = page.getByRole("button", { name: /agents.*stream.*open/i });
-  if (!(await channel.isVisible())) {
+  const channelList = page.getByTestId("channel-combobox-list");
+  if (!(await channelList.isVisible())) {
     await dialog.getByRole("combobox", { name: "Channel" }).click();
   }
-  await channel.click();
+  await expect(channelList).toBeVisible();
+  await channelList
+    .getByRole("button", { name: "agents", exact: true })
+    .click();
 }
 
 async function editWorkflowName(
@@ -229,11 +232,6 @@ test("enables and disables a workflow from its card menu", async ({ page }) => {
 
   const enableItem = page.getByRole("menuitemcheckbox", { name: "Enable" });
 
-  await page.getByRole("button", { name: `View ${workflowName}` }).click();
-  const detailPanel = page.getByTestId("workflow-detail-panel");
-  await expect(detailPanel).toBeVisible();
-  await expect(detailPanel.getByText("active", { exact: true })).toBeVisible();
-
   await workflowActions().click();
   await expect(enableItem).toHaveAttribute("aria-checked", "true");
   await expect(enableItem.locator("button")).toHaveCount(0);
@@ -244,15 +242,11 @@ test("enables and disables a workflow from its card menu", async ({ page }) => {
   await expect(
     workflowCard().getByText("disabled", { exact: true }),
   ).toBeVisible();
-  await expect(
-    detailPanel.getByText("disabled", { exact: true }),
-  ).toBeVisible();
 
   await enableItem.click();
   await expect(
     workflowCard().getByText("active", { exact: true }),
   ).toBeVisible();
-  await expect(detailPanel.getByText("active", { exact: true })).toBeVisible();
 });
 
 test("rejects a stale card toggle without overwriting a newer edit", async ({
@@ -580,7 +574,7 @@ test("clean editor close respects in-app versus direct-entry provenance", async 
   await expect(page).toHaveURL(/#\/workflows$/);
 });
 
-test("direct editor routes survive refresh and invalid view stays on detail", async ({
+test("direct workflow routes survive refresh and invalid view opens edit", async ({
   page,
 }) => {
   const workflowName = `route_test_${Date.now()}`;
@@ -593,8 +587,10 @@ test("direct editor routes survive refresh and invalid view stays on detail", as
   const workflowId = new URL(page.url()).hash.match(/workflows\/([^?]+)/)?.[1];
   expect(workflowId).toBeTruthy();
   await page.goto(`/#/workflows/${workflowId}?view=invalid`);
-  await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Edit workflow" }),
+  ).toContainText(workflowName);
+  await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
 
   await page.goto("/#/workflows?view=create");
   await page.reload();
@@ -663,35 +659,16 @@ test("stale editor save preserves the local draft and reports the conflict", asy
   await expect(dialog).toBeVisible();
 });
 
-test("triggers a workflow from the detail panel", async ({ page }) => {
-  const workflowName = `trigger_test_${Date.now()}`;
+test("card click opens the editor modal", async ({ page }) => {
+  const workflowName = `card_editor_${Date.now()}`;
 
   await navigateToWorkflows(page);
   await createWorkflow(page, workflowName);
-
-  // Click on the workflow card to open the detail panel
   await page.getByRole("button", { name: `View ${workflowName}` }).click();
-  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
 
-  // Click the Trigger button
-  await page
-    .getByTestId("workflow-detail-panel")
-    .getByRole("button", { name: "Trigger" })
-    .click();
-
-  // Wait for the trigger to complete (button text changes back from "Triggering...")
+  await expect(page).toHaveURL(/#\/workflows\/[^?]+\?.*view=edit/);
   await expect(
-    page
-      .getByTestId("workflow-detail-panel")
-      .getByRole("button", { name: "Trigger" }),
-  ).toBeVisible();
-
-  await expect(
-    page
-      .getByTestId("workflow-detail-panel")
-      .getByTestId("workflow-selected-run"),
-  ).toBeVisible();
-  await expect(
-    page.getByTestId("workflow-detail-panel").getByTestId("workflow-run-trace"),
-  ).toContainText("step_1");
+    page.getByRole("dialog", { name: "Edit workflow" }),
+  ).toContainText(workflowName);
+  await expect(page.getByTestId("workflow-detail-panel")).toHaveCount(0);
 });

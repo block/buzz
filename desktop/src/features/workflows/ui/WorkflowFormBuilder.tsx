@@ -378,7 +378,7 @@ export const WorkflowFormBuilder = React.forwardRef<
     parseError,
     scopeField,
     selectedNode: selectedRouteNode,
-    workflowChannelId: _workflowChannelId,
+    workflowChannelId,
     yaml,
   },
   ref,
@@ -766,6 +766,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                                 showHeader={false}
                                 step={selectedStep}
                                 triggerType={formState.trigger.on}
+                                workflowChannelId={workflowChannelId}
                               />
                             ) : null}
                           </motion.div>

@@ -41,12 +41,14 @@ function StepConfigFields({
   prefix,
   disabled,
   triggerType,
+  workflowChannelId,
   onUpdate,
 }: {
   step: StepFormState;
   prefix: string;
   disabled?: boolean;
   triggerType: TriggerType;
+  workflowChannelId?: string | null;
   onUpdate: (step: StepFormState) => void;
 }) {
   switch (step.action) {
@@ -83,31 +85,37 @@ function StepConfigFields({
               value={step.text ?? ""}
             />
           </div>
-          <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-channel`}>
-              Channel override (optional)
-            </FieldLabel>
-            <Input
-              autoCapitalize="off"
-              disabled={disabled}
-              id={`${prefix}-channel`}
-              onChange={(event) =>
-                onUpdate({ ...step, channel: event.target.value })
-              }
-              placeholder="Channel UUID"
-              value={step.channel ?? ""}
-            />
+          {workflowChannelId ? (
             <p className="text-xs text-muted-foreground">
-              Defaults to the trigger channel. Webhook and manual triggers
-              require a channel.
+              Messages post to the workflow channel selected above.
             </p>
-            {triggerType === "webhook" && !(step.channel ?? "").trim() ? (
-              <p className="text-xs text-amber-700">
-                This step will fail for webhook-triggered runs until a channel
-                override is set.
+          ) : (
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-channel`}>
+                Channel override (optional)
+              </FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-channel`}
+                onChange={(event) =>
+                  onUpdate({ ...step, channel: event.target.value })
+                }
+                placeholder="Channel UUID"
+                value={step.channel ?? ""}
+              />
+              <p className="text-xs text-muted-foreground">
+                Defaults to the channel that triggered the workflow. Webhook and
+                manual triggers require a channel.
               </p>
-            ) : null}
-          </div>
+              {triggerType === "webhook" && !(step.channel ?? "").trim() ? (
+                <p className="text-xs text-amber-700">
+                  This step will fail for webhook-triggered runs until a channel
+                  override is set.
+                </p>
+              ) : null}
+            </div>
+          )}
         </div>
       );
     case "send_dm":
@@ -303,6 +311,7 @@ export function WorkflowStepCard({
   onUpdate,
   step,
   triggerType,
+  workflowChannelId,
 }: {
   bare?: boolean;
   showHeader?: boolean;
@@ -312,6 +321,7 @@ export function WorkflowStepCard({
   onUpdate: (step: StepFormState) => void;
   step: StepFormState;
   triggerType: TriggerType;
+  workflowChannelId?: string | null;
 }) {
   const prefix = `wf-step-${index}`;
 
@@ -348,6 +358,7 @@ export function WorkflowStepCard({
           prefix={prefix}
           step={step}
           triggerType={triggerType}
+          workflowChannelId={workflowChannelId}
         />
       </section>
 

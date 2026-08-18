@@ -11,22 +11,14 @@ import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorP
 type WorkflowsRouteScreenProps = {
   editor?: WorkflowEditorRoute | null;
   onEditorPaneChange: (pane: WorkflowEditorPane) => void;
-  selectedWorkflowId: string | null;
 };
 
 export function WorkflowsRouteScreen({
   editor = null,
   onEditorPaneChange,
-  selectedWorkflowId,
 }: WorkflowsRouteScreenProps) {
-  const {
-    closeWorkflowDetail,
-    goDuplicateWorkflow,
-    goEditWorkflow,
-    goNewWorkflow,
-    goWorkflow,
-    goWorkflows,
-  } = useAppNavigation();
+  const { goDuplicateWorkflow, goEditWorkflow, goNewWorkflow, goWorkflows } =
+    useAppNavigation();
   const closeEditor = React.useCallback(() => {
     if (editor?.hasOrigin) {
       window.history.back();
@@ -43,7 +35,6 @@ export function WorkflowsRouteScreen({
       channels={memberChannels}
       editor={editor}
       onCloseEditor={closeEditor}
-      onCloseWorkflow={closeWorkflowDetail}
       onCreateWorkflow={() => {
         void goNewWorkflow();
       }}
@@ -54,10 +45,6 @@ export function WorkflowsRouteScreen({
         void goEditWorkflow(workflowId);
       }}
       onEditorPaneChange={onEditorPaneChange}
-      onViewWorkflow={(workflowId) => {
-        void goWorkflow(workflowId);
-      }}
-      selectedWorkflowId={selectedWorkflowId}
     />
   );
 }

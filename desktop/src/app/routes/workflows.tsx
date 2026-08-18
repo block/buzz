@@ -48,7 +48,6 @@ function WorkflowsRouteComponent() {
             },
           });
         }}
-        selectedWorkflowId={null}
       />
     </React.Suspense>
   );

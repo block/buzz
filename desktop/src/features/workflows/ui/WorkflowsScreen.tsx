@@ -26,13 +26,10 @@ type WorkflowsScreenProps = {
   channels: Channel[];
   editor: WorkflowEditorRoute | null;
   onCloseEditor: () => void;
-  onCloseWorkflow: () => void;
   onCreateWorkflow: () => void;
   onDuplicateWorkflow: (workflowId: string) => void;
   onEditWorkflow: (workflowId: string) => void;
   onEditorPaneChange: (pane: WorkflowEditorPane) => void;
-  onViewWorkflow: (workflowId: string) => void;
-  selectedWorkflowId: string | null;
 };
 
 export function WorkflowsScreen(props: WorkflowsScreenProps) {

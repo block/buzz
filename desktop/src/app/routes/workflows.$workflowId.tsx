@@ -29,17 +29,13 @@ function WorkflowRouteComponent() {
   const hasOrigin =
     (location.state as { workflowEditorHasOrigin?: unknown } | undefined)
       ?.workflowEditorHasOrigin === true;
-  const editor:
-    | import("@/features/workflows/ui/WorkflowsScreen").WorkflowEditorRoute
-    | null =
-    view === "edit" || view === "duplicate"
-      ? {
-          hasOrigin,
-          mode: view,
-          pane: parseWorkflowEditorPane(pane),
-          workflowId,
-        }
-      : null;
+  const editor: import("@/features/workflows/ui/WorkflowsScreen").WorkflowEditorRoute =
+    {
+      hasOrigin,
+      mode: view === "duplicate" ? "duplicate" : "edit",
+      pane: parseWorkflowEditorPane(pane),
+      workflowId,
+    };
 
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="workflows" />}>
@@ -55,7 +51,6 @@ function WorkflowRouteComponent() {
             },
           });
         }}
-        selectedWorkflowId={editor ? null : workflowId}
       />
     </React.Suspense>
   );
