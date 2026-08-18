@@ -52,7 +52,7 @@ bool _tryShowMessageActionsPopover({
   required bool isArchived,
   required Rect? anchorRect,
   required Future<ui.Image> Function()? captureAnchorSnapshot,
-  required VoidCallback? onPopoverPresented,
+  required ValueChanged<bool>? onPopoverPreviewVisibilityChanged,
   required VoidCallback? onPopoverDismissed,
   required FocusNode? composerFocusNode,
   required VoidCallback? restoreComposerFocus,
@@ -72,7 +72,7 @@ bool _tryShowMessageActionsPopover({
       isArchived: isArchived,
       anchorRect: anchorRect,
       captureAnchorSnapshot: captureAnchorSnapshot,
-      onPopoverPresented: onPopoverPresented,
+      onPopoverPreviewVisibilityChanged: onPopoverPreviewVisibilityChanged,
       onPopoverDismissed: onPopoverDismissed,
       composerFocusNode: composerFocusNode,
       restoreComposerFocus: restoreComposerFocus,
@@ -107,7 +107,7 @@ Future<bool> _showMessageActionsPopover({
   required bool isArchived,
   required Rect anchorRect,
   required Future<ui.Image> Function() captureAnchorSnapshot,
-  required VoidCallback? onPopoverPresented,
+  required ValueChanged<bool>? onPopoverPreviewVisibilityChanged,
   required VoidCallback? onPopoverDismissed,
   required FocusNode? composerFocusNode,
   required VoidCallback? restoreComposerFocus,
@@ -151,7 +151,6 @@ Future<bool> _showMessageActionsPopover({
     }
 
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    onPopoverPresented?.call();
     if (shouldRestoreComposerFocus) composerFocusNode!.unfocus();
 
     String? selectedActionId;
@@ -176,6 +175,7 @@ Future<bool> _showMessageActionsPopover({
             pageRef: ref,
             actions: actions,
             useIosNativeActionSurface: useIosNativeActionSurface,
+            onPreviewVisibilityChanged: onPopoverPreviewVisibilityChanged,
           ),
     );
     var routePushed = false;
@@ -505,6 +505,7 @@ class _MessageActionsPopover extends HookWidget {
   final WidgetRef pageRef;
   final List<_PopoverMessageAction> actions;
   final bool useIosNativeActionSurface;
+  final ValueChanged<bool>? onPreviewVisibilityChanged;
 
   const _MessageActionsPopover({
     required this.anchorRect,
@@ -515,6 +516,7 @@ class _MessageActionsPopover extends HookWidget {
     required this.pageRef,
     required this.actions,
     required this.useIosNativeActionSurface,
+    required this.onPreviewVisibilityChanged,
   });
 
   @override
@@ -633,8 +635,11 @@ class _MessageActionsPopover extends HookWidget {
           menuHeight,
         );
 
-        return Stack(
-          children: [
+        return _MessageActionPreviewVisibility(
+          visible: showPreview,
+          onChanged: onPreviewVisibilityChanged,
+          child: Stack(
+            children: [
             Positioned.fill(
               child: BackdropFilter(
                 filter: ui.ImageFilter.blur(
@@ -764,10 +769,32 @@ class _MessageActionsPopover extends HookWidget {
                 },
               ),
             ),
-          ],
+            ],
+          ),
         );
       },
     );
+  }
+}
+
+class _MessageActionPreviewVisibility extends HookWidget {
+  final bool visible;
+  final ValueChanged<bool>? onChanged;
+  final Widget child;
+  const _MessageActionPreviewVisibility({
+    required this.visible,
+    required this.onChanged,
+    required this.child,
+  });
+  @override
+  Widget build(BuildContext context) {
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) onChanged?.call(visible);
+      });
+      return null;
+    }, [visible, onChanged]);
+    return child;
   }
 }
 

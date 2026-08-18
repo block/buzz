@@ -52,11 +52,10 @@ const _reminderPreviewLength = 100;
 ///
 /// Popover capture is asynchronous: [captureAnchorSnapshot] must remain valid
 /// until its future completes, and the returned image becomes this function's
-/// responsibility to dispose. [onPopoverPresented] runs after capture succeeds
-/// and immediately before the route is pushed. [onPopoverDismissed] runs after
-/// that route completes while [context] is still mounted, so the callbacks are
-/// paired only while their owner remains mounted; neither runs for sheet
-/// fallback or a failed capture.
+/// responsibility to dispose. [onPopoverPreviewVisibilityChanged] reports
+/// whether the constrained layout actually renders the lifted preview;
+/// [onPopoverDismissed] runs after the route completes while [context] is still
+/// mounted. Neither callback runs for sheet fallback or a failed capture.
 ///
 /// [composerFocusNode] remains caller-owned and must outlive the popover. If it
 /// has focus when this function is called, the popover unfocuses it and invokes
@@ -74,7 +73,7 @@ void showMessageActions({
   bool isMember = false,
   Rect? anchorRect,
   Future<ui.Image> Function()? captureAnchorSnapshot,
-  VoidCallback? onPopoverPresented,
+  ValueChanged<bool>? onPopoverPreviewVisibilityChanged,
   VoidCallback? onPopoverDismissed,
   FocusNode? composerFocusNode,
   VoidCallback? restoreComposerFocus,
@@ -105,7 +104,7 @@ void showMessageActions({
     isArchived: isArchived,
     anchorRect: anchorRect,
     captureAnchorSnapshot: captureAnchorSnapshot,
-    onPopoverPresented: onPopoverPresented,
+    onPopoverPreviewVisibilityChanged: onPopoverPreviewVisibilityChanged,
     onPopoverDismissed: onPopoverDismissed,
     composerFocusNode: composerFocusNode,
     restoreComposerFocus: restoreComposerFocus,

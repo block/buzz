@@ -90,7 +90,7 @@ class _MessageBubble extends HookConsumerWidget {
         isArchived: isArchived,
         anchorRect: details.anchorRect,
         captureAnchorSnapshot: details.captureSnapshot,
-        onPopoverPresented: () => details.setSourceHidden(true),
+        onPopoverPreviewVisibilityChanged: details.setSourceHidden,
         onPopoverDismissed: () => details.setSourceHidden(false),
         composerFocusNode: composerFocusNode,
         restoreComposerFocus: restoreComposerFocus,

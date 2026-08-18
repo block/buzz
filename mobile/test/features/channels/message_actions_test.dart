@@ -246,7 +246,8 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
               anchorRect: anchorRect,
               captureAnchorSnapshot:
                   captureAnchorSnapshot ?? _testMessageSnapshot,
-              onPopoverPresented: () => sourceHidden.value = true,
+              onPopoverPreviewVisibilityChanged: (visible) =>
+                  sourceHidden.value = visible,
               onPopoverDismissed: () => sourceHidden.value = false,
               composerFocusNode: composerFocusNode,
               restoreComposerFocus: composerFocusNode?.requestFocus,
@@ -704,7 +705,7 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       const keyboardInset = 100.0;
       final prefs = await _mockPrefs();
-      await _pumpMessageActionsPopover(
+      final harness = await _pumpMessageActionsPopover(
         tester,
         message: _message(),
         prefs: prefs,
@@ -721,6 +722,7 @@ void main() {
         find.byKey(const ValueKey('message-action-preview')),
         findsNothing,
       );
+      expect(harness.sourceHidden.value, isFalse);
       final actionRect = tester.getRect(
         find.byKey(const ValueKey('message-action-surface')),
       );
