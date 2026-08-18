@@ -10,7 +10,7 @@ import {
   setAgentRoutingPolicy,
   type RoutingMatchKind,
   type RoutingPolicy,
-} from "@/shared/api/tauri";
+} from "@/shared/api/routingPolicy";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
