@@ -1,42 +1,9 @@
-import data from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
-import { init } from "emoji-mart";
 import * as React from "react";
 
 import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
-
-// emoji-mart treats a persisted empty object differently from a missing index:
-// a missing index gets its default Frequent row, while `{}` removes the entire
-// category from the module-global picker data. Normalize that poisoned state
-// before the first picker initializes.
-try {
-  if (window.localStorage.getItem("emoji-mart.frequently") === "{}") {
-    window.localStorage.removeItem("emoji-mart.frequently");
-    window.localStorage.removeItem("emoji-mart.last");
-  }
-} catch {
-  // emoji-mart also tolerates unavailable storage; picker selection still works.
-}
-
-// emoji-mart synchronously builds its search index inside `init`. Preserve the
-// idle prewarm so the first picker open does not pay that cost. Normalizing the
-// poisoned persisted state above ensures this initialization cannot remove the
-// module-global Frequent category.
-let warmStarted = false;
-function warmEmojiIndex() {
-  if (warmStarted) {
-    return;
-  }
-  warmStarted = true;
-  const warm = () => void init({ data });
-  if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-    window.requestIdleCallback(warm, { timeout: 1_500 });
-  } else {
-    globalThis.setTimeout(warm, 250);
-  }
-}
-warmEmojiIndex();
+import { emojiMartData } from "@/features/custom-emoji/ui/emojiMartPrewarm";
 
 /**
  * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
@@ -138,7 +105,7 @@ export const EmojiPicker = React.memo(function EmojiPicker({
       <Picker
         autoFocus={autoFocus}
         custom={custom}
-        data={data}
+        data={emojiMartData}
         maxFrequentRows={2}
         onEmojiSelect={(emoji: { native?: string; id?: string }) => {
           // Standard emoji carry a `native` glyph. Custom emoji don't — emit
