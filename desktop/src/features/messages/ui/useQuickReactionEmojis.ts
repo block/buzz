@@ -7,6 +7,7 @@ import {
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 const QUICK_REACTION_STORAGE_KEY = "buzz.quick-reaction-emojis.v1";
+const QUICK_REACTION_UPDATED_EVENT = "buzz:quick-reaction-emojis-updated";
 const DEFAULT_QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉"] as const;
 const MAX_STORED_REACTIONS = 24;
 const sessionQuickReactionEmojis = new Map<string, string[]>();
@@ -207,6 +208,24 @@ function getSessionQuickReactionEmojis(
   return emojis;
 }
 
+function invalidateSessionQuickReactions(communityScope: string | null) {
+  const prefix = `${communityScope ?? "global"}:`;
+  for (const key of sessionQuickReactionEmojis.keys()) {
+    if (key.startsWith(prefix)) {
+      sessionQuickReactionEmojis.delete(key);
+    }
+  }
+}
+
+function notifyQuickReactionUpdate(communityScope: string | null) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(QUICK_REACTION_UPDATED_EVENT, {
+      detail: { communityScope },
+    }),
+  );
+}
+
 export function recordQuickReactionEmoji(emoji: string) {
   const trimmed = emoji.trim();
   if (!trimmed) return;
@@ -226,9 +245,9 @@ export function recordQuickReactionEmoji(emoji: string) {
     });
   }
 
-  // Keep the current hover tray stable; the stored recents apply on reload or
-  // when another tab updates this community's quick reactions.
   writeQuickReactionEntries(entries, storageKey);
+  invalidateSessionQuickReactions(communityScope);
+  notifyQuickReactionUpdate(communityScope);
 }
 
 export function useQuickReactionEmojis(
@@ -263,13 +282,33 @@ export function useQuickReactionEmojis(
       }
     };
 
+    const handleLocalUpdate = (event: Event) => {
+      if (
+        event instanceof CustomEvent &&
+        event.detail?.communityScope === communityScope
+      ) {
+        setEmojis(
+          getSessionQuickReactionEmojis(
+            limit,
+            communityScope,
+            customEmojiCacheKey,
+          ),
+        );
+      }
+    };
+
     window.addEventListener("storage", handleStorage);
+    window.addEventListener(QUICK_REACTION_UPDATED_EVENT, handleLocalUpdate);
     setEmojis(
       getSessionQuickReactionEmojis(limit, communityScope, customEmojiCacheKey),
     );
 
     return () => {
       window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(
+        QUICK_REACTION_UPDATED_EVENT,
+        handleLocalUpdate,
+      );
     };
   }, [customEmojiCacheKey, limit, communityScope]);
 

@@ -1,32 +1,22 @@
 import data from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
-import { init } from "emoji-mart";
 import * as React from "react";
 
 import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 
-// emoji-mart builds its searchable index synchronously inside `init`, which
-// `<Picker>` calls on mount — so the first reaction popover open paid the full
-// ~1.8k-emoji index build and froze the cursor. Warm `init({ data })` once at
-// idle so the index is prebuilt; `init` is a no-op after the first call (its
-// `Data` singleton guards the rebuild), so the Picker's mount-time `init` skips
-// the heavy work. Search still reads the prebuilt index — no first-keystroke
-// hitch. Module-level so it fires regardless of when a picker first mounts.
-let warmStarted = false;
-function warmEmojiIndex() {
-  if (warmStarted) {
-    return;
+// emoji-mart treats a persisted empty object differently from a missing index:
+// a missing index gets its default Frequent row, while `{}` removes the entire
+// category from the module-global picker data. Normalize that poisoned state
+// before the first picker initializes.
+try {
+  if (window.localStorage.getItem("emoji-mart.frequently") === "{}") {
+    window.localStorage.removeItem("emoji-mart.frequently");
+    window.localStorage.removeItem("emoji-mart.last");
   }
-  warmStarted = true;
-  const warm = () => void init({ data });
-  if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-    window.requestIdleCallback(warm, { timeout: 1_500 });
-  } else {
-    globalThis.setTimeout(warm, 250);
-  }
+} catch {
+  // emoji-mart also tolerates unavailable storage; picker selection still works.
 }
-warmEmojiIndex();
 
 /**
  * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
