@@ -101,7 +101,7 @@ void main() {
       expect(find.text('Confirm desktop code'), findsOneWidget);
       expect(
         find.text(
-          'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device.',
+          'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device. Only continue if you started this pairing from your desktop.',
         ),
         findsOneWidget,
       );
@@ -415,7 +415,7 @@ void main() {
       expect(find.text('Confirm desktop code'), findsOneWidget);
       expect(
         find.text(
-          'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device.',
+          'Make sure the six-digit code matches on both devices. Your Buzz identity will transfer to this device. Only continue if you started this pairing from your desktop.',
         ),
         findsOneWidget,
       );
@@ -515,14 +515,47 @@ void main() {
       expect(tester.getSize(confirmFinder).height, 48);
       expect(tester.getSize(cancelFinder).height, 48);
       expect(
-        find.textContaining('Only confirm if you started this pairing.'),
-        findsNothing,
+        find.textContaining(
+          'Only continue if you started this pairing from your desktop.',
+        ),
+        findsOneWidget,
       );
       expect(
         tester.getBottomLeft(find.byType(Scaffold)).dy -
             tester.getBottomLeft(cancelFinder).dy,
         Grid.sm,
       );
+    });
+
+    testWidgets('uses accessible SAS error contrast in both themes', (
+      tester,
+    ) async {
+      const errorMessage = 'Identity confirmation failed. Nothing transferred.';
+      const errorInk = Color(0xFF7A1025);
+      const gradientColors = [Color(0xFFD7D72E), Color(0xFFD7E7F6)];
+
+      for (final theme in [AppTheme.light(), AppTheme.dark()]) {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              pairingProvider.overrideWith(
+                () => _ConfirmingSasPairingNotifier(errorMessage: errorMessage),
+              ),
+            ],
+            child: MaterialApp(theme: theme, home: const PairingPage()),
+          ),
+        );
+
+        final errorText = tester.widget<Text>(find.text(errorMessage));
+        expect(errorText.style?.color, errorInk);
+        for (final background in gradientColors) {
+          expect(
+            _contrastRatio(errorInk, background),
+            greaterThanOrEqualTo(4.5),
+          );
+        }
+        expect(tester.takeException(), isNull);
+      }
     });
 
     testWidgets('keeps SAS actions above the keyboard on small screens', (
@@ -562,6 +595,18 @@ void main() {
       expect(find.text('Codes match'), findsOneWidget);
     });
   });
+}
+
+double _contrastRatio(Color foreground, Color background) {
+  final foregroundLuminance = foreground.computeLuminance();
+  final backgroundLuminance = background.computeLuminance();
+  final lighter = foregroundLuminance > backgroundLuminance
+      ? foregroundLuminance
+      : backgroundLuminance;
+  final darker = foregroundLuminance > backgroundLuminance
+      ? backgroundLuminance
+      : foregroundLuminance;
+  return (lighter + 0.05) / (darker + 0.05);
 }
 
 Future<void> _expandPairingCode(WidgetTester tester) async {
@@ -652,9 +697,13 @@ class _RecordingPairingNotifier extends Notifier<PairingState>
 
 class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
     implements PairingNotifier {
-  _ConfirmingSasPairingNotifier({this.sendsIdentityToDesktop = false});
+  _ConfirmingSasPairingNotifier({
+    this.sendsIdentityToDesktop = false,
+    this.errorMessage,
+  });
 
   final bool sendsIdentityToDesktop;
+  final String? errorMessage;
   bool denied = false;
 
   @override
@@ -662,6 +711,7 @@ class _ConfirmingSasPairingNotifier extends Notifier<PairingState>
     status: PairingStatus.confirmingSas,
     sasCode: '123456',
     sendsIdentityToDesktop: sendsIdentityToDesktop,
+    errorMessage: errorMessage,
   );
 
   @override
