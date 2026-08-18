@@ -5083,4 +5083,41 @@ mod tests {
             "error must mention sandbox_workspace_write"
         );
     }
+
+    /// npm installs every JS CLI on Windows as a `.cmd` shim, so an agent
+    /// configured as `hermes-acp.cmd` is the ordinary case — and
+    /// `normalize_agent_command_identity` already strips `.cmd`/`.bat` when
+    /// deriving agent identity, so the rest of the harness assumes such a
+    /// command runs.
+    ///
+    /// It does: `std::process::Command` detects those extensions and routes
+    /// them through `cmd.exe` itself, with the argument escaping that was
+    /// hardened for CVE-2024-24576. This test exists to keep that assumption
+    /// checked rather than assumed, since nothing else in the suite spawns a
+    /// batch shim and the failure mode if it ever regressed — agents that
+    /// simply never start on Windows — is expensive to diagnose from the
+    /// symptom.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn acp_client_can_spawn_an_npm_style_cmd_shim() {
+        let shim = std::env::temp_dir().join(format!("buzz-agent-{}.cmd", uuid::Uuid::new_v4()));
+        // Stay alive long enough to be observed, without emitting ACP traffic.
+        // Kept short: `shutdown()` ends the shim but not the `ping` beneath it,
+        // and this suite should not leave a process behind for 20 seconds.
+        std::fs::write(&shim, "@echo off\r\nping -n 6 127.0.0.1 > nul\r\n")
+            .expect("shim must be writable");
+
+        let spawned = AcpClient::spawn(&shim.to_string_lossy(), &[], &[], false).await;
+        let ok = spawned.is_ok();
+        if let Ok(mut client) = spawned {
+            client.shutdown().await;
+        }
+        let _ = std::fs::remove_file(&shim);
+
+        assert!(
+            ok,
+            "an npm-style .cmd agent shim must be spawnable — this is the \
+             '%1 is not a valid Win32 application' failure"
+        );
+    }
 }
