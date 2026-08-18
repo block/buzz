@@ -20,6 +20,48 @@ const PERSONA_SYNC_KINDS = [
   KIND_DELETION,
 ];
 
+function eventDTag(event: RelayEvent): string | null {
+  return event.tags.find((tag) => tag[0] === "d")?.[1] ?? null;
+}
+
+function eventIsNewer(candidate: RelayEvent, current: RelayEvent): boolean {
+  return (
+    candidate.created_at > current.created_at ||
+    (candidate.created_at === current.created_at && candidate.id < current.id)
+  );
+}
+
+/**
+ * Keep only the NIP-33 head for each managed-agent coordinate in a startup
+ * backfill. Applying historical policy revisions one by one can stop and start
+ * the same runtime for every revision; the retained store only needs the final
+ * head. Other event kinds stay in relay order because persona/team projections
+ * do not trigger runtime policy transitions and deletion ordering is separate.
+ */
+export function coalesceManagedAgentBackfill(
+  events: readonly RelayEvent[],
+): RelayEvent[] {
+  const heads = new Map<string, RelayEvent>();
+
+  for (const event of events) {
+    if (event.kind !== KIND_MANAGED_AGENT) continue;
+    const dTag = eventDTag(event);
+    if (!dTag) continue;
+    const coordinate = `${event.pubkey.toLowerCase()}:${dTag.toLowerCase()}`;
+    const current = heads.get(coordinate);
+    if (!current || eventIsNewer(event, current)) heads.set(coordinate, event);
+  }
+
+  return events.filter((event) => {
+    if (event.kind !== KIND_MANAGED_AGENT) return true;
+    const dTag = eventDTag(event);
+    if (!dTag) return true;
+    return (
+      heads.get(`${event.pubkey.toLowerCase()}:${dTag.toLowerCase()}`) === event
+    );
+  });
+}
+
 // Start the persona/team/agent/deletion sync for `pubkey` on `relayUrl`:
 // one-shot backfill of existing heads + tombstones, then a live subscription.
 // Returns a disposer that closes the live subscription. Extracted from the hook
@@ -35,13 +77,19 @@ export function startPersonaSync(
   relayUrl: string,
   onCancelled: () => boolean,
 ): () => Promise<void> {
+  // Reconcile in relay order. Managed-agent reconciliation can await a remote
+  // provider deployment after releasing the local store lock; firing commands
+  // independently lets an older broad policy finish after a newer restrictive
+  // one. One chain per owner/relay subscription makes the newest event the last
+  // deployment without serializing unrelated identities or communities.
+  let reconcileChain = Promise.resolve();
   const reconcile = (event: RelayEvent) => {
     if (event.pubkey !== pubkey) return;
-    void reconcileInboundPersonaEvent(JSON.stringify(event), relayUrl).catch(
-      (error) => {
+    reconcileChain = reconcileChain
+      .then(() => reconcileInboundPersonaEvent(JSON.stringify(event), relayUrl))
+      .catch((error) => {
         console.warn("[usePersonaSync] reconcile failed:", error);
-      },
-    );
+      });
   };
 
   // One-shot backfill of existing heads + tombstones (closes the fresh-start
@@ -50,7 +98,8 @@ export function startPersonaSync(
     .fetchEvents({ kinds: PERSONA_SYNC_KINDS, authors: [pubkey], limit: 500 })
     .then((events) => {
       if (onCancelled()) return;
-      for (const event of events) reconcile(event);
+      for (const event of coalesceManagedAgentBackfill(events))
+        reconcile(event);
     })
     .catch((error) => {
       console.warn("[usePersonaSync] backfill failed:", error);

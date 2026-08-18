@@ -1618,11 +1618,13 @@ pub fn build_workflow_update(
     channel_id: Uuid,
     workflow_id: Uuid,
     yaml: &str,
+    expected_revision: &str,
 ) -> Result<EventBuilder, SdkError> {
     check_content(yaml, 64 * 1024)?;
     let tags = vec![
         tag(&["d", &workflow_id.to_string()])?,
         tag(&["h", &channel_id.to_string()])?,
+        tag(&["expected-revision", expected_revision])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml).tags(tags))
 }
@@ -3972,16 +3974,18 @@ mod tests {
     fn workflow_update_includes_h_tag() {
         let cid = uuid();
         let wid = uuid();
-        let ev = sign(build_workflow_update(cid, wid, "name: updated").unwrap());
+        let revision = "a".repeat(64);
+        let ev = sign(build_workflow_update(cid, wid, "name: updated", &revision).unwrap());
         assert_eq!(ev.kind.as_u16(), 30620);
         assert!(has_tag(&ev, "d", &wid.to_string()));
         assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "expected-revision", &revision));
     }
 
     #[test]
     fn workflow_update_rejects_oversized_yaml() {
         let big = "x".repeat(65 * 1024);
-        let err = build_workflow_update(uuid(), uuid(), &big).unwrap_err();
+        let err = build_workflow_update(uuid(), uuid(), &big, &"a".repeat(64)).unwrap_err();
         assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 

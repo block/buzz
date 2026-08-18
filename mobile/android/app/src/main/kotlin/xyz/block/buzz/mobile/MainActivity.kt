@@ -10,7 +10,7 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.os.Build
 import androidx.annotation.RequiresApi
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
@@ -77,7 +77,7 @@ internal object AndroidImageProcessor {
     }
 }
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
     private var mediaUploadChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {

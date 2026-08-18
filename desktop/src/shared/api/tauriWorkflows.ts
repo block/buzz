@@ -13,6 +13,7 @@ import type {
 
 type RawWorkflow = {
   id: string;
+  revision: string;
   name: string;
   owner_pubkey: string;
   channel_id: string | null;
@@ -94,6 +95,7 @@ type RawApprovalActionResponse = {
 function fromRawWorkflow(raw: RawWorkflow): Workflow {
   return {
     id: raw.id,
+    revision: raw.revision,
     name: raw.name,
     ownerPubkey: raw.owner_pubkey,
     channelId: raw.channel_id,
@@ -220,10 +222,12 @@ export async function createWorkflow(
 export async function updateWorkflow(
   workflowId: string,
   yamlDefinition: string,
+  expectedRevision: string,
 ): Promise<WorkflowSaveResult> {
   const raw = await invokeTauri<RawWorkflowSaveResponse>("update_workflow", {
     workflowId,
     yamlDefinition,
+    expectedRevision,
   });
   return fromRawWorkflowSave(raw);
 }
