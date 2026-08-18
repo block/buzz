@@ -715,6 +715,32 @@ impl NestRegenGate {
         *requested
     }
 
+    /// Non-blocking [`claim`] against the *exact* lock `claim` takes. Returns
+    /// `Some(generation)` if it acquired the lock — i.e. a claim could proceed
+    /// with no contention — or `None` if the lock is already held, meaning a
+    /// concurrent claim would block on it. Because `claim` and `commit` share
+    /// `highest_requested`, calling this from inside `commit_hooked`'s
+    /// under-lock hook reports `None`: the eligibility compare and the write
+    /// are serialized against any new claim. A design that advanced the
+    /// watermark under a separate lock (or a lock-free atomic) would report
+    /// `Some` here — the regression this probe proves absent, with no reliance
+    /// on elapsed time or thread scheduling.
+    #[cfg(test)]
+    fn try_claim(&self) -> Option<u64> {
+        match self.highest_requested.try_lock() {
+            Ok(mut requested) => {
+                *requested += 1;
+                Some(*requested)
+            }
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                let mut requested = poisoned.into_inner();
+                *requested += 1;
+                Some(*requested)
+            }
+        }
+    }
+
     /// Commit `content` for `generation`, dropping the write once a newer
     /// generation has been *requested* (regardless of whether that newer
     /// generation has written or ever will). Returns whether the file was
@@ -726,10 +752,11 @@ impl NestRegenGate {
 
     /// [`commit`] with a hook invoked while the lock is held, after the
     /// eligibility compare and before the write. Production passes a no-op, so
-    /// this is exactly [`commit`]; tests pass a hook that starts a competing
-    /// [`claim`] to prove no claim can land inside the compare-then-write
-    /// window (the flawed separate-watermark/separate-write-lock design would
-    /// let it slip in). The `impl FnOnce` monomorphizes the no-op away.
+    /// this is exactly [`commit`]; tests pass a hook that calls [`try_claim`]
+    /// to prove no claim can land inside the compare-then-write window — the
+    /// probe reports the lock held here, whereas the flawed
+    /// separate-watermark/separate-write-lock design would report it free. The
+    /// `impl FnOnce` monomorphizes the no-op away.
     fn commit_hooked(
         &self,
         agents_md: &Path,
