@@ -1,9 +1,9 @@
-//! Validation for human-reviewed agent definition text.
+//! Validation for human-reviewed agent and team definition text.
 //!
-//! Shared definitions are executable configuration: `system_prompt` is shown
-//! to a person, then delivered verbatim to an ACP harness. Characters that
-//! consume input bytes without a visible glyph break that review invariant and
-//! are rejected rather than silently stripped.
+//! Shared definitions are executable configuration: agent `system_prompt` and
+//! team instructions are shown to a person, then delivered verbatim to an ACP
+//! harness. Characters that consume input bytes without a visible glyph break
+//! that review invariant and are rejected rather than silently stripped.
 
 use regex::Regex;
 use std::sync::LazyLock;
@@ -58,6 +58,38 @@ pub(crate) fn validate_managed_agent_definition_text(
         ""
     };
     validate_agent_definition_text(name, executable_prompt)
+}
+
+/// Validate the human-visible fields of a team definition.
+///
+/// Team names and instructions are shared and executed at launch, so they use
+/// the same reviewable-text contract as agent definitions. Absent instructions
+/// are allowed; present instructions must be reviewable.
+pub(crate) fn validate_team_definition_text(
+    name: &str,
+    instructions: Option<&str>,
+) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("Team name is required".to_string());
+    }
+    let name_chars = name.chars().count();
+    if name_chars > MAX_DISPLAY_NAME_CHARS {
+        return Err(format!(
+            "Team name is too long ({name_chars} characters, max {MAX_DISPLAY_NAME_CHARS})"
+        ));
+    }
+    validate_visible_text(name, "Team name", false)?;
+
+    let Some(instructions) = instructions else {
+        return Ok(());
+    };
+    if instructions.len() > MAX_SYSTEM_PROMPT_BYTES {
+        return Err(format!(
+            "Team instructions are too long ({} bytes, max {MAX_SYSTEM_PROMPT_BYTES})",
+            instructions.len()
+        ));
+    }
+    validate_visible_text(instructions, "Team instructions", true)
 }
 
 fn validate_visible_text(
@@ -266,5 +298,33 @@ mod tests {
             Some("stale\u{200B} prompt"),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn accepts_plain_team_name_and_multiline_instructions() {
+        assert!(validate_team_definition_text(
+            "Review Team 🐝",
+            Some("Review changes.\n\tCall out security risks."),
+        )
+        .is_ok());
+        assert!(validate_team_definition_text("Review Team", None).is_ok());
+    }
+
+    #[test]
+    fn rejects_invisible_characters_in_team_name_or_instructions() {
+        assert!(
+            validate_team_definition_text("Review\u{200B} Team", Some("Be thorough.")).is_err()
+        );
+        assert!(
+            validate_team_definition_text("Review Team", Some("Be\u{200B} thorough.")).is_err()
+        );
+    }
+
+    #[test]
+    fn enforces_team_name_and_instruction_bounds() {
+        assert!(validate_team_definition_text(&"a".repeat(129), None).is_err());
+        assert!(
+            validate_team_definition_text("Review Team", Some(&"a".repeat(64 * 1024 + 1))).is_err()
+        );
     }
 }

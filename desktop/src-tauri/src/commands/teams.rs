@@ -4,9 +4,15 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     managed_agents::{
+<<<<<<< HEAD
         delete_team_with_cascade, ensure_persona_ids_are_active, load_managed_agents,
         load_personas, load_teams, save_managed_agents, save_teams, try_regenerate_nest,
-        CreateTeamRequest, TeamRecord, UpdateTeamRequest,
+        validate_team_definition_text, CreateTeamRequest, TeamRecord, UpdateTeamRequest,
+=======
+        delete_team_with_cascade, ensure_persona_ids_are_active, load_personas, load_teams,
+        save_teams, try_regenerate_nest, validate_team_definition_text, CreateTeamRequest,
+        TeamRecord, UpdateTeamRequest,
+>>>>>>> 9ab245950 (fix(desktop): validate team names and instructions like agents)
     },
     util::now_iso,
 };
@@ -317,6 +323,7 @@ pub async fn create_team(input: CreateTeamRequest, app: AppHandle) -> Result<Tea
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
         let instructions = trim_optional(input.instructions);
+        validate_team_definition_text(&name, instructions.as_deref())?;
         let now = now_iso();
 
         let _store_guard = state
@@ -363,6 +370,9 @@ pub async fn update_team(input: UpdateTeamRequest, app: AppHandle) -> Result<Tea
         let name = trim_required(&input.name, "Team name")?;
         let description = trim_optional(input.description);
         let instructions = trim_optional(input.instructions);
+        // Validate before the store lock so a rejected update cannot leave a
+        // partial in-memory write, let alone a teams.json write.
+        validate_team_definition_text(&name, instructions.as_deref())?;
 
         let _store_guard = state
             .managed_agents_store_lock

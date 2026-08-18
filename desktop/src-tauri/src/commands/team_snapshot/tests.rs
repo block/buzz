@@ -331,6 +331,28 @@ fn team_import_definitions_are_built_for_all_members() {
 }
 
 #[test]
+fn team_import_rejects_invisible_team_instructions() {
+    let mut source = snapshot(vec![member("Alice")]);
+    source.team.instructions = Some("Be\u{200B} thorough.".to_string());
+
+    let error = build_import_team(&source, vec!["alice".to_string()], "now")
+        .expect_err("snapshot import must reject invisible team instructions");
+
+    assert!(error.contains("U+200B"));
+}
+
+#[test]
+fn team_import_rejects_bidirectional_team_name() {
+    let mut source = snapshot(vec![member("Alice")]);
+    source.team.name = "Review\u{202E} Team".to_string();
+
+    let error = build_import_team(&source, vec!["alice".to_string()], "now")
+        .expect_err("snapshot import must reject bidirectional team names");
+
+    assert!(error.contains("U+202E"));
+}
+
+#[test]
 fn team_import_keeps_or_clears_every_member_allowlist_with_one_toggle() {
     let source = snapshot(vec![member("Alice"), member("Bob")]);
     let kept = build_import_definitions(&source, true, "now").unwrap();
