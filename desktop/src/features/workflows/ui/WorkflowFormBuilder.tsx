@@ -1,4 +1,12 @@
-import { Check, ChevronDown, Plus, Trash2, X, Zap } from "lucide-react";
+import {
+  ArrowDown,
+  Check,
+  ChevronDown,
+  Plus,
+  Trash2,
+  X,
+  Zap,
+} from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { createPortal } from "react-dom";
@@ -144,6 +152,7 @@ type WorkflowFormBuilderProps = {
 
 export type WorkflowFormBuilderHandle = {
   addFirstStep: () => void;
+  setWorkflowName: (name: string) => void;
 };
 
 export type WorkflowEditorMode = "form" | "yaml";
@@ -227,6 +236,7 @@ function WorkflowNode({
   selected,
   showTitle = true,
   subtitle,
+  terminal,
   title,
 }: {
   description: string;
@@ -240,9 +250,11 @@ function WorkflowNode({
   selected: boolean;
   showTitle?: boolean;
   subtitle?: string;
+  terminal: boolean;
   title: string;
 }) {
   const isNumbered = number !== undefined;
+  const [addMenuOpen, setAddMenuOpen] = React.useState(false);
 
   return (
     <li className="flex flex-col items-center">
@@ -293,7 +305,7 @@ function WorkflowNode({
         {onRemove ? (
           <Button
             aria-label={`Remove ${title}`}
-            className="pointer-events-none absolute right-1 top-1/2 z-10 h-8 w-8 -translate-y-1/2 rounded-full bg-transparent opacity-0 transition-all duration-200 group-focus-within:pointer-events-auto group-focus-within:translate-x-12 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-x-12 group-hover:opacity-100 hover:bg-destructive/15 hover:text-destructive"
+            className="pointer-events-none absolute -right-8 top-1/2 z-10 h-8 w-8 -translate-y-1/2 rounded-full bg-transparent opacity-0 transition-all duration-200 group-focus-within:pointer-events-auto group-focus-within:translate-x-3 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-x-3 group-hover:opacity-100 hover:bg-destructive/15 hover:text-destructive"
             disabled={disabled}
             onClick={onRemove}
             size="icon"
@@ -305,14 +317,29 @@ function WorkflowNode({
         ) : null}
       </div>
 
-      <span className="relative flex h-18 items-center justify-center">
-        <DropdownMenu>
+      <div
+        className="group relative flex h-18 items-center justify-center"
+        data-menu-open={addMenuOpen}
+        data-terminal={terminal}
+        data-testid="workflow-node-ingress"
+      >
+        {terminal ? null : (
+          <ArrowDown
+            aria-hidden="true"
+            className="h-5 w-5 text-muted-foreground transition-opacity duration-200 ease-out group-hover:opacity-10 group-data-[menu-open=true]:opacity-10 group-has-[:focus-visible]:opacity-10 motion-reduce:transition-none"
+          />
+        )}
+        <DropdownMenu onOpenChange={setAddMenuOpen}>
           <DropdownMenuTrigger asChild>
             <Button
               aria-label={
                 title === "Trigger" ? "Add step" : `Add after ${title}`
               }
-              className="relative z-10 h-7 w-7 rounded-full bg-background shadow-sm"
+              className={cn(
+                "relative z-10 h-7 w-7 rounded-full bg-background shadow-sm",
+                !terminal &&
+                  "pointer-events-none absolute scale-125 opacity-0 transition-[opacity,transform,background-color,color,border-color,box-shadow] duration-200 ease-out group-hover:pointer-events-auto group-hover:scale-100 group-hover:opacity-100 group-data-[menu-open=true]:pointer-events-auto group-data-[menu-open=true]:scale-100 group-data-[menu-open=true]:opacity-100 focus-visible:pointer-events-auto focus-visible:scale-100 focus-visible:opacity-100 motion-reduce:transition-none",
+              )}
               disabled={disabled}
               size="icon"
               type="button"
@@ -327,12 +354,12 @@ function WorkflowNode({
                 key={action}
                 onSelect={() => onAddAfter(action)}
               >
-                {ACTION_LABELS[action]}
+                <span>{ACTION_LABELS[action]}</span>
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
-      </span>
+      </div>
     </li>
   );
 }
@@ -455,8 +482,10 @@ export const WorkflowFormBuilder = React.forwardRef<
     ref,
     () => ({
       addFirstStep: () => insertStep(0, "send_message"),
+      setWorkflowName: (name: string) =>
+        updateFormState({ ...formState, name }),
     }),
-    [insertStep],
+    [formState, insertStep, updateFormState],
   );
 
   const removeStep = React.useCallback(
@@ -516,7 +545,7 @@ export const WorkflowFormBuilder = React.forwardRef<
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col">
+      <div className="flex h-full min-h-0 flex-col [container-type:inline-size]">
         {parseError ? (
           <p className="mx-6 mt-3 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             Cannot switch to form view: {parseError}
@@ -524,60 +553,25 @@ export const WorkflowFormBuilder = React.forwardRef<
         ) : null}
 
         {mode === "yaml" ? (
-          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6">
-            <div className="max-w-md">{scopeField}</div>
-            <div className="flex h-full min-h-[320px] flex-col space-y-1.5">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden px-6 pb-3 pt-3">
+            <div className="max-w-md flex-shrink-0">{scopeField}</div>
+            <div className="flex min-h-0 flex-1 flex-col gap-1.5">
               <Textarea
                 aria-label="Workflow YAML"
                 autoCapitalize="off"
-                className="min-h-[320px] flex-1 resize-none font-mono text-xs"
+                className="min-h-0 flex-1 resize-none font-mono text-xs"
                 disabled={disabled}
                 onChange={(event) => onChange(event.target.value)}
                 value={yaml}
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="flex-shrink-0 text-xs text-muted-foreground">
                 Edit the raw YAML definition directly.
               </p>
             </div>
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="grid flex-shrink-0 grid-cols-2 items-end gap-3 border-b border-border bg-muted/10 px-6 py-4">
-              <div className="space-y-1.5">
-                <FieldLabel htmlFor="wf-name">Workflow name</FieldLabel>
-                <Input
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  disabled={disabled}
-                  id="wf-name"
-                  onChange={(event) =>
-                    updateFormState({ ...formState, name: event.target.value })
-                  }
-                  placeholder="e.g. deploy_notifier"
-                  value={formState.name}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <FieldLabel htmlFor="wf-description">
-                  Description (optional)
-                </FieldLabel>
-                <Input
-                  autoCapitalize="off"
-                  disabled={disabled}
-                  id="wf-description"
-                  onChange={(event) =>
-                    updateFormState({
-                      ...formState,
-                      description: event.target.value,
-                    })
-                  }
-                  placeholder="What does this workflow do?"
-                  value={formState.description}
-                />
-              </div>
-            </div>
-
-            <div className="flex min-h-0 flex-1">
+            <div className="relative isolate flex min-h-0 flex-1">
               <div className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-5">
                 <div className="mx-auto w-full max-w-sm">
                   {scopeField ? <div className="mb-3">{scopeField}</div> : null}
@@ -590,6 +584,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                       onAddAfter={(action) => insertStep(0, action)}
                       onClick={() => selectNode({ type: "trigger" })}
                       selected={selectedNode?.type === "trigger"}
+                      terminal={formState.steps.length === 0}
                       title="Trigger"
                     />
 
@@ -615,27 +610,38 @@ export const WorkflowFormBuilder = React.forwardRef<
                           }
                           showTitle={false}
                           subtitle={stepName ? actionLabel : undefined}
+                          terminal={index === formState.steps.length - 1}
                           title={`Step ${index + 1}`}
                         />
                       );
                     })}
-
-                    {formState.steps.length > 0 ? (
-                      <li className="flex justify-center">
-                        <span className="rounded-full border border-border bg-muted/30 px-5 py-1.5 text-xs font-medium text-muted-foreground">
-                          End
-                        </span>
-                      </li>
-                    ) : null}
                   </ol>
                 </div>
               </div>
 
               <AnimatePresence initial={false}>
                 {selectedNode ? (
+                  <motion.button
+                    animate={{ opacity: 1 }}
+                    aria-label="Close inspector overlay"
+                    className="absolute inset-0 z-20 hidden bg-background/15 backdrop-blur-sm [@container(max-width:58rem)]:block"
+                    data-testid="workflow-node-inspector-backdrop"
+                    exit={{ opacity: 0 }}
+                    initial={{ opacity: 0 }}
+                    key="workflow-node-inspector-backdrop"
+                    onClick={() => onSelectedNodeChange(null)}
+                    transition={
+                      shouldReduceMotion
+                        ? { duration: 0 }
+                        : { duration: 0.18, ease: "easeOut" }
+                    }
+                    type="button"
+                  />
+                ) : null}
+                {selectedNode ? (
                   <motion.aside
                     animate={{ opacity: 1, width: "26rem", x: 0 }}
-                    className="flex flex-shrink-0 p-4"
+                    className="flex flex-shrink-0 p-4 [@container(max-width:58rem)]:absolute [@container(max-width:58rem)]:inset-y-0 [@container(max-width:58rem)]:right-0 [@container(max-width:58rem)]:z-30 [@container(max-width:58rem)]:max-w-full"
                     data-testid="workflow-node-inspector"
                     exit={{ opacity: 0, width: 0, x: 24 }}
                     initial={{ opacity: 0, width: 0, x: 24 }}
@@ -646,8 +652,12 @@ export const WorkflowFormBuilder = React.forwardRef<
                         : { duration: 0.24, ease: [0.22, 1, 0.36, 1] }
                     }
                   >
-                    <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/40">
-                      <div className="flex w-96 min-w-96 flex-shrink-0 items-start justify-between gap-3 px-5 pb-3 pt-5">
+                    <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl bg-muted/40 [@container(max-width:58rem)]:bg-background [@container(max-width:58rem)]:shadow-2xl">
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-0 z-0 hidden bg-muted/40 [@container(max-width:58rem)]:block"
+                      />
+                      <div className="relative z-10 flex w-96 min-w-96 flex-shrink-0 items-start justify-between gap-3 px-5 pb-3 pt-5 [@container(max-width:26rem)]:w-full [@container(max-width:26rem)]:min-w-0">
                         <div className="min-w-0">
                           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                             {selectedNode.type === "trigger"
@@ -712,7 +722,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                         </div>
                       </div>
 
-                      <div className="min-h-0 w-96 min-w-96 flex-1 overflow-y-auto px-5 pb-5 pt-2">
+                      <div className="relative z-10 min-h-0 w-96 min-w-96 flex-1 overflow-y-auto px-5 pb-5 pt-2 [@container(max-width:26rem)]:w-full [@container(max-width:26rem)]:min-w-0">
                         <AnimatePresence
                           custom={selectionDirection}
                           initial={false}
@@ -771,19 +781,15 @@ export const WorkflowFormBuilder = React.forwardRef<
       </div>
       {mode === "form" && nameLeadingContainer
         ? createPortal(
-            <div className="flex items-center gap-3">
-              <label className="text-sm text-foreground" htmlFor="wf-enabled">
-                Enable
-              </label>
-              <Switch
-                checked={formState.enabled}
-                disabled={disabled}
-                id="wf-enabled"
-                onCheckedChange={(checked) =>
-                  updateFormState({ ...formState, enabled: checked })
-                }
-              />
-            </div>,
+            <Switch
+              aria-label="Enable workflow"
+              checked={formState.enabled}
+              disabled={disabled}
+              id="wf-enabled"
+              onCheckedChange={(checked) =>
+                updateFormState({ ...formState, enabled: checked })
+              }
+            />,
             nameLeadingContainer,
           )
         : null}

@@ -474,9 +474,12 @@ export function WorkflowDialog({
       mutation.reset();
       yamlDefinitionRef.current = nextYaml;
       setYamlDefinition(nextYaml);
+      if (editorMode === "form") {
+        formBuilderRef.current?.setWorkflowName(name);
+      }
       return true;
     },
-    [mutation.reset],
+    [editorMode, mutation.reset],
   );
   const handleToggleWorkflowEnabled = React.useCallback(() => {
     const nextYaml = yamlWithWorkflowEnabled(
@@ -578,7 +581,11 @@ export function WorkflowDialog({
                   <div className="space-y-1">
                     <ChannelCombobox
                       channels={channels}
-                      defaultOpen={false}
+                      defaultOpen={
+                        mode === "create" &&
+                        editorMode === "form" &&
+                        !selectedChannelId
+                      }
                       disabled={mutation.isPending}
                       id="wf-channel-select"
                       onChange={(value) => {

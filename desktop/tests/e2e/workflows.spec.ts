@@ -14,6 +14,28 @@ async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("workflows-view")).toBeVisible();
 }
 
+async function selectWorkflowChannel(
+  page: import("@playwright/test").Page,
+  dialog: import("@playwright/test").Locator,
+) {
+  const channel = page.getByRole("button", { name: /agents.*stream.*open/i });
+  if (!(await channel.isVisible())) {
+    await dialog.getByRole("combobox", { name: "Channel" }).click();
+  }
+  await channel.click();
+}
+
+async function editWorkflowName(
+  dialog: import("@playwright/test").Locator,
+  name: string,
+) {
+  await dialog.getByRole("button", { name: "Edit workflow name" }).click();
+  const input = dialog.getByRole("textbox", { name: "Workflow name" });
+  await input.fill(name);
+  await dialog.getByRole("button", { name: "Save workflow name" }).click();
+  await expect(input).not.toBeVisible();
+}
+
 async function createWorkflow(
   page: import("@playwright/test").Page,
   name: string,
@@ -30,11 +52,19 @@ async function createWorkflow(
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
   await expect(dialog).toBeVisible();
 
-  await dialog.getByRole("combobox", { name: "Channel" }).click();
-  await page.getByRole("button", { name: /agents.*stream.*open/i }).click();
-  await dialog.locator("#wf-name").fill(name);
+  await selectWorkflowChannel(page, dialog);
+  await editWorkflowName(dialog, name);
   if (options?.description) {
-    await dialog.getByLabel("Description (optional)").fill(options.description);
+    await dialog.getByRole("tab", { name: "YAML" }).click();
+    const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
+    const yaml = await yamlEditor.inputValue();
+    await yamlEditor.fill(
+      yaml.replace(
+        `name: ${name}`,
+        `name: ${name}\ndescription: ${JSON.stringify(options.description)}`,
+      ),
+    );
+    await dialog.getByRole("tab", { name: "Form" }).click();
   }
   if (options?.enabled === false) {
     await dialog.getByRole("switch", { name: "Enable" }).click();
@@ -103,6 +133,7 @@ test("disables autocapitalization in the workflow form", async ({ page }) => {
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
 
+  await dialog.getByRole("button", { name: "Edit workflow name" }).click();
   await expect(
     dialog.getByRole("textbox", { name: "Workflow name" }),
   ).toHaveAttribute("autocapitalize", "off");
@@ -385,8 +416,7 @@ test("duplicates a workflow", async ({ page }) => {
 
   // Submit the duplicate after deliberately choosing its destination channel.
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
-  await dialog.getByRole("combobox", { name: "Channel" }).click();
-  await page.getByRole("button", { name: /agents.*stream.*open/i }).click();
+  await selectWorkflowChannel(page, dialog);
   await dialog.getByRole("button", { name: "Create copy" }).click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
 
@@ -426,9 +456,8 @@ test("captures the built editor at desktop and narrow widths", async ({
   await navigateToWorkflows(page);
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await dialog.getByRole("combobox", { name: "Channel" }).click();
-  await page.getByRole("button", { name: /agents.*stream.*open/i }).click();
-  await dialog.locator("#wf-name").fill("editor_screenshot");
+  await selectWorkflowChannel(page, dialog);
+  await editWorkflowName(dialog, "editor_screenshot");
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
   await dialog.getByLabel("Message text").fill("Notify the workflow channel");
@@ -445,15 +474,54 @@ test("captures the built editor at desktop and narrow widths", async ({
   }
 });
 
+test("preserves final sequence affordances and responsive inspector behavior", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+  await page.getByRole("button", { name: "Create Workflow" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
+  await selectWorkflowChannel(page, dialog);
+  await editWorkflowName(dialog, "sequence_parity_test");
+  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Send Message" }).click();
+
+  await expect(dialog.getByText("End", { exact: true })).toHaveCount(0);
+  const ingresses = dialog.getByTestId("workflow-node-ingress");
+  await expect(ingresses).toHaveCount(2);
+  await expect(
+    ingresses.first().locator("svg.lucide-arrow-down"),
+  ).toBeVisible();
+  await expect(ingresses.last().locator("svg.lucide-arrow-down")).toHaveCount(
+    0,
+  );
+  await expect(
+    ingresses.last().getByRole("button", { name: "Add after Step 1" }),
+  ).toBeVisible();
+
+  const stepNode = dialog.getByRole("button", { name: "Step 1: Send Message" });
+  const removeStep = dialog.getByRole("button", { name: "Remove Step 1" });
+  await expect(removeStep).toHaveClass(/-right-8/);
+  await stepNode.hover();
+  await expect(removeStep).toBeVisible();
+
+  await page.setViewportSize({ width: 760, height: 820 });
+  await expect(
+    dialog.getByTestId("workflow-node-inspector-backdrop"),
+  ).toBeVisible();
+  await dialog.getByTestId("workflow-node-inspector-backdrop").click({
+    position: { x: 20, y: 20 },
+  });
+  await expect(dialog.getByTestId("workflow-node-inspector")).not.toBeVisible();
+});
+
 test("pane routes use stable IDs and Form/YAML changes stay synchronized", async ({
   page,
 }) => {
   await navigateToWorkflows(page);
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await dialog.getByRole("combobox", { name: "Channel" }).click();
-  await page.getByRole("button", { name: /agents.*stream.*open/i }).click();
-  await dialog.locator("#wf-name").fill("pane_sync_test");
+  await selectWorkflowChannel(page, dialog);
+  await editWorkflowName(dialog, "pane_sync_test");
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
@@ -541,9 +609,8 @@ test("dirty create close is blocked and keep editing preserves the draft", async
   await navigateToWorkflows(page);
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
-  await dialog.getByRole("combobox", { name: "Channel" }).click();
-  await page.getByRole("button", { name: /agents.*stream.*open/i }).click();
-  await dialog.locator("#wf-name").fill("preserved_dirty_draft");
+  await selectWorkflowChannel(page, dialog);
+  await editWorkflowName(dialog, "preserved_dirty_draft");
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
   const confirmation = page.getByRole("alertdialog", {
@@ -551,7 +618,9 @@ test("dirty create close is blocked and keep editing preserves the draft", async
   });
   await expect(confirmation).toBeVisible();
   await confirmation.getByRole("button", { name: "Keep editing" }).click();
-  await expect(dialog.locator("#wf-name")).toHaveValue("preserved_dirty_draft");
+  await expect(
+    dialog.getByText("preserved_dirty_draft", { exact: true }),
+  ).toBeVisible();
 });
 
 test("stale editor save preserves the local draft and reports the conflict", async ({
