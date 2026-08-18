@@ -477,7 +477,9 @@ mod tests {
                 { "name": "ui", "any": ["button"], "model": "ui-model" }
             ]
         }));
-        let d = p.decide_static("Add a Postgres MIGRATION for members").unwrap();
+        let d = p
+            .decide_static("Add a Postgres MIGRATION for members")
+            .unwrap();
         assert_eq!(d.model, "codex-model");
         assert_eq!(d.reason, Reason::Rule("db".into()));
         // Case-insensitive, and the later rule still reachable.
@@ -541,7 +543,9 @@ mod tests {
         // declines toward codex.
         assert!(p.harness_decline("write the migration", "codex").is_none());
         assert_eq!(
-            p.harness_decline("write the migration", "claude").unwrap().class,
+            p.harness_decline("write the migration", "claude")
+                .unwrap()
+                .class,
             "codex"
         );
 
