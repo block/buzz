@@ -401,9 +401,9 @@ export function useMentionSendFlow({
       };
       let uploadStarted = false;
       try {
-        // Use selection-time identity only for non-publishing preparation;
-        // finishSend authorizes once more at publication.
-        const admittedMentionPubkeys = uniqueNormalizedPubkeys(mentionPubkeys);
+        const admittedMentionPubkeys = uniqueNormalizedPubkeys(
+          await mentions.revalidateMentionPubkeys(mentionPubkeys),
+        );
         if (isSendCancelled()) return;
         if (!isMountedRef.current) return persistPreflightDraft();
         const admittedMentionPubkeySet = new Set(admittedMentionPubkeys);

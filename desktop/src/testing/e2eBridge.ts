@@ -298,6 +298,8 @@ type E2eConfig = {
     relayAgents?: MockRelayAgentSeed[];
     /** Reject successive relay-agent directory reads, then resume. */
     relayAgentListErrors?: (string | null)[];
+    /** Pubkeys omitted only from targeted send-time authorization checks. */
+    relayAgentRevalidationRevokedPubkeys?: string[];
     /** Native-like huddle state seeded from authoritative role-bearing membership. */
     huddle?: MockHuddleSeed;
     agentListDelayMs?: number;
@@ -12222,9 +12224,15 @@ export function maybeInstallE2eTauriMocks() {
         const requested = new Set(
           pubkeys.map((pubkey) => pubkey.toLowerCase()),
         );
+        const revoked = new Set(
+          (activeConfig?.mock?.relayAgentRevalidationRevokedPubkeys ?? []).map(
+            (pubkey) => pubkey.toLowerCase(),
+          ),
+        );
         return agents.filter(
           (agent) =>
             requested.has(agent.pubkey.toLowerCase()) &&
+            !revoked.has(agent.pubkey.toLowerCase()) &&
             (!channelId || agent.channel_ids.includes(channelId)),
         );
       }
