@@ -45,9 +45,18 @@ class MessageLongPressDetails {
 class MessageLongPressInkWell extends StatelessWidget {
   final VoidCallback? onTap;
   final ValueChanged<Rect>? onLongPress;
+
+  /// Handles a completed long press with snapshot and source-visibility access.
+  ///
+  /// When provided, this callback takes precedence over [onLongPress].
   final ValueChanged<MessageLongPressDetails>? onLongPressDetails;
   final BorderRadius? borderRadius;
   final Color? highlightColor;
+
+  /// Identifies the [RepaintBoundary] to capture for the lifted preview.
+  ///
+  /// The key's current context must resolve to a boundary covering the message
+  /// content. When omitted, this widget inserts and owns that boundary.
   final GlobalKey? snapshotKey;
   final Widget child;
 

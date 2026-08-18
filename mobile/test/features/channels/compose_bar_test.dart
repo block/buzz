@@ -184,6 +184,7 @@ Widget _buildComposeBar({
   VoidCallback? onFocusRequested,
   FocusNode? focusNode,
   ValueChanged<VoidCallback>? onFocusRestorerChanged,
+  String composeBarKey = 'compose-bar',
 }) {
   return ProviderScope(
     overrides: [
@@ -231,6 +232,7 @@ Widget _buildComposeBar({
           child: Align(
             alignment: Alignment.bottomCenter,
             child: ComposeBar(
+              key: ValueKey(composeBarKey),
               channelId: 'channel-1',
               focusNode: focusNode,
               onFocusRestorerChanged: onFocusRestorerChanged,
@@ -625,6 +627,121 @@ void main() {
 
       expect(find.byType(TextField), findsOneWidget);
       expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('keeps hook order when the parent focus node changes', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('invalidates a registered focus restorer on unmount', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final registeredRestorer = callbacks.single;
+
+      await tester.pumpWidget(const SizedBox.shrink());
+
+      registeredRestorer();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('does not let an old restorer mutate a replacement composer', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'first-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final oldRestorer = callbacks.single;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'second-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      expect(callbacks, hasLength(2));
+
+      oldRestorer();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsNothing);
+
+      callbacks.last();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('starts Android composer motion with the first IME metrics', (

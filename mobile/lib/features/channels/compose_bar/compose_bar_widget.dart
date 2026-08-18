@@ -9,7 +9,16 @@ class ComposeBar extends HookConsumerWidget {
   /// Runs immediately before the editor requests focus, allowing a parent to
   /// prepare focus-dependent layout (for example, following a thread tail).
   final VoidCallback? onFocusRequested;
+
+  /// Optional focus node owned and disposed by the caller.
+  ///
+  /// When omitted, the composer creates and disposes its own focus node.
   final FocusNode? focusNode;
+
+  /// Receives the current callback for restoring the editor and its focus.
+  ///
+  /// The callback is valid only while this composer is mounted and becomes a
+  /// no-op after unmounting. A replacement registration supersedes it.
   final ValueChanged<VoidCallback>? onFocusRestorerChanged;
 
   /// Optional thread IDs for thread-scoped typing indicators.
@@ -54,7 +63,8 @@ class ComposeBar extends HookConsumerWidget {
       defaultTargetPlatform != TargetPlatform.android,
     );
     final androidImeFallbackTimer = useRef<Timer?>(null);
-    final focusNode = this.focusNode ?? useFocusNode();
+    final ownedFocusNode = useFocusNode();
+    final focusNode = this.focusNode ?? ownedFocusNode;
     useEffect(
       () => () {
         androidImeFallbackTimer.value?.cancel();

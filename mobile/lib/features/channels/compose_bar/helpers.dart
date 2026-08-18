@@ -7,14 +7,20 @@ void _useComposerFocusRestorer({
   required VoidCallback expand,
 }) {
   useEffect(() {
-    onChanged?.call(() {
+    if (onChanged == null) return null;
+
+    var isCurrent = true;
+    void restoreFocus() {
+      if (!isCurrent) return;
       if (isExpanded.value) {
         focusNode.requestFocus();
       } else {
         expand();
       }
-    });
-    return null;
+    }
+
+    onChanged(restoreFocus);
+    return () => isCurrent = false;
   }, [onChanged, focusNode]);
 }
 
