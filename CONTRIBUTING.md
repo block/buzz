@@ -85,8 +85,14 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 | `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
 | `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
 
-This repo uses [Hermit](https://cashapp.github.io/hermit/) for toolchain
-pinning. Activate it once per shell session:
+Buzz supports two development-environment paths. Hermit is the established,
+portable default and pins the repository's command-line tools. Nix is an
+optional alternative that also supplies native build and runtime libraries.
+Choose one path per shell rather than activating both.
+
+#### Hermit toolchain (default)
+
+Activate [Hermit](https://cashapp.github.io/hermit/) once per shell session:
 
 ```bash
 . ./bin/activate-hermit
@@ -98,12 +104,54 @@ Hermit pins Rust, `just`, Node, pnpm, and other tools to the versions in
 upfront. If you don't use Hermit, ensure your toolchain meets the minimum
 versions in the table above.
 
+#### Nix development shells (optional)
+
+If you already use [Nix](https://nixos.org/) with flakes enabled, the repository
+flake provides the Buzz toolchain and native Tauri libraries without requiring
+Hermit or distro-specific library installation:
+
+```bash
+nix develop          # Rust, relay, desktop, and web development
+nix develop .#mobile # default environment plus Flutter
+nix develop .#full   # mobile environment plus occasional tools such as gh and uv
+```
+
+With a current [direnv](https://direnv.net/) release whose standard library
+provides `use flake`, `direnv allow` loads the default desktop/web shell through
+the committed `.envrc`. Older direnv installations may need
+[nix-direnv](https://github.com/nix-community/nix-direnv). Direnv is optional;
+agents and scripts should not assume it has loaded in a non-interactive shell.
+Use an explicit command in that case:
+
+```bash
+nix develop .#mobile --command just ci
+nix develop .#mobile --command just mobile-test
+```
+
+`just` runs inside the environment from which it was invoked, so it cannot
+select a larger Nix shell after a recipe starts. Enter `.#mobile` before running
+a mobile recipe. The aggregate `just check` and `just ci` recipes, and the
+pre-push hook, also include mobile checks and therefore require `.#mobile`. Do
+not activate Hermit inside a Nix shell; Buzz recipes detect `IN_NIX_SHELL` and
+use the Nix-provided tools instead of the Hermit shims.
+
+Hermit pins Flutter 3.41.7 exactly. The mobile Nix shell currently uses Flutter
+3.41.9, the closest packaged release in the same stable line; `flake.lock` pins
+the package set used by the Nix path.
+
+Docker remains a host prerequisite for local services. Xcode remains a host
+prerequisite for iOS builds. The `.#mobile` shell supplies Flutter and the tools
+used by repository checks but expects a host Android SDK for Android builds; on
+x86-64 Linux, `.#mobile-android` instead supplies the pinned Android SDK,
+emulator image, NDK, CMake, and JDK used by the emulator test workflow.
+
 #### Linux: Tauri system libraries
 
-Hermit pins language toolchains, not system libraries. On Linux, the desktop
-app's Rust crates link against GTK and WebKitGTK, so `just ci` (and any
-`just desktop-tauri-*` recipe) needs these installed system-wide first. On
-Debian/Ubuntu:
+When using Hermit or a manually installed toolchain, Linux system libraries
+remain the contributor's responsibility. The desktop app's Rust crates link
+against GTK and WebKitGTK, so `just ci` (and any `just desktop-tauri-*` recipe)
+needs these installed system-wide first. The Nix shells already provide these
+libraries. On Debian/Ubuntu:
 
 ```bash
 sudo apt-get install -y --no-install-recommends \
@@ -146,11 +194,15 @@ just setup
 just hooks
 ```
 
+Nix users can replace step 2 by entering `nix develop`, then run the remaining
+commands normally. For non-interactive setup, use `nix develop --command just
+setup`.
+
 `just setup` runs `just bootstrap` first — it copies `.env.example` to `.env`
-if it doesn't already exist, and invokes `cargo`, `node`, and `pnpm` to trigger
-Hermit's lazy tool download (each tool is fetched once on first invocation and
-cached thereafter). You can also run `just bootstrap` independently at any time;
-it is safe to re-run.
+if it doesn't already exist and verifies `cargo`, `node`, and `pnpm`. Under
+Hermit, this triggers each tool's lazy download; inside Nix, it verifies the
+tools supplied by the selected shell. You can also run `just bootstrap`
+independently at any time; it is safe to re-run.
 
 `just setup` then starts Docker services (Postgres on `:5432`, Redis on `:6379`,
 Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on

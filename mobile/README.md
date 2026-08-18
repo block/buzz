@@ -19,6 +19,18 @@ just mobile-dev
 cd mobile && flutter run
 ```
 
+On x86-64 Linux, the repository also provides a pinned Android SDK, emulator,
+system image, NDK, CMake, and Java environment:
+
+```bash
+nix develop .#mobile-android
+just mobile-emulator start --window
+```
+
+See [TESTING.md](TESTING.md) for lifecycle, reset, screenshots, and running
+integration-test targets. The helper refuses to reuse or stop a device on its
+configured serial unless it is the Buzz-owned AVD.
+
 ### Worktree-aware debug identity
 
 Debug builds produced from a git worktree get a unique app identifier keyed

@@ -154,22 +154,61 @@ See **Quick start** below — this is the developer / self-host path.
 
 ## Quick start
 
-You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://cashapp.github.io/hermit/) (or Rust 1.88+, Node 24+, pnpm 10+, `just`).
+You'll need [Docker](https://docs.docker.com/get-docker/). For the development
+toolchain, choose either [Hermit](https://cashapp.github.io/hermit/) (the
+portable default) or the optional Nix development shell. You can also provide
+Rust 1.88+, Node 24+, pnpm 10+, and `just` yourself.
 
-**Once:**
+**Once, with Hermit:**
 ```bash
 git clone https://github.com/block/buzz.git && cd buzz
 . ./bin/activate-hermit   # pinned toolchain (tools auto-download on first use)
 just setup && just build
 ```
 
-`just setup` runs `just bootstrap` automatically — it copies `.env.example` to `.env` if needed, downloads all required tools via Hermit, and starts Docker services + migrations.
+**Alternatively, with Nix (flakes enabled):**
 
-**Every day:**
+```bash
+git clone https://github.com/block/buzz.git && cd buzz
+nix develop --command just setup
+nix develop --command just build
+```
+
+The default Nix shell covers Rust, relay, desktop, and web work. Use
+`nix develop .#mobile` for Flutter development or `nix develop .#full` for the
+largest tool set. If you use direnv, `direnv allow` loads the default shell.
+Hermit and Nix are alternative environments; do not activate both in the same
+shell. See [CONTRIBUTING.md](CONTRIBUTING.md#nix-development-shells-optional)
+for details.
+
+### Rationale: why a Nix development shell?
+
+Hermit reproducibly supplies Buzz's command-line tools, but native desktop
+libraries remain a host concern. On Linux, Tauri development otherwise requires
+distro-specific GTK, WebKitGTK, GStreamer, and media packages; on NixOS those
+libraries are not exposed through the conventional FHS paths expected by many
+build tools. The flake makes the language toolchain reproducible across Buzz's
+supported Linux and macOS architectures and pins the native library set needed
+on Linux.
+
+Nix remains an optional alternative to Hermit, not a replacement. The default
+shell covers relay, desktop, and web work; Flutter is isolated in `.#mobile`,
+while `.#full` adds infrequently used tools. This keeps contributors from
+paying for the largest closure unless their workflow needs it. Docker and any
+platform SDKs are still installed on the host.
+
+`just setup` runs `just bootstrap` automatically — it copies `.env.example` to
+`.env` if needed, prepares the selected toolchain, and starts Docker services +
+migrations.
+
+**Every day, with Hermit:**
 ```bash
 . ./bin/activate-hermit
 just dev   # starts the relay + desktop app together
 ```
+
+With Nix, enter `nix develop` (or let direnv load it) and then run the same
+`just` recipes.
 
 Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
 

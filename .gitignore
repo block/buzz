@@ -57,6 +57,10 @@ typesense-data/
 
 # Hermit (toolchain manager cache)
 .hermit/
+
+# direnv (local Nix environment cache)
+.direnv/
+
 doc/
 /repos/
 

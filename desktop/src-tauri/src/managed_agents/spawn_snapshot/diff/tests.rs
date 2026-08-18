@@ -425,16 +425,16 @@ fn no_sentinel_reaches_snapshot_debug_output() {
 fn no_sentinel_reaches_the_owning_process_debug_output() {
     // `ManagedAgentProcess` derives `Debug` and delegates to the snapshot's
     // manual impl — this pins that the derive can never become the leak path.
-    #[cfg(unix)]
-    let program = "/usr/bin/true";
-    #[cfg(windows)]
-    let program = "true";
-    let child = std::process::Command::new(program)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn placeholder child");
+    // Use the absolute current-test path so the placeholder is portable and
+    // independent of concurrent tests that temporarily replace PATH.
+    let child =
+        std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .arg("--help")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn placeholder child");
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
         log_path: std::path::PathBuf::new(),
