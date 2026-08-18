@@ -1049,24 +1049,53 @@ fn group_members_tags(group_id: &str, members: &[MemberRecord]) -> anyhow::Resul
     Ok(tags)
 }
 
-async fn emit_group_members_event(
+async fn store_group_members_event(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
-    members: &[MemberRecord],
-    relay_pubkey_hex: &str,
-) -> anyhow::Result<()> {
+    member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
+) -> anyhow::Result<Option<buzz_core::StoredEvent>> {
     let group_id = channel_id.to_string();
-    let tags = group_members_tags(&group_id, members)?;
-    emit_addressable_discovery_event(
-        tenant,
-        state,
-        channel_id,
-        KIND_NIP29_GROUP_MEMBERS,
-        tags,
-        relay_pubkey_hex,
-    )
-    .await
+    let tags = group_members_tags(&group_id, &member_snapshot.members)?;
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = member_snapshot
+        .latest_member_event_timestamp(tenant.community(), channel_id, &relay_pubkey)
+        .await?
+        .map(|timestamp| timestamp + 1)
+        .unwrap_or(now)
+        .max(now);
+    let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(ts))
+        .sign_with_keys(&state.relay_keypair)
+        .map_err(|error| anyhow::anyhow!("failed to sign member snapshot: {error}"))?;
+    let (stored, inserted) = member_snapshot
+        .replace_member_event(tenant.community(), channel_id, &event)
+        .await?;
+    Ok(inserted.then_some(stored))
+}
+
+async fn dispatch_group_members_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored: Option<buzz_core::StoredEvent>,
+    relay_pubkey_hex: &str,
+) {
+    if let Some(stored) = stored {
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &stored,
+            KIND_NIP29_GROUP_MEMBERS,
+            relay_pubkey_hex,
+            None,
+        )
+        .await;
+    }
 }
 
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
@@ -1083,14 +1112,7 @@ pub async fn emit_group_discovery_events(
     channel_id: Uuid,
 ) -> anyhow::Result<()> {
     let channel = state.db.get_channel(tenant.community(), channel_id).await?;
-    // Keep the membership-writer lock through all membership-derived event
-    // replacements. This orders normal publication and startup repair by the
-    // canonical roster they captured, rather than by wall-clock timestamps.
-    let member_snapshot = state
-        .db
-        .lock_member_snapshot(tenant.community(), channel_id)
-        .await?;
-    let members = &member_snapshot.members;
+    let members = state.db.get_members(tenant.community(), channel_id).await?;
 
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
@@ -1116,7 +1138,7 @@ pub async fn emit_group_discovery_events(
             tags.push(Tag::parse(["hidden"])?);
             // Include participant pubkeys in kind:39000 for DMs so clients can
             // resolve display names without a separate kind:39002 fetch.
-            for m in members {
+            for m in &members {
                 let pubkey_hex = hex::encode(&m.pubkey);
                 tags.push(Tag::parse(["p", &pubkey_hex])?);
             }
@@ -1178,8 +1200,17 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    emit_group_members_event(tenant, state, channel_id, members, &relay_pubkey_hex).await?;
+    // Re-capture membership behind the writer lock immediately before the
+    // authoritative 39002 replacement. Metadata/admin snapshots retain their
+    // existing behavior; only membership publication needs this freshness fence.
+    let mut member_snapshot = state
+        .db
+        .lock_member_snapshot(tenant.community(), channel_id)
+        .await?;
+    let stored_members =
+        store_group_members_event(tenant, state, channel_id, &mut member_snapshot).await?;
     member_snapshot.release().await?;
+    dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
 
     Ok(())
 }
@@ -3098,20 +3129,15 @@ pub async fn reconcile_large_channel_member_snapshots(
             // Hold the membership-writer lock from roster capture through
             // replacement. Otherwise a rolling deployment can publish stale
             // roster A after another relay commits and publishes roster B.
-            let member_snapshot = state
+            let mut member_snapshot = state
                 .db
                 .lock_member_snapshot(candidate.community_id, channel_id)
                 .await?;
             let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
-            emit_group_members_event(
-                &tenant,
-                state,
-                channel_id,
-                &member_snapshot.members,
-                &relay_pubkey_hex,
-            )
-            .await?;
+            let stored_members =
+                store_group_members_event(&tenant, state, channel_id, &mut member_snapshot).await?;
             member_snapshot.release().await?;
+            dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
             Ok::<bool, anyhow::Error>(true)
         }
         .await;
