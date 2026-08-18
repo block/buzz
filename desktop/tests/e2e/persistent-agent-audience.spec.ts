@@ -115,7 +115,7 @@ async function installAudienceFixtures(
   });
 }
 
-test("locks multiple agents from the mention picker without closing it", async ({
+test("always mentions multiple agents from the mention picker", async ({
   page,
 }) => {
   await installAudienceFixtures(page);
@@ -123,36 +123,28 @@ test("locks multiple agents from the mention picker without closing it", async (
 
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
-  await composer.getByTestId("message-insert-mention").click();
+  await input.fill("@Mor");
 
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
-  await expect(menu.getByTestId("mention-address-lock-hint")).toHaveText(
-    "Hover an agent avatar to keep it addressed",
-  );
-
-  const morgaritaRow = menu.getByTestId(`mention-suggestion-${AGENT_A}`);
-  const morgaritaLock = menu.getByTestId(`mention-address-lock-${AGENT_A}`);
-  await morgaritaRow.hover();
-  await expect(morgaritaLock).toBeVisible();
-  await morgaritaLock.click();
-  await expect(menu).toBeVisible();
-  await expect(morgaritaLock).toHaveAttribute("aria-pressed", "true");
-
-  const vogueRow = menu.getByTestId(`mention-suggestion-${AGENT_B}`);
-  const vogueLock = menu.getByTestId(`mention-address-lock-${AGENT_B}`);
-  await vogueRow.hover();
-  await vogueLock.click();
-
-  await expect(menu).toBeVisible();
-  await expect(vogueLock).toHaveAttribute("aria-pressed", "true");
+  await menu.getByRole("button", { name: "Always mention Morgarita" }).click();
+  await expect(menu).toHaveCount(0);
   await expect(input).toHaveText("");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
   await expect(
-    composer.getByRole("button", { name: "Always mention Morgarita" }),
+    composer.getByRole("button", {
+      name: "Stop always mentioning Morgarita",
+    }),
   ).toHaveAttribute("aria-pressed", "true");
+
+  await input.fill("@Vog");
+  await composer
+    .getByTestId("mention-autocomplete")
+    .getByRole("button", { name: "Always mention Vogue" })
+    .click();
+  await expect(input).toHaveText("");
   await expect(
-    composer.getByRole("button", { name: "Always mention Vogue" }),
+    composer.getByRole("button", { name: "Stop always mentioning Vogue" }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect
     .poll(() =>
@@ -169,7 +161,7 @@ test("locks multiple agents from the mention picker without closing it", async (
     .toEqual([AGENT_A, AGENT_B]);
 });
 
-test("locked agents remain in the tray while Enter-send resolves", async ({
+test("always-mentioned agents remain in the tray while Enter-send resolves", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -184,7 +176,9 @@ test("locked agents remain in the tray while Enter-send resolves", async ({
 
   await expect(input).toHaveText("", { timeout: 500 });
   await expect(
-    composer.getByRole("button", { name: "Always mention Morgarita" }),
+    composer.getByRole("button", {
+      name: "Stop always mentioning Morgarita",
+    }),
   ).toBeVisible();
   await expect(input).toBeFocused();
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
@@ -245,7 +239,7 @@ test("ordinary agent mentions remain one-shot and return to the placeholder", as
     .toEqual({ collapsed: true, inside: true });
 });
 
-test("locked agents restore in the tray and can be removed independently", async ({
+test("always-mentioned agents restore and can be removed independently", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_B, AGENT_A]);
@@ -257,13 +251,17 @@ test("locked agents restore in the tray and can be removed independently", async
   await expect(input).toHaveText("");
   await expect(composer.getByTestId("composer-address-locks")).toBeVisible();
   await expect(
-    composer.getByRole("button", { name: "Always mention Vogue" }),
+    composer.getByRole("button", { name: "Stop always mentioning Vogue" }),
   ).toBeVisible();
   await expect(
-    composer.getByRole("button", { name: "Always mention Morgarita" }),
+    composer.getByRole("button", {
+      name: "Stop always mentioning Morgarita",
+    }),
   ).toBeVisible();
 
-  await composer.getByRole("button", { name: "Always mention Vogue" }).click();
+  await composer
+    .getByRole("button", { name: "Stop always mentioning Vogue" })
+    .click();
   await expect
     .poll(() =>
       page.evaluate(
@@ -282,7 +280,9 @@ test("locked agents restore in the tray and can be removed independently", async
   await composer.getByTestId("send-message").click();
   await expect(input).toHaveText("");
   await expect(
-    composer.getByRole("button", { name: "Always mention Morgarita" }),
+    composer.getByRole("button", {
+      name: "Stop always mentioning Morgarita",
+    }),
   ).toBeVisible();
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "hello"))
@@ -292,7 +292,7 @@ test("locked agents restore in the tray and can be removed independently", async
     .not.toContain(AGENT_B);
 });
 
-test("channel locks carry into threads and stay synchronized", async ({
+test("channel always-mentions carry into threads and stay synchronized", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -301,23 +301,23 @@ test("channel locks carry into threads and stay synchronized", async ({
 
   await expect(
     channelComposer(page).getByRole("button", {
-      name: "Always mention Morgarita",
+      name: "Stop always mentioning Morgarita",
     }),
   ).toBeVisible();
 
   await openThread(page);
-  const channelLock = channelComposer(page).getByRole("button", {
-    name: "Always mention Morgarita",
+  const channelAlwaysMention = channelComposer(page).getByRole("button", {
+    name: "Stop always mentioning Morgarita",
   });
-  const threadLock = threadComposer(page).getByRole("button", {
-    name: "Always mention Morgarita",
+  const threadAlwaysMention = threadComposer(page).getByRole("button", {
+    name: "Stop always mentioning Morgarita",
   });
-  await expect(channelLock).toBeVisible();
-  await expect(threadLock).toBeVisible();
+  await expect(channelAlwaysMention).toBeVisible();
+  await expect(threadAlwaysMention).toBeVisible();
 
-  await threadLock.click();
-  await expect(threadLock).toHaveCount(0);
-  await expect(channelLock).toHaveCount(0);
+  await threadAlwaysMention.click();
+  await expect(threadAlwaysMention).toHaveCount(0);
+  await expect(channelAlwaysMention).toHaveCount(0);
   await expect
     .poll(() =>
       page.evaluate(
@@ -334,7 +334,7 @@ test("channel locks carry into threads and stay synchronized", async ({
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {
-  test(`captures the address-lock tray in ${theme}`, async ({ page }) => {
+  test(`captures the persistent-mention tray in ${theme}`, async ({ page }) => {
     await seedAudience(page, [AGENT_A, AGENT_B], theme);
     await installAudienceFixtures(page);
     await openThread(page);
@@ -343,12 +343,14 @@ for (const theme of ["buzz", "buzz-dark"]) {
     await overlay.getByTestId("message-input").focus();
     await waitForAnimations(page);
     await composer.screenshot({
-      path: `${SHOTS}/${theme}-address-lock-tray.png`,
+      path: `${SHOTS}/${theme}-persistent-mention-tray.png`,
     });
   });
 }
 
-test("the address-lock tray fits the narrow composer", async ({ page }) => {
+test("the persistent-mention tray fits the narrow composer", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 700, height: 760 });
   await seedAudience(page, [AGENT_A, AGENT_B]);
   await installAudienceFixtures(page);
@@ -357,11 +359,15 @@ test("the address-lock tray fits the narrow composer", async ({ page }) => {
   const composer = overlay.getByTestId("message-composer");
   await expect(overlay.getByTestId("composer-address-locks")).toBeVisible();
   await expect(
-    overlay.getByRole("button", { name: "Always mention Morgarita" }),
+    overlay.getByRole("button", {
+      name: "Stop always mentioning Morgarita",
+    }),
   ).toBeVisible();
   await expect(
-    overlay.getByRole("button", { name: "Always mention Vogue" }),
+    overlay.getByRole("button", { name: "Stop always mentioning Vogue" }),
   ).toBeVisible();
   await waitForAnimations(page);
-  await composer.screenshot({ path: `${SHOTS}/narrow-address-lock-tray.png` });
+  await composer.screenshot({
+    path: `${SHOTS}/narrow-persistent-mention-tray.png`,
+  });
 });
