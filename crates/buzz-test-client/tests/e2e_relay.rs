@@ -2679,8 +2679,7 @@ async fn test_workflow_reply_in_thread_pushes_live_thread_summary() {
     // A message_posted workflow that replies in-thread, but only to NEW
     // top-level messages (`trigger_is_reply == false`) — so it cannot recurse
     // on the reply it just posted.
-    let yaml = format!(
-        "name: reply-bot\n\
+    let yaml = "name: reply-bot\n\
          description: F3 live probe\n\
          trigger:\n\
          \x20 on: message_posted\n\
@@ -2691,7 +2690,7 @@ async fn test_workflow_reply_in_thread_pushes_live_thread_summary() {
          \x20   action: send_message\n\
          \x20   text: \"auto-reply\"\n\
          \x20   reply_in_thread: true\n"
-    );
+        .to_string();
     let def = EventBuilder::new(Kind::Custom(30620), yaml)
         .tags([
             Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),

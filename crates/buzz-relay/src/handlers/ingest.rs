@@ -724,23 +724,9 @@ pub(crate) async fn resolve_nip10_thread_meta(
     channel_id: Uuid,
     state: &AppState,
 ) -> Result<Option<ThreadMetadataOwned>, String> {
-    let mut root_hex: Option<String> = None;
-    let mut reply_hex: Option<String> = None;
-
-    for tag in event.tags.iter() {
-        let parts = tag.as_slice();
-        if parts.len() >= 4 && parts[0] == "e" {
-            let hex_val = &parts[1];
-            let marker = &parts[3];
-            if hex_val.len() == 64 && hex_val.chars().all(|c| c.is_ascii_hexdigit()) {
-                match marker.as_str() {
-                    "root" => root_hex = Some(hex_val.to_string()),
-                    "reply" => reply_hex = Some(hex_val.to_string()),
-                    _ => {}
-                }
-            }
-        }
-    }
+    let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
+    let root_hex = markers.root;
+    let reply_hex = markers.reply;
 
     if root_hex.is_none() && reply_hex.is_none() {
         return Ok(None);

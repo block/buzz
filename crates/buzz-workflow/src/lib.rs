@@ -1002,16 +1002,17 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     }
 }
 
-/// True when an event is a threaded reply — it carries a NIP-10 `e` tag marked
-/// `reply`. A `root` marker alone is not enough: the ingest resolver treats
-/// `(root=Some, reply=None)` as top-level (see `resolve_nip10_thread_meta`), so
-/// a `message_posted` filter of `trigger_is_reply == false` fires on those and
-/// on messages with no NIP-10 markers at all.
+/// True when an event is a threaded reply — it carries a valid NIP-10 `reply`
+/// marker. Delegates to the shared [`buzz_core::nip10`] parser so this stays in
+/// lockstep with ingest's `resolve_nip10_thread_meta`: a `root` marker alone is
+/// top-level, and a marker with a malformed (non-64-hex) event id is ignored by
+/// ingest, so it must not flip `trigger_is_reply` either — else a
+/// `trigger_is_reply == false` workflow would skip a message ingest stored as a
+/// new top-level post.
 fn event_is_reply(event: &nostr::Event) -> bool {
-    event.tags.iter().any(|tag| {
-        let parts = tag.as_slice();
-        parts.len() >= 4 && parts[0] == "e" && parts[3] == "reply"
-    })
+    buzz_core::nip10::parse_thread_markers(&event.tags)
+        .reply
+        .is_some()
 }
 
 /// Pure authority decision for [`WorkflowEngine::check_owner_authority`].
@@ -1692,6 +1693,53 @@ steps:
         let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
         let ctx = build_trigger_context(&stored);
         assert!(!ctx.is_reply, "unmarked e-tag must not count as a reply");
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_malformed_reply_id() {
+        // Ingest gates a marker on a valid 64-hex event id; a malformed reply
+        // id is not a thread link, so ingest stores the event top-level. The
+        // predicate must agree, or `trigger_is_reply == false` would skip it.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "malformed reply marker")
+            .tags([Tag::parse(["e", "bad", "", "reply"]).expect("reply tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a malformed reply id is ignored by ingest, so it is top-level"
+        );
+    }
+
+    #[test]
+    fn build_trigger_context_is_reply_false_for_valid_root_malformed_reply() {
+        // A valid `root` marker but a malformed `reply` id: ingest ignores the
+        // reply and stores the event as root-only, i.e. top-level. The predicate
+        // must not flip to reply on the malformed marker.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+        use uuid::Uuid;
+        let root = Keys::generate();
+        let root_event = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&root)
+            .expect("sign root");
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "valid root, malformed reply")
+            .tags([
+                Tag::parse(["e", &root_event.id.to_hex(), "", "root"]).expect("root tag"),
+                Tag::parse(["e", "bad", "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let stored = buzz_core::StoredEvent::new(event, Some(Uuid::new_v4()));
+        let ctx = build_trigger_context(&stored);
+        assert!(
+            !ctx.is_reply,
+            "a valid root with a malformed reply id is top-level to ingest"
+        );
     }
 
     #[test]
