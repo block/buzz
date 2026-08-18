@@ -22,6 +22,13 @@ use crate::relay::{classify_request_error, relay_api_base_url_with_override, rel
 /// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
 pub(super) const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
+fn ensure_clipboard_png_size(encoded_len: usize) -> Result<(), String> {
+    if encoded_len > MAX_DOWNLOAD_BYTES as usize {
+        return Err("encoded clipboard image is too large".to_string());
+    }
+    Ok(())
+}
+
 /// Encode an RGBA clipboard image as PNG before returning it across IPC.
 fn encode_clipboard_image_as_png(image: arboard::ImageData<'static>) -> Result<Vec<u8>, String> {
     let width =
@@ -51,6 +58,7 @@ fn encode_clipboard_image_as_png(image: arboard::ImageData<'static>) -> Result<V
         .write_image_data(&image.bytes)
         .map_err(|error| format!("failed to encode clipboard image: {error}"))?;
     drop(writer);
+    ensure_clipboard_png_size(encoded.len())?;
     Ok(encoded)
 }
 
@@ -235,18 +243,23 @@ pub async fn copy_image_to_clipboard(
 /// This is a fallback for Linux WebKitGTK, which can receive a paste event
 /// without exposing the Wayland `image/png` offer as a `DataTransferItem`.
 #[tauri::command]
-pub async fn read_clipboard_image(app: tauri::AppHandle) -> Result<Option<Vec<u8>>, String> {
+pub async fn read_clipboard_image(app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let clipboard_app = app.clone();
     app.run_on_main_thread(move || {
-        let result = read_system_clipboard_image(&clipboard_app)
-            .and_then(|image| image.map(encode_clipboard_image_as_png).transpose());
+        let result = read_system_clipboard_image(&clipboard_app).and_then(|image| {
+            image
+                .ok_or_else(|| "clipboard contains no image".to_string())
+                .and_then(encode_clipboard_image_as_png)
+        });
         let _ = tx.send(result);
     })
     .map_err(|error| format!("main thread dispatch failed: {error}"))?;
 
-    rx.recv()
-        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())?
+    let png = rx
+        .recv()
+        .map_err(|_| "clipboard result channel closed unexpectedly".to_string())??;
+    Ok(tauri::ipc::Response::new(png))
 }
 
 /// Write text to the system clipboard through the native shell.
@@ -590,6 +603,12 @@ mod tests {
             .to_rgba8();
         assert_eq!(decoded.dimensions(), (2, 1));
         assert_eq!(decoded.into_raw(), rgba);
+    }
+
+    #[test]
+    fn clipboard_encoded_png_cap_rejects_only_oversized_output() {
+        assert!(ensure_clipboard_png_size(MAX_DOWNLOAD_BYTES as usize).is_ok());
+        assert!(ensure_clipboard_png_size(MAX_DOWNLOAD_BYTES as usize + 1).is_err());
     }
 
     #[test]
