@@ -3933,6 +3933,17 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+/// Returns `true` when the authorization gateway deterministically denied the
+/// request. Nxtlinq uses JSON-RPC error code `-32041` for policy denials.
+///
+/// A policy decision cannot change between automatic retries of the same
+/// request, so retrying only produces duplicate Activity errors and receipts.
+/// Match the machine-readable code rather than the human-readable message so
+/// wording changes do not affect retry behavior.
+fn is_authorization_policy_denial(error: &acp::AcpError) -> bool {
+    matches!(error, acp::AcpError::AgentError { code: -32041, .. })
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
@@ -4074,6 +4085,21 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(e) if is_authorization_policy_denial(e)
+            ) {
+                // Replaying the identical request cannot change a deterministic
+                // policy decision. Keep the Activity error emitted below, but
+                // consume the batch now so it is not retried repeatedly.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — non-retryable authorization policy denial"
+                );
+                let content = "⚠️ I couldn't process the last request because it was blocked by the configured authorization policy. Review the Agent's policy, then re-send the request."
+                    .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
                 // between retries, so requeueing only wastes attempt slots and
@@ -4546,11 +4572,29 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
-    fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
+    fn shared_base_prompt_allows_uninitialized_nxtlinq_review_drafts() {
         let prompt = include_str!("base_prompt.md");
-        assert!(prompt.contains("pass real newline bytes through stdin"));
-        assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
-        assert!(prompt.contains("buzz messages send ... --content -"));
+        assert!(prompt.contains("does not need an existing `nxtlinq/` initialization"));
+        assert!(prompt.contains("Never ask the owner to run `nxtlinq-attest init`"));
+        assert!(prompt.contains("Desktop runs the reviewed standard Attest init"));
+    }
+
+    #[test]
+    fn shared_base_prompt_uses_structured_nxtlinq_setup_after_denials() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("structured `nxtlinq_setup` tool"));
+        assert!(prompt.contains("Inspection is optional evidence, never a prerequisite"));
+        assert!(prompt.contains("current owner-reviewed proposal and owner guidance"));
+        assert!(prompt.contains("Do not invoke `buzz agents nxtlinq-setup`, its `--help`"));
+        assert!(!prompt.contains("printf '%s'"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_structured_message_replies() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("structured `buzz_message_send` tool"));
+        assert!(prompt.contains("do not invoke `buzz messages send` through shell"));
+        assert!(prompt.contains("real newline characters"));
     }
 
     #[test]
@@ -8585,6 +8629,18 @@ mod error_outcome_emission_tests {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
     }
 
+    #[tokio::test]
+    async fn policy_denial_emits_exactly_one_feed_event() {
+        let denial = AcpError::AgentError {
+            code: -32041,
+            message: "Blocked by Nxtlinq policy".to_string(),
+        };
+        assert_eq!(
+            turn_errors_emitted_for(PromptOutcome::Error(denial)).await,
+            1
+        );
+    }
+
     // ── is_auth_error classification ───────────────────────────────────────
 
     #[test]
@@ -8638,13 +8694,34 @@ mod error_outcome_emission_tests {
         );
     }
 
-    // ── auth error dead-letter behavior ────────────────────────────────────
+    // ── authorization policy denial classification ─────────────────────────
 
-    /// An auth-class `PromptOutcome::Error` must dead-letter immediately
-    /// (the batch is never requeued) so the user sees a re-auth hint at once
-    /// rather than after 10 futile retries.
-    #[tokio::test]
-    async fn auth_error_dead_letters_immediately_without_requeueing() {
+    #[test]
+    fn policy_denial_matches_nxtlinq_json_rpc_code() {
+        let e = acp::AcpError::AgentError {
+            code: -32041,
+            message: "Blocked by Nxtlinq policy".to_string(),
+        };
+        assert!(is_authorization_policy_denial(&e));
+    }
+
+    #[test]
+    fn policy_denial_does_not_match_message_or_other_errors() {
+        let same_message_different_code = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Blocked by Nxtlinq policy".to_string(),
+        };
+        assert!(!is_authorization_policy_denial(
+            &same_message_different_code
+        ));
+
+        let io = acp::AcpError::Io(std::io::Error::other("pipe broke"));
+        assert!(!is_authorization_policy_denial(&io));
+    }
+
+    // ── non-retryable error behavior ───────────────────────────────────────
+
+    async fn queue_after_prompt_error(error: acp::AcpError) -> (EventQueue, uuid::Uuid) {
         let keys = nostr::Keys::generate();
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
             .sign_with_keys(&keys)
@@ -8659,12 +8736,6 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
-        };
-
-        let auth_error = acp::AcpError::AgentError {
-            code: -32000,
-            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
-                .to_string(),
         };
 
         let agent = dummy_agent(0).await;
@@ -8697,7 +8768,7 @@ mod error_outcome_emission_tests {
             agent,
             source: PromptSource::Channel(channel_id),
             turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(auth_error),
+            outcome: PromptOutcome::Error(error),
             batch: Some(batch),
         };
         handle_prompt_result(
@@ -8713,6 +8784,21 @@ mod error_outcome_emission_tests {
             None,
             None,
         );
+
+        (queue, channel_id)
+    }
+
+    /// An auth-class `PromptOutcome::Error` must dead-letter immediately
+    /// (the batch is never requeued) so the user sees a re-auth hint at once
+    /// rather than after 10 futile retries.
+    #[tokio::test]
+    async fn auth_error_dead_letters_immediately_without_requeueing() {
+        let auth_error = acp::AcpError::AgentError {
+            code: -32000,
+            message: "API Error: 401 OAuth access token has expired. Re-authenticate to continue."
+                .to_string(),
+        };
+        let (queue, channel_id) = queue_after_prompt_error(auth_error).await;
 
         // The batch must not be requeued: pending_channels returns 0.
         assert_eq!(
@@ -8727,78 +8813,38 @@ mod error_outcome_emission_tests {
         );
     }
 
+    /// A deterministic policy denial must remain visible as the turn error but
+    /// must not requeue the same request and generate duplicate denials.
+    #[tokio::test]
+    async fn policy_denial_dead_letters_immediately_without_requeueing() {
+        let policy_denial = acp::AcpError::AgentError {
+            code: -32041,
+            message: "Blocked by Nxtlinq policy".to_string(),
+        };
+        let (queue, channel_id) = queue_after_prompt_error(policy_denial).await;
+
+        assert_eq!(
+            queue.pending_channels(),
+            0,
+            "policy denial must dead-letter immediately — batch must not be requeued"
+        );
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            0,
+            "policy denial must dead-letter immediately — no events should be pending"
+        );
+    }
+
     /// A non-auth application error (e.g. usage credits) must still follow the
     /// standard requeue path so today's behavior is unchanged.
     #[tokio::test]
     async fn non_auth_application_error_is_requeued() {
-        let keys = nostr::Keys::generate();
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let channel_id = uuid::Uuid::new_v4();
-        let batch = FlushBatch {
-            channel_id,
-            events: vec![BatchEvent {
-                event,
-                prompt_tag: "test".into(),
-                received_at: std::time::Instant::now(),
-            }],
-            cancelled_events: vec![],
-            cancel_reason: None,
-        };
-
         // Usage-credits error — AgentError but NOT an auth error.
         let usage_error = acp::AcpError::AgentError {
             code: -32000,
             message: "Usage credits required for 1M context".to_string(),
         };
-
-        let agent = dummy_agent(0).await;
-        let mut pool = AgentPool::from_slots(vec![None]);
-        let task_id = pool.join_set.spawn(async {}).id();
-        pool.task_map_mut().insert(
-            task_id,
-            crate::pool::TaskMeta {
-                agent_index: 0,
-                channel_id: None,
-                turn_id: "test-turn-id".to_string(),
-                recoverable_batch: None,
-                control_tx: None,
-                steer_tx: None,
-                successful_steer_deliveries: HashSet::new(),
-            },
-        );
-        let mut queue = EventQueue::new(config::DedupMode::Queue);
-        let config = test_config();
-        let mut heartbeat_in_flight = false;
-        let removed_channels = std::collections::HashSet::new();
-        let mut crash_history = vec![SlotCircuit {
-            crash_times: Vec::new(),
-            open_until: None,
-            respawn_in_flight: false,
-        }];
-        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
-        let mut respawn_tasks = tokio::task::JoinSet::new();
-        let result = PromptResult {
-            agent,
-            source: PromptSource::Channel(channel_id),
-            turn_id: "test-turn-id".to_string(),
-            outcome: PromptOutcome::Error(usage_error),
-            batch: Some(batch),
-        };
-        handle_prompt_result(
-            &mut pool,
-            &mut queue,
-            &config,
-            result,
-            &mut heartbeat_in_flight,
-            &removed_channels,
-            &mut crash_history,
-            &respawn_tx,
-            &mut respawn_tasks,
-            None,
-            None,
-        );
+        let (queue, channel_id) = queue_after_prompt_error(usage_error).await;
 
         // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
         assert_eq!(

@@ -279,30 +279,16 @@ export type RelayAgent = {
   respondToAllowlist: string[];
 };
 
-export type ManagedAgentRuntimeLifecycle =
-  | "starting"
-  | "listening"
-  | "waking"
-  | "ready"
-  | "failed"
-  | "stopped";
-
-export type ManagedAgentRuntimeStatus = {
-  pubkey: string;
-  /** Exact submitted descriptor, present only on startup reconcile results. */
-  requestedRelayUrl?: string;
-  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
-  relayUrl: string;
-  localSetup: boolean;
-  lifecycle: ManagedAgentRuntimeLifecycle;
-  pid: number | null;
-  error: string | null;
-  logPath: string | null;
-};
-
-export type ManagedAgentBackend =
-  | { type: "local" }
-  | { type: "provider"; id: string; config: Record<string, unknown> };
+import type {
+  AgentCommandWrapper,
+  ManagedAgentBackend,
+} from "./managedAgentTypes";
+export type {
+  AgentCommandWrapper,
+  ManagedAgentBackend,
+  ManagedAgentRuntimeLifecycle,
+  ManagedAgentRuntimeStatus,
+} from "./managedAgentTypes";
 
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
@@ -328,6 +314,8 @@ export type ManagedAgent = {
    */
   agentCommandOverride: string | null;
   agentArgs: string[];
+  commandWrapper: AgentCommandWrapper | null;
+  workingDirectory: string | null;
   mcpCommand: string;
   turnTimeoutSeconds: number;
   idleTimeoutSeconds: number | null;
@@ -422,6 +410,8 @@ export type CreateManagedAgentInput = {
    */
   harnessOverride?: boolean;
   agentArgs?: string[];
+  commandWrapper?: AgentCommandWrapper;
+  workingDirectory?: string;
   mcpCommand?: string;
   turnTimeoutSeconds?: number;
   idleTimeoutSeconds?: number;
@@ -698,6 +688,10 @@ export type UpdateManagedAgentInput = {
    */
   harnessOverride?: boolean;
   agentArgs?: string[];
+  /** `null` clears the saved executable wrapper. */
+  commandWrapper?: AgentCommandWrapper | null;
+  /** `null` restores Buzz's default agent workspace. */
+  workingDirectory?: string | null;
   mcpCommand?: string;
   /** Absent = don't touch. Present = set the mode. */
   respondTo?: RespondToMode;

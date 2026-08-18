@@ -1995,7 +1995,7 @@ async fn reply_guard_nags_twice_then_lets_the_turn_end() {
     assert_eq!(reply_nag_count(&captured[1]), 1);
     assert_eq!(reply_nag_count(&captured[2]), 2);
 
-    // The reminder must name the command it wants and license silence, so it
+    // The reminder must name the structured reply tool and license silence, so it
     // cannot fight the base prompt's "silence is usually correct".
     let msgs = captured[2]["messages"].as_array().unwrap();
     let nag = msgs
@@ -2005,8 +2005,8 @@ async fn reply_guard_nags_twice_then_lets_the_turn_end() {
         .expect("reminder body");
     let text = nag["text"].as_str().unwrap_or("");
     assert!(
-        text.contains("buzz messages send"),
-        "reminder should name the command: {text}"
+        text.contains("buzz_message_send"),
+        "reminder should name the structured reply tool: {text}"
     );
     assert!(
         text.contains("silence is genuinely correct"),

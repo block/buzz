@@ -173,6 +173,15 @@ from the `d` tag of their kind:39002 events, not from `h`.
 
 **Agent-facing operations go in `buzz-cli`**: New agent-facing features belong in `buzz-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `buzz-dev-mcp` (shell + file tools for `buzz-agent`) is separate.
 
+**Nxtlinq-protected tool surfaces fail closed**: When the Buzz Agent permission
+bridge is enabled, every MCP tool that can touch external state must produce a
+Gateway action before its handler runs. New bundled tools must either map to a
+canonical filesystem/terminal action, map to a narrow `mcp:invoke` action, or
+be documented and tested as state-only/control-plane exemptions. Do not add an
+in-process filesystem reader (including hint/skill loading) that bypasses this
+boundary. Filesystem manifest globs are project-relative; ACP resources and
+working directories are absolute.
+
 **Workflow conditions**: `buzz-workflow` uses
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
 simple and testable.

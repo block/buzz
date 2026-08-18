@@ -42,6 +42,34 @@ fn nest_skill_contains_safe_mention_workflow() {
 }
 
 #[test]
+fn nest_skill_requires_nxtlinq_setup_draft_in_the_same_turn() {
+    assert!(BUZZ_CLI_SKILL_MD.contains("sending a review draft in the **same turn**"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("then invoke the structured `nxtlinq_setup` tool"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Do not invoke `buzz agents nxtlinq-setup`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("`owner_project_root` is mandatory"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("relative to that root"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("servers: [buzz-dev-mcp]"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Terminal commands are independent of filesystem excludes"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("`~/.buzz-dev/REPOS`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("ask for the exact project path"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("do not stop after describing the policy"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("include the returned request ID"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("The Desktop review is the owner's confirmation boundary"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("That denial is expected and is **not** a setup blocker"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("never retry through shell"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Inspection is optional evidence, never a prerequisite"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("current owner-reviewed proposal and owner guidance"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("its `--help`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("lets the owner edit it"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("does **not** need to be initialized"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("Never ask the owner to run `nxtlinq-attest init`"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("missing Attest initialization"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("are not such prerequisites"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("belong **inside `policy`**"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("\"policy\": {"));
+}
+
+#[test]
 fn ensure_nest_creates_all_dirs_and_agents_md() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(".buzz");
@@ -460,6 +488,8 @@ fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
         agent_command: String::new(),
         agent_command_override: None,
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: String::new(),
         turn_timeout_seconds: 0,
         idle_timeout_seconds: None,

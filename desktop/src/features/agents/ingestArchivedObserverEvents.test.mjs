@@ -11,11 +11,15 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
+import { REQUIRED_NXTLINQ_SENSITIVE_EXCLUDES } from "@/features/agents/agentManagement.ts";
+
 import {
   ingestArchivedObserverEvents,
+  injectLiveObserverEventsForE2E,
   injectObserverEventsForE2E,
   getAgentObserverSnapshot,
   resetAgentObserverStore,
+  subscribeAgentManagementRequests,
   _testRegisterKnownAgents,
   _testGetArchivedChannelEvents,
 } from "@/features/agents/observerRelayStore.ts";
@@ -325,6 +329,93 @@ describe("ingestArchivedObserverEvents", () => {
       false,
       "channel-B archive must NOT contain channel-A events (cross-channel contamination guard)",
     );
+  });
+});
+
+describe("agent management request replay", () => {
+  beforeEach(() => {
+    resetAgentObserverStore();
+  });
+
+  it("replays a recent request when the modal listener mounts late", () => {
+    const request = {
+      type: "agent_management_request",
+      action: "nxtlinq_setup",
+      requestId: "request-after-mount",
+      request: {
+        channelId: "chan-1",
+        projectRoot: "/tmp/project",
+        explanation: "Read source while excluding secrets.",
+        policy: {
+          name: "review-agent",
+          version: "1.0.0",
+          scope: ["demo:structured-capabilities"],
+          aud: ["nxtlinq-authorization-gateway"],
+          capabilities: [
+            {
+              type: "filesystem:read",
+              include: ["README.md", "src/**"],
+              exclude: [...REQUIRED_NXTLINQ_SENSITIVE_EXCLUDES],
+            },
+            { type: "mcp:connect", servers: ["buzz-dev-mcp"] },
+          ],
+        },
+      },
+    };
+    injectLiveObserverEventsForE2E(AGENT_PUBKEY, [
+      makeObserverEvent({
+        kind: "agent_management_request",
+        payload: request,
+      }),
+    ]);
+
+    const received = [];
+    const unsubscribe = subscribeAgentManagementRequests((agent, payload) => {
+      received.push({ agent, payload });
+    });
+    unsubscribe();
+
+    assert.equal(received.length, 1);
+    assert.equal(received[0].agent, AGENT_PUBKEY);
+    assert.equal(received[0].payload.requestId, "request-after-mount");
+  });
+
+  it("does not dispatch the same replayed request twice", () => {
+    const event = makeObserverEvent({
+      kind: "agent_management_request",
+      payload: {
+        type: "agent_management_request",
+        action: "nxtlinq_setup",
+        requestId: "request-deduplicated",
+        request: {
+          channelId: "chan-1",
+          projectRoot: "/tmp/project",
+          explanation: "Read source while excluding secrets.",
+          policy: {
+            name: "review-agent",
+            version: "1.0.0",
+            scope: ["demo:structured-capabilities"],
+            aud: ["nxtlinq-authorization-gateway"],
+            capabilities: [
+              {
+                type: "filesystem:read",
+                include: ["README.md"],
+                exclude: [...REQUIRED_NXTLINQ_SENSITIVE_EXCLUDES],
+              },
+              { type: "mcp:connect", servers: ["buzz-dev-mcp"] },
+            ],
+          },
+        },
+      },
+    });
+    injectLiveObserverEventsForE2E(AGENT_PUBKEY, [event, event]);
+
+    let received = 0;
+    const unsubscribe = subscribeAgentManagementRequests(() => {
+      received += 1;
+    });
+    unsubscribe();
+    assert.equal(received, 1);
   });
 });
 

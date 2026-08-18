@@ -221,7 +221,6 @@ fn effective_agent_command_explicit_override_wins() {
         "codex-acp"
     );
 }
-
 /// Minimal record for `record_agent_command` tests. Only the resolution
 /// inputs (runtime / persona_id / agent_command_override) vary.
 fn record_with(
@@ -241,6 +240,8 @@ fn record_with(
         agent_command: String::new(),
         agent_command_override: override_cmd.map(str::to_string),
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: String::new(),
         turn_timeout_seconds: 0,
         idle_timeout_seconds: None,
@@ -1797,7 +1798,6 @@ fn discovery_publish_path_survives_mid_flight_save() {
     }));
 
     let _entries = discover_acp_runtimes_from(Some(dir.path()));
-
     assert!(
         lookup_loaded_harness_by_id("mid-flight-save").is_some(),
         "discovery's publish must re-read the directory — a stale-snapshot \

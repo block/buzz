@@ -220,6 +220,15 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  nxtlinqAuthorizationConfig?: {
+    trustStore: string | null;
+    receiptRoot: string;
+  };
+  /** Native Nxtlinq Attest project state used by setup-review specs. */
+  nxtlinqAttestInitialization?: {
+    status: "missing" | "initialized" | "workspacePrivateKey" | "invalid";
+    detail?: string | null;
+  };
   /** Result returned by the mocked `add_agent_to_huddle` command. */
   addAgentToHuddleResult?: {
     ephemeral_added: boolean;

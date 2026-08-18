@@ -1143,6 +1143,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.11.0",
  "sherpa-onnx",
+ "similar",
  "strip-ansi-escapes",
  "tar",
  "tauri",
@@ -9663,6 +9664,15 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ee016af5d736b69fc89e19254540fa4b5f5492853fb5503920f084011c78b6"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "simple-dns"

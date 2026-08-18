@@ -1474,7 +1474,6 @@ mod tests {
             "BUZZ_AGENT_MODEL".to_string(),
             "claude-opus-4-5".to_string(),
         );
-
         // Minimal record: only the fields resolve_effective_agent_env reads.
         let record = crate::managed_agents::types::ManagedAgentRecord {
             pubkey: "test-pubkey".to_string(),
@@ -1488,6 +1487,8 @@ mod tests {
             agent_command: "buzz-agent".to_string(),
             agent_command_override: None,
             agent_args: vec![],
+            command_wrapper: None,
+            working_directory: None,
             mcp_command: String::new(),
             turn_timeout_seconds: 320,
             idle_timeout_seconds: None,
@@ -1732,7 +1733,6 @@ mod tests {
         );
     }
 }
-
 // Goose file-config-aware requirement tests live in a sibling file so this
 // module stays under the desktop file-size ratchet.
 #[cfg(test)]

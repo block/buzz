@@ -41,6 +41,49 @@ buzz agents draft-update --channel <uuid> --agent-name "Current name" \
 
 Run `buzz agents draft-update --help` for optional runtime, provider, model, rename, and access changes. Prefer these CLI commands over any legacy MCP agent-management tools.
 
+When the owner explicitly asks to install, set up, configure, reconfigure, regenerate, expand, enable, review, or protect this Agent with Nxtlinq, completing the request means sending a review draft in the **same turn**. Inspect only ordinary documentation/source that the current policy already permits, construct the narrowest useful policy, and then invoke the structured `nxtlinq_setup` tool; do not stop after describing the policy, print policy JSON as the final result, offer to send it later, or ask for another confirmation. The Desktop review is the owner's confirmation boundary and the tool itself installs or changes nothing. Do not invoke `buzz agents nxtlinq-setup`, its `--help`, or another setup reference command through shell; the structured tool is pinned to this Buzz build and cannot be shadowed by an older CLI on PATH.
+
+Call the structured tool with this exact envelope shape (values below are examples). `name`, `version`, `scope`, `aud`, and `capabilities` belong **inside `policy`**; never put them at the top level and never omit `policy`:
+
+```json
+{
+  "channel": "<current-channel-uuid>",
+  "owner_project_root": "/absolute/path/supplied/by/owner",
+  "explanation": "Read ordinary project documentation and source; exclude secrets and signing material.",
+  "policy": {
+    "name": "customer-project-agent",
+    "version": "1.0.0",
+    "scope": ["demo:structured-capabilities"],
+    "aud": ["nxtlinq-authorization-gateway"],
+    "capabilities": [
+      {
+        "type": "filesystem:read",
+        "include": ["README.md", "package.json", "src/**"],
+        "exclude": [".env*", "**/.env*", "nxtlinq/**"]
+      },
+      {
+        "type": "mcp:connect",
+        "servers": ["buzz-dev-mcp"]
+      }
+    ]
+  }
+}
+```
+
+An Agent that is already protected may be unable to inspect files or run commands needed for the newly requested work. Inspection is optional evidence, never a prerequisite for opening review. That denial is expected and is **not** a setup blocker: never retry through shell, ask the owner for a narrower target merely because inspection was denied, or refuse to open review. If any preliminary file, MCP, shell, or help lookup is denied, proceed immediately to the structured tool in the same turn. Use the owner's stated task, the files already accessible, and the denied operation itself to propose the smallest additional capability. For regeneration, the current owner-reviewed proposal and owner guidance supplied in the request are sufficient input; file inspection is not required. If the request is a generic setup/review with no more specific task evidence, submit the conservative normal Buzz baseline described below. Desktop shows the existing manifest beside the proposal and lets the owner edit it before anything is applied. The trusted `nxtlinq_setup` control-plane tool remains available specifically so an existing policy can be reviewed or expanded without first granting the Agent permission to read its own manifest.
+
+Use the current Buzz `[Context]` channel UUID as `channel`. `owner_project_root` is mandatory and must copy the absolute project path explicitly supplied by the owner in the current request exactly; never replace it with the shell/MCP working directory, the Agent's configured workspace, `~/.buzz-dev/REPOS`, or any inferred default. If the owner did not supply an absolute path, ask for the exact project path and do not submit a draft yet. An existing real project directory does **not** need to be initialized for Nxtlinq before submission: Desktop review owns the explicit Attest initialization and secure-key ceremony. Never ask the owner to run `nxtlinq-attest init` merely because `nxtlinq/` or its manifest is absent.
+
+The project root is absolute, but every filesystem `include` and `exclude` in the manifest is **relative to that root**. Never prefix a policy glob with `owner_project_root`. Use exactly `scope: [demo:structured-capabilities]` and `aud: [nxtlinq-authorization-gateway]`; do not put paths or capability names in `scope`, because legacy scope entries can authorize an entire operation family. A normal Buzz Agent draft starts with a narrow `filesystem:read` (for example `README.md`, `package.json`, and `src/**`), the complete sensitive excludes supplied by the `nxtlinq_setup` schema/normalizer (environment files, npm/netrc/PyPI credentials, Git/Nxtlinq metadata, AWS/Docker/SSH credentials, and key material), plus `mcp:connect` with `servers: [buzz-dev-mcp]` so the Gateway can establish the required bundled MCP connection. Connection authority is not invocation authority.
+
+Default-deny filesystem writes, terminal execution, and `mcp:invoke`; add one only when the owner's intended future work actually needs it. A `filesystem:write` grant does not imply read; editing with `str_replace` needs matching read and write coverage for the target. A terminal grant uses exact raw shell tool strings such as `git status` or `npm start`, without adding `bash -lc`, `pwd`, `cd`, preflight commands, or absolute workspace paths. Terminal commands are independent of filesystem excludes and can read files themselves, so do not add shell merely to make file access convenient. `environment` contains variable names only, must include `PATH`, and names every additional variable the command may receive; never include values or `NAME=value`, and never request host identity variables such as `BUZZ_PRIVATE_KEY`, `NOSTR_PRIVATE_KEY`, or `BUZZ_AUTH_TAG`. Do not put bundled `read_file`, `str_replace`, or `shell` under `mcp:invoke`; Buzz maps them to filesystem or terminal decisions. Local `view_image` uses filesystem read, while fetching a remote image requires the explicit `mcp:invoke` selector `servers: [buzz-dev-mcp]`, `tools: [view_image]`. Other external MCP tools require both an explicit `mcp:connect` server and a narrow `mcp:invoke` selector with exactly one server (and only its required tools), preventing accidental server/tool cross-products.
+
+After success, report that the draft is awaiting owner review and include the returned request ID. Only stop without sending a draft if a concrete setup prerequisite fails (for example, no host-bound channel context, the supplied project path does not identify a real directory, or the structured tool rejects the draft); missing Attest initialization and an ordinary filesystem, terminal, or MCP authorization denial are not such prerequisites. Report only the exact blocker returned by the setup tool.
+
+Propose policy fields only; do not inspect `nxtlinq/`, dotfiles, credentials, or other secrets. Never install the Gateway, directly edit the manifest, or request/read/pass a signing private key. Desktop owns installation and invokes the reviewed standard Attest init when needed; Attest generates the identity, after which Desktop relocates the private key into secure storage before installing public project state. Desktop also owns diff application and owner-initiated native signing. The Agent never participates in key generation, selection, storage, or signing.
+
+For capabilities, use only the Gateway manifest fields: filesystem `include`/`exclude`; terminal `commands`/`environment`; canonical MCP `servers` and `tools`; optional `approvalRequired`. Every selector is a string array. Never invent constraints such as `command`, `args`, `cwd`, or `network`. Conversational setup rejects `approvalRequired: true` because Buzz does not yet provide that interactive approval flow; omit it (or use `false`).
+
 ## Git Repositories
 
 Buzz hosts real git repos, and **you can own one yourself** — no human key needed. `repos create` signs the announcement with *your* key, so the repo is owned by whoever runs it; the owner segment in the clone URL is your own pubkey (hex, not a username). Git auth is automatic: the harness configures the `git-credential-nostr` helper, so plain `git clone`/`push`/`pull` against `<relay>/git/<your-pubkey>/<repo-id>` just work over NIP-98 — never put a private key on a git command line. Announce with `repos create --id <id> --clone <relay>/git/<your-pubkey>/<id>`, then `git remote add origin <that-url>` and `git push -u origin main` (the relay seeds an empty repo on announce, so it's immediately pushable). Requires git 2.46+ for the credential protocol.

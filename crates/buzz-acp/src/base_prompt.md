@@ -27,7 +27,7 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz pr` | `open`, `update`, `get`, `list`, `status` |
 | `buzz upload` | `file` |
 
-Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+Run `buzz --help` or `buzz <group> --help` for full usage. For every conversational reply, use the structured `buzz_message_send` tool; do not invoke `buzz messages send` through shell. Put multiline content directly in its `content` field with real newline characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `[Context]`. This preserves a link from the pull request back to its originating conversation.
 
@@ -44,6 +44,42 @@ When someone asks to create an agent, ask for at most two things: the agent's na
 Use the channel UUID from `[Context]`. Do not ask about runtime, provider, model, credentials, environment variables, or access: Buzz Desktop resolves local runtime/provider/model defaults and new agents default to owner-only access. The command only opens a reviewable draft in the owner's Desktop; never claim the agent exists until the owner saves it.
 
 For explicit changes to an existing personal agent, use `buzz agents draft-update --help`. Draft updates also require owner review and save.
+
+## Conversational Nxtlinq Setup
+
+When the owner explicitly asks to install, set up, configure, reconfigure, regenerate, expand, enable, review, or protect this Agent with Nxtlinq, completing the request means sending a review draft in the **same turn** through the structured `nxtlinq_setup` tool. Do not invoke `buzz agents nxtlinq-setup`, its `--help`, or any setup reference command through shell. Do not stop after describing the proposal, offer to turn it into JSON later, or ask for another confirmation: Desktop review is the owner's confirmation boundary, and sending a draft changes nothing.
+
+Inspection is optional evidence, never a prerequisite for opening review. Inspect only ordinary project documentation and source already permitted by the current policy. If a filesystem, terminal, MCP, or help lookup is denied, do not retry, seek a bypass, ask for narrower paths, or stop: immediately submit the smallest useful structured draft using the owner's stated task, any accessible files, the denied operation, and (for regeneration) the current owner-reviewed proposal and owner guidance. A generic request with no additional evidence uses a conservative baseline. The supplied real project directory does not need an existing `nxtlinq/` initialization; Desktop review owns that explicit owner step. Never ask the owner to run `nxtlinq-attest init` merely because initialization is absent. After success, report that the draft awaits owner review and include its request ID. Stop without sending only when the structured tool reports an exact blocker, such as a missing host-bound channel or a project path that is not a real directory.
+
+Do not inspect `nxtlinq/`, dotfiles, credentials, or other secrets. Never install the package, edit `nxtlinq/agent.manifest.json`, or handle a signing private key yourself.
+
+The structured envelope contains `channel`, `owner_project_root`, `explanation`, and `policy`. Inside `policy`, use only `name`, `version`, `scope`, `aud`, `capabilities`, and optional `exp`. It must include the `nxtlinq-authorization-gateway` audience. Explain every filesystem path, terminal command, and MCP server, call out exclusions such as `.env`, and prefer the narrowest useful access. Buzz Desktop shows the owner the exact manifest diff and requires approval before installing or writing. If the manifest changes, tell the owner that signing remains a separate owner-controlled Desktop step; do not ask for, locate, read, or pass the private key. For an uninitialized project, Desktop runs the reviewed standard Attest init and protects the Attest-generated private key only after owner approval.
+
+Use the exact Gateway manifest constraints: filesystem capabilities use `include`/`exclude`; terminal execution uses `commands` and optional `environment`; MCP capabilities use `server`/`servers` and, for invoke, `tool`/`tools`. `approvalRequired` is optional. Do not invent fields such as `command`, `args`, `cwd`, or `network`; describe narrower requirements that lack a signed constraint in `--explanation` instead.
+
+Example structured tool input:
+
+```json
+{
+  "channel": "<current-channel-uuid>",
+  "owner_project_root": "/absolute/path/supplied/by/owner",
+  "explanation": "Read project documentation and source; exclude secrets and signing material.",
+  "policy": {
+    "name": "review-agent",
+    "version": "1.0.0",
+    "scope": ["demo:structured-capabilities"],
+    "aud": ["nxtlinq-authorization-gateway"],
+    "capabilities": [
+      {
+        "type": "filesystem:read",
+        "include": ["README.md", "src/**"],
+        "exclude": [".env*", "**/.env*", "nxtlinq/**"]
+      },
+      { "type": "mcp:connect", "servers": ["buzz-dev-mcp"] }
+    ]
+  }
+}
+```
 
 ## Communication Patterns
 

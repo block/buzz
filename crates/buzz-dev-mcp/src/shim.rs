@@ -17,6 +17,8 @@ use zeroize::Zeroize;
 /// Cleaned up on drop (TempDir).
 pub struct Shim {
     _dir: TempDir,
+    /// Fixed session-owned multicall entrypoint for structured Buzz tools.
+    pub buzz_path: PathBuf,
     pub path_env: String,
     pub git_env: Vec<(String, String)>,
 }
@@ -38,6 +40,7 @@ impl Shim {
         ] {
             symlink(&self_exe, &dir.path().join(name))?;
         }
+        let buzz_path = dir.path().join("buzz");
 
         let original = std::env::var_os("PATH").unwrap_or_default();
         let mut entries = vec![PathBuf::from(dir.path())];
@@ -69,6 +72,7 @@ impl Shim {
 
         Ok(Self {
             _dir: dir,
+            buzz_path,
             path_env,
             git_env,
         })

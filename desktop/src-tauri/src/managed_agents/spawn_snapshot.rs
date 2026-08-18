@@ -100,6 +100,10 @@ pub(crate) struct SpawnConfigSnapshot {
     /// The effective agent command the harness drives.
     pub command: String,
     pub args: Vec<String>,
+    /// Optional outer executable wrapper; arguments are masked in diffs because
+    /// they may contain credential or operator-controlled paths.
+    pub command_wrapper: Option<super::AgentCommandWrapper>,
+    pub working_directory: Option<std::path::PathBuf>,
     /// Catalog-derived from `command`; `""` when the runtime has none.
     pub mcp_command: String,
     /// Fully layered process env: baked floor -> runtime metadata ->
@@ -147,6 +151,8 @@ impl SpawnConfigSnapshot {
             acp_command: record.acp_command.clone(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
+            command_wrapper: record.command_wrapper.clone(),
+            working_directory: record.working_directory.clone(),
             mcp_command: known_acp_runtime(&descriptor.command)
                 .and_then(|runtime| runtime.mcp_command)
                 .unwrap_or("")

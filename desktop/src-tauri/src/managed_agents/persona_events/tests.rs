@@ -16,6 +16,8 @@ pub(super) fn sample_record() -> ManagedAgentRecord {
         agent_command: "goose".into(),
         agent_command_override: None,
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: String::new(),
         turn_timeout_seconds: 320,
         idle_timeout_seconds: None,

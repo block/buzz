@@ -2621,6 +2621,7 @@ mod tests {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
+            nxtlinq_permission_bridge: false,
         }
     }
 

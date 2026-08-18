@@ -11,6 +11,12 @@ fn base() -> SpawnConfigSnapshot {
         acp_command: "buzz-acp".into(),
         command: "goose".into(),
         args: vec!["--mode".into(), "acp".into()],
+        command_wrapper: Some(crate::managed_agents::AgentCommandWrapper {
+            command: "nxtlinq-authorization-gateway".into(),
+            args: vec!["--adapter".into(), "acp".into(), "--".into()],
+            authorization: None,
+        }),
+        working_directory: Some("/projects/example".into()),
         mcp_command: "goose-mcp".into(),
         env: BTreeMap::from([
             ("OPENAI_API_KEY".to_string(), SECRET.to_string()),
@@ -51,6 +57,10 @@ fn mutations() -> Vec<Mutation> {
         ("acp_command", |s| s.acp_command = "other-acp".into()),
         ("command", |s| s.command = "claude".into()),
         ("args", |s| s.args = vec!["--other".into()]),
+        ("command_wrapper.command", |s| {
+            s.command_wrapper.as_mut().expect("base wrapper").command = "other-wrapper".into();
+        }),
+        ("working_directory", |s| s.working_directory = None),
         ("mcp_command", |s| s.mcp_command = String::new()),
         ("env.OPENAI_API_KEY", |s| {
             s.env

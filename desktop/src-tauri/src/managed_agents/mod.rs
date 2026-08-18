@@ -17,6 +17,7 @@ pub(crate) mod effective_config;
 mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
+mod launch_wrapper;
 mod managed_node_paths;
 mod nest;
 pub(crate) mod parallelism;
@@ -64,6 +65,14 @@ pub(crate) use git_bash::{discover_git_bash, GitBashPrerequisite};
 pub(crate) use global_config::{
     load_global_agent_config, resolve_effective_model_provider, save_global_agent_config,
     validate_global_config, GlobalAgentConfig,
+};
+pub use launch_wrapper::AgentCommandWrapper;
+pub(crate) use launch_wrapper::{
+    apply_agent_launch_update, normalized_agent_launch_config, resolve_agent_launch,
+};
+pub(crate) use launch_wrapper::{
+    verify_managed_nxtlinq_gateway, NXTLINQ_GATEWAY_COMMAND, NXTLINQ_GATEWAY_PACKAGE,
+    NXTLINQ_GATEWAY_VERSION,
 };
 pub(crate) use managed_node_paths::*;
 pub use nest::*;

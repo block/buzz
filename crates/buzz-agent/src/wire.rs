@@ -27,7 +27,10 @@ pub enum Inbound {
         method: String,
         params: Value,
     },
-    Ignored,
+    Response {
+        id: Value,
+        message: Value,
+    },
     Invalid {
         id: Value,
         code: i32,
@@ -109,9 +112,10 @@ pub fn classify(msg: &Value) -> Inbound {
             params,
         },
         (Some(m), None) => Inbound::Notification { method: m, params },
-        // Bare responses (id present, no method) are unexpected — buzz-agent
-        // does not issue requests to the client. Ignore silently.
-        (None, Some(_)) => Inbound::Ignored,
+        (None, Some(id)) => Inbound::Response {
+            id,
+            message: msg.clone(),
+        },
         (None, None) => Inbound::Invalid {
             id: Value::Null,
             code: INVALID_REQUEST,

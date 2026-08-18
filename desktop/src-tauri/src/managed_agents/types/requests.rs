@@ -1,13 +1,13 @@
 //! Persona and managed-agent command request types, split from `types.rs`
 //! (file-size cap).
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::Deserialize;
 
 use super::{
-    default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    CatalogSource, RelayMeshConfig, RespondTo,
+    default_start_on_app_launch, validate_respond_to_allowlist, AgentCommandWrapper,
+    AgentDefinition, BackendKind, CatalogSource, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -147,6 +147,10 @@ pub struct CreateManagedAgentRequest {
     pub harness_override: bool,
     #[serde(default)]
     pub agent_args: Vec<String>,
+    #[serde(default)]
+    pub command_wrapper: Option<AgentCommandWrapper>,
+    #[serde(default)]
+    pub working_directory: Option<PathBuf>,
     /// Accepted for wire compatibility; not applied to the record. The
     /// effective MCP command is always derived from the runtime catalog at
     /// spawn time — a per-record override is never read.
@@ -236,6 +240,12 @@ pub struct UpdateManagedAgentRequest {
     pub harness_override: bool,
     #[serde(default)]
     pub agent_args: Option<Vec<String>>,
+    /// Absent = don't touch; null = clear; object = replace.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub command_wrapper: Option<Option<AgentCommandWrapper>>,
+    /// Absent = don't touch; null = restore Buzz's default workdir; path = set.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub working_directory: Option<Option<PathBuf>>,
     /// Accepted for wire compatibility; not applied to the stored record.
     /// The effective MCP command is always catalog-derived at spawn time.
     ///

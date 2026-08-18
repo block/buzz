@@ -114,13 +114,10 @@ fn goose_has_no_mcp_hooks() {
 fn unknown_command_returns_none() {
     assert!(known_acp_runtime("custom-agent").is_none());
 }
-
 // ── build_respond_to_env tests ───────────────────────────────────────
-
 use super::test_fixtures::{expected_mode, expected_owner_only, fixture};
 use super::{build_respond_to_env, build_respond_to_env_with_policy};
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
-
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
     let rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));

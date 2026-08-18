@@ -76,6 +76,8 @@ fn agent_record() -> ManagedAgentRecord {
         acp_command: "buzz-acp".to_string(),
         agent_command: "goose".to_string(),
         agent_args: vec![],
+        command_wrapper: None,
+        working_directory: None,
         mcp_command: "".to_string(),
         turn_timeout_seconds: 300,
         idle_timeout_seconds: None,

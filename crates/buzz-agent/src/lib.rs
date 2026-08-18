@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 mod agent;
 pub mod auth;
+mod authorization;
 mod builtin;
 pub mod catalog;
 pub mod config;
@@ -39,6 +40,7 @@ use tokio::io::BufReader;
 use tokio::sync::{mpsc, watch, Mutex};
 
 use crate::agent::RunCtx;
+use crate::authorization::PermissionBroker;
 use crate::config::{Config, MAX_SYSTEM_PROMPT_BYTES, PROTOCOL_VERSION};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
@@ -50,6 +52,47 @@ use crate::wire::{
     WireSender, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR,
 };
 
+const NXTLINQ_AUTHORIZATION_SYSTEM_PROMPT: &str = r#"## Nxtlinq per-operation authorization
+
+Authorization is evaluated independently for every tool call. A denied operation never means the workspace, shell, tool, or session is locked. At the start of every new user turn, treat all earlier denials as history only—not as evidence that a newly requested call will be denied. Never refuse or merely discuss a newly requested operation because an earlier operation was denied: invoke the appropriate tool first and let Nxtlinq authorize that exact call. Example: if reading `.env` was denied and the next user asks to read `README.md`, you must call `read_file` for `README.md`; do not claim that file access is unavailable. For a shell request, preserve the user's command as a standalone command without adding `pwd`, `cd`, preflight checks, wrappers, or extra flags, because policy may match the command exactly. Do not disguise or bypass a denied operation; report that operation's denial and continue to evaluate later requests independently."#;
+
+fn compose_effective_system_prompt(
+    base: String,
+    hints_text: &str,
+    nxtlinq_permission_bridge: bool,
+) -> String {
+    let mut prompt = base;
+    if nxtlinq_permission_bridge {
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(NXTLINQ_AUTHORIZATION_SYSTEM_PROMPT);
+    }
+    if !hints_text.is_empty() {
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(hints_text);
+    }
+    prompt
+}
+
+fn session_hints(
+    cwd: &std::path::Path,
+    hints_enabled: bool,
+    nxtlinq_permission_bridge: bool,
+) -> (String, Vec<SkillEntry>) {
+    // Project/global hint and skill discovery performs eager filesystem reads,
+    // while load_skill reads more files in-process. Until those reads have a
+    // receipt-bearing authorization path, exclude the entire surface from an
+    // attested session instead of letting it bypass the Gateway.
+    if hints_enabled && !nxtlinq_permission_bridge {
+        hints::build_hints_section(cwd)
+    } else {
+        (String::new(), Vec::new())
+    }
+}
+
 struct App {
     cfg: Config,
     llm: Arc<Llm>,
@@ -60,11 +103,13 @@ struct App {
     /// OAuth authentication and non-auth errors use the configured model for that
     /// response and retry on the next session.
     models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
+    permissions: Arc<PermissionBroker>,
 }
 
 struct Session {
     id: String,
     mcp: Arc<McpRegistry>,
+    cwd: std::path::PathBuf,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
     skills: Vec<SkillEntry>,
     history: Vec<HistoryItem>,
@@ -186,6 +231,7 @@ async fn async_main() {
         llm,
         sessions: Mutex::new(HashMap::new()),
         models_cache: tokio::sync::OnceCell::new(),
+        permissions: Arc::new(PermissionBroker::default()),
     });
     let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
     let writer = tokio::spawn(wire::writer_task(wire_rx));
@@ -235,7 +281,11 @@ async fn dispatch(app: &Arc<App>, msg: Value, wire_tx: &WireSender) {
             handle_request(app, id, method, params, wire_tx).await
         }
         Inbound::Notification { method, params } => handle_notification(app, &method, params).await,
-        Inbound::Ignored => {}
+        Inbound::Response { id, message } => {
+            if !app.permissions.resolve(&id, message).await {
+                tracing::debug!("ignoring response for unknown request id={id}");
+            }
+        }
         Inbound::Invalid { id, code, message } => {
             wire::send(wire_tx, wire::err(id, code, &message)).await
         }
@@ -378,11 +428,11 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             .await;
         }
     }
-    let (hints_text, skills) = if app.cfg.hints_enabled {
-        hints::build_hints_section(std::path::Path::new(&p.cwd))
-    } else {
-        (String::new(), Vec::new())
-    };
+    let (hints_text, skills) = session_hints(
+        std::path::Path::new(&p.cwd),
+        app.cfg.hints_enabled,
+        app.cfg.nxtlinq_permission_bridge,
+    );
     let effective_system_prompt: Arc<str> = {
         // When the harness provides a systemPrompt (base_prompt + persona), use
         // it as the primary content and suppress the default. The default is only
@@ -391,11 +441,8 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             Some(client_prompt) if !client_prompt.trim().is_empty() => client_prompt.to_owned(),
             _ => app.cfg.system_prompt.clone(),
         };
-        let prompt = if hints_text.is_empty() {
-            base
-        } else {
-            format!("{base}\n\n{hints_text}")
-        };
+        let prompt =
+            compose_effective_system_prompt(base, &hints_text, app.cfg.nxtlinq_permission_bridge);
         // Reject combined prompts exceeding 512KB.
         if prompt.len() > MAX_SYSTEM_PROMPT_BYTES {
             return reject(
@@ -481,6 +528,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         Session {
             id: session_id.clone(),
             mcp,
+            cwd: Path::new(&p.cwd).to_path_buf(),
             skills,
             history: Vec::new(),
             cancel_tx,
@@ -674,6 +722,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let (
         sid,
         mcp,
+        cwd,
         skills,
         mut history,
         mut original_task,
@@ -734,6 +783,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         system_prompt: &effective_system_prompt,
         llm: &app.llm,
         mcp: &mcp,
+        session_cwd: &cwd,
+        permissions: &app.permissions,
         skills: &skills,
         wire: &wire_tx,
         cancel: &mut cancel_rx,
@@ -861,6 +912,7 @@ async fn acquire_session(
     (
         String,
         Arc<McpRegistry>,
+        std::path::PathBuf,
         Vec<SkillEntry>,
         Vec<HistoryItem>,
         Option<String>,
@@ -904,6 +956,7 @@ async fn acquire_session(
     Ok((
         s.id.clone(),
         s.mcp.clone(),
+        s.cwd.clone(),
         skills,
         std::mem::take(&mut s.history),
         s.original_task.take(),
@@ -1022,6 +1075,47 @@ mod tests {
                 name: "configured-model".into(),
             }]
         );
+    }
+
+    #[test]
+    fn nxtlinq_prompt_makes_authorization_per_operation() {
+        let prompt = crate::compose_effective_system_prompt("base".into(), "hints", true);
+
+        assert!(prompt.starts_with("base\n\n"));
+        assert!(prompt.contains("evaluated independently for every tool call"));
+        assert!(prompt.contains("never means the workspace, shell, tool, or session is locked"));
+        assert!(prompt.contains("Never refuse or merely discuss a newly requested operation"));
+        assert!(prompt.contains("without adding `pwd`, `cd`, preflight checks"));
+        assert!(prompt.ends_with("\n\nhints"));
+    }
+
+    #[test]
+    fn ordinary_prompt_does_not_include_nxtlinq_instructions() {
+        let prompt = crate::compose_effective_system_prompt("base".into(), "hints", false);
+
+        assert_eq!(prompt, "base\n\nhints");
+        assert!(!prompt.contains("Nxtlinq"));
+    }
+
+    #[test]
+    fn nxtlinq_sessions_do_not_eagerly_read_hints_or_expose_disk_skills() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("AGENTS.md"), "protected hints").expect("fixture");
+        let skill = root.path().join(".agents/skills/example");
+        std::fs::create_dir_all(&skill).expect("skill dir");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: example\ndescription: protected skill\n---\nsecret instructions",
+        )
+        .expect("skill fixture");
+
+        let (hints, skills) = crate::session_hints(root.path(), true, true);
+        assert!(hints.is_empty());
+        assert!(skills.is_empty());
+
+        let (hints, skills) = crate::session_hints(root.path(), true, false);
+        assert!(hints.contains("protected hints"));
+        assert_eq!(skills.len(), 1);
     }
 
     #[test]

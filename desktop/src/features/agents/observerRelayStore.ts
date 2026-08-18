@@ -37,6 +37,7 @@ const MAX_OBSERVER_EVENTS = 3000;
 // ever made per-agent, where a fixed headroom could exceed a smaller cap.
 const OBSERVER_EVENTS_LOW_WATER = Math.floor(MAX_OBSERVER_EVENTS * 0.9);
 const MAX_PENDING_UNKNOWN_AGENT_FRAMES = 100;
+const MAX_RECENT_AGENT_MANAGEMENT_REQUESTS = 100;
 
 export type ObserverSnapshot = {
   connectionState: ConnectionState;
@@ -134,6 +135,10 @@ const controlResultListeners = new Map<
 const agentManagementListeners = new Set<
   (agentPubkey: string, request: AgentManagementRequest) => void
 >();
+const recentAgentManagementRequests: Array<{
+  agentPubkey: string;
+  request: AgentManagementRequest;
+}> = [];
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
@@ -492,8 +497,26 @@ function processLiveObserverEvents(
     }
     const managementRequest = parseAgentManagementRequest(parsed.payload);
     if (managementRequest) {
-      for (const listener of agentManagementListeners) {
-        listener(agentPubkey, managementRequest);
+      const alreadyRecorded = recentAgentManagementRequests.some(
+        (candidate) =>
+          normalizePubkey(candidate.agentPubkey) ===
+            normalizePubkey(agentPubkey) &&
+          candidate.request.requestId === managementRequest.requestId,
+      );
+      if (!alreadyRecorded) {
+        recentAgentManagementRequests.push({
+          agentPubkey,
+          request: managementRequest,
+        });
+        if (
+          recentAgentManagementRequests.length >
+          MAX_RECENT_AGENT_MANAGEMENT_REQUESTS
+        ) {
+          recentAgentManagementRequests.shift();
+        }
+        for (const listener of agentManagementListeners) {
+          listener(agentPubkey, managementRequest);
+        }
       }
     }
     if (parsed.kind === "session_config_captured") {
@@ -509,7 +532,6 @@ function processLiveObserverEvents(
       );
     }
   }
-
   // Preserve the harness's envelope backpressure: retained state was committed
   // before specialized callbacks, but external-store subscribers publish once.
   if (addedEvents) {
@@ -661,6 +683,9 @@ export function subscribeAgentManagementRequests(
   listener: (agentPubkey: string, request: AgentManagementRequest) => void,
 ) {
   agentManagementListeners.add(listener);
+  for (const candidate of recentAgentManagementRequests) {
+    listener(candidate.agentPubkey, candidate.request);
+  }
   return () => {
     agentManagementListeners.delete(listener);
   };
@@ -868,6 +893,14 @@ export function injectObserverEventsForE2E(
   }
 }
 
+/** E2E-only ingress that also exercises owner-reviewed management dispatch. */
+export function injectLiveObserverEventsForE2E(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  processLiveObserverEvents(agentPubkey, events);
+}
+
 /**
  * Synchronize the observer store with a sorted buffer of events for one agent.
  * Used by test harnesses and replay bridges that already hold decoded frames.
@@ -898,6 +931,7 @@ export function resetAgentObserverStore() {
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
+  recentAgentManagementRequests.length = 0;
   onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;

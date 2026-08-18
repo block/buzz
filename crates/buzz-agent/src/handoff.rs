@@ -205,13 +205,14 @@ impl RunCtx<'_> {
         // Reset history first; the _PostCompact hook is meant to inject
         // state into the FRESH context, not the old one we're discarding.
         self.history.clear();
+        let effective_hook_servers = self.cfg.effective_hook_servers();
         let post_compact = self
             .mcp
             .call_hooks(
                 "_PostCompact",
                 &serde_json::json!({}),
                 self.cfg.hook_timeout,
-                &self.cfg.hook_servers,
+                &effective_hook_servers,
             )
             .await;
         // Handoff summary and hook output are injected as a synthetic user

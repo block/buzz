@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
 use tracing::Instrument as _;
 
+use crate::authorization::{action_for_tool, PermissionBroker, POLICY_DENIAL_PREFIX};
 use crate::builtin;
 use crate::config::{
     pricing_authority, Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
@@ -79,7 +80,7 @@ const REPLY_GUARD_SERVER: &str = "buzz-agent";
 /// Explicitly licenses silence. The base prompt tells agents that publishing is
 /// optional and "silence is usually correct"; a reminder that argued otherwise
 /// would fight that instruction and make agents chattier.
-const REPLY_GUARD_NAG: &str = "You are about to end this turn without calling `buzz messages send`. \
+const REPLY_GUARD_NAG: &str = "You are about to end this turn without using `buzz_message_send`. \
 Your assistant text and reasoning are never shown to anyone — if you did work, found an answer, \
 or hit a blocker that someone is waiting on, it exists only if you publish it. \
 If you already posted, or if silence is genuinely correct for this turn, ignore this and end your turn.";
@@ -96,8 +97,23 @@ If you already posted, or if silence is genuinely correct for this turn, ignore 
 /// and never executed — cannot disarm the guard. They must stay *before*
 /// [`is_reply_shaped`]: together with them, and only with them, the `__shell`
 /// suffix is exactly equivalent to "the bare tool name is `shell`".
-fn is_buzz_reply_call(call: &ToolCall, mcp: &McpRegistry) -> bool {
-    mcp.has(&call.name) && !mcp.is_hook(&call.name) && is_reply_shaped(&call.name, &call.arguments)
+fn is_buzz_reply_call(call: &ToolCall, mcp: &McpRegistry, nxtlinq_bridge: bool) -> bool {
+    mcp.has(&call.name)
+        && !mcp.is_hook(&call.name)
+        && (is_structured_reply_shaped(&call.name, &call.arguments)
+            || (!nxtlinq_bridge && is_reply_shaped(&call.name, &call.arguments)))
+}
+
+fn is_structured_reply_shaped(name: &str, arguments: &serde_json::Value) -> bool {
+    name.ends_with("__buzz_message_send")
+        && arguments
+            .get("channel")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.is_empty())
+        && arguments
+            .get("content")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.is_empty())
 }
 
 /// Whether a tool name and arguments have the shape of a Buzz publish command.
@@ -142,6 +158,8 @@ pub struct RunCtx<'a> {
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
     pub mcp: &'a Arc<McpRegistry>,
+    pub session_cwd: &'a std::path::Path,
+    pub permissions: &'a Arc<PermissionBroker>,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
     pub skills: &'a [SkillEntry],
     pub wire: &'a WireSender,
@@ -698,13 +716,14 @@ impl RunCtx<'_> {
                     if stop_rejections >= self.cfg.stop_max_rejections {
                         return Ok(stop);
                     }
+                    let effective_hook_servers = self.cfg.effective_hook_servers();
                     let mut objections = self
                         .mcp
                         .call_hooks(
                             "_Stop",
                             &json!({}),
                             self.cfg.hook_timeout,
-                            &self.cfg.hook_servers,
+                            &effective_hook_servers,
                         )
                         .await;
                     // Reply guard shares this gate and this budget, so a round
@@ -738,7 +757,9 @@ impl RunCtx<'_> {
             // Deliberately after truncation: a publish-shaped call that was
             // discarded never runs, so it must not suppress the reminder.
             if self.cfg.require_reply && !buzz_reply_call_seen {
-                buzz_reply_call_seen = calls.iter().any(|c| is_buzz_reply_call(c, self.mcp));
+                buzz_reply_call_seen = calls
+                    .iter()
+                    .any(|c| is_buzz_reply_call(c, self.mcp, self.cfg.nxtlinq_permission_bridge));
             }
             self.history.push(HistoryItem::Assistant {
                 text: response.text,
@@ -853,7 +874,7 @@ impl RunCtx<'_> {
             });
             // On tool error: append a reflection prompt so the LLM
             // diagnoses the failure before blindly retrying.
-            if result.is_error {
+            if result.is_error && should_append_error_reflection(&result) {
                 result
                     .content
                     .push(ToolResultContent::Text(ERROR_REFLECTION_SUFFIX.to_string()));
@@ -873,8 +894,11 @@ impl RunCtx<'_> {
         let mut set: JoinSet<(usize, InvokeOutcome)> = JoinSet::new();
 
         for &i in runnable {
-            let call = calls[i].clone();
+            let mut call = calls[i].clone();
             let mcp = Arc::clone(self.mcp);
+            let session_cwd = self.session_cwd.to_path_buf();
+            let permissions = Arc::clone(self.permissions);
+            let permission_bridge = self.cfg.nxtlinq_permission_bridge;
             let wire = self.wire.clone();
             let session_id = self.session_id.to_owned();
             let timeout = self.cfg.tool_timeout;
@@ -895,6 +919,29 @@ impl RunCtx<'_> {
                     }
                 };
                 emit_in_progress(&wire, &session_id, &call).await;
+                if permission_bridge {
+                    match action_for_tool(&call, &session_cwd) {
+                        Ok(authorization) => {
+                            for action in authorization.actions {
+                                if let Err(reason) = permissions
+                                    .authorize(&wire, &session_id, &call, action)
+                                    .await
+                                {
+                                    emit_failed(&wire, &session_id, &call, &reason).await;
+                                    return (i, InvokeOutcome::Failed(reason));
+                                }
+                            }
+                            // Bind execution to the canonical path that was
+                            // authorized, rather than resolving a user-supplied
+                            // symlink a second time inside the MCP handler.
+                            call.arguments = authorization.arguments;
+                        }
+                        Err(reason) => {
+                            emit_failed(&wire, &session_id, &call, &reason).await;
+                            return (i, InvokeOutcome::Failed(reason));
+                        }
+                    }
+                }
                 let outcome = invoke_tool_inner(&mcp, &call, timeout, budget, cancel).await;
                 match &outcome {
                     InvokeOutcome::Done(result) => {
@@ -981,6 +1028,12 @@ impl RunCtx<'_> {
     }
 }
 
+fn should_append_error_reflection(result: &ToolResult) -> bool {
+    !result.content.iter().any(|content| {
+        matches!(content, ToolResultContent::Text(text) if text.starts_with(POLICY_DENIAL_PREFIX))
+    })
+}
+
 /// Outcome of invoking a single tool. The wire notification is emitted by
 /// the caller so the spawn loop and the (degenerate, max_parallel=1) path
 /// share the same logic.
@@ -1040,6 +1093,14 @@ async fn invoke_tool_inner(
 fn outcome_to_result(call: &ToolCall, outcome: InvokeOutcome) -> ToolResult {
     match outcome {
         InvokeOutcome::Done(r) => r,
+        InvokeOutcome::Failed(m) if m.starts_with(POLICY_DENIAL_PREFIX) => ToolResult {
+            provider_id: call.provider_id.clone(),
+            content: vec![ToolResultContent::Text(m)],
+            // A policy decision is an expected tool outcome, not evidence that
+            // the tool transport or session is broken. The wire activity above
+            // still reports this individual call as denied.
+            is_error: false,
+        },
         InvokeOutcome::Failed(m) => synthetic_tool_result(call, m),
     }
 }
@@ -1249,6 +1310,26 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn policy_denial_is_an_expected_result_not_a_broken_tool_signal() {
+        let call = ToolCall {
+            provider_id: "call-1".into(),
+            name: "buzz-dev-mcp__read_file".into(),
+            arguments: json!({ "path": ".env" }),
+            provider_extra: Default::default(),
+        };
+        let result = outcome_to_result(
+            &call,
+            InvokeOutcome::Failed(format!("{POLICY_DENIAL_PREFIX}: exact call only")),
+        );
+
+        assert!(!result.is_error);
+        assert!(matches!(
+            result.content.as_slice(),
+            [ToolResultContent::Text(text)] if text.contains("exact call only")
+        ));
+    }
+
     /// `truncate_history` cannot serve as the context-window fallback: it is
     /// measured in BYTES (`max_history_bytes`, default 16 MiB, a request-body
     /// limiter) while the thing the fallback must defend is a TOKEN window
@@ -1328,6 +1409,22 @@ mod tests {
                 "expected {cmd:?} to count as a publish attempt"
             );
         }
+    }
+
+    #[test]
+    fn structured_reply_shape_requires_literal_channel_and_content_fields() {
+        assert!(is_structured_reply_shaped(
+            "dev__buzz_message_send",
+            &json!({ "channel": "channel-1", "content": "Access denied" })
+        ));
+        assert!(!is_structured_reply_shaped(
+            "dev__buzz_message_send",
+            &json!({ "channel": "channel-1", "content": "" })
+        ));
+        assert!(!is_structured_reply_shaped(
+            "dev__shell",
+            &json!({ "channel": "channel-1", "content": "Access denied" })
+        ));
     }
 
     /// Commands that do real work but do not reply in the originating

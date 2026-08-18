@@ -41,6 +41,9 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_AGENT_COMMAND",
     "BUZZ_ACP_AGENT_ARGS",
     "BUZZ_ACP_MCP_COMMAND",
+    // Authorization trust is derived from the structured command wrapper at
+    // the spawn boundary. User env must never opt itself into Gateway trust.
+    "BUZZ_ACP_TRUST_NXTLINQ_GATEWAY",
     // Control-plane parallelism: the Desktop resolves the effective
     // worker-pool size (applying any per-harness cap) and writes it into
     // launch.policy_env. A user-supplied BUZZ_ACP_AGENTS would bypass the

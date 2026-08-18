@@ -28,10 +28,14 @@ import {
   structuredEnvKeys,
   type RuntimeCatalogStatus,
 } from "../lib/agentConfigCore";
+import type { AgentLaunchFields } from "./useAgentLaunchFields";
+import { NxtlinqAuthorizationPreset } from "./NxtlinqAuthorizationPreset";
 
 export function EditAgentAdvancedFields({
   acpCommand,
+  agentPubkey,
   agentArgs,
+  launchFields,
   autoRestartOnConfigChange,
   disabled,
   envVars,
@@ -53,12 +57,16 @@ export function EditAgentAdvancedFields({
   onAgentArgsChange,
   onEnvVarsChange,
   onInheritHarnessChange,
+  onNxtlinqSaveBlockedChange,
+  onOpenNxtlinqSetup,
   onParallelismChange,
   onAutoRestartChange,
   onSystemPromptChange,
 }: {
   acpCommand: string;
+  agentPubkey: string;
   agentArgs: string;
+  launchFields: AgentLaunchFields;
   autoRestartOnConfigChange: boolean;
   disabled: boolean;
   envVars: EnvVarsValue;
@@ -104,6 +112,8 @@ export function EditAgentAdvancedFields({
   onAgentArgsChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
+  onNxtlinqSaveBlockedChange: (blocked: boolean) => void;
+  onOpenNxtlinqSetup: () => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
@@ -224,6 +234,18 @@ export function EditAgentAdvancedFields({
           />
         </div>
       </div>
+
+      <NxtlinqAuthorizationPreset
+        agentPubkey={agentPubkey}
+        disabled={disabled}
+        envVars={envVars}
+        inheritedEnvVars={inheritedEnvVars}
+        launchFields={launchFields}
+        onEnvVarsChange={onEnvVarsChange}
+        onOpenSetup={onOpenNxtlinqSetup}
+        onSaveBlockedChange={onNxtlinqSaveBlockedChange}
+        requiredEnvKeys={requiredEnvKeys}
+      />
 
       {/* Parallelism */}
       <div className="space-y-1.5">

@@ -592,8 +592,7 @@ pub async fn confirm_agent_snapshot_import(
         // Enqueue the kind:30175 persona event via the retention path.
         super::super::pending::retain_persona_pending(&app, &state, &persona);
 
-        // Build the managed agent record — no machine-local commands, no
-        // secrets, no lineage from the snapshot.
+        // Build the record without machine-local commands, secrets, or snapshot lineage.
         let record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: display_name.clone(),
@@ -610,6 +609,8 @@ pub async fn confirm_agent_snapshot_import(
             agent_command: String::new(),
             agent_command_override: None,
             agent_args: vec![],
+            command_wrapper: None,
+            working_directory: None,
             mcp_command: String::new(),
             turn_timeout_seconds: 0,
             idle_timeout_seconds: snapshot.definition.idle_timeout_seconds,

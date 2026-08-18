@@ -1,5 +1,6 @@
 import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
 import { HarnessesSettingsPanel } from "./HarnessesSettingsPanel";
+import { NxtlinqGatewaySettingsCard } from "./NxtlinqGatewaySettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { SettingsOptionGroupList } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -14,6 +15,7 @@ export function AgentsSettingsPanel() {
 
       <SettingsOptionGroupList>
         <PreventSleepSettingsCard />
+        <NxtlinqGatewaySettingsCard />
         <HarnessesSettingsPanel />
         <AgentDefaultsSettingsCard />
       </SettingsOptionGroupList>

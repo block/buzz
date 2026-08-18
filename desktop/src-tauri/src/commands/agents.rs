@@ -778,6 +778,8 @@ pub async fn create_managed_agent(
             input.parallelism,
             linked_persona.as_ref(),
         )?;
+        let (command_wrapper, working_directory) =
+            crate::managed_agents::normalized_agent_launch_config(&input)?;
 
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
@@ -798,10 +800,10 @@ pub async fn create_managed_agent(
             agent_command,
             agent_command_override,
             agent_args,
+            command_wrapper,
+            working_directory,
             mcp_command,
-            // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness;
-            // store the schema default only. Use idle_timeout_seconds or
-            // max_turn_duration_seconds for actual turn-length control.
+            // BUZZ_ACP_TURN_TIMEOUT is deprecated; persist the schema default.
             turn_timeout_seconds: DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
             // 0 or None → harness uses its own default (320s idle, 3600s max), and the CLI also clamps 0 → minimum.
             idle_timeout_seconds: input.idle_timeout_seconds.filter(|s| *s > 0),
@@ -1257,7 +1259,6 @@ pub async fn delete_managed_agent(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-// Remote agent shutdown is handled entirely by the frontend:
 // 1. Frontend sends "!shutdown" @mention via WebSocket (signed by user's key)
 // 2. Harness sees it, exits gracefully, sets presence to "offline"
 // 3. Desktop's existing presence polling sees "offline" — UI updates automatically
@@ -1271,7 +1272,6 @@ pub(super) use deploy::build_deploy_payload;
 use deploy::{deploy_payload_json, DeployProjections};
 #[cfg(test)]
 use deploy::{ensure_remote_provider_supported, resolve_deploy_model_provider};
-
 #[path = "agents_profile.rs"]
 mod profile;
 pub(crate) use profile::*;

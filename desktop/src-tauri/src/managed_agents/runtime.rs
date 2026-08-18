@@ -7,9 +7,9 @@ use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        missing_command_message, normalize_agent_args, open_log_file, resolve_agent_launch,
+        resolve_command, spawn_key_refusal, AgentCommandWrapper, KnownAcpRuntime,
+        ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -60,8 +60,6 @@ mod instance_reaper;
 pub(crate) use instance_reaper::reap_dead_instance_agents;
 #[cfg(test)]
 use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
-
-// Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
 #[cfg(test)]
@@ -306,6 +304,8 @@ pub fn build_managed_agent_summary(
         agent_command: descriptor.command,
         agent_command_override: record.agent_command_override.clone(),
         agent_args: descriptor.args,
+        command_wrapper: record.command_wrapper.clone(),
+        working_directory: record.working_directory.clone(),
         mcp_command: effective_mcp_command,
         turn_timeout_seconds: record.turn_timeout_seconds,
         idle_timeout_seconds: record.idle_timeout_seconds,
@@ -494,7 +494,7 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
-
+    let launch = resolve_agent_launch(record, resolved_agent_command, agent_args)?;
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
     let effective_relay_url = runtime_key.relay_url.clone();
@@ -517,9 +517,7 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    launch.apply_working_directory(&mut command);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
@@ -531,8 +529,8 @@ pub fn spawn_agent_child(
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
-    command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
-    command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    command.env("BUZZ_ACP_AGENT_COMMAND", &launch.command);
+    command.env("BUZZ_ACP_AGENT_ARGS", launch.args.join(","));
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
@@ -821,6 +819,7 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    AgentCommandWrapper::apply_nxtlinq_trust(record.command_wrapper.as_ref(), &mut command);
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible

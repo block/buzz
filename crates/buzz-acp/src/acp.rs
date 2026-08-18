@@ -160,6 +160,11 @@ pub struct AcpClient {
     /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
+    /// Marks permission requests as having passed through an enforcing Nxtlinq
+    /// Gateway. The trusted path requires a well-formed `allow_once` option and
+    /// cancels otherwise; ordinary runtimes retain Buzz's standard unattended
+    /// permission behavior.
+    trust_nxtlinq_gateway: bool,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
     /// Used by [`cancel_with_cleanup`] to drain the correct response.
     /// Set in [`session_prompt_with_idle_timeout`]; consumed in [`cancel_with_cleanup`].
@@ -552,6 +557,8 @@ impl AcpClient {
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
+            trust_nxtlinq_gateway: std::env::var("BUZZ_ACP_TRUST_NXTLINQ_GATEWAY")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
@@ -1953,38 +1960,42 @@ impl AcpClient {
             options.len()
         );
 
-        // Find allow_once by kind — NEVER hardcode optionId.
-        let allow_once = options
-            .iter()
-            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
-
-        let response = if let Some(opt) = allow_once {
-            let option_id = opt["optionId"]
-                .as_str()
-                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
-            tracing::info!(
-                target: "acp::permission",
-                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
-            );
-            permission_response_selected(&id, option_id)
+        let response = if self.trust_nxtlinq_gateway {
+            permission_allow_once_response(&id, options)?
         } else {
-            // No allow_once — fall back to reject_once.
-            tracing::warn!(
-                target: "acp::permission",
-                "no allow_once option found in permission request id={id}, falling back to reject_once"
-            );
-            let reject = options
+            // Preserve Buzz's standard unattended permission behavior for
+            // ordinary runtimes. The Nxtlinq branch above is deliberately
+            // stricter because an allowed request should have been forwarded
+            // by the enforcing Gateway with an `allow_once` option.
+            let allow_once = options
                 .iter()
-                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-            if let Some(opt) = reject {
-                let option_id = opt["optionId"].as_str().unwrap_or("reject");
+                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+            if let Some(opt) = allow_once {
+                let option_id = opt["optionId"].as_str().ok_or_else(|| {
+                    AcpError::Protocol("allow_once option missing optionId".into())
+                })?;
+                tracing::info!(
+                    target: "acp::permission",
+                    "auto-approving permission id={id} with allow_once optionId={option_id:?}"
+                );
                 permission_response_selected(&id, option_id)
             } else {
-                return Err(AcpError::Protocol(
-                    "no suitable permission option found (neither allow_once nor reject_once)"
-                        .into(),
-                ));
+                tracing::warn!(
+                    target: "acp::permission",
+                    "no allow_once option found in permission request id={id}, falling back to reject_once"
+                );
+                let reject = options
+                    .iter()
+                    .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
+                if let Some(opt) = reject {
+                    let option_id = opt["optionId"].as_str().unwrap_or("reject");
+                    permission_response_selected(&id, option_id)
+                } else {
+                    return Err(AcpError::Protocol(
+                        "no suitable permission option found (neither allow_once nor reject_once)"
+                            .into(),
+                    ));
+                }
             }
         };
 
@@ -2118,6 +2129,33 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
         "id": id,
         "result": { "outcome": { "outcome": "cancelled" } }
     })
+}
+
+/// Select `allow_once` only when the operator explicitly declares that an
+/// enforcing Nxtlinq Gateway is between this client and the Agent. A policy
+/// denial is answered by the Gateway itself and never reaches this function.
+fn permission_allow_once_response(
+    id: &serde_json::Value,
+    options: &[serde_json::Value],
+) -> Result<serde_json::Value, AcpError> {
+    let allow_once = options
+        .iter()
+        .find(|opt| opt.get("kind").and_then(|kind| kind.as_str()) == Some("allow_once"));
+    let Some(option) = allow_once else {
+        tracing::warn!(
+            target: "acp::permission",
+            "trusted gateway request id={id} has no allow_once option; cancelling"
+        );
+        return Ok(permission_response_cancelled(id));
+    };
+    let option_id = option["optionId"]
+        .as_str()
+        .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
+    tracing::info!(
+        target: "acp::permission",
+        "approving gateway-authorized permission id={id} with allow_once optionId={option_id:?}"
+    );
+    Ok(permission_response_selected(id, option_id))
 }
 
 /// Full `session/new` response — session ID plus the raw JSON result.
@@ -2374,6 +2412,14 @@ mod tests {
         assert_eq!(StopReason::from_str("Refusal"), Some(StopReason::Refusal));
     }
 
+    fn options(json: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str(json).expect("option list")
+    }
+
+    fn outcome(response: &serde_json::Value) -> Option<&str> {
+        response["result"]["outcome"]["outcome"].as_str()
+    }
+
     #[test]
     fn find_allow_once_by_kind_not_by_option_id() {
         // optionId values are intentionally non-obvious to prove we don't hardcode them.
@@ -2395,6 +2441,29 @@ mod tests {
         // Found by kind, not by hardcoded optionId
         assert_eq!(opt["kind"].as_str(), Some("allow_once"));
         assert_eq!(opt["optionId"].as_str(), Some("opt-allow-99"));
+    }
+
+    #[test]
+    fn trusted_gateway_permission_selects_allow_once_by_kind() {
+        let options = options(
+            r#"[
+            {"optionId": "reject-random", "name": "Reject", "kind": "reject_once"},
+            {"optionId": "allow-random", "name": "Allow", "kind": "allow_once"}
+        ]"#,
+        );
+        let response = permission_allow_once_response(&serde_json::json!(8), &options)
+            .expect("allow response");
+        assert_eq!(outcome(&response), Some("selected"));
+        assert_eq!(response["result"]["outcome"]["optionId"], "allow-random");
+    }
+
+    #[test]
+    fn trusted_gateway_request_without_allow_once_is_cancelled() {
+        let options =
+            options(r#"[{"optionId": "reject-random", "name": "Reject", "kind": "reject_once"}]"#);
+        let response = permission_allow_once_response(&serde_json::json!(8), &options)
+            .expect("cancel response");
+        assert_eq!(outcome(&response), Some("cancelled"));
     }
 
     #[test]

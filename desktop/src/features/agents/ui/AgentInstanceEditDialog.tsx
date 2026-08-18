@@ -95,6 +95,8 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
+import { useAgentLaunchFields } from "./useAgentLaunchFields";
+import { useNxtlinqDirectSetup } from "./NxtlinqDirectSetupDialog";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -118,7 +120,6 @@ export function AgentInstanceEditDialog({
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
-
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -131,6 +132,7 @@ export function AgentInstanceEditDialog({
     agent.personaId != null && agent.agentCommandOverride == null,
   );
   const [agentArgs, setAgentArgs] = React.useState(agent.agentArgs.join(","));
+  const launchFields = useAgentLaunchFields(agent, open);
   const [parallelism, setParallelism] = React.useState(
     String(agent.parallelism),
   );
@@ -145,6 +147,11 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const nxtlinqSetup = useNxtlinqDirectSetup(
+    agent,
+    launchFields.workingDirectory,
+    () => onOpenChange(false),
+  );
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -167,14 +174,10 @@ export function AgentInstanceEditDialog({
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
 
-  // Runtime selector: defaults to "custom" until the dialog opens and the
-  // catalog loads. The open-effect re-derives the correct id from the catalog.
+  // Defaults to custom until the open effect can match the loaded runtime catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
 
-  // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
-
-  // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
     if (open) {
@@ -267,10 +270,7 @@ export function AgentInstanceEditDialog({
     return runtimeSupportsLlmProviderSelection(matched?.id ?? "");
   }, [runtimes, originalAgentCommand]);
 
-  // The runtime id active after submit. Inheriting resolves from the LINKED PERSONA's runtime
-  // (that is what runs once the override is cleared, not the current override).
-  // Falls back to dual-match (command path, then id) when no persona or its runtime is unset.
-  // This single prospective id feeds BOTH the block-save gate and submit so they always agree.
+  // Resolve the post-submit runtime once for both save gating and submission.
   const prospectiveRuntimeId = React.useMemo(() => {
     if (!inheritHarness) {
       return selectedRuntime?.id ?? selectedRuntimeId;
@@ -397,12 +397,7 @@ export function AgentInstanceEditDialog({
     enabled: open,
   });
 
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
-  // `inheritedSubmission.envVars` (the same snapshot the credential gate
-  // validates) rather than raw `envVars`, so an inherit-transition that layers
-  // in persona env vars is reflected in discovery. Agent-local env takes
-  // precedence, matching the agent → global → file spawn-path precedence.
+  // Match spawn precedence while including inherited credentials in discovery.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...inheritedSubmission.envVars }),
     [globalConfig.env_vars, inheritedSubmission.envVars],
@@ -613,9 +608,9 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    !launchFields.saveBlocked &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
-
   async function handleSubmit() {
     try {
       const parsedParallelism = Number.parseInt(parallelism, 10);
@@ -676,6 +671,7 @@ export function AgentInstanceEditDialog({
           parsedArgs.join(",") !== agent.agentArgs.join(",")
             ? parsedArgs
             : undefined,
+        ...launchFields.buildUpdate(),
         parallelism:
           parsedParallelism > 0 && parsedParallelism !== agent.parallelism
             ? parsedParallelism
@@ -846,9 +842,8 @@ export function AgentInstanceEditDialog({
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
-
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
+    <Dialog onOpenChange={handleOpenChange} open={open && !nxtlinqSetup.isOpen}>
       <ChooserDialogContent
         className="max-w-3xl border-0"
         contentClassName="pt-3"
@@ -1177,6 +1172,8 @@ export function AgentInstanceEditDialog({
                     <EditAgentAdvancedFields
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
+                      agentPubkey={agent.pubkey}
+                      launchFields={launchFields}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
@@ -1205,6 +1202,8 @@ export function AgentInstanceEditDialog({
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
+                      onNxtlinqSaveBlockedChange={launchFields.setSaveBlocked}
+                      onOpenNxtlinqSetup={nxtlinqSetup.open}
                       onParallelismChange={setParallelism}
                       onSystemPromptChange={setSystemPrompt}
                     />
@@ -1212,7 +1211,6 @@ export function AgentInstanceEditDialog({
                 ) : null}
               </AnimatePresence>
             </div>
-
             {/* Error */}
             {updateMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">
@@ -1222,6 +1220,7 @@ export function AgentInstanceEditDialog({
           </div>
         </div>
       </ChooserDialogContent>
+      {nxtlinqSetup.dialog}
     </Dialog>
   );
 }

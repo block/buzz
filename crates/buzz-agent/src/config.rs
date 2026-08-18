@@ -521,6 +521,8 @@ pub struct Config {
     /// Databricks gateway does not auto-cache, so without this the surfaced
     /// `cache_read_input_tokens` is structurally always 0.
     pub prompt_caching: bool,
+    /// Require Nxtlinq Gateway authorization evidence before filesystem MCP calls.
+    pub nxtlinq_permission_bridge: bool,
 }
 
 impl Config {
@@ -632,6 +634,7 @@ impl Config {
                 env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
             )?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            nxtlinq_permission_bridge: parse_env("BUZZ_AGENT_NXTLINQ_PERMISSION_BRIDGE", 0u8)? != 0,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -674,6 +677,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            nxtlinq_permission_bridge: false,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
         }
@@ -966,6 +970,19 @@ impl HookServers {
     }
 }
 
+impl Config {
+    /// Nxtlinq-protected sessions never dispatch lifecycle hooks to arbitrary
+    /// MCP servers. Preserve the operator's on/off choice, but pin enabled
+    /// hooks to the bundled state-only server whose behavior Buzz owns.
+    pub fn effective_hook_servers(&self) -> HookServers {
+        if !self.nxtlinq_permission_bridge || self.hook_servers.is_disabled() {
+            self.hook_servers.clone()
+        } else {
+            HookServers::Only(vec!["buzz-dev-mcp".to_string()])
+        }
+    }
+}
+
 fn parse_hook_servers_env(key: &str) -> HookServers {
     parse_hook_servers(env(key).as_deref())
 }
@@ -1072,6 +1089,20 @@ mod tests {
     #[test]
     fn hook_servers_allows_blocks_when_none() {
         assert!(!parse_hook_servers(None).allows("foo"));
+    }
+
+    #[test]
+    fn nxtlinq_protected_hooks_are_pinned_to_the_bundled_server() {
+        let mut cfg =
+            Config::for_discovery(Provider::OpenAi, "key".into(), "https://example.com".into());
+        cfg.hook_servers = HookServers::All;
+        cfg.nxtlinq_permission_bridge = true;
+        let hooks = cfg.effective_hook_servers();
+        assert!(hooks.allows("buzz-dev-mcp"));
+        assert!(!hooks.allows("customer-mcp"));
+
+        cfg.hook_servers = HookServers::None;
+        assert!(cfg.effective_hook_servers().is_disabled());
     }
 
     #[test]
