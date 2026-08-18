@@ -4,15 +4,9 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     managed_agents::{
-<<<<<<< HEAD
         delete_team_with_cascade, ensure_persona_ids_are_active, load_managed_agents,
         load_personas, load_teams, save_managed_agents, save_teams, try_regenerate_nest,
         validate_team_definition_text, CreateTeamRequest, TeamRecord, UpdateTeamRequest,
-=======
-        delete_team_with_cascade, ensure_persona_ids_are_active, load_personas, load_teams,
-        save_teams, try_regenerate_nest, validate_team_definition_text, CreateTeamRequest,
-        TeamRecord, UpdateTeamRequest,
->>>>>>> 9ab245950 (fix(desktop): validate team names and instructions like agents)
     },
     util::now_iso,
 };
