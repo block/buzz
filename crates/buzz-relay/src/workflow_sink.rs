@@ -148,6 +148,66 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     out
 }
 
+/// Build the tag set for an `assign_agent` kind:9 event.
+///
+/// Split out of the sink so the tag contract is testable without Postgres —
+/// the end-to-end sink tests are `#[ignore]`-gated on a live database, which
+/// is exactly how the missing `buzz:workflow-owner` tag went unnoticed.
+///
+/// The set is:
+/// - `p` (owner) — attribution, matching `send_message`.
+/// - `h` — the destination channel.
+/// - `buzz:workflow` — marks the event as workflow-emitted (prevents recursive
+///   triggering).
+/// - `buzz:workflow-owner` — **load-bearing**. This event is signed by the
+///   relay keypair, so buzz-acp gates it through `workflow_attributed_author`,
+///   which requires exactly one `["buzz:workflow", "true"]` *and* exactly one
+///   `["buzz:workflow-owner", <pubkey>]` and fails closed otherwise. Without
+///   it the event is gated on the relay's own pubkey, which `author_allowed`
+///   rejects under `owner-only` — the mode official desktop builds hard-clamp
+///   — so the assignee never wakes and the action cannot do the one thing it
+///   exists for. Mention `p` tags are explicitly *not* used for attribution.
+/// - `p` (assignee) — the wake, omitted when the owner is the assignee.
+/// - `task` — optional correlation id, trimmed, omitted when empty.
+fn assign_agent_tags(
+    author_pubkey_hex: &str,
+    channel_id_canonical: &str,
+    agent_pk_hex: &str,
+    task_id: Option<&str>,
+) -> Result<Vec<Tag>, ActionSinkError> {
+    let mut tags = vec![
+        Tag::parse(["p", author_pubkey_hex])
+            .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+        Tag::parse(["h", channel_id_canonical])
+            .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+        Tag::parse(["buzz:workflow", "true"])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+        Tag::parse(["buzz:workflow-owner", author_pubkey_hex])
+            .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
+    ];
+    // No reverse-parse of `@Name` mentions in `text` — that is the failure
+    // mode assign_agent exists to avoid.
+    if agent_pk_hex != author_pubkey_hex {
+        tags.push(
+            Tag::parse(["p", agent_pk_hex])
+                .map_err(|e| ActionSinkError::EventBuild(format!("assignee p tag: {e}")))?,
+        );
+    }
+    // Emit the trimmed id, not the caller's string: definition-time validation
+    // checks `tid.trim()` but stores the original, so a padded `task_id` would
+    // otherwise put whitespace on the wire and break correlation for every
+    // reader that compares it verbatim.
+    if let Some(tid) = task_id.map(str::trim) {
+        if !tid.is_empty() {
+            tags.push(
+                Tag::parse(["task", tid])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("task tag: {e}")))?,
+            );
+        }
+    }
+    Ok(tags)
+}
+
 /// Relay-side action sink — executes workflow side-effects directly.
 ///
 /// Holds a **weak** reference to `AppState` to avoid an `Arc` reference cycle:
@@ -464,33 +524,12 @@ impl ActionSink for RelayActionSink {
             }
 
             // 6. Build the kind:9 event.
-            //    - Owner attribution `p` tag (same as send_message)
-            //    - Assignee wake `p` tag (dedup against owner)
-            //    - No reverse-parse of `@Name` mentions in `text` — that is
-            //      the failure mode assign_agent exists to avoid.
-            //    - Optional `task` tag with the caller's correlation id.
-            let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
-                Tag::parse(["h", &channel_id_canonical])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
-            ];
-            if agent_pk_hex != author_pubkey_hex {
-                tags.push(
-                    Tag::parse(["p", &agent_pk_hex])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("assignee p tag: {e}")))?,
-                );
-            }
-            if let Some(tid) = task_id.as_deref() {
-                if !tid.trim().is_empty() {
-                    tags.push(
-                        Tag::parse(["task", tid])
-                            .map_err(|e| ActionSinkError::EventBuild(format!("task tag: {e}")))?,
-                    );
-                }
-            }
+            let tags = assign_agent_tags(
+                &author_pubkey_hex,
+                &channel_id_canonical,
+                &agent_pk_hex,
+                task_id.as_deref(),
+            )?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -748,6 +787,76 @@ mod tests {
             resolve_mention_pubkeys("@Max then @Robby then @Max again", &members),
             vec![pk('b'), pk('a')]
         );
+    }
+    /// Values of every tag with the given name, in order.
+    fn tag_values<'a>(tags: &'a [Tag], name: &str) -> Vec<&'a str> {
+        tags.iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some(name))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect()
+    }
+
+    /// The load-bearing one. An assign_agent event is signed by the relay
+    /// keypair, so buzz-acp only accepts it via `workflow_attributed_author`,
+    /// which needs exactly one `buzz:workflow-owner`. Without it the event is
+    /// gated on the relay pubkey and dropped under `owner-only` — the mode
+    /// shipped desktop builds hard-clamp — so the assignee never wakes.
+    #[test]
+    fn assign_agent_names_the_owner_for_the_harness_author_gate() {
+        let owner = pk('a');
+        let agent = pk('b');
+        let tags = assign_agent_tags(&owner, "chan-1", &agent, None).expect("tags build");
+
+        assert_eq!(
+            tag_values(&tags, "buzz:workflow-owner"),
+            vec![owner.as_str()],
+            "exactly one buzz:workflow-owner naming the workflow owner"
+        );
+        assert_eq!(
+            tag_values(&tags, "buzz:workflow"),
+            vec!["true"],
+            "exactly one buzz:workflow marker — the gate rejects duplicates"
+        );
+        assert_eq!(tag_values(&tags, "p"), vec![owner.as_str(), agent.as_str()]);
+    }
+
+    /// Owner == assignee collapses the wake `p` tag, but attribution must
+    /// survive: the owner tag is what the author gate reads.
+    #[test]
+    fn assign_agent_self_assignment_keeps_the_owner_tag() {
+        let owner = pk('c');
+        let tags = assign_agent_tags(&owner, "chan-1", &owner, None).expect("tags build");
+
+        assert_eq!(
+            tag_values(&tags, "p"),
+            vec![owner.as_str()],
+            "no duplicate p"
+        );
+        assert_eq!(
+            tag_values(&tags, "buzz:workflow-owner"),
+            vec![owner.as_str()]
+        );
+    }
+
+    /// Definition validation checks `task_id.trim()` but stores the original,
+    /// so an untrimmed emit would put whitespace on the wire and break
+    /// correlation for any reader comparing it verbatim.
+    #[test]
+    fn assign_agent_task_id_is_trimmed_and_dropped_when_blank() {
+        let owner = pk('d');
+        let agent = pk('e');
+
+        let padded = assign_agent_tags(&owner, "c", &agent, Some("  task-7  ")).expect("build");
+        assert_eq!(tag_values(&padded, "task"), vec!["task-7"]);
+
+        let blank = assign_agent_tags(&owner, "c", &agent, Some("   ")).expect("build");
+        assert!(
+            tag_values(&blank, "task").is_empty(),
+            "a whitespace-only correlation id must not reach the wire"
+        );
+
+        let absent = assign_agent_tags(&owner, "c", &agent, None).expect("build");
+        assert!(tag_values(&absent, "task").is_empty());
     }
 }
 
@@ -1050,6 +1159,30 @@ mod integration_tests {
         assert_eq!(
             task_tag.as_slice().get(1).map(|s| s.as_str()),
             Some("11111111-2222-3333-4444-555555555555")
+        );
+
+        // The owner must be named in `buzz:workflow-owner`, not merely p-tagged.
+        // This event is signed by the relay keypair, so buzz-acp's
+        // `workflow_attributed_author` is the only reason the harness accepts
+        // it at all — and that gate fails closed without exactly one of these
+        // tags, leaving the event gated on the relay's own pubkey, which
+        // `author_allowed` rejects under `owner-only`. Official desktop builds
+        // hard-clamp that mode, so without this tag the assignee never wakes
+        // and the action cannot do the one thing it exists for. The p tags
+        // above do not substitute: the gate explicitly ignores them for
+        // attribution.
+        let owner_tags: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("buzz:workflow-owner"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(
+            owner_tags,
+            vec![author_hex.as_str()],
+            "assign_agent must emit exactly one buzz:workflow-owner naming the \
+             workflow owner, or the harness drops the event; got {owner_tags:?}"
         );
     }
 

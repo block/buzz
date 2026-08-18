@@ -46,6 +46,15 @@ pub enum WorkflowError {
     #[error("webhook error: {0}")]
     WebhookError(String),
 
+    /// A side-effect action (`send_message`, `assign_agent`) failed.
+    ///
+    /// Distinct from [`Self::WebhookError`]: these actions are not webhooks,
+    /// and collapsing them into `webhook_failed` left an operator unable to
+    /// tell a removed assignee from an archived channel from a genuine
+    /// outbound HTTP failure.
+    #[error("action failed: {0}")]
+    ActionFailed(String),
+
     /// The engine's concurrency limit was reached.
     #[error("capacity exceeded")]
     CapacityExceeded,
@@ -75,6 +84,7 @@ impl WorkflowError {
             Self::TemplateError(_) => "template_resolution_failed",
             Self::StepTimeout { .. } => "step_timeout",
             Self::WebhookError(_) => "webhook_failed",
+            Self::ActionFailed(_) => "action_failed",
             Self::CapacityExceeded => "capacity_exceeded",
             Self::Database(_) => "database_error",
             Self::Unauthorized(_) => "owner_unauthorized",

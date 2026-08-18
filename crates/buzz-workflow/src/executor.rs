@@ -476,7 +476,8 @@ pub enum StepResult {
     Skipped,
 }
 
-fn resolve_send_message_channel(
+fn resolve_action_channel(
+    action: &str,
     explicit_channel: Option<&str>,
     trigger_channel: &str,
     workflow_channel_id: Option<Uuid>,
@@ -489,12 +490,12 @@ fn resolve_send_message_channel(
         if let Some(explicit_channel) = explicit_channel {
             let override_channel_id = explicit_channel.parse::<Uuid>().map_err(|e| {
                 WorkflowError::InvalidDefinition(format!(
-                    "SendMessage: invalid channel override UUID: {e}"
+                    "{action}: invalid channel override UUID: {e}"
                 ))
             })?;
             if override_channel_id != workflow_channel_id {
                 return Err(WorkflowError::InvalidDefinition(format!(
-                    "SendMessage: channel override must match the workflow channel ({workflow_channel_id})"
+                    "{action}: channel override must match the workflow channel ({workflow_channel_id})"
                 )));
             }
         }
@@ -504,17 +505,16 @@ fn resolve_send_message_channel(
     if let Some(explicit_channel) = explicit_channel {
         let override_channel_id = explicit_channel.parse::<Uuid>().map_err(|e| {
             WorkflowError::InvalidDefinition(format!(
-                "SendMessage: invalid channel override UUID: {e}"
+                "{action}: invalid channel override UUID: {e}"
             ))
         })?;
         return Ok(override_channel_id.to_string());
     }
 
     if trigger_channel.trim().is_empty() {
-        return Err(WorkflowError::InvalidDefinition(
-            "SendMessage: no channel_id available (trigger has no channel context and no channel override was specified)"
-                .into(),
-        ));
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "{action}: no channel_id available (trigger has no channel context and no channel override was specified)"
+        )));
     }
 
     Ok(trigger_channel.trim().to_string())
@@ -581,7 +581,8 @@ pub async fn dispatch_action(
                                 wf_run.workflow_id
                             ))
                         })?;
-                    let channel_id = resolve_send_message_channel(
+                    let channel_id = resolve_action_channel(
+                        "SendMessage",
                         channel.as_deref(),
                         &trigger_ctx.channel_id,
                         workflow.channel_id,
@@ -647,19 +648,25 @@ pub async fn dispatch_action(
                                 wf_run.workflow_id
                             ))
                         })?;
-                    let channel_id = resolve_send_message_channel(
+                    let channel_id = resolve_action_channel(
+                        "AssignAgent",
                         channel.as_deref(),
                         &trigger_ctx.channel_id,
                         workflow.channel_id,
                     )?;
                     let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
 
+                    // Routing metadata only. The task body can carry incident
+                    // or customer detail, and this log is not the place to
+                    // duplicate it — the message itself is already persisted
+                    // as an event.
                     info!(
                         run_id = %run_id,
                         step = step_id,
                         channel = %channel_id,
                         agent = %agent_pubkey,
-                        "AssignAgent → {channel_id}: {text}"
+                        text_len = text.len(),
+                        "AssignAgent → {channel_id}"
                     );
 
                     let event_id = engine
@@ -1928,7 +1935,7 @@ mod tests {
     #[test]
     fn send_message_uses_bound_workflow_channel_by_default() {
         let workflow_channel_id = Uuid::new_v4();
-        let resolved = resolve_send_message_channel(None, "", Some(workflow_channel_id))
+        let resolved = resolve_action_channel("SendMessage", None, "", Some(workflow_channel_id))
             .expect("bound channel should be used");
         assert_eq!(resolved, workflow_channel_id.to_string());
     }
@@ -1937,7 +1944,8 @@ mod tests {
     fn send_message_rejects_cross_channel_override_for_bound_workflow() {
         let workflow_channel_id = Uuid::new_v4();
         let other_channel_id = Uuid::new_v4();
-        let err = resolve_send_message_channel(
+        let err = resolve_action_channel(
+            "SendMessage",
             Some(&other_channel_id.to_string()),
             "",
             Some(workflow_channel_id),
@@ -1953,9 +1961,13 @@ mod tests {
     #[test]
     fn send_message_canonicalizes_valid_explicit_override_for_global_workflow() {
         let override_channel_id = Uuid::new_v4();
-        let resolved =
-            resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
-                .expect("override should be accepted");
+        let resolved = resolve_action_channel(
+            "SendMessage",
+            Some(&override_channel_id.to_string()),
+            "",
+            None,
+        )
+        .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
     }
 
