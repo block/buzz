@@ -623,8 +623,18 @@ fn commit_claim_at_the_older_tasks_cutover_supersedes_it() {
     // single-lock gate blocks that claim on the shared lock, so it cannot
     // complete until gen1's write releases it — the flawed
     // separate-watermark/separate-write-lock design Carl warned about would let
-    // the claim complete immediately. We prove the claim stays pending for the
-    // whole time gen1 is under the lock.
+    // the claim complete immediately.
+    //
+    // Determinism: the claimer sends an acknowledgement the instant before it
+    // calls `claim()`, and the hook blocks until it arrives. That proves the
+    // claimer is scheduled and standing at the `claim()` call — never starved —
+    // so `!claim_completed` is a real statement about the gate's locking, not an
+    // artifact of a thread that never ran. (A starved claimer was the escape
+    // hatch: it lets both the correct and the flawed design satisfy the
+    // assertion.) The bounded settle after the ack only bounds how long the
+    // flawed design's non-blocking claim needs to land — distinguishing "blocked
+    // on the shared lock" from "completed off a separate lock" is inherently a
+    // wait on the negative branch; the ack is what makes it sound.
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{mpsc, Arc};
     use std::time::Duration;
@@ -636,17 +646,20 @@ fn commit_claim_at_the_older_tasks_cutover_supersedes_it() {
     let gen1 = gate.claim();
 
     let claim_completed = Arc::new(AtomicBool::new(false));
-    let (under_lock_tx, under_lock_rx) = mpsc::channel();
+    let (start_tx, start_rx) = mpsc::channel();
+    let (at_claim_tx, at_claim_rx) = mpsc::channel();
 
     // Second request races in while gen1 is between its eligibility check and
     // its write. It must not complete until gen1 releases the shared lock.
     let claimer = {
         let gate = gate.clone();
         let claim_completed = claim_completed.clone();
-        let start = under_lock_rx;
         std::thread::spawn(move || {
             // Wait until gen1 is provably inside the lock.
-            start.recv().unwrap();
+            start_rx.recv().unwrap();
+            // Acknowledge immediately before calling `claim()`: the hook now
+            // knows this thread is scheduled and about to contend for the lock.
+            at_claim_tx.send(()).unwrap();
             let gen2 = gate.claim();
             claim_completed.store(true, Ordering::SeqCst);
             gen2
@@ -656,8 +669,10 @@ fn commit_claim_at_the_older_tasks_cutover_supersedes_it() {
     let wrote_gen1 = gate
         .commit_hooked(&file, "gen1 roster", gen1, || {
             // We are past the eligibility compare and hold the lock. Release the
-            // competing claimer and give it ample time to complete if it can.
-            under_lock_tx.send(()).unwrap();
+            // competing claimer and wait until it has provably reached its
+            // `claim()` call — so this proof can never pass by starving it.
+            start_tx.send(()).unwrap();
+            at_claim_rx.recv().unwrap();
             std::thread::sleep(Duration::from_millis(200));
             assert!(
                 !claim_completed.load(Ordering::SeqCst),
