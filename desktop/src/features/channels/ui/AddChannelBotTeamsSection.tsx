@@ -78,7 +78,7 @@ export function AddChannelBotTeamsSection({
         </p>
       </div>
 
-      <TooltipProvider delayDuration={150}>
+      <TooltipProvider>
         <div className="flex flex-wrap gap-2">
           {teams.map((team) => {
             const resolution = resolveTeamPersonas(team, personas);
