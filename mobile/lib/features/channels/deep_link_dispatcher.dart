@@ -99,6 +99,11 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
     if (!context.mounted) return;
 
+    _pushChannel(channel, link);
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+  }
+
+  void _pushChannel(Channel channel, BuzzDeepLink link) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
@@ -112,7 +117,6 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             ),
       ),
     );
-    ref.read(pendingDeepLinkProvider.notifier).consume();
   }
 
   void _maybeDispatchInvite(InviteDeepLink link) {
@@ -129,7 +133,23 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         if (!navigatorContext.mounted) return;
         final status = ref.read(inviteJoinProvider).status;
         if (status == InviteJoinStatus.confirming) {
-          await showInviteJoinSheet(navigatorContext, ref);
+          final shouldFocusStarter = await showInviteJoinSheet(
+            navigatorContext,
+            ref,
+          );
+          final focusChannelId = ref.read(inviteJoinProvider).focusChannelId;
+          if (shouldFocusStarter == true &&
+              focusChannelId != null &&
+              ref.read(pendingDeepLinkProvider) == null &&
+              navigatorContext.mounted) {
+            final channels = ref.read(channelsProvider).asData?.value;
+            final channel = channels
+                ?.where((candidate) => candidate.id == focusChannelId)
+                .firstOrNull;
+            if (channel != null) {
+              _pushChannel(channel, ChannelDeepLink(channelId: focusChannelId));
+            }
+          }
         } else if (status == InviteJoinStatus.switchedExisting) {
           messenger?.showSnackBar(
             const SnackBar(content: Text('Switched to this community')),
