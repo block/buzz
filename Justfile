@@ -157,19 +157,32 @@ fmt-all: fmt desktop-tauri-fmt mobile-fmt
 # Fix all formatting and lint issues
 fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
 
-# Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
-# Sidecar binary list must stay in sync with desktop-release-build below.
-_ensure-sidecar-stubs:
+# Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time).
+# Takes an optional target triple; defaults to the host. This is the single
+# definition of the sidecar list — desktop-release-build depends on it rather
+# than repeating it, because the two copies had already drifted apart.
+_ensure-sidecar-stubs target="":
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET="{{target}}"
+    if [[ -z "$TARGET" ]]; then
+        TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    fi
     mkdir -p desktop/src-tauri/binaries
     SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    # tauri.windows.conf.json overrides externalBin to drop this one on Windows.
     if [[ "$TARGET" != *windows* ]]; then
         SIDECARS+=(buzz-backend-kubernetes)
     fi
+    # Tauri resolves an externalBin as `<name>-<target><exe-suffix>`, so on a
+    # Windows host the stub it validates is `.exe`. Without the suffix the
+    # build script panics on the first sidecar and no Tauri recipe can run.
+    EXE_SUFFIX=""
+    if [[ "$TARGET" == *windows* ]]; then
+        EXE_SUFFIX=".exe"
+    fi
     for bin in "${SIDECARS[@]}"; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        touch "desktop/src-tauri/binaries/${bin}-${TARGET}${EXE_SUFFIX}"
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
@@ -252,21 +265,10 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     echo "Both compiled states verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
-# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
-desktop-release-build target="aarch64-apple-darwin":
+desktop-release-build target="aarch64-apple-darwin": (_ensure-sidecar-stubs target)
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET={{target}}
-    mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    if [[ "$TARGET" != *windows* ]]; then
-        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
-    fi
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
