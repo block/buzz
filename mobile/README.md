@@ -28,7 +28,8 @@ just mobile-emulator start --window
 ```
 
 See [TESTING.md](TESTING.md) for lifecycle, reset, screenshots, and running
-integration-test targets.
+integration-test targets. The helper refuses to reuse or stop a device on its
+configured serial unless it is the Buzz-owned AVD.
 
 ### Worktree-aware debug identity
 

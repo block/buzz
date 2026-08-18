@@ -689,8 +689,8 @@ mobile-fmt:
 mobile-fix:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format . && flutter analyze
 
-# Run mobile lint and format checks
-mobile-check:
+# Run mobile lint, format, file-size, and emulator-script safety checks
+mobile-check: mobile-emulator-script-test
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze && node ./scripts/check-file-sizes.mjs
 
 # Run mobile tests
@@ -710,6 +710,10 @@ mobile-build-android:
 # Manage the isolated Android emulator (run inside `nix develop .#mobile-android`)
 mobile-emulator *ARGS:
     ./scripts/mobile-android-emulator.sh {{ARGS}}
+
+# Verify Android emulator ownership and reset safety without starting a device
+mobile-emulator-script-test:
+    ./scripts/test-mobile-android-emulator.sh
 
 # Boot the emulator and run a selected on-device integration test
 mobile-emulator-test target:

@@ -11,6 +11,7 @@ use crate::managed_agents::{
 };
 mod presets;
 mod runtime_metadata;
+mod shell_candidates;
 #[macro_use]
 mod windows_install;
 pub(crate) use presets::{
@@ -19,6 +20,7 @@ pub(crate) use presets::{
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
+pub(crate) use shell_candidates::login_shell_candidates;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -755,28 +757,6 @@ fn path_candidates_from_env_raw(basename: &str) -> Vec<PathBuf> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
-}
-
-/// Collect login shell candidates for the current platform.
-///
-/// On Unix: existing historical `/bin` locations followed by zsh/bash found
-/// on PATH. The latter supports non-FHS distributions such as NixOS.
-/// On Windows: Git Bash via `resolve_bash_path` — skips `BUZZ_SHELL` because
-/// login-shell callers use bash-only `-l -c` syntax.
-pub(crate) fn login_shell_candidates() -> Vec<PathBuf> {
-    #[cfg(not(windows))]
-    {
-        let mut candidates = vec![PathBuf::from("/bin/zsh"), PathBuf::from("/bin/bash")];
-        candidates.extend(path_candidates_from_env("zsh"));
-        candidates.extend(path_candidates_from_env("bash"));
-        candidates.retain(|candidate| is_executable_file(candidate));
-        candidates.dedup();
-        candidates
-    }
-    #[cfg(windows)]
-    {
-        super::git_bash::resolve_bash_path().into_iter().collect()
-    }
 }
 
 /// Run a command in a login shell (tries zsh then bash on Unix, Git Bash on Windows).

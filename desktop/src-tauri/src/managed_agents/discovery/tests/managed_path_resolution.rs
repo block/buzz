@@ -1,4 +1,21 @@
-use crate::managed_agents::discovery::{clear_resolve_cache, resolve_command};
+use crate::managed_agents::discovery::{
+    clear_resolve_cache, login_shell_candidates, resolve_command,
+};
+
+#[cfg(unix)]
+#[test]
+fn login_shell_candidates_include_an_available_shell() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let candidates = login_shell_candidates();
+    let first = candidates.first().expect("an available Unix login shell");
+    assert!(
+        matches!(
+            first.file_name().and_then(std::ffi::OsStr::to_str),
+            Some("zsh" | "bash")
+        ),
+        "expected zsh or bash, got {first:?}"
+    );
+}
 
 /// The legacy Goose Windows installer wrote `%USERPROFILE%\goose\goose.exe`,
 /// a directory on no standard PATH. `resolve_command_uncached` finds binaries

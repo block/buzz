@@ -7,6 +7,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 state_root="${BUZZ_ANDROID_EMULATOR_HOME:-${XDG_STATE_HOME:-$HOME/.local/state}/buzz/android-emulator}"
 state_marker="$state_root/.buzz-android-emulator-state"
+state_marker_value="buzz-android-emulator-state-v1"
 android_user_home="$state_root/user"
 android_avd_home="$state_root/avd"
 avd_name="buzz_pixel_api_${BUZZ_ANDROID_EMULATOR_API:-36}"
@@ -63,9 +64,40 @@ device_ready() {
     [[ "$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]
 }
 
-create_avd() {
+device_present() {
+  adb devices | awk 'NR > 1 {print $1}' | grep -Fxq "$serial"
+}
+
+device_avd_name() {
+  adb -s "$serial" emu avd name 2>/dev/null |
+    tr -d '\r' |
+    awk 'NF && $0 != "OK" { print; exit }'
+}
+
+device_is_owned() {
+  state_is_owned && [[ "$(device_avd_name)" == "$avd_name" ]]
+}
+
+state_is_owned() {
+  [[ -d "$state_root" && -f "$state_marker" ]] || return 1
+  [[ "$(<"$state_marker")" == "$state_marker_value" ]]
+}
+
+claim_state_root() {
+  if [[ -e "$state_root" ]]; then
+    if ! state_is_owned; then
+      echo "refusing pre-existing unowned emulator state path: $state_root" >&2
+      return 1
+    fi
+  else
+    mkdir -p "$state_root"
+    printf '%s\n' "$state_marker_value" >"$state_marker"
+  fi
   mkdir -p "$android_user_home" "$android_avd_home"
-  touch "$state_marker"
+}
+
+create_avd() {
+  claim_state_root || return 1
   if ANDROID_HOME="$emulator_sdk" ANDROID_SDK_ROOT="$emulator_sdk" \
     "$avdmanager_bin" list avd | grep -Fq "Name: $avd_name"; then
     return
@@ -90,14 +122,17 @@ EOF
 
 start_emulator() {
   local window_mode="${1:-}"
-  if device_ready; then
-    echo "$serial is already ready"
-    return
-  fi
-
-  if adb devices | awk 'NR > 1 {print $1}' | grep -Fxq "$serial"; then
-    echo "$serial exists but is not ready; stop or reset it before retrying" >&2
-    exit 1
+  if device_present; then
+    if ! device_is_owned; then
+      echo "refusing device $serial: it is not the Buzz-owned AVD $avd_name" >&2
+      return 1
+    fi
+    if device_ready; then
+      echo "$serial is already ready"
+      return
+    fi
+    echo "$serial is the Buzz-owned AVD but is not ready; stop or reset it before retrying" >&2
+    return 1
   fi
 
   create_avd
@@ -142,16 +177,19 @@ start_emulator() {
 }
 
 stop_emulator() {
-  if adb -s "$serial" get-state >/dev/null 2>&1; then
-    adb -s "$serial" emu kill >/dev/null
-    echo "stopped $serial"
-  else
+  if ! device_present; then
     echo "$serial is not running"
+    return
   fi
+  if ! device_is_owned; then
+    echo "refusing to stop $serial: it is not the Buzz-owned AVD $avd_name" >&2
+    return 1
+  fi
+  adb -s "$serial" emu kill >/dev/null
+  echo "stopped $serial"
 }
 
 reset_emulator() {
-  stop_emulator
   if [[ ! -e "$state_root" ]]; then
     echo "isolated emulator state is already absent: $state_root"
     return
@@ -162,10 +200,11 @@ reset_emulator() {
       exit 1
       ;;
   esac
-  if [[ ! -f "$state_marker" ]]; then
+  if ! state_is_owned; then
     echo "refusing unrecognized emulator state path: $state_root" >&2
-    exit 1
+    return 1
   fi
+  stop_emulator || return 1
   rm -rf -- "$state_root"
   echo "removed isolated emulator state: $state_root"
 }
@@ -183,7 +222,7 @@ take_screenshot() {
 
 run_test() {
   local target="${1:?test requires an integration-test target}"
-  start_emulator
+  start_emulator || return 1
   "$repo_root/scripts/mobile-worktree-overrides.sh"
   mkdir -p "$repo_root/test-results/mobile-emulator"
   (
@@ -196,30 +235,36 @@ run_test() {
   )
 }
 
-require_toolchain
-case "${1:-}" in
-  start)
-    start_emulator "${2:-}"
-    ;;
-  stop)
-    stop_emulator
-    ;;
-  status)
-    echo "state: $state_root"
-    echo "avd: $avd_name ($system_image)"
-    adb devices -l | grep -E "^List|^${serial}[[:space:]]" || true
-    ;;
-  reset)
-    reset_emulator
-    ;;
-  screenshot)
-    take_screenshot "${2:-}"
-    ;;
-  test)
-    run_test "${2:-}"
-    ;;
-  *)
-    usage >&2
-    exit 2
-    ;;
-esac
+main() {
+  require_toolchain
+  case "${1:-}" in
+    start)
+      start_emulator "${2:-}"
+      ;;
+    stop)
+      stop_emulator
+      ;;
+    status)
+      echo "state: $state_root"
+      echo "avd: $avd_name ($system_image)"
+      adb devices -l | grep -E "^List|^${serial}[[:space:]]" || true
+      ;;
+    reset)
+      reset_emulator
+      ;;
+    screenshot)
+      take_screenshot "${2:-}"
+      ;;
+    test)
+      run_test "${2:-}"
+      ;;
+    *)
+      usage >&2
+      return 2
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

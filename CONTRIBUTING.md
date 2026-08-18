@@ -139,9 +139,11 @@ Hermit pins Flutter 3.41.7 exactly. The mobile Nix shell currently uses Flutter
 3.41.9, the closest packaged release in the same stable line; `flake.lock` pins
 the package set used by the Nix path.
 
-Docker remains a host prerequisite for local services. Android SDK/Xcode are
-also host prerequisites when building for their respective mobile platforms;
-the mobile shell supplies Flutter and the tools used by repository checks.
+Docker remains a host prerequisite for local services. Xcode remains a host
+prerequisite for iOS builds. The `.#mobile` shell supplies Flutter and the tools
+used by repository checks but expects a host Android SDK for Android builds; on
+x86-64 Linux, `.#mobile-android` instead supplies the pinned Android SDK,
+emulator image, NDK, CMake, and JDK used by the emulator test workflow.
 
 #### Linux: Tauri system libraries
 

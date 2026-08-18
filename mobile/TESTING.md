@@ -17,6 +17,15 @@ mutable data is isolated under
 `${XDG_STATE_HOME:-$HOME/.local/state}/buzz/android-emulator`, never mixed with
 Android Studio's default AVDs. Override that location with
 `BUZZ_ANDROID_EMULATOR_HOME` when parallel checkouts need independent state.
+Use a dedicated path that does not already contain unrelated data: the helper
+creates a versioned ownership marker and refuses to adopt or reset any
+pre-existing unowned directory.
+
+The default serial is `emulator-5556`. If another AVD already owns that serial,
+the helper fails closed rather than reusing or stopping it. With a separate
+state root, override `BUZZ_ANDROID_EMULATOR_SERIAL` for parallel devices; each
+configured serial is verified against the expected Buzz AVD name before
+lifecycle commands run.
 
 The emulator runs headless by default. Use `just mobile-emulator start
 --window` for interactive work. Hardware acceleration uses `/dev/kvm` when it

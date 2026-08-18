@@ -4,7 +4,12 @@ use crate::managed_agents::{
     DEFAULT_ACP_COMMAND,
 };
 
+mod install_shell;
 mod post_install_verification;
+
+#[cfg(windows)]
+pub(crate) use install_shell::install_shell_from;
+use install_shell::resolve_install_shell;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
@@ -804,43 +809,6 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     apply_no_window(&mut cmd);
 
     Ok(cmd)
-}
-
-/// Resolve the shell binary for install commands.
-///
-/// Unix: zsh if available, else bash. The PATH fallback supports distributions
-/// such as NixOS that do not expose shells below `/bin`.
-/// Windows: Git Bash via `resolve_bash_path` — skips `BUZZ_SHELL` because install
-/// commands use bash-only `-l -c` syntax. A `BUZZ_SHELL=pwsh` user gets a green
-/// Doctor prereq (their agents work) but installs use the Git Bash fallback chain.
-fn resolve_install_shell() -> Result<std::path::PathBuf, String> {
-    #[cfg(not(windows))]
-    {
-        if std::path::Path::new("/bin/zsh").exists() {
-            return Ok(std::path::PathBuf::from("/bin/zsh"));
-        }
-        if std::path::Path::new("/bin/bash").exists() {
-            return Ok(std::path::PathBuf::from("/bin/bash"));
-        }
-        crate::managed_agents::login_shell_candidates()
-            .into_iter()
-            .next()
-            .ok_or_else(|| "No zsh or bash executable was found".to_string())
-    }
-
-    #[cfg(windows)]
-    {
-        install_shell_from(crate::managed_agents::git_bash::resolve_bash_path())
-    }
-}
-
-/// Pure mapping from a resolved bash path to the install-shell result.
-/// `None` → `Err(GIT_BASH_INSTALL_HINT)`, `Some(path)` → `Ok(path)`.
-#[cfg(windows)]
-pub(crate) fn install_shell_from(
-    resolved: Option<std::path::PathBuf>,
-) -> Result<std::path::PathBuf, String> {
-    resolved.ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
 }
 
 /// Returns `true` when `command` is a Windows-native PowerShell invocation

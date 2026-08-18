@@ -1252,30 +1252,6 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
     );
 }
 
-// ── Phase C: login_shell_candidates ─────────────────────────────────────────
-
-/// On Unix, login_shell_candidates returns at least one candidate.
-#[cfg(unix)]
-#[test]
-fn test_login_shell_candidates_non_empty_on_unix() {
-    let _guard = crate::managed_agents::lock_path_mutex();
-    let candidates = super::login_shell_candidates();
-    assert!(
-        !candidates.is_empty(),
-        "Unix must have at least one login shell candidate"
-    );
-    // The first candidate should resolve to zsh or bash, including on non-FHS
-    // distributions where the executable lives in a store path.
-    let first = &candidates[0];
-    assert!(
-        matches!(
-            first.file_name().and_then(std::ffi::OsStr::to_str),
-            Some("zsh" | "bash")
-        ),
-        "expected zsh or bash, got {first:?}"
-    );
-}
-
 // ── Regression: POSIX PATH must never reach native Windows consumers ───────
 
 /// `login_shell_path()` must return `None` on Windows so native-process
