@@ -1,6 +1,7 @@
+import * as React from "react";
 import type { ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ChevronDown, Eye } from "lucide-react";
+import { Eye } from "lucide-react";
 import {
   setThreadViewMode,
   useThreadViewMode,
@@ -15,6 +16,9 @@ import {
   type LinkPreviewStyle,
 } from "@/shared/lib/linkPreviewStylePreference";
 import { isLinuxPlatform } from "@/shared/lib/platform";
+import type { ResolvedLinkPreview } from "@/shared/lib/useResolvedLinkPreviews";
+import { LinkPreviewAttachmentPresentation } from "@/shared/ui/link-preview-attachment";
+import type { LinkPreviewImageLightboxProps } from "@/shared/ui/rich-link-preview-attachment";
 import {
   previewConversationDensity,
   setConversationDensity,
@@ -36,14 +40,6 @@ import {
   useTheme,
 } from "@/shared/theme/ThemeProvider";
 
-import { Button } from "@/shared/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionRow } from "./SettingsOptionGroup";
 import { SegmentedControl } from "@/shared/ui/segmented-control";
@@ -257,65 +253,125 @@ export function ConversationDisplaySettings() {
   );
 }
 
+/**
+ * Static sample used by the settings preview card. The thumbnail is an inline
+ * SVG data URL so the preview needs no network fetch or native image pipeline.
+ */
+const LINK_PREVIEW_SAMPLE_BASE: Omit<ResolvedLinkPreview, "imageDataUrl"> = {
+  kind: "generic-link",
+  href: "https://example.com/product-updates",
+  provider: "example.com",
+  title: "Product updates — a fresh look at conversations",
+  typeLabel: "link",
+  description:
+    "Highlights from this release: refreshed conversation layout, quicker link handling, and readability improvements.",
+  imageState: "image",
+  imageDomain: "example.com",
+};
+
+/**
+ * Build the sample thumbnail as an SVG data URL from the Buzz gradient
+ * tokens. Data-URL images cannot resolve CSS variables, so the token values
+ * are read from the live stylesheet and baked in per render — if the Buzz
+ * gradient ever changes in `theme.css`, this preview follows automatically.
+ */
+function buzzGradientSampleImage(isDark: boolean): string {
+  const styles = globalThis.document
+    ? getComputedStyle(document.documentElement)
+    : null;
+  const readToken = (token: string, fallback: string): string =>
+    styles?.getPropertyValue(token).trim() || fallback;
+  const top = isDark
+    ? readToken("--buzz-gradient-dark-top", "#4a4616")
+    : readToken("--buzz-gradient-light-top", "#e6e6b6");
+  const bottom = isDark
+    ? readToken("--buzz-gradient-dark-bottom", "#0a1423")
+    : readToken("--buzz-gradient-light-bottom", "#c4d0da");
+  const shapeToken = isDark ? "--foreground" : "--background";
+  const shapeFallback = isDark ? "0 0% 98%" : "0 0% 100%";
+  const shape = `hsl(${readToken(shapeToken, shapeFallback)})`;
+  const shapeOpacities = isDark ? [0.5, 0.38, 0.28] : [0.82, 0.68, 0.52];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 382 200"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${top}"/><stop offset="1" stop-color="${bottom}"/></linearGradient></defs><rect width="382" height="200" fill="url(#g)"/><rect x="76" y="64" width="72" height="72" rx="22" fill="${shape}" opacity="${shapeOpacities[0]}"/><rect x="168" y="76" width="96" height="18" rx="9" fill="${shape}" opacity="${shapeOpacities[1]}"/><rect x="168" y="106" width="138" height="18" rx="9" fill="${shape}" opacity="${shapeOpacities[2]}"/></svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+/** Lightbox stand-in for the settings sample — renders the image inert. */
+function SampleImageLightbox({
+  children,
+  className,
+}: LinkPreviewImageLightboxProps) {
+  return <div className={className}>{children}</div>;
+}
+
+function LinkPreviewSample({ style }: { style: LinkPreviewStyle }) {
+  const { isDark } = useTheme();
+  const preview = React.useMemo<ResolvedLinkPreview>(
+    () => ({
+      ...LINK_PREVIEW_SAMPLE_BASE,
+      imageDataUrl: buzzGradientSampleImage(isDark),
+    }),
+    [isDark],
+  );
+  return (
+    <div className="px-4 py-3" data-testid="link-preview-sample">
+      <div
+        aria-hidden="true"
+        className="relative overflow-hidden rounded-xl border border-border/65 bg-transparent"
+        data-testid="link-preview-sample-surface"
+        inert
+      >
+        <span className="absolute right-3.5 top-3 inline-flex items-center gap-1 text-2xs font-medium text-muted-foreground/55">
+          <Eye aria-hidden="true" className="size-3" />
+          Preview
+        </span>
+        <div className="p-4 pr-24">
+          <LinkPreviewAttachmentPresentation
+            ImageLightbox={SampleImageLightbox}
+            preview={preview}
+            showExpandControl={false}
+            style={style}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LinkPreviewStyleSetting() {
   const style = useLinkPreviewStyle();
+  const [previewStyle, setPreviewStyle] =
+    React.useState<LinkPreviewStyle | null>(null);
+  const displayedStyle = previewStyle ?? style;
   const activeOption =
-    LINK_PREVIEW_STYLE_OPTIONS.find((option) => option.value === style) ??
-    LINK_PREVIEW_STYLE_OPTIONS[0];
+    LINK_PREVIEW_STYLE_OPTIONS.find(
+      (option) => option.value === displayedStyle,
+    ) ?? LINK_PREVIEW_STYLE_OPTIONS[0];
 
   return (
-    <SettingsOptionRow>
-      <div className="min-w-0">
-        <p className="text-sm font-medium">Links</p>
-        <p
-          className="text-sm font-normal text-muted-foreground/70"
-          data-settings-subcopy
-        >
-          {activeOption.description}
-        </p>
-      </div>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            className="h-7 min-w-28 justify-between gap-1.5 rounded-md border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
-            data-testid="link-preview-style-trigger"
-            size="sm"
-            type="button"
-            variant="ghost"
+    <div data-testid="link-preview-style-group">
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Link previews</p>
+          <p
+            className="text-sm font-normal text-muted-foreground/70"
+            data-settings-subcopy
           >
-            <span className="truncate">{activeOption.label}</span>
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          className="min-w-72 rounded-md"
-          data-testid="link-preview-style-menu"
-        >
-          <DropdownMenuRadioGroup
-            onValueChange={(next) =>
-              setLinkPreviewStyle(next as LinkPreviewStyle)
-            }
-            value={style}
-          >
-            {LINK_PREVIEW_STYLE_OPTIONS.map((option) => (
-              <DropdownMenuRadioItem
-                data-testid={`link-preview-style-${option.value}`}
-                key={option.value}
-                value={option.value}
-              >
-                <span className="flex min-w-0 flex-col">
-                  <span className="font-medium">{option.label}</span>
-                  <span className="text-2xs text-muted-foreground">
-                    {option.description}
-                  </span>
-                </span>
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </SettingsOptionRow>
+            {activeOption.description}
+          </p>
+        </div>
+        <SegmentedControl
+          size="compact"
+          legend="Link previews"
+          onPreviewChange={setPreviewStyle}
+          onValueChange={setLinkPreviewStyle}
+          optionTestIdPrefix="link-preview-style"
+          options={LINK_PREVIEW_STYLE_OPTIONS}
+          testId="link-preview-style-control"
+          value={style}
+        />
+      </SettingsOptionRow>
+      <LinkPreviewSample style={displayedStyle} />
+    </div>
   );
 }
 
@@ -438,74 +494,159 @@ export function GlassBackgroundSetting() {
 }
 
 /** Compact thread preference row in the Appearance preferences card. */
-export function ThreadLayoutSetting() {
-  const threadViewMode = useThreadViewMode();
-  const { communities } = useCommunities();
-  const showCommunityScope = communities.length > 1;
-  const activeOption =
-    THREAD_VIEW_MODE_OPTIONS.find(
-      (option) => option.value === threadViewMode,
-    ) ?? THREAD_VIEW_MODE_OPTIONS[0];
+/**
+ * Abstract diagram for the thread layout preview, in the same soft-block
+ * style as the links sample: a rounded frame holding a channel surface and a
+ * thread surface, with light skeleton bars. Inline SVG (not a data-URL image)
+ * so fills reference theme tokens directly and follow light/dark and accent
+ * changes automatically. Only the panel proportions change between modes.
+ */
+function ThreadLayoutDiagram({ mode }: { mode: ThreadViewMode }) {
+  const { isDark } = useTheme();
+  const gradientId = React.useId();
+  // Inline SVG resolves CSS variables, so the frame gradient references the
+  // Buzz gradient tokens directly and follows theme.css automatically.
+  const gradientTop = isDark
+    ? "var(--buzz-gradient-dark-top, #4a4616)"
+    : "var(--buzz-gradient-light-top, #e6e6b6)";
+  const gradientBottom = isDark
+    ? "var(--buzz-gradient-dark-bottom, #0a1423)"
+    : "var(--buzz-gradient-light-bottom, #c4d0da)";
+  const channelSurface = "hsl(var(--muted))";
+  const threadSurface = "hsl(var(--background))";
+  const channelOpacity = isDark ? 0.88 : 0.78;
+  const threadOpacity = isDark ? 0.98 : 0.96;
+  const bar = "hsl(var(--foreground) / 0.24)";
+  const barSoft = "hsl(var(--foreground) / 0.14)";
+
+  const isFocus = mode === "focus";
+  // Inner content area: 10..230 x 10..122 (inside the frame padding).
+  // Split: channel and thread share the area side by side with a gap.
+  // Focus: the channel continues beneath the overlaid thread, leaving only
+  // a narrow orientation sliver visible at the left edge.
+  const gap = 6;
+  const threadX = isFocus ? 42 : 124;
+  const channelWidth = isFocus ? 64 : threadX - 10 - gap;
+  const threadWidth = 230 - threadX;
+
+  /** Two skeleton text bars, clipped to the panel they sit in. */
+  const skeleton = (x: number, y: number, width: number) => (
+    <>
+      <rect fill={bar} height={7} rx={3.5} width={width * 0.62} x={x} y={y} />
+      <rect
+        fill={barSoft}
+        height={7}
+        rx={3.5}
+        width={width * 0.86}
+        x={x}
+        y={y + 13}
+      />
+    </>
+  );
 
   return (
-    <SettingsOptionRow>
-      <div className="min-w-0">
-        <p className="text-sm font-medium">
-          Thread layout
-          {showCommunityScope ? (
-            <span className="font-normal text-muted-foreground">
-              {" "}
-              (all communities)
-            </span>
-          ) : null}
-        </p>
-        <p
-          className="text-sm font-normal text-muted-foreground/70"
-          data-settings-subcopy
-        >
-          {activeOption.description}
-        </p>
+    <svg
+      aria-hidden="true"
+      className="block w-full max-w-60"
+      data-testid={`thread-layout-diagram-${mode}`}
+      role="img"
+      viewBox="0 0 240 132"
+    >
+      <defs>
+        <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stopColor={gradientTop} />
+          <stop offset="1" stopColor={gradientBottom} />
+        </linearGradient>
+      </defs>
+      {/* Frame */}
+      <rect fill={`url(#${gradientId})`} height={132} rx={18} width={240} />
+      {/* Channel surface */}
+      <rect
+        fill={channelSurface}
+        height={112}
+        opacity={channelOpacity}
+        rx={10}
+        width={channelWidth}
+        x={10}
+        y={10}
+      />
+      {channelWidth > 60 ? skeleton(22, 24, channelWidth - 24) : null}
+      {/* Thread surface */}
+      <path
+        d={`M ${threadX + 10} 10 H 220 Q 230 10 230 20 V 112 Q 230 122 220 122 H ${threadX + 10} Q ${threadX} 122 ${threadX} 112 V 20 Q ${threadX} 10 ${threadX + 10} 10 Z`}
+        fill={threadSurface}
+        opacity={threadOpacity}
+      />
+      {skeleton(threadX + 12, 24, threadWidth - 24)}
+    </svg>
+  );
+}
+
+function ThreadLayoutPreview({ mode }: { mode: ThreadViewMode }) {
+  return (
+    <div className="px-4 py-3" data-testid="thread-layout-preview">
+      <div
+        aria-hidden="true"
+        className="relative overflow-hidden rounded-xl border border-border/65 bg-transparent"
+        data-testid="thread-layout-preview-surface"
+      >
+        <span className="absolute right-3.5 top-3 inline-flex items-center gap-1 text-2xs font-medium text-muted-foreground/55">
+          <Eye aria-hidden="true" className="size-3" />
+          Preview
+        </span>
+        <div className="p-4 pr-24">
+          <ThreadLayoutDiagram mode={mode} />
+        </div>
       </div>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            className="h-7 min-w-28 justify-between gap-1.5 rounded-md border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
-            data-testid="thread-layout-trigger"
-            size="sm"
-            type="button"
-            variant="ghost"
+    </div>
+  );
+}
+
+export function ThreadLayoutSetting() {
+  const threadViewMode = useThreadViewMode();
+  const [previewMode, setPreviewMode] = React.useState<ThreadViewMode | null>(
+    null,
+  );
+  const { communities } = useCommunities();
+  const showCommunityScope = communities.length > 1;
+  const displayedMode = previewMode ?? threadViewMode;
+  const activeOption =
+    THREAD_VIEW_MODE_OPTIONS.find((option) => option.value === displayedMode) ??
+    THREAD_VIEW_MODE_OPTIONS[0];
+
+  return (
+    <div data-testid="thread-layout-group">
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">
+            Thread layout
+            {showCommunityScope ? (
+              <span className="font-normal text-muted-foreground">
+                {" "}
+                (all communities)
+              </span>
+            ) : null}
+          </p>
+          <p
+            className="text-sm font-normal text-muted-foreground/70"
+            data-settings-subcopy
           >
-            <span className="truncate">{activeOption.label}</span>
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          className="min-w-72 rounded-md"
-          data-testid="thread-layout-menu"
-        >
-          <DropdownMenuRadioGroup
-            onValueChange={(next) => setThreadViewMode(next as ThreadViewMode)}
-            value={threadViewMode}
-          >
-            {THREAD_VIEW_MODE_OPTIONS.map((option) => (
-              <DropdownMenuRadioItem
-                data-testid={`thread-layout-${option.value}`}
-                key={option.value}
-                value={option.value}
-              >
-                <span className="flex min-w-0 flex-col">
-                  <span className="font-medium">{option.label}</span>
-                  <span className="text-2xs text-muted-foreground">
-                    {option.description}
-                  </span>
-                </span>
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </SettingsOptionRow>
+            {activeOption.description}
+          </p>
+        </div>
+        <SegmentedControl
+          size="compact"
+          legend="Thread layout"
+          onPreviewChange={setPreviewMode}
+          onValueChange={setThreadViewMode}
+          optionTestIdPrefix="thread-layout"
+          options={THREAD_VIEW_MODE_OPTIONS}
+          testId="thread-layout-control"
+          value={threadViewMode}
+        />
+      </SettingsOptionRow>
+      <ThreadLayoutPreview mode={displayedMode} />
+    </div>
   );
 }
 
