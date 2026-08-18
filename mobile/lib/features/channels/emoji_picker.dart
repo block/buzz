@@ -146,7 +146,19 @@ class _EmojiPickerContent extends HookConsumerWidget {
     // A notifier rather than state: the highlight changes on every scroll frame
     // and only the rail needs to hear about it. Rebuilding the sheet would
     // rebuild the grid underneath it.
-    final activeSection = useMemoized(() => ValueNotifier(0), [sections]);
+    //
+    // Seed it from the current scroll offset rather than 0: a skin-tone change
+    // rebuilds [sections] and so replaces this notifier, but the grid keeps its
+    // scroll position (same controller, same section extents). Resetting to 0
+    // here would falsely highlight the first category until the next scroll.
+    final activeSection = useMemoized(
+      () => ValueNotifier(
+        scrollController.hasClients
+            ? _activeSectionIndex(offsets, scrollController.offset)
+            : 0,
+      ),
+      [sections],
+    );
     useEffect(() => activeSection.dispose, [activeSection]);
 
     useEffect(() {

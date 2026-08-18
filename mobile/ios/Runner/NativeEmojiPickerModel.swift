@@ -373,6 +373,14 @@ enum NativeEmojiSearch {
 
 /// The top offset of each pinned section header, keyed by section id, reported
 /// up from the scrolling grid so the rail can follow manual scrolling.
+///
+/// The same stream also carries two viewport measurements under the reserved
+/// keys below, so the tracker sees the section offsets and the viewport bounds
+/// consistently in a single update. Section ids come from the emoji dataset and
+/// never collide with these dotted reserved keys.
+let nativeEmojiViewportBottomKey = "buzz.emoji.viewportBottom"
+let nativeEmojiContentBottomKey = "buzz.emoji.contentBottom"
+
 struct NativeEmojiSectionOffsetsKey: PreferenceKey {
   static let defaultValue: [String: CGFloat] = [:]
 
@@ -391,8 +399,28 @@ enum NativeEmojiCategoryTracker {
   static func selectedSectionID(
     order: [String],
     offsets: [String: CGFloat],
-    viewportTop: CGFloat
+    viewportTop: CGFloat,
+    viewportBottom: CGFloat? = nil,
+    contentBottom: CGFloat? = nil
   ) -> String? {
+    // At the clamped bottom of an overflowing list, a final section shorter
+    // than the viewport can never scroll its header to the top, so the
+    // header-at-top rule would keep the preceding section highlighted while the
+    // user is plainly viewing the last one. Detect that case first: the content
+    // end is on screen (`contentBottom <= viewportBottom`) and the top has
+    // scrolled away (`firstTop < viewportTop`, so the list really did overflow
+    // rather than merely fitting). Highlight the last section then.
+    if let viewportBottom,
+      let contentBottom,
+      contentBottom <= viewportBottom + 1,
+      let firstID = order.first,
+      let firstTop = offsets[firstID],
+      firstTop < viewportTop,
+      let lastID = order.last
+    {
+      return lastID
+    }
+
     var selected: String?
     for id in order {
       guard let top = offsets[id] else { continue }

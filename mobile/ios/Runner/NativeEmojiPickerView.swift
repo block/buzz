@@ -295,15 +295,19 @@ struct NativeEmojiPickerView: View {
         }
       }
       .padding(.bottom, 8)
+      .background(contentBoundaryReporter())
     }
     .coordinateSpace(name: sectionListSpace)
+    .background(viewportBoundaryReporter())
     .scrollDismissesKeyboard(.interactively)
     .onPreferenceChange(NativeEmojiSectionOffsetsKey.self) { offsets in
       guard tracksSelection else { return }
       selectedSectionID = NativeEmojiCategoryTracker.selectedSectionID(
         order: data.sections.map(\.id),
         offsets: offsets,
-        viewportTop: 0
+        viewportTop: 0,
+        viewportBottom: offsets[nativeEmojiViewportBottomKey],
+        contentBottom: offsets[nativeEmojiContentBottomKey]
       )
     }
   }
@@ -313,6 +317,33 @@ struct NativeEmojiPickerView: View {
       Color.clear.preference(
         key: NativeEmojiSectionOffsetsKey.self,
         value: [id: geometry.frame(in: .named(sectionListSpace)).minY]
+      )
+    }
+  }
+
+  // The end of the scrolling content, relative to the viewport top. At the
+  // clamped bottom of an overflowing list this converges on the viewport
+  // height, which lets the tracker highlight a short final section that can
+  // never scroll its own header to the top.
+  private func contentBoundaryReporter() -> some View {
+    GeometryReader { geometry in
+      Color.clear.preference(
+        key: NativeEmojiSectionOffsetsKey.self,
+        value: [
+          nativeEmojiContentBottomKey:
+            geometry.frame(in: .named(sectionListSpace)).maxY
+        ]
+      )
+    }
+  }
+
+  // The fixed viewport height, reported through the same preference stream so
+  // it stays consistent with the section offsets in each update.
+  private func viewportBoundaryReporter() -> some View {
+    GeometryReader { geometry in
+      Color.clear.preference(
+        key: NativeEmojiSectionOffsetsKey.self,
+        value: [nativeEmojiViewportBottomKey: geometry.size.height]
       )
     }
   }

@@ -456,6 +456,72 @@ class RunnerTests: XCTestCase {
     )
   }
 
+  func testCategoryTrackerSelectsShortFinalSectionAtClampedBottom() {
+    // The list has overflowed (People scrolled above the top) and its end is on
+    // screen, but the short Custom section's header sits below the top because
+    // the content clamps before it can reach it. The rail must still highlight
+    // Custom rather than leaving Nature — its predecessor — selected.
+    let order = ["people", "nature", "custom"]
+    let offsets: [String: CGFloat] = [
+      "people": -900,
+      "nature": -420,
+      "custom": 360,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 500
+      ),
+      "custom"
+    )
+  }
+
+  func testCategoryTrackerKeepsHeaderRuleWhenContentEndIsOffscreen() {
+    // The same short-final geometry, but the content end is still below the
+    // viewport (the user has not reached the bottom), so the ordinary
+    // header-at-top rule applies and Nature stays selected.
+    let order = ["people", "nature", "custom"]
+    let offsets: [String: CGFloat] = [
+      "people": -900,
+      "nature": -420,
+      "custom": 360,
+    ]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 900
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerDoesNotForceLastSectionForAShortList() {
+    // A list that fits without scrolling has its content end on screen too, but
+    // its first header is still at the top — so the bottom rule must not fire
+    // and steal the highlight to the final section.
+    let order = ["people", "nature"]
+    let offsets: [String: CGFloat] = ["people": 0, "nature": 120]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: offsets,
+        viewportTop: 0,
+        viewportBottom: 500,
+        contentBottom: 240
+      ),
+      "people"
+    )
+  }
+
   func testRemoteEmojiLoaderLimitsConcurrentDownloads() async throws {
     let maximumConcurrentDownloads = 3
     let taskCount = 8

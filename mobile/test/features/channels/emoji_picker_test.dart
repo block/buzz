@@ -497,6 +497,43 @@ void main() {
       expect(find.byTooltip('Smileys & People'), findsOneWidget);
     });
 
+    testWidgets(
+      'changing skin tone keeps the scrolled-to category highlighted',
+      (tester) async {
+        // A skin-tone change rebuilds the sections and the active-section
+        // notifier. Regression: the notifier was recreated at index 0, so a
+        // user parked on a later category snapped back to the first one in the
+        // rail while the grid stayed put. The notifier now seeds from the live
+        // scroll offset, so the highlight survives the rebuild.
+        await _pumpPicker(tester, prefs: await _prefs(), dataset: _tallDataset);
+        final colors = Theme.of(
+          tester.element(find.byType(EmojiPickerSheet)),
+        ).colorScheme;
+        Color iconColor(String tooltip) => tester
+            .widget<Icon>(
+              find.descendant(
+                of: find.byTooltip(tooltip),
+                matching: find.byType(Icon),
+              ),
+            )
+            .color!;
+
+        await tester.tap(find.byTooltip('Animals & Nature'));
+        await tester.pumpAndSettle();
+        expect(iconColor('Animals & Nature'), colors.primary);
+        expect(iconColor('Smileys & People'), colors.onSurfaceVariant);
+
+        await tester.tap(find.byTooltip('Skin tone'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('emoji-skin-tone-3')));
+        await tester.pumpAndSettle();
+
+        // Still on Nature after the tone rebuild — not reset to People.
+        expect(iconColor('Animals & Nature'), colors.primary);
+        expect(iconColor('Smileys & People'), colors.onSurfaceVariant);
+      },
+    );
+
     testWidgets('a standard emoji emits its glyph', (tester) async {
       final selected = await _pumpPicker(tester, prefs: await _prefs());
 
