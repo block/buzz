@@ -35,6 +35,32 @@ fn sub_id(name: &str) -> String {
     format!("e2e-{name}-{}", uuid::Uuid::new_v4())
 }
 
+async fn assert_no_event_of_kind(
+    client: &mut BuzzTestClient,
+    kind: Kind,
+    timeout_dur: Duration,
+    context: &str,
+) {
+    let deadline = tokio::time::Instant::now() + timeout_dur;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            return;
+        }
+
+        match client.recv_event(remaining).await {
+            Err(TestClientError::Timeout) => return,
+            Ok(RelayMessage::Event { event, .. }) if event.kind == kind => {
+                panic!("{context}: {}", event.id)
+            }
+            Ok(_) => {}
+            Err(error) => panic!("{context}: unexpected receive error: {error}"),
+        }
+    }
+}
+
 fn relay_http_url() -> String {
     relay_url()
         .replace("wss://", "https://")
@@ -303,14 +329,13 @@ async fn test_channel_rename_emits_persistent_system_message() {
         no_op.message
     );
 
-    match client.recv_event(Duration::from_millis(500)).await {
-        Err(TestClientError::Timeout) => {}
-        Ok(RelayMessage::Event { event, .. }) if event.kind == Kind::Custom(40099) => {
-            panic!("canonical no-op rename emitted system message {}", event.id)
-        }
-        Ok(other) => panic!("unexpected relay message after canonical no-op rename: {other:?}"),
-        Err(error) => panic!("unexpected receive error after canonical no-op rename: {error}"),
-    }
+    assert_no_event_of_kind(
+        &mut client,
+        Kind::Custom(40099),
+        Duration::from_millis(500),
+        "canonical no-op rename emitted system message",
+    )
+    .await;
 
     let no_op_persisted_sid = sub_id("channel-rename-no-op-persisted");
     client
@@ -348,14 +373,13 @@ async fn test_channel_rename_emits_persistent_system_message() {
         .expect("send invalid rename event");
     assert!(!rejected.accepted, "invalid rename should be rejected");
 
-    match client.recv_event(Duration::from_millis(500)).await {
-        Err(TestClientError::Timeout) => {}
-        Ok(RelayMessage::Event { event, .. }) if event.kind == Kind::Custom(40099) => {
-            panic!("failed rename emitted system message {}", event.id)
-        }
-        Ok(other) => panic!("unexpected relay message after failed rename: {other:?}"),
-        Err(error) => panic!("unexpected receive error after failed rename: {error}"),
-    }
+    assert_no_event_of_kind(
+        &mut client,
+        Kind::Custom(40099),
+        Duration::from_millis(500),
+        "failed rename emitted system message",
+    )
+    .await;
 
     client.disconnect().await.expect("disconnect");
 }
