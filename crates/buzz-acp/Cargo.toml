@@ -68,9 +68,6 @@ clap = { version = "4", features = ["derive", "env"] }
 # Config file
 toml = "1.0"
 
-# Shell-style argv splitting for BUZZ_ACP_AGENT_ARGS
-shlex = "1.3"
-
 # Filter expressions
 evalexpr = { workspace = true }
 
