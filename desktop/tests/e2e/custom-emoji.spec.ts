@@ -406,7 +406,7 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
     .toBe(true);
   await expect(
     messageActionBar(row).locator("button[title=':react:']"),
-  ).toHaveCount(1);
+  ).toHaveCount(0);
   await expect(messageReactionTrigger(row)).not.toHaveClass(
     SELECTED_ACTION_CLASS,
   );
