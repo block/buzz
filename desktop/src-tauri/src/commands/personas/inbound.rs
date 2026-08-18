@@ -585,6 +585,7 @@ fn apply_inbound_managed_agent(
             &previous_allowlist,
             local.respond_to,
             &local.respond_to_allowlist,
+            crate::managed_agents::owner_only_access_build(),
         );
     }
     false
