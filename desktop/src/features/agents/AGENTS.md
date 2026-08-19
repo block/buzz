@@ -236,17 +236,16 @@ with a TypeScript lookup table or an id comparison in a component.
    mid-conversation effort control without a plan ruling. The archived live-effort
    machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
 
-12. **Owner-only builds discover only verified same-owner remote agents.**
-    The native `list_relay_agents` boundary authenticates ownership through the
-    agent's NIP-OA profile, then retains only agents owned by the active user
-    when the compiled owner-only capability is present. Keep this as the
-    authoritative backstop: internal builds must never admit cross-owner remote
-    agents, while same-owner agents on another machine remain inside the
-    documented owner-only trust boundary. OSS builds retain the complete
-    policy-filtered relay directory and send-time fail-closed mention
-    revalidation. Local `agents-data-changed` events refresh only local
-    persona/team/managed-agent caches; they must never invalidate the remote
-    relay directory.
+12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
+    The compiled owner-only capability applies when Desktop starts or deploys a
+    managed agent. Independently operated relay agents remain eligible in every
+    build when their NIP-OA-verified owner-authored `respond_to` policy admits
+    the viewer and their relay membership includes the target channel. Keep
+    native discovery and send-time revalidation fail closed on missing or
+    invalid ownership, policy, membership, or directory evidence; do not add a
+    cross-owner clamp to either mention path. Local `agents-data-changed` events
+    refresh only local persona/team/managed-agent caches; they must never
+    invalidate the remote relay directory.
 
 ## The tests that enforce this
 
