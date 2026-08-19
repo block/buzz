@@ -103,11 +103,9 @@ export function useProjectSidebarMembership(
           current,
           remote.store,
         );
-        if (
-          !writeProjectSidebarMembershipStore(relayUrl, pubkey, merged, false)
-        ) {
-          return current;
-        }
+        // The write records merged as the authoritative in-session state even
+        // when the localStorage mirror fails, so the merge always applies.
+        writeProjectSidebarMembershipStore(relayUrl, pubkey, merged, false);
         if (!projectSidebarMembershipStoresEqual(merged, remote.store)) {
           managerRef.current?.publishMembership(merged);
         }
