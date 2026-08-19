@@ -516,6 +516,26 @@ test("deletes a workflow with confirmation", async ({ page }) => {
   await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
 });
 
+test("deleting the open workflow closes its editor", async ({ page }) => {
+  const workflowName = `delete_open_${Date.now()}`;
+
+  await navigateToWorkflows(page);
+  await createWorkflow(page, workflowName);
+  await page.getByRole("button", { name: `View ${workflowName}` }).click();
+
+  const detailDialog = page.getByRole("dialog", { name: "Edit workflow" });
+  await expect(detailDialog).toBeVisible();
+  await detailDialog.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete" }).click();
+  await expect(page.getByRole("alertdialog")).toContainText(workflowName);
+  await page.getByRole("button", { name: "Delete" }).click();
+
+  await expect(detailDialog).toHaveCount(0);
+  await expect(page).toHaveURL(/#\/workflows(?:\?|$)/);
+  await expect(page.getByTestId("new-workflow-card")).toBeVisible();
+  await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
+});
+
 test("captures the built editor at desktop and narrow widths", async ({
   page,
 }) => {

@@ -202,8 +202,11 @@ export function WorkflowsView({
     (workflow: Workflow) => {
       deleteOne(workflow.id);
       setDeleteTarget(null);
+      // Deleting the workflow the editor is pointed at would otherwise leave
+      // that editor open on a workflow that no longer exists.
+      if (workflow.id === editorWorkflowId) onCloseEditor();
     },
-    [deleteOne],
+    [deleteOne, editorWorkflowId, onCloseEditor],
   );
 
   const handleView = React.useCallback(
