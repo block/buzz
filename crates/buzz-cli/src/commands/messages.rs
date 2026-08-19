@@ -78,9 +78,12 @@ async fn fetch_event(client: &BuzzClient, event_id: &str) -> Result<serde_json::
 async fn resolve_thread_ref(
     client: &BuzzClient,
     parent_event_id: &str,
-) -> Result<ThreadRef, CliError> {
+) -> Result<(ThreadRef, Option<u16>), CliError> {
     let event = fetch_event(client, parent_event_id).await?;
-    thread_ref_from_event(parent_event_id, &event)
+    Ok((
+        thread_ref_from_event(parent_event_id, &event)?,
+        event_kind(&event),
+    ))
 }
 
 fn thread_ref_from_event(event_id: &str, event: &serde_json::Value) -> Result<ThreadRef, CliError> {
@@ -90,6 +93,17 @@ fn thread_ref_from_event(event_id: &str, event: &serde_json::Value) -> Result<Th
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     thread_ref_from_parent_tags(parent_eid, event_id, &tags)
+}
+
+fn event_kind(event: &serde_json::Value) -> Option<u16> {
+    event
+        .get("kind")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|kind| u16::try_from(kind).ok())
+}
+
+fn effective_message_kind(explicit: Option<u16>, parent_kind: Option<u16>) -> Option<u16> {
+    explicit.or_else(|| matches!(parent_kind, Some(45001 | 45003)).then_some(45003))
 }
 
 /// Resolve the channel UUID for an event by querying for it via POST /query.
@@ -672,21 +686,24 @@ pub async fn cmd_send_message(
 
     // Build thread ref if replying. `--reply-to` is the immediate parent; the
     // thread root is derived from the parent's NIP-10 tags via the relay.
-    let thread_ref = if let Some(ref r) = p.reply_to {
+    let reply_context = if let Some(ref r) = p.reply_to {
         Some(resolve_thread_ref(client, r).await?)
     } else {
         None
     };
+    let thread_ref = reply_context.as_ref().map(|(thread_ref, _)| thread_ref);
+    let effective_kind =
+        effective_message_kind(p.kind, reply_context.as_ref().and_then(|(_, kind)| *kind));
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
-    let builder = match p.kind {
+    let builder = match effective_kind {
         Some(45001) => {
             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
         }
         Some(45003) => {
-            let tr = thread_ref.as_ref().ok_or_else(|| {
+            let tr = thread_ref.ok_or_else(|| {
                 CliError::Usage("--reply-to is required for forum comments (kind 45003)".into())
             })?;
             buzz_sdk::build_forum_comment(
@@ -701,7 +718,7 @@ pub async fn cmd_send_message(
         None | Some(9) => buzz_sdk::build_message(
             channel_uuid,
             &final_content,
-            thread_ref.as_ref(),
+            thread_ref,
             &mention_refs,
             p.broadcast,
             &media_tags,
@@ -783,7 +800,7 @@ pub async fn cmd_send_diff_message(client: &BuzzClient, p: SendDiffParams) -> Re
     // `--reply-to` is the immediate parent; the thread root is derived from
     // the parent's NIP-10 tags via the relay.
     let thread_ref = if let Some(r) = &p.reply_to {
-        Some(resolve_thread_ref(client, r).await?)
+        Some(resolve_thread_ref(client, r).await?.0)
     } else {
         None
     };
@@ -1056,8 +1073,8 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        match_profiles_by_name, merge_message_mentions, missing_members,
+        channel_id_from_event, cmd_get_thread, effective_message_kind, event_mention_pubkeys,
+        find_root_from_tags, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
         resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
         CliError, Uuid,
@@ -1162,6 +1179,15 @@ mod tests {
             .unwrap(),
             ID_A
         );
+    }
+
+    #[test]
+    fn forum_parent_infers_forum_comment_unless_kind_is_explicit() {
+        assert_eq!(effective_message_kind(None, Some(45001)), Some(45003));
+        assert_eq!(effective_message_kind(None, Some(45003)), Some(45003));
+        assert_eq!(effective_message_kind(None, Some(9)), None);
+        assert_eq!(effective_message_kind(None, None), None);
+        assert_eq!(effective_message_kind(Some(9), Some(45001)), Some(9));
     }
 
     #[test]
