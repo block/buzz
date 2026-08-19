@@ -780,7 +780,7 @@ export function AppShell() {
               />
             ) : null}
             <SidebarProvider
-              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible !bg-transparent"
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>

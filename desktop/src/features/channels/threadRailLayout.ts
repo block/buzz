@@ -1,7 +1,7 @@
 export const THREAD_RAIL_DESKTOP_BREAKPOINT_PX = 600;
 
 export function threadRailColumnClassName(): string {
-  return "buzz-theme-gradient-underlay hidden min-h-0 shrink-0 self-stretch min-[601px]:flex min-[601px]:flex-col";
+  return "hidden min-h-0 shrink-0 self-stretch min-[601px]:flex min-[601px]:flex-col";
 }
 
 export function threadRailShellClassName(_collapsed: boolean): string {

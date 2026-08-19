@@ -62,18 +62,27 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
     const railColumnElement = document.querySelector<HTMLElement>(
       '[data-testid="thread-rail-column"]',
     );
+    const appSidebarLayer = document.querySelector<HTMLElement>(
+      '[data-testid="app-sidebar-layer"]',
+    );
     const contentElement = document.querySelector<HTMLElement>(
       "[data-buzz-content-surface]:not([data-buzz-content-unframed])",
     );
-    if (!railElement || !railColumnElement || !contentElement) {
+    if (
+      !railElement ||
+      !railColumnElement ||
+      !appSidebarLayer ||
+      !contentElement
+    ) {
       throw new Error(
-        "Thread Rail, rail column, or framed content surface unavailable",
+        "Thread Rail, rail column, app layer, or framed content surface unavailable",
       );
     }
     const railRect = railElement.getBoundingClientRect();
     const contentRect = contentElement.getBoundingClientRect();
     const railStyle = getComputedStyle(railElement);
     const railColumnStyle = getComputedStyle(railColumnElement);
+    const appSidebarLayerStyle = getComputedStyle(appSidebarLayer);
     const contentStyle = getComputedStyle(contentElement);
     return {
       railTop: Math.round(railRect.top),
@@ -83,8 +92,11 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
       railRadius: railStyle.borderTopLeftRadius,
       contentRadius: contentStyle.borderTopLeftRadius,
       railBackground: railStyle.backgroundColor,
+      railColumnBackground: railColumnStyle.backgroundColor,
       railColumnBackgroundImage: railColumnStyle.backgroundImage,
       railColumnRadius: railColumnStyle.borderTopLeftRadius,
+      appSidebarLayerBackground: appSidebarLayerStyle.backgroundColor,
+      appSidebarLayerBackgroundImage: appSidebarLayerStyle.backgroundImage,
       contentBackground: contentStyle.backgroundColor,
       railClipPath: railStyle.clipPath,
     };
@@ -96,7 +108,10 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
   });
   expect(paneGeometry.railBottom).toBe(paneGeometry.contentBottom);
   expect(paneGeometry.railColumnRadius).toBe("0px");
-  expect(paneGeometry.railColumnBackgroundImage).toContain("linear-gradient");
+  expect(paneGeometry.railColumnBackground).toBe("rgba(0, 0, 0, 0)");
+  expect(paneGeometry.railColumnBackgroundImage).toBe("none");
+  expect(paneGeometry.appSidebarLayerBackground).toBe("rgba(0, 0, 0, 0)");
+  expect(paneGeometry.appSidebarLayerBackgroundImage).toBe("none");
   expect(paneGeometry.railClipPath).toBe("none");
   const entry = rail.getByTestId(`thread-rail-entry-${root.id}`);
   await expect(entry).toHaveAttribute("aria-current", "page");
