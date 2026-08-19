@@ -287,9 +287,19 @@ describe("visibility-gated hooks", () => {
     focused = true;
     await act(async () => window.dispatchEvent(new window.Event("focus")));
     assert.deepEqual(observed, [1_000, false]);
-    await act(
-      async () => new Promise((resolve) => window.setTimeout(resolve, 10)),
-    );
+    // Wait for the resume to actually land rather than for a fixed duration.
+    // `scheduleAfterForegroundReady` is a three-hop chain —
+    // setTimeout(0) → requestAnimationFrame → setTimeout(0) — and jsdom fires
+    // rAF on a ~16ms cadence, so a single 10ms sleep could never reliably
+    // cover it: the test passed only when the event loop happened to be idle
+    // and failed under parallel load. Polling keeps the assertion exactly as
+    // strict while removing the race.
+    await act(async () => {
+      const deadline = Date.now() + 2_000;
+      while (observed.length < 3 && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 5));
+      }
+    });
     assert.deepEqual(observed, [1_000, false, 1_000]);
 
     await act(async () => root.unmount());
