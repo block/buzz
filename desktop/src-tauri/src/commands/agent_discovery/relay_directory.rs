@@ -112,6 +112,12 @@ async fn query_all_relay_pages(
     }
 }
 
+fn retain_agents_allowed_by_build(agents: &mut Vec<RelayAgentInfo>, require_verified_owner: bool) {
+    if require_verified_owner {
+        agents.retain(|agent| agent.owner_pubkey.is_some());
+    }
+}
+
 pub(crate) async fn list_relay_agents_for_state(
     state: &AppState,
 ) -> Result<Vec<RelayAgentInfo>, String> {
@@ -192,6 +198,14 @@ async fn list_relay_agents_for_selection(
         &managed_agent_events,
         &profile_events,
     );
+    // Marked builds reject legacy directory records that lack a verified
+    // NIP-OA owner, but do not require that owner to equal the viewer. The
+    // verified owner's signed respond_to policy remains the authorization
+    // boundary for independently operated relay agents.
+    retain_agents_allowed_by_build(
+        &mut agents,
+        crate::managed_agents::owner_only_access_build(),
+    );
     agents.retain(|agent| member_agent_channel_ids.contains_key(&agent.pubkey));
     for agent in &mut agents {
         agent.channel_ids = member_agent_channel_ids
@@ -231,6 +245,67 @@ pub async fn revalidate_relay_agents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marked_build_requires_verified_owner_without_requiring_viewer_ownership() {
+        let cross_owner = "b".repeat(64);
+        let mut agents = vec![
+            RelayAgentInfo {
+                pubkey: "a".repeat(64),
+                owner_pubkey: Some(cross_owner.clone()),
+                name: "Verified cross-owner".to_string(),
+                agent_type: "agent".to_string(),
+                channels: Vec::new(),
+                channel_ids: Vec::new(),
+                capabilities: Vec::new(),
+                status: "offline".to_string(),
+                respond_to: None,
+                respond_to_allowlist: Vec::new(),
+            },
+            RelayAgentInfo {
+                pubkey: "c".repeat(64),
+                owner_pubkey: None,
+                name: "Ownerless legacy".to_string(),
+                agent_type: "agent".to_string(),
+                channels: Vec::new(),
+                channel_ids: Vec::new(),
+                capabilities: Vec::new(),
+                status: "online".to_string(),
+                respond_to: None,
+                respond_to_allowlist: Vec::new(),
+            },
+        ];
+
+        retain_agents_allowed_by_build(&mut agents, true);
+
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "Verified cross-owner");
+        assert_eq!(
+            agents[0].owner_pubkey.as_deref(),
+            Some(cross_owner.as_str())
+        );
+    }
+
+    #[test]
+    fn oss_build_preserves_ownerless_legacy_agents() {
+        let mut agents = vec![RelayAgentInfo {
+            pubkey: "a".repeat(64),
+            owner_pubkey: None,
+            name: "Ownerless legacy".to_string(),
+            agent_type: "agent".to_string(),
+            channels: Vec::new(),
+            channel_ids: Vec::new(),
+            capabilities: Vec::new(),
+            status: "online".to_string(),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+        }];
+
+        retain_agents_allowed_by_build(&mut agents, false);
+
+        assert_eq!(agents.len(), 1);
+        assert!(agents[0].owner_pubkey.is_none());
+    }
 
     #[test]
     fn exact_author_queries_prevent_noisy_agent_crowd_out() {

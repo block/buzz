@@ -238,12 +238,15 @@ with a TypeScript lookup table or an id comparison in a component.
 
 12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
-    managed agent. Independently operated relay agents remain eligible in every
-    build when their NIP-OA-verified owner-authored `respond_to` policy admits
-    the viewer and their relay membership includes the target channel. Keep
-    native discovery and send-time revalidation fail closed on missing or
-    invalid ownership, policy, membership, or directory evidence; do not add a
-    cross-owner clamp to either mention path. Local `agents-data-changed` events
+    managed agent. Independently operated relay agents with NIP-OA ownership
+    remain eligible in every build when their verified owner's signed
+    `respond_to` policy admits the viewer and relay membership includes the
+    target channel. Marked builds require that verified owner coordinate but do
+    not require it to equal the viewer; OSS builds retain compatibility with
+    self-authored legacy directory records. Keep native discovery and send-time
+    revalidation fail closed on invalid ownership or managed policy evidence,
+    and on missing membership or directory evidence; do not add a cross-owner
+    clamp to either mention path. Local `agents-data-changed` events
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
 
