@@ -3512,7 +3512,13 @@ void main() {
         expect(
           tester.getTopLeft(stickySurface).dy,
           closeTo(
-            frostedAppBarHeight(tester.element(stickyHeader)) + Grid.twelve,
+            frostedAppBarHeight(
+                  tester.element(stickyHeader),
+                  titleContentHeight: tester
+                      .widget<FrostedAppBar>(find.byType(FrostedAppBar).first)
+                      .titleContentHeight,
+                ) +
+                Grid.twelve,
             1,
           ),
         );
