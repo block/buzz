@@ -271,6 +271,62 @@ class JourneyTests(unittest.TestCase):
             review_native.Driver(pathlib.Path("/tmp/driver"), 42, pathlib.Path("/tmp/snapshot"))
         self.assertEqual(popen.call_args.kwargs["env"], safe)
 
+    def test_launch_timeout_kills_and_reaps_term_ignoring_child(self):
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            review_native.subprocess.TimeoutExpired("buzz-desktop", 15),
+            0,
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            (run_dir / "logs").mkdir()
+            secret_path = run_dir / "identity.key"
+            secret_path.write_text("1" * 64)
+            app_binary = run_dir / "buzz-desktop"
+            app_binary.write_bytes(b"binary")
+            fixture = {
+                "secret_path": str(secret_path),
+                "identity_pubkey": "2" * 64,
+            }
+            isolation = review_native.isolation_manifest(
+                "run", "ws://127.0.0.1:3030"
+            )
+            with mock.patch.object(review_native.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(review_native.time, "monotonic", side_effect=[0, 61]), \
+                 mock.patch.object(review_native, "scrubbed_environment", return_value={"PATH": "/usr/bin"}):
+                with self.assertRaisesRegex(
+                    review_native.HarnessError,
+                    "timed out waiting for native Buzz process; Tauri launcher required SIGKILL",
+                ):
+                    review_native.build_and_launch(
+                        run_dir, isolation, fixture, "http://127.0.0.1/probe",
+                        "token", app_binary
+                    )
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in process.wait.call_args_list],
+            [15, 15],
+        )
+
+    def test_final_wait_timeout_is_reported(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = review_native.subprocess.TimeoutExpired(
+            "buzz-desktop", 15
+        )
+        errors = review_native.terminate_and_reap(process, "Tauri launcher")
+        self.assertEqual(
+            errors,
+            [
+                "Tauri launcher required SIGKILL",
+                "Tauri launcher remained alive after SIGKILL",
+            ],
+        )
+        self.assertEqual(process.wait.call_count, 2)
+
     def test_visible_window_waits_for_reveal(self):
         driver = mock.Mock()
         driver.request.side_effect = [

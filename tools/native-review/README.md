@@ -23,12 +23,14 @@ Create an isolated Python environment and install the pinned parser dependency:
 ```bash
 python3 -m venv .venv-native-review
 .venv-native-review/bin/pip install --require-hashes -r tools/native-review/requirements.txt
+export PATH="$PWD/.venv-native-review/bin:$PATH"
 ```
 
-Then run the harness with that interpreter first on `PATH`:
+Then run the harness. The exported `PATH` keeps the isolated interpreter active
+for the wrapper and direct Python commands:
 
 ```bash
-PATH="$PWD/.venv-native-review/bin:$PATH" just native-review-doctor
+just native-review-doctor
 just native-review-desktop tools/native-review/desktop/tooltip-fresh-dwell.yaml
 python3 -m unittest discover -s tools/native-review/tests -p 'test_*.py'
 ```

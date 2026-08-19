@@ -61,6 +61,7 @@ jobs:
               - 'desktop/src-tauri/**'
             native-review:
               - 'tools/native-review/**'
+              - 'scripts/setup-desktop-test-data.sh'
               - 'Justfile'
               - '.github/workflows/ci.yml'
             web:

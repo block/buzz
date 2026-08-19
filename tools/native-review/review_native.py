@@ -562,6 +562,33 @@ def build_native_review_app(isolation: dict[str, str]) -> pathlib.Path:
     return app_binary
 
 
+def terminate_and_reap(process: subprocess.Popen[str], label: str,
+                       timeout_seconds: float = 15) -> list[str]:
+    """Terminate a child and synchronously prove it has been reaped."""
+    errors = []
+    if process.poll() is not None:
+        process.wait()
+        return errors
+    try:
+        process.terminate()
+    except OSError as exc:
+        errors.append(f"{label} terminate failed: {exc}")
+    try:
+        process.wait(timeout=timeout_seconds)
+        return errors
+    except subprocess.TimeoutExpired:
+        errors.append(f"{label} required SIGKILL")
+    try:
+        process.kill()
+    except OSError as exc:
+        errors.append(f"{label} kill failed: {exc}")
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        errors.append(f"{label} remained alive after SIGKILL")
+    return errors
+
+
 def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: dict[str, Any],
                      probe_url: str, probe_token: str,
                      app_binary: pathlib.Path | None = None) -> tuple[subprocess.Popen[str], pathlib.Path, int]:
@@ -588,14 +615,19 @@ def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: 
                                stderr=subprocess.STDOUT, text=True)
     log.close()
     deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise HarnessError(f"Tauri exited during launch; see {run_dir / 'logs/app.log'}")
-        if run(["ps", "-p", str(process.pid), "-o", "comm="], check=False).stdout.rstrip().endswith("/buzz-desktop"):
-            return process, app_binary, process.pid
-        time.sleep(0.25)
-    process.terminate()
-    raise HarnessError("timed out waiting for native Buzz process")
+    try:
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise HarnessError(f"Tauri exited during launch; see {run_dir / 'logs/app.log'}")
+            if run(["ps", "-p", str(process.pid), "-o", "comm="], check=False).stdout.rstrip().endswith("/buzz-desktop"):
+                return process, app_binary, process.pid
+            time.sleep(0.25)
+        raise HarnessError("timed out waiting for native Buzz process")
+    except Exception as exc:
+        cleanup_errors = terminate_and_reap(process, "Tauri launcher")
+        if cleanup_errors:
+            raise HarnessError(f"{exc}; {'; '.join(cleanup_errors)}") from exc
+        raise
 
 def wait_for_visible_window(driver: Driver, process: subprocess.Popen[str], timeout_seconds: float = 30) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
@@ -786,11 +818,7 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
             except Exception as exc:
                 cleanup_errors.append(f"native driver cleanup failed: {exc}")
         if process and journey["cleanup"]["terminate_app"]:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill(); cleanup_errors.append("Tauri launcher required SIGKILL")
+            cleanup_errors.extend(terminate_and_reap(process, "Tauri launcher"))
         if journey["cleanup"]["remove_state"]:
             try:
                 cleanup_review_state(run_dir, isolation, fixture)
