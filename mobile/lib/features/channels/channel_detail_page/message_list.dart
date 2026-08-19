@@ -5,6 +5,7 @@ class _MessageList extends HookConsumerWidget {
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final InitialThreadRouteBehavior initialThreadRouteBehavior;
   final Set<String> initialOrdinaryUnreadMessageIds;
   final String? initialOldestOrdinaryUnreadMessageId;
   final Set<String> initialForcedUnreadMessageIds;
@@ -15,12 +16,15 @@ class _MessageList extends HookConsumerWidget {
   final bool isArchived;
   final double appBarTitleContentHeight;
   final double composerBottomInset;
+  final FocusNode? composerFocusNode;
+  final VoidCallback? restoreComposerFocus;
 
   const _MessageList({
     required this.entries,
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
+    required this.initialThreadRouteBehavior,
     required this.initialOrdinaryUnreadMessageIds,
     required this.initialOldestOrdinaryUnreadMessageId,
     required this.initialForcedUnreadMessageIds,
@@ -31,6 +35,8 @@ class _MessageList extends HookConsumerWidget {
     required this.isArchived,
     required this.appBarTitleContentHeight,
     required this.composerBottomInset,
+    this.composerFocusNode,
+    this.restoreComposerFocus,
   });
 
   @override
@@ -565,23 +571,30 @@ class _MessageList extends HookConsumerWidget {
       if (threadHead == null) return null;
       didOpenInitialThread.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted) return;
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: threadHead,
-              allMessages: allMessages,
-              channelId: channelId,
-              currentPubkey: currentPubkey,
-              isMember: isMember,
-              isArchived: isArchived,
-              initialMessageId: initialMessageId,
-            ),
+        if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) {
+          return;
+        }
+        final route = MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: allMessages,
+            channelId: channelId,
+            currentPubkey: currentPubkey,
+            isMember: isMember,
+            isArchived: isArchived,
+            initialMessageId: initialMessageId,
           ),
         );
+        final navigator = Navigator.of(context);
+        switch (initialThreadRouteBehavior) {
+          case InitialThreadRouteBehavior.push:
+            navigator.push(route);
+          case InitialThreadRouteBehavior.replaceCurrentRoute:
+            navigator.pushReplacement(route);
+        }
       });
       return null;
-    }, [initialThreadRootId, allMessages]);
+    }, [initialThreadRootId, allMessages, initialThreadRouteBehavior]);
 
     useEffect(() {
       final targetIndex = reversedIndexOf(initialMessageId);
@@ -804,6 +817,8 @@ class _MessageList extends HookConsumerWidget {
                           allMessages: allMessages,
                           isMember: isMember,
                           isArchived: isArchived,
+                          composerFocusNode: composerFocusNode,
+                          restoreComposerFocus: restoreComposerFocus,
                         ),
                         if (entry.summary != null)
                           _ThreadSummaryRow(

@@ -26,7 +26,7 @@ test("issue comments use the project activity timeline", async ({ page }) => {
   await installMockBridge(page);
   await openBuzzProject(page);
 
-  await page.getByRole("tab", { name: "Issues", exact: true }).click();
+  await page.getByRole("tab", { name: "Tasks", exact: true }).click();
   const issueRow = page.getByTestId("project-issue-row").first();
   await expect(issueRow).toBeVisible({ timeout: 10_000 });
   await issueRow.getByRole("button", { name: /^#/ }).click();
@@ -75,7 +75,7 @@ test("issue assignees can be assigned and unassigned", async ({ page }) => {
   await installMockBridge(page);
   await openBuzzProject(page);
 
-  await page.getByRole("tab", { name: "Issues", exact: true }).click();
+  await page.getByRole("tab", { name: "Tasks", exact: true }).click();
   const issueRow = page.getByTestId("project-issue-row").first();
   await expect(issueRow).toBeVisible({ timeout: 10_000 });
   await issueRow.getByRole("button", { name: /^#/ }).click();
@@ -94,6 +94,6 @@ test("issue assignees can be assigned and unassigned", async ({ page }) => {
   const unassign = page.getByTestId(`project-issue-unassign-${assignee}`);
   await expect(unassign).toBeVisible({ timeout: 10_000 });
   await unassign.click();
-  await expect(page.getByText("Issue unassigned.")).toBeVisible();
+  await expect(page.getByText("Task unassigned.")).toBeVisible();
   await expect(unassign).toHaveCount(0, { timeout: 10_000 });
 });

@@ -340,7 +340,7 @@ async function createProjectPullRequestComment({
     throw new Error("Comment location is invalid.");
   }
   if ((normalizedAnchor || decision) && !pullRequest.commit) {
-    throw new Error("Pull request commit is required for review comments.");
+    throw new Error("A review commit is required for review comments.");
   }
 
   const recipients = new Set([
@@ -387,8 +387,8 @@ async function createProjectPullRequestComment({
 
   await relayClient.publishEvent(
     event,
-    "Timed out posting pull request comment.",
-    "Failed to post pull request comment.",
+    "Timed out posting review comment.",
+    "Failed to post review comment.",
   );
 }
 
@@ -437,8 +437,8 @@ async function createProjectIssueComment({
 
   await relayClient.publishEvent(
     event,
-    "Timed out posting issue comment.",
-    "Failed to post issue comment.",
+    "Timed out posting task comment.",
+    "Failed to post task comment.",
   );
 }
 

@@ -2182,6 +2182,28 @@ pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Val
     result.get("models").cloned()
 }
 
+/// Extract the `configId` for the `thought_level` category option from a
+/// `session/new` result, if the adapter advertised one.
+///
+/// Claude Code's adapter uses `category: "thought_level"` in its `configOptions`.
+/// The configId is adapter-defined (e.g. `"effort"` on claude-agent-acp) and must
+/// not be hardcoded in the harness — this function discovers it at session time so
+/// the spawn-scoped effort application forwards the adapter's real id. Accepts both
+/// `configId` (ACP spec) and `id` (claude-agent-acp), matching the model-switch path.
+pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<String> {
+    let arr = result["configOptions"].as_array()?;
+    for opt in arr {
+        if opt.get("category").and_then(|c| c.as_str()) == Some("thought_level") {
+            let config_id = opt
+                .get("configId")
+                .or_else(|| opt.get("id"))
+                .and_then(|v| v.as_str())?;
+            return Some(config_id.to_string());
+        }
+    }
+    None
+}
+
 /// Match a desired model ID against a fresh `session/new` response.
 ///
 /// Returns the correct ACP method to call, or `None` if no match.
@@ -2749,6 +2771,54 @@ mod tests {
     fn extract_model_state_none_when_absent() {
         let result = serde_json::json!({ "sessionId": "sess-1" });
         assert!(super::extract_model_state(&result).is_none());
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_finds_config_id() {
+        let result = serde_json::json!({
+            "sessionId": "sess-1",
+            "configOptions": [
+                { "configId": "model", "category": "model" },
+                {
+                    "configId": "effort",
+                    "category": "thought_level",
+                    "options": [{ "value": "high" }, { "value": "low" }]
+                }
+            ]
+        });
+        assert_eq!(
+            super::extract_thought_level_config_id(&result).as_deref(),
+            Some("effort")
+        );
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_falls_back_to_id_key() {
+        let result = serde_json::json!({
+            "configOptions": [
+                { "id": "effort", "category": "thought_level" }
+            ]
+        });
+        assert_eq!(
+            super::extract_thought_level_config_id(&result).as_deref(),
+            Some("effort")
+        );
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_none_without_category() {
+        let result = serde_json::json!({
+            "configOptions": [
+                { "configId": "model", "category": "model" }
+            ]
+        });
+        assert!(super::extract_thought_level_config_id(&result).is_none());
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_none_without_config_options() {
+        let result = serde_json::json!({ "sessionId": "sess-1" });
+        assert!(super::extract_thought_level_config_id(&result).is_none());
     }
 
     #[test]

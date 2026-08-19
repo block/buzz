@@ -102,7 +102,7 @@ export function ProjectsCreateMenu({
               type="button"
             >
               <CircleDot />
-              Issue
+              Task
             </button>
             <button
               className={MENU_ITEM_CLASS}
@@ -111,7 +111,7 @@ export function ProjectsCreateMenu({
               type="button"
             >
               <GitPullRequest />
-              Pull Request
+              Review
             </button>
           </div>
         </div>

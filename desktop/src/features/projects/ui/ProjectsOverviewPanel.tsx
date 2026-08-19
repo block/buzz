@@ -107,16 +107,16 @@ export function ProjectsOverviewPanel({
               onClick={() => onSelectSection("repositories")}
             />
             <StatPill
-              count={stats.prs}
-              icon={GitPullRequest}
-              label="Pull requests"
-              onClick={() => onSelectSection("prs")}
-            />
-            <StatPill
               count={stats.issues}
               icon={CircleDot}
-              label="Issues"
+              label="Tasks"
               onClick={() => onSelectSection("issues")}
+            />
+            <StatPill
+              count={stats.prs}
+              icon={GitPullRequest}
+              label="Reviews"
+              onClick={() => onSelectSection("prs")}
             />
           </div>
           {metadata}

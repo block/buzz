@@ -28,7 +28,12 @@ import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { useProfileInteractionActions } from "@/features/profile/ui/useProfileInteractionActions";
 
-import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
+import {
+  DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+  Popover,
+  PopoverAnchor,
+  PopoverContent,
+} from "@/shared/ui/popover";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
@@ -51,7 +56,6 @@ type UserProfilePopoverProps = {
   botIdenticonValue?: string;
 };
 
-const HOVER_OPEN_DELAY_MS = 500;
 const HOVER_CLOSE_DELAY_MS = 200;
 
 const RUNTIME_LABELS: Record<string, string> = {
@@ -244,7 +248,7 @@ export function UserProfilePopover({
     clearHoverTimer();
     hoverTimerRef.current = setTimeout(() => {
       setOpen(true);
-    }, HOVER_OPEN_DELAY_MS);
+    }, DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS);
   }, [clearHoverTimer, enableHoverPopover]);
 
   const handleMouseLeave = React.useCallback(() => {

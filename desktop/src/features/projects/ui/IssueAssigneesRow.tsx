@@ -153,10 +153,10 @@ export function IssueAssigneesRow({
         });
         setPickerOpen(false);
         setAssigneeQuery("");
-        toast.success("Issue assigned.");
+        toast.success("Task assigned.");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to assign issue.",
+          error instanceof Error ? error.message : "Failed to assign task.",
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
@@ -178,10 +178,10 @@ export function IssueAssigneesRow({
           signerPubkey: operationSigner,
           signAsManagedOwner,
         });
-        toast.success("Issue unassigned.");
+        toast.success("Task unassigned.");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to unassign issue.",
+          error instanceof Error ? error.message : "Failed to unassign task.",
         );
       } finally {
         assignmentOperationInFlightRef.current = false;
@@ -248,7 +248,7 @@ export function IssueAssigneesRow({
       })}
       {canSelfAssign && viewer ? (
         <Button
-          className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
+          className="h-5 px-1 text-xs text-muted-foreground hover:text-foreground"
           data-testid="project-issue-self-assign"
           disabled={assignMutation.isPending || unassignMutation.isPending}
           onClick={() => {
@@ -265,7 +265,7 @@ export function IssueAssigneesRow({
         <Dialog onOpenChange={setPickerOpen} open={pickerOpen}>
           <DialogTrigger asChild>
             <Button
-              className="h-6 px-1 text-xs text-muted-foreground hover:text-foreground"
+              className="h-5 px-1 text-xs text-muted-foreground hover:text-foreground"
               data-testid="project-issue-assign"
               disabled={assignMutation.isPending || unassignMutation.isPending}
               size="xs"
@@ -277,9 +277,9 @@ export function IssueAssigneesRow({
           </DialogTrigger>
           <DialogContent className="max-w-md gap-0 overflow-hidden p-0">
             <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
-              <DialogTitle>Assign issue</DialogTitle>
+              <DialogTitle>Assign task</DialogTitle>
               <DialogDescription>
-                Choose a person or agent to work on this issue.
+                Choose a person or agent to work on this task.
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2 border-b border-border/60 px-6 py-3">

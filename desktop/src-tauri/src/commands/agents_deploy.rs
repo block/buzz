@@ -83,7 +83,25 @@ pub(super) fn build_launch_block(
         policy_env.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), value.to_string());
     }
     if let Some(value) = effective_model {
-        policy_env.insert("BUZZ_ACP_MODEL".into(), value.to_string());
+        // B2: remote env-authority model key. Claude's startup model authority
+        // is ANTHROPIC_MODEL (same as the local A1 path — the harness reads it
+        // first and skips the BUZZ_ACP_MODEL catalog-switch path that would
+        // introduce a second startup authority). All other runtimes use
+        // BUZZ_ACP_MODEL, which the harness reads into desired_model at spawn.
+        let is_claude = runtime.map(|r| r.id == "claude").unwrap_or(false);
+        let model_key = if is_claude {
+            "ANTHROPIC_MODEL"
+        } else {
+            "BUZZ_ACP_MODEL"
+        };
+        policy_env.insert(model_key.into(), value.to_string());
+    }
+    // I-4: remote parity for persisted startup effort. Mirrors the local spawn
+    // path in runtime.rs. The harness reads BUZZ_ACP_EFFORT_LEVEL into
+    // PoolStartup.startup_effort and applies it at first session creation via
+    // resolve_startup_effort().
+    if let Some(ref value) = record.effort_level {
+        policy_env.insert("BUZZ_ACP_EFFORT_LEVEL".into(), value.clone());
     }
     if let Some(value) = record.idle_timeout_seconds {
         policy_env.insert("BUZZ_ACP_IDLE_TIMEOUT".into(), value.to_string());
@@ -101,10 +119,41 @@ pub(super) fn build_launch_block(
         policy_env.insert("BUZZ_ACP_TEAM_INSTRUCTIONS".into(), value);
     }
 
+    // B5 remote parity: when a canonical effort_level is persisted, strip
+    // BUZZ_ACP_EFFORT_LEVEL from launch.env so it cannot shadow the canonical
+    // value in policy_env (tier 1). In the k8s three-tier model tier 2
+    // (launch.env) overwrites tier 1 (policy_env) — later-wins — so the key
+    // must be absent from tier 2 whenever a canonical value is present.
+    // When effort_level is None there is no canonical to protect, so user
+    // env passthrough stands (env may legitimately seed startup effort).
+    //
+    // B2 remote parity: mirror the local A1 model authority. For a Claude
+    // launch, ALWAYS strip BOTH BUZZ_ACP_MODEL and ANTHROPIC_MODEL from
+    // launch.env — the resolved canonical model rides policy_env.ANTHROPIC_MODEL
+    // alone (set above), and launch.env later-wins over policy_env. Left in
+    // launch.env, a user BUZZ_ACP_MODEL would introduce a second startup
+    // authority and a user ANTHROPIC_MODEL would silently override the
+    // canonical model. When no canonical model is present, neither key is in
+    // policy_env, so stripping them keeps the remote process free of both —
+    // matching local, where `apply_claude_model_env(None)` removes both.
+    let is_claude = runtime.map(|r| r.id == "claude").unwrap_or(false);
+    let strip_key = |k: &str| {
+        (record.effort_level.is_some() && k.eq_ignore_ascii_case("BUZZ_ACP_EFFORT_LEVEL"))
+            || (is_claude
+                && (k.eq_ignore_ascii_case("BUZZ_ACP_MODEL")
+                    || k.eq_ignore_ascii_case("ANTHROPIC_MODEL")))
+    };
+    let launch_env: BTreeMap<String, String> = descriptor
+        .env
+        .iter()
+        .filter(|(k, _)| !strip_key(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     serde_json::json!({
         "command": descriptor.command,
         "args": descriptor.args,
-        "env": descriptor.env,
+        "env": launch_env,
         "policy_env": policy_env,
         "owner_pubkey": owner_pubkey,
     })
@@ -284,11 +333,225 @@ mod tests {
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SESSION_TITLE"], "Agent Name");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_DISPLAY_NAME"], "Agent Name");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_SYSTEM_PROMPT"], "prompt");
+        // goose runtime: model goes via BUZZ_ACP_MODEL (non-claude path).
         assert_eq!(launch["policy_env"]["BUZZ_ACP_MODEL"], "model");
+        assert!(
+            launch["policy_env"]["ANTHROPIC_MODEL"].is_null(),
+            "goose must NOT receive ANTHROPIC_MODEL"
+        );
         assert_eq!(launch["policy_env"]["BUZZ_ACP_IDLE_TIMEOUT"], "17");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_MAX_TURN_DURATION"], "23");
         assert_eq!(launch["policy_env"]["BUZZ_ACP_AGENTS"], "4");
         assert_eq!(launch["owner_pubkey"], "owner-hex");
+    }
+
+    #[test]
+    fn launch_block_claude_runtime_uses_anthropic_model_not_buzz_acp_model() {
+        // B2: remote claude deploys must send ANTHROPIC_MODEL, not BUZZ_ACP_MODEL,
+        // so the remote harness has a single startup model authority matching A1.
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "claude".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let teams: Vec<TeamRecord> = vec![];
+        let launch = build_launch_block(
+            &record,
+            &descriptor,
+            &teams,
+            None,
+            Some("claude-opus-4"),
+            "owner-hex",
+        );
+        assert_eq!(
+            launch["policy_env"]["ANTHROPIC_MODEL"], "claude-opus-4",
+            "claude remote must receive ANTHROPIC_MODEL"
+        );
+        assert!(
+            launch["policy_env"]["BUZZ_ACP_MODEL"].is_null(),
+            "claude remote must NOT receive BUZZ_ACP_MODEL"
+        );
+    }
+
+    /// F2: remote Claude launch must mirror local A1 — ALWAYS strip BOTH
+    /// BUZZ_ACP_MODEL and ANTHROPIC_MODEL from launch.env (tier 2), so the
+    /// canonical model in policy_env (tier 1) is the sole authority. Since
+    /// launch.env later-wins over policy_env, a user BUZZ_ACP_MODEL would add a
+    /// second startup authority and a user ANTHROPIC_MODEL would silently
+    /// override the canonical model.
+    #[test]
+    fn launch_block_claude_strips_both_model_keys_from_launch_env() {
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "claude".into(),
+            args: vec![],
+            env: BTreeMap::from([
+                ("BUZZ_ACP_MODEL".to_string(), "user-sonnet".to_string()),
+                ("ANTHROPIC_MODEL".to_string(), "user-opus".to_string()),
+                ("KEEP_ME".to_string(), "yes".to_string()),
+            ]),
+        };
+        let launch = build_launch_block(
+            &record,
+            &descriptor,
+            &[],
+            None,
+            Some("claude-opus-4"),
+            "owner-hex",
+        );
+
+        // Canonical model rides policy_env alone.
+        assert_eq!(launch["policy_env"]["ANTHROPIC_MODEL"], "claude-opus-4");
+        assert!(launch["policy_env"]["BUZZ_ACP_MODEL"].is_null());
+        // Both model keys are stripped from launch.env — neither can later-win.
+        assert!(
+            launch["env"]["BUZZ_ACP_MODEL"].is_null(),
+            "user BUZZ_ACP_MODEL must be stripped from launch.env for claude"
+        );
+        assert!(
+            launch["env"]["ANTHROPIC_MODEL"].is_null(),
+            "user ANTHROPIC_MODEL must be stripped from launch.env for claude"
+        );
+        // Unrelated user env survives.
+        assert_eq!(launch["env"]["KEEP_ME"], "yes");
+    }
+
+    /// F2: when no canonical model resolves, a Claude launch still strips both
+    /// model keys from launch.env, so neither authority reaches the remote
+    /// process — matching local `apply_claude_model_env(None)`, which removes
+    /// both.
+    #[test]
+    fn launch_block_claude_strips_model_keys_even_without_canonical() {
+        let record = record();
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "claude".into(),
+            args: vec![],
+            env: BTreeMap::from([
+                ("BUZZ_ACP_MODEL".to_string(), "user-sonnet".to_string()),
+                ("ANTHROPIC_MODEL".to_string(), "user-opus".to_string()),
+            ]),
+        };
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+
+        assert!(launch["policy_env"]["ANTHROPIC_MODEL"].is_null());
+        assert!(launch["policy_env"]["BUZZ_ACP_MODEL"].is_null());
+        assert!(
+            launch["env"]["BUZZ_ACP_MODEL"].is_null(),
+            "user BUZZ_ACP_MODEL must be stripped even without a canonical model"
+        );
+        assert!(
+            launch["env"]["ANTHROPIC_MODEL"].is_null(),
+            "user ANTHROPIC_MODEL must be stripped even without a canonical model"
+        );
+    }
+
+    /// F2: non-Claude runtimes must NOT strip model keys from launch.env — the
+    /// model authority stripping is Claude-specific (BUZZ_ACP_MODEL is the
+    /// spawn authority for other runtimes and rides policy_env there).
+    #[test]
+    fn launch_block_non_claude_preserves_user_model_env() {
+        let record = record(); // goose command
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "goose".into(),
+            args: vec![],
+            env: BTreeMap::from([("BUZZ_ACP_MODEL".to_string(), "user-model".to_string())]),
+        };
+        let launch =
+            build_launch_block(&record, &descriptor, &[], None, Some("model"), "owner-hex");
+
+        // goose puts canonical in policy_env, and the user launch.env value is
+        // preserved (later-wins is the intended goose behavior).
+        assert_eq!(launch["policy_env"]["BUZZ_ACP_MODEL"], "model");
+        assert_eq!(launch["env"]["BUZZ_ACP_MODEL"], "user-model");
+    }
+
+    #[test]
+    fn launch_block_claude_runtime_injects_effort_level_when_set() {
+        // I-4: remote parity — record.effort_level → BUZZ_ACP_EFFORT_LEVEL in policy_env.
+        let mut record = record();
+        record.effort_level = Some("high".to_string());
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "claude".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_EFFORT_LEVEL"], "high",
+            "claude remote must receive BUZZ_ACP_EFFORT_LEVEL when effort_level is set"
+        );
+    }
+
+    #[test]
+    fn launch_block_does_not_inject_effort_level_when_absent() {
+        // I-4: no BUZZ_ACP_EFFORT_LEVEL in policy_env when record.effort_level is None.
+        let record = record(); // effort_level is None by default
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "claude".into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        };
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+        assert!(
+            launch["policy_env"]["BUZZ_ACP_EFFORT_LEVEL"].is_null(),
+            "policy_env must NOT contain BUZZ_ACP_EFFORT_LEVEL when effort_level is None"
+        );
+    }
+
+    /// B5 remote parity: when a canonical effort_level is persisted, a conflicting
+    /// user-supplied BUZZ_ACP_EFFORT_LEVEL in descriptor.env must NOT shadow it.
+    /// The canonical value in policy_env (tier 1) must win in the final build_env
+    /// output — the key must be absent from launch.env (tier 2) so tier 1 is
+    /// authoritative.
+    #[test]
+    fn launch_block_canonical_effort_strips_user_env_collision() {
+        let mut record = record();
+        record.effort_level = Some("high".to_string());
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "claude".into(),
+            args: vec![],
+            // User-supplied conflicting value in descriptor.env.
+            env: BTreeMap::from([("BUZZ_ACP_EFFORT_LEVEL".to_string(), "low".to_string())]),
+        };
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+
+        // Canonical must be in policy_env (tier 1).
+        assert_eq!(
+            launch["policy_env"]["BUZZ_ACP_EFFORT_LEVEL"], "high",
+            "canonical effort must be in policy_env when record.effort_level is Some"
+        );
+        // Conflicting user value must be absent from launch.env (tier 2) so it
+        // cannot shadow the canonical tier-1 value in build_env.
+        assert!(
+            launch["env"]["BUZZ_ACP_EFFORT_LEVEL"].is_null(),
+            "user BUZZ_ACP_EFFORT_LEVEL must be stripped from launch.env when canonical is present"
+        );
+    }
+
+    /// B5 remote parity: when no canonical effort is persisted (effort_level is
+    /// None), a user-supplied BUZZ_ACP_EFFORT_LEVEL in descriptor.env survives
+    /// into launch.env — passthrough preserved for startup seeding.
+    #[test]
+    fn launch_block_user_effort_env_survives_when_no_canonical_value() {
+        let record = record(); // effort_level is None
+        let descriptor = EffectiveHarnessDescriptor {
+            command: "claude".into(),
+            args: vec![],
+            env: BTreeMap::from([("BUZZ_ACP_EFFORT_LEVEL".to_string(), "low".to_string())]),
+        };
+        let launch = build_launch_block(&record, &descriptor, &[], None, None, "owner-hex");
+
+        // No canonical — key must NOT appear in policy_env.
+        assert!(
+            launch["policy_env"]["BUZZ_ACP_EFFORT_LEVEL"].is_null(),
+            "policy_env must NOT contain BUZZ_ACP_EFFORT_LEVEL when effort_level is None"
+        );
+        // User value must survive in launch.env so the harness can use it.
+        assert_eq!(
+            launch["env"]["BUZZ_ACP_EFFORT_LEVEL"], "low",
+            "user-supplied effort must survive in launch.env when no canonical value"
+        );
     }
 
     /// OpenClaw descriptor: `launch.policy_env["BUZZ_ACP_AGENTS"]` must be "5"

@@ -79,7 +79,11 @@ export function ProfileIdentityButton({
 
   return (
     <UserProfilePopover pubkey={pubkey} triggerElement="span">
-      <button className={className} type="button">
+      <button
+        aria-label={showLabel ? undefined : label}
+        className={className}
+        type="button"
+      >
         {inner}
       </button>
     </UserProfilePopover>
