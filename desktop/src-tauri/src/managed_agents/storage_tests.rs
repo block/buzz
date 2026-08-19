@@ -12,8 +12,8 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 use super::{
-    agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
-    KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
+    agent_keyring_name, hydrate_keys_with, managed_agent_record_exists_at_path, migrate_inline_key,
+    persist_agent_keys_with, KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
 };
 
 /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -141,6 +141,28 @@ fn record_with_pubkey_and_key(pubkey: &str, nsec: &str) -> ManagedAgentRecord {
         }}"#
     ))
     .expect("sample record")
+}
+
+#[test]
+fn ownership_lookup_deserializes_only_pubkey() {
+    let mut file = NamedTempFile::new().expect("temp agent store");
+    file.write_all(
+        br#"[{"pubkey":"target-pubkey","private_key_nsec":{"must":"stay ignored"},"future_schema":{"nested":[1,2,3]}}]"#,
+    )
+    .expect("write agent store");
+
+    assert!(
+        serde_json::from_str::<Vec<ManagedAgentRecord>>(
+            &std::fs::read_to_string(file.path()).expect("read fixture")
+        )
+        .is_err(),
+        "fixture must fail full-record deserialization"
+    );
+    assert_eq!(
+        managed_agent_record_exists_at_path(file.path(), "target-pubkey"),
+        Ok(true),
+        "ownership preflight must ignore secret and unrelated record fields"
+    );
 }
 
 #[test]

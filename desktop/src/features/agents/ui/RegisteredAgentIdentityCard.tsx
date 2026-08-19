@@ -1,6 +1,7 @@
 import { Copy, EllipsisVertical, Trash2 } from "lucide-react";
 
 import {
+  registeredAgentAriaLabel,
   registeredAgentRoleSummary,
   resolveRegisteredAgentDisplay,
 } from "@/features/agents/lib/registeredAgentCards";
@@ -79,7 +80,7 @@ export function RegisteredAgentIdentityCard({
           </DropdownMenuContent>
         </DropdownMenu>
       }
-      ariaLabel={`${display.label} externally managed agent profile, public key ${reference.pubkey}`}
+      ariaLabel={registeredAgentAriaLabel(display.label, reference.pubkey)}
       avatarUrl={display.avatarUrl}
       dataTestId={`registered-agent-${reference.pubkey}`}
       label={display.label}

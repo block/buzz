@@ -262,9 +262,18 @@ pub(crate) fn managed_agent_record_exists(app: &AppHandle, pubkey: &str) -> Resu
     managed_agent_record_exists_at_path(&managed_agents_store_path(app)?, pubkey)
 }
 
+/// Minimal projection for ownership preflight. Unknown fields—including any
+/// inline private key fallback—are skipped by Serde instead of materialized in
+/// a `ManagedAgentRecord`.
+#[derive(serde::Deserialize)]
+struct ManagedAgentOwnershipRecord {
+    #[serde(default)]
+    pubkey: String,
+}
+
 /// Path-based ownership lookup used by the command-boundary regression tests.
-/// It intentionally shares the raw, non-hydrating read used in production so
-/// proving a rejected target cannot touch the keyring does not itself touch it.
+/// It intentionally reads only the public-key projection used in production so
+/// proving a rejected target cannot touch the keyring or materialize secrets.
 pub(crate) fn managed_agent_record_exists_at_path(
     path: &Path,
     pubkey: &str,
@@ -274,10 +283,11 @@ pub(crate) fn managed_agent_record_exists_at_path(
     }
     let content =
         fs::read_to_string(path).map_err(|error| format!("failed to read agent store: {error}"))?;
-    let records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|error| {
-        backup_invalid_store(path);
-        format!("failed to parse agent store (preserved as .invalid): {error}")
-    })?;
+    let records: Vec<ManagedAgentOwnershipRecord> =
+        serde_json::from_str(&content).map_err(|error| {
+            backup_invalid_store(path);
+            format!("failed to parse agent store (preserved as .invalid): {error}")
+        })?;
     Ok(records
         .iter()
         .any(|record| !record.pubkey.is_empty() && record.pubkey == pubkey))

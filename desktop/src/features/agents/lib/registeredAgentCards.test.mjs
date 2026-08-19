@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   dedupeRegisteredAgentsAgainstManaged,
+  registeredAgentAriaLabel,
   resolveRegisteredAgentDisplay,
   registeredAgentRoleSummary,
   visibleRegisteredAgentReferences,
@@ -48,6 +49,12 @@ test("role summary is always an externally managed suffix", () => {
     "reviewer · Externally managed",
   );
   assert.equal(registeredAgentRoleSummary(null), "Externally managed");
+});
+
+test("accessible card label distinguishes the key without reading all 64 characters", () => {
+  const label = registeredAgentAriaLabel("External", PUBKEY);
+  assert.match(label, new RegExp(`${PUBKEY.slice(0, 8)}.*${PUBKEY.slice(-4)}`));
+  assert.equal(label.includes(PUBKEY), false);
 });
 
 test("registered references are deduped against managed pubkeys", () => {

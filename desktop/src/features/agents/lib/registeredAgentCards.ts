@@ -15,6 +15,15 @@ export function registeredAgentRoleSummary(roleSummary: string | null): string {
     : "Externally managed";
 }
 
+export function registeredAgentAriaLabel(
+  label: string,
+  pubkey: string,
+): string {
+  return `${label} externally managed agent profile, public key ${truncatePubkey(
+    normalizePubkey(pubkey),
+  )}`;
+}
+
 export function resolveRegisteredAgentDisplay({
   reference,
   profile,
