@@ -3602,6 +3602,9 @@ const DEFAULT_MOCK_DEVICE_IDENTITY = {
   createdAt: "2026-01-01T00:00:00Z",
 };
 let mockDeviceIdentity = { ...DEFAULT_MOCK_DEVICE_IDENTITY };
+// Stands in for the OS host name the settings card offers as an opt-in. Kept
+// distinct from MOCK_DEVICE_LABEL so a test can tell "suggested" from "applied".
+const MOCK_HOSTNAME_SUGGESTION = "marys-macbook";
 
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
@@ -12753,6 +12756,8 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "get_device_identity":
         return { ...mockDeviceIdentity };
+      case "get_device_name_suggestion":
+        return MOCK_HOSTNAME_SUGGESTION;
       case "set_device_label": {
         const label = (payload as { label?: unknown } | undefined)?.label;
         if (typeof label === "string" && label.trim().length > 0) {

@@ -12,7 +12,9 @@ mod backend;
 pub(crate) mod claude_config;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
-mod definition_validation;
+// `pub(crate)` so the device-identity and inbound-directory paths can reuse the
+// one visible-text policy instead of growing a second, drifting copy.
+pub(crate) mod definition_validation;
 mod discovery;
 pub(crate) mod effective_config;
 mod env_vars;

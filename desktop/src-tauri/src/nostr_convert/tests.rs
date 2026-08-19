@@ -496,6 +496,73 @@ fn managed_agent_directory_surfaces_the_owner_verified_device_label() {
     assert_eq!(agents[0].device_label, None);
 }
 
+/// Owner authentication proves authorship, not well-formedness: a sibling
+/// device on an older, buggy, or tampered build can sign anything. A bad value
+/// must degrade to `None` on its own without hiding a real, reachable agent.
+#[test]
+fn managed_agent_directory_drops_invalid_device_metadata_but_keeps_the_agent() {
+    let agent_keys = Keys::generate();
+    let owner_keys = Keys::generate();
+    let agent_pubkey = agent_keys.public_key().to_hex();
+
+    let auth_tag_json =
+        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+            .expect("compute auth tag");
+    let auth_tag_values: Vec<String> =
+        serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+    let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Bumble"}"#)
+        .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+        .sign_with_keys(&agent_keys)
+        .expect("sign profile");
+
+    // A bidi override in the label and a malformed id, both correctly signed.
+    let hostile = EventBuilder::new(
+        Kind::Custom(30177),
+        serde_json::json!({
+            "name": "Bumble",
+            "parallelism": 1,
+            "respond_to": "anyone",
+            "device_id": "not-a-uuid",
+            "device_label": "mfeth\u{202E}win",
+        })
+        .to_string(),
+    )
+    .tags([Tag::parse(["d", agent_pubkey.as_str()]).expect("parse d tag")])
+    .sign_with_keys(&owner_keys)
+    .expect("sign managed-agent event");
+
+    let agents = relay_agents_from_managed_agent_events(&[hostile], std::slice::from_ref(&profile));
+    assert_eq!(agents.len(), 1, "the agent itself must still be reachable");
+    assert_eq!(agents[0].name, "Bumble");
+    assert_eq!(agents[0].device_id, None, "malformed id dropped");
+    assert_eq!(agents[0].device_label, None, "bidi-bearing label dropped");
+
+    // An over-long label is refused by the same policy.
+    let long = EventBuilder::new(
+        Kind::Custom(30177),
+        serde_json::json!({
+            "name": "Bumble",
+            "parallelism": 1,
+            "respond_to": "anyone",
+            "device_id": "0123456789abcdef0123456789abcdef",
+            "device_label": "a".repeat(33),
+        })
+        .to_string(),
+    )
+    .tags([Tag::parse(["d", agent_pubkey.as_str()]).expect("parse d tag")])
+    .sign_with_keys(&owner_keys)
+    .expect("sign managed-agent event");
+
+    let agents = relay_agents_from_managed_agent_events(&[long], std::slice::from_ref(&profile));
+    assert_eq!(agents.len(), 1);
+    assert_eq!(
+        agents[0].device_id.as_deref(),
+        Some("0123456789abcdef0123456789abcdef"),
+        "a valid id survives its label being dropped"
+    );
+    assert_eq!(agents[0].device_label, None);
+}
+
 #[test]
 fn managed_agent_directory_rejects_agents_without_verified_owner_profiles() {
     let owner_keys = Keys::generate();

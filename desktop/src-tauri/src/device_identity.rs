@@ -22,12 +22,16 @@
 //!
 //! # Privacy
 //!
-//! `device_label` is seeded from the OS host name and is published in a
-//! world-readable kind:30177 event (see
-//! [`crate::managed_agents::agent_events`]). Host names routinely contain a
-//! real person's name, so the label is user-editable via [`set_device_label`]
-//! and capped/sanitized by [`sanitize_label`]. The opaque `device_id` alone is
-//! enough to tell N devices apart.
+//! `device_label` is published in a world-readable kind:30177 event (see
+//! [`crate::managed_agents::agent_events`]), so it starts **opaque** —
+//! `device-<8 hex>`, derived from the id and saying nothing about the machine.
+//! Host names routinely contain a real person's name, so the OS host name is
+//! only ever *offered* as a suggestion ([`hostname_suggestion`]) and reaches the
+//! relay solely when the owner applies it via [`set_device_label`]. Every label,
+//! whichever boundary it arrives from — typed, loaded from disk, or received
+//! from a peer — passes [`validate_device_label`], the same visible-text policy
+//! that guards agent definition text. The opaque `device_id` alone is enough to
+//! tell N devices apart.
 
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
@@ -35,10 +39,8 @@ use std::sync::{PoisonError, RwLock};
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
+use crate::managed_agents::definition_validation::validate_device_label;
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
-
-/// Maximum length of a device label, in `char`s.
-const MAX_DEVICE_LABEL_CHARS: usize = 32;
 
 /// Stable identity of the computer this Buzz install runs on.
 ///
@@ -49,8 +51,9 @@ const MAX_DEVICE_LABEL_CHARS: usize = 32;
 pub struct DeviceIdentity {
     /// Opaque uuid v4 (simple hex, 32 chars). Never derived from hardware.
     pub device_id: String,
-    /// Human label shown beside this device's agents on other devices.
-    /// Seeded from the OS host name at first run.
+    /// Human label shown beside this device's agents on other devices. Starts
+    /// opaque (`device-<8 hex>`); the owner may rename it, including to the OS
+    /// host name, which is never applied without that explicit choice.
     pub device_label: String,
     /// RFC 3339 first-run timestamp. Diagnostics only.
     pub created_at: String,
@@ -64,44 +67,70 @@ pub struct DeviceIdentity {
 /// existed.
 static CURRENT: RwLock<Option<DeviceIdentity>> = RwLock::new(None);
 
-/// Normalize a user-supplied or host-derived device label.
+/// Normalize a user-supplied device label.
 ///
-/// Trims, rejects an empty or control-character-bearing value, and caps the
-/// result at [`MAX_DEVICE_LABEL_CHARS`] `char`s. Control characters are refused
-/// rather than stripped because the label is published to a relay and rendered
-/// in other clients' UI.
+/// Trims, then enforces the shared visible-text policy
+/// ([`validate_device_label`]) — which rejects not only `Cc` control
+/// characters but the `Cf` format characters `char::is_control` misses, such as
+/// zero-width spaces and bidi overrides. An over-long label is **refused, not
+/// truncated**: silently publishing something other than what the owner typed
+/// is worse than telling them it is too long.
 fn sanitize_label(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("device label must not be empty".to_string());
-    }
-    if trimmed.chars().any(char::is_control) {
-        return Err("device label must not contain control characters".to_string());
-    }
-    let capped: String = trimmed.chars().take(MAX_DEVICE_LABEL_CHARS).collect();
-    let capped = capped.trim_end();
-    if capped.is_empty() {
-        return Err("device label must not be empty".to_string());
-    }
-    Ok(capped.to_string())
+    validate_device_label(trimmed)?;
+    Ok(trimmed.to_string())
 }
 
-/// Derive the first-run label from `seed` (the OS host name), falling back to
-/// an id-derived placeholder when the seed sanitizes to nothing.
+/// The opaque, id-derived label every device starts with.
 ///
-/// The fallback is deliberately opaque: a device with an unusable host name
-/// still gets a stable, distinguishable label without inventing a plausible
-/// but wrong name.
-fn seed_label(seed: &str, device_id: &str) -> String {
-    sanitize_label(seed)
-        .unwrap_or_else(|_| format!("device-{}", device_id.chars().take(8).collect::<String>()))
+/// Deliberately says nothing about the machine. See [`mint_identity`].
+fn opaque_label(device_id: &str) -> String {
+    format!("device-{}", device_id.chars().take(8).collect::<String>())
 }
 
-/// Mint a brand-new identity, seeding the label from the OS host name.
+/// Validate a `device_id` against the shape [`mint_identity`] produces:
+/// 32 lowercase hex digits (a uuid v4 in simple form).
+///
+/// Shared with the inbound relay path, which must not trust a peer's value.
+pub(crate) fn validate_device_id(device_id: &str) -> Result<(), String> {
+    if device_id.len() == 32
+        && device_id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+    {
+        return Ok(());
+    }
+    Err("device id must be 32 lowercase hex characters".to_string())
+}
+
+/// Validate a whole identity, whichever boundary it arrived from.
+fn validate_identity(identity: &DeviceIdentity) -> Result<(), String> {
+    validate_device_id(&identity.device_id)?;
+    validate_device_label(&identity.device_label)
+}
+
+/// The OS host name, offered to the owner as a suggested device name.
+///
+/// Returns `None` when the host name is unusable — empty, over-long, or
+/// carrying characters the label policy refuses. This is only ever a
+/// *suggestion*: nothing here reaches the relay until the owner applies it.
+pub fn hostname_suggestion() -> Option<String> {
+    let host = gethostname::gethostname();
+    let host = host.to_string_lossy();
+    sanitize_label(&host).ok()
+}
+
+/// Mint a brand-new identity with an **opaque** label.
+///
+/// The label is *not* seeded from the OS host name. Host names routinely carry
+/// a real person's name ("marys-macbook"), and this label is published in a
+/// world-readable kind:30177 event — so seeding from it would publish that name
+/// before the owner had seen any warning or had a chance to edit it. The owner
+/// opts into the host name explicitly, via [`hostname_suggestion`] surfaced in
+/// the device-name settings card.
 fn mint_identity() -> DeviceIdentity {
     let device_id = uuid::Uuid::new_v4().simple().to_string();
-    let host = gethostname::gethostname();
-    let device_label = seed_label(&host.to_string_lossy(), &device_id);
+    let device_label = opaque_label(&device_id);
     DeviceIdentity {
         device_id,
         device_label,
@@ -117,11 +146,17 @@ fn write_identity_at(path: &Path, identity: &DeviceIdentity) -> Result<(), Strin
 }
 
 /// Load the identity at `path`, minting and persisting a fresh one when the
-/// file is absent, unreadable, or malformed.
+/// file is absent, unreadable, malformed, **or invalid**.
 ///
-/// A corrupt file is preserved as `device.json.corrupt` (best effort) and
-/// replaced. Losing the identity only *relabels* a device — it never touches
-/// agent data — so this path must never fail the caller.
+/// Deserializing proves only that the JSON has the right shape. The stored file
+/// is on disk, editable by hand, and survives downgrades — so the contents are
+/// revalidated here against the same policy [`set_label`] enforces. Without
+/// that, a hand-edited `device.json` carrying a 5000-character label or a bidi
+/// override would be published to the relay unchecked.
+///
+/// A file that fails either step is preserved as `device.json.corrupt` (best
+/// effort) and replaced. Losing the identity only *relabels* a device — it
+/// never touches agent data — so this path must never fail the caller.
 fn load_or_create_at(path: &Path) -> Result<DeviceIdentity, String> {
     if path.exists() {
         match std::fs::read_to_string(path)
@@ -129,6 +164,11 @@ fn load_or_create_at(path: &Path) -> Result<DeviceIdentity, String> {
             .and_then(|content| {
                 serde_json::from_str::<DeviceIdentity>(&content)
                     .map_err(|e| format!("failed to parse device identity: {e}"))
+            })
+            .and_then(|identity| {
+                validate_identity(&identity)
+                    .map(|()| identity)
+                    .map_err(|e| format!("stored device identity is invalid: {e}"))
             }) {
             Ok(identity) => return Ok(identity),
             Err(error) => {
@@ -189,6 +229,60 @@ pub fn current() -> Option<DeviceIdentity> {
         .clone()
 }
 
+/// Serializes every test that reads or writes [`CURRENT`].
+///
+/// `CURRENT` is process-global and Rust runs a binary's tests on parallel
+/// threads, so without this a test that seeds a device would race one asserting
+/// there is none. That is exactly the failure mode of the crate's known-flaky
+/// `claude_spawn_uses_the_probed_cli_executable`, which mutates the global
+/// `PATH`; do not reproduce it here.
+#[cfg(test)]
+pub(crate) static DEVICE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII seam letting a test exercise a code path that branches on a device
+/// being cached. Holds [`DEVICE_TEST_LOCK`] and restores the previous value on
+/// drop, so tests stay order-independent.
+///
+/// Test-only: `#[cfg(test)]` keeps it out of every release artifact, so the
+/// cache stays writable only by [`ensure`] and [`set_label`] in production.
+#[cfg(test)]
+pub(crate) struct DeviceGuard {
+    previous: Option<DeviceIdentity>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl DeviceGuard {
+    /// Install `identity` as the cached device for the guard's lifetime.
+    pub(crate) fn set(identity: Option<DeviceIdentity>) -> Self {
+        let _lock = DEVICE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let previous = CURRENT
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        *CURRENT.write().unwrap_or_else(PoisonError::into_inner) = identity;
+        Self { previous, _lock }
+    }
+
+    /// A deterministic device for assertions.
+    pub(crate) fn sample() -> DeviceIdentity {
+        DeviceIdentity {
+            device_id: "0123456789abcdef0123456789abcdef".to_string(),
+            device_label: "studio-mac".to_string(),
+            created_at: "2026-01-01T00:00:00+00:00".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DeviceGuard {
+    fn drop(&mut self) {
+        *CURRENT.write().unwrap_or_else(PoisonError::into_inner) = self.previous.take();
+    }
+}
+
 /// Rename this device, persisting and caching the result.
 ///
 /// The new label reaches other devices on the next kind:30177 republish. The
@@ -208,12 +302,35 @@ pub fn get_device_identity(app: AppHandle) -> Result<DeviceIdentity, String> {
     ensure(&app)
 }
 
-/// Rename this device and republish every local agent's kind:30177 record so
-/// other devices see the new label without waiting for the next app restart.
+/// Return the OS host name as a *suggested* device name, or `None` when it is
+/// unusable under the label policy.
 ///
-/// The republish is best-effort: a rename that persists locally but cannot
-/// reach the retention store still succeeds, and propagates on the next agent
-/// mutation or restart.
+/// Purely advisory: the settings card offers it, and nothing is published until
+/// the owner applies it via [`set_device_label`]. See [`mint_identity`] for why
+/// the host name is not the default.
+#[tauri::command]
+pub fn get_device_name_suggestion() -> Option<String> {
+    hostname_suggestion()
+}
+
+/// Rename this device and republish the **active community's** local agents so
+/// its members see the new label without waiting for the next app restart.
+///
+/// Scope, stated precisely because it is narrower than it looks: republishing
+/// needs a retention scope, and a scope carries the owner keys for one
+/// `(owner, relay)` pair — which are only resolved for the community currently
+/// applied. Agents in the owner's *other* configured communities keep
+/// publishing the old label until that community is next activated, at which
+/// point `run_event_sync` reconciles them with the current label. So
+/// propagation is eventual everywhere, immediate only here.
+///
+/// Republishing every scope up front would mean resolving owner keys for
+/// communities that are not applied — a change to identity handling, not to
+/// this command, and out of scope for Stage 0.
+///
+/// The republish is best-effort in the other direction too: a rename that
+/// persists locally but cannot reach the retention store still succeeds, and
+/// propagates on the next agent mutation or restart.
 #[tauri::command]
 pub fn set_device_label(app: AppHandle, label: String) -> Result<DeviceIdentity, String> {
     let identity = set_label(&app, &label)?;
@@ -261,25 +378,100 @@ mod tests {
         assert!(sanitize_label("mfeth\nwin").is_err());
     }
 
+    /// Over-long labels are refused, never silently shortened: publishing
+    /// something other than what the owner typed is the worse failure.
     #[test]
-    fn sanitize_label_truncates_to_thirty_two_chars() {
-        let long = "a".repeat(100);
-        let sanitized = sanitize_label(&long).unwrap();
-        assert_eq!(sanitized.chars().count(), 32);
-        assert_eq!(sanitized, "a".repeat(32));
+    fn sanitize_label_rejects_over_thirty_two_chars() {
+        assert!(sanitize_label(&"a".repeat(33)).is_err());
+        assert_eq!(sanitize_label(&"a".repeat(32)).unwrap(), "a".repeat(32));
+    }
+
+    /// `char::is_control` covers only category `Cc`. These are `Cf`, and a bidi
+    /// override can visually reorder the text rendered around the label.
+    #[test]
+    fn sanitize_label_rejects_format_characters_is_control_would_miss() {
+        assert!(!'\u{202E}'.is_control(), "precondition: RLO is not Cc");
+        assert!(!'\u{200B}'.is_control(), "precondition: ZWSP is not Cc");
+        assert!(sanitize_label("mfeth\u{202E}win").is_err(), "bidi override");
+        assert!(
+            sanitize_label("mfeth\u{200B}win").is_err(),
+            "zero width space"
+        );
+        assert!(sanitize_label("mfeth\u{2066}win").is_err(), "bidi isolate");
     }
 
     #[test]
-    fn seed_label_falls_back_to_id_derived_label() {
-        let device_id = "0123456789abcdef0123456789abcdef";
-        assert_eq!(seed_label("  ", device_id), "device-01234567");
-        assert_eq!(seed_label("\u{0}", device_id), "device-01234567");
+    fn opaque_label_is_derived_from_the_id() {
+        assert_eq!(
+            opaque_label("0123456789abcdef0123456789abcdef"),
+            "device-01234567"
+        );
+    }
+
+    /// A minted identity must not leak the OS host name — it is published
+    /// world-readable before the owner has seen any warning.
+    #[test]
+    fn mint_identity_uses_an_opaque_label_not_the_hostname() {
+        let identity = mint_identity();
+        assert_eq!(identity.device_label, opaque_label(&identity.device_id));
+        assert!(identity.device_label.starts_with("device-"));
+        let host = gethostname::gethostname().to_string_lossy().to_string();
+        if !host.trim().is_empty() {
+            assert_ne!(identity.device_label, host.trim());
+        }
+        validate_identity(&identity).expect("a minted identity must be valid");
     }
 
     #[test]
-    fn seed_label_prefers_the_sanitized_seed() {
-        let device_id = "0123456789abcdef0123456789abcdef";
-        assert_eq!(seed_label(" mfeth-win ", device_id), "mfeth-win");
+    fn validate_device_id_accepts_only_lowercase_hex_of_length_32() {
+        assert!(validate_device_id("0123456789abcdef0123456789abcdef").is_ok());
+        assert!(validate_device_id("0123456789ABCDEF0123456789ABCDEF").is_err());
+        assert!(validate_device_id("tooshort").is_err());
+        assert!(validate_device_id(&"a".repeat(33)).is_err());
+        assert!(validate_device_id("g123456789abcdef0123456789abcdef").is_err());
+    }
+
+    /// Deserializing proves shape, not validity. A hand-edited file must be
+    /// quarantined and replaced rather than published.
+    #[test]
+    fn load_or_create_replaces_a_syntactically_valid_but_invalid_identity() {
+        // Built through serde rather than written as a literal: an unescaped
+        // U+202E in source trips rustc's own
+        // `text_direction_codepoint_in_literal` lint — the same hazard this
+        // validation exists to keep out of the relay.
+        let bad_id = serde_json::json!({
+            "deviceId": "nothex",
+            "deviceLabel": "ok",
+            "createdAt": "2026-01-01T00:00:00Z",
+        })
+        .to_string();
+        let bad_label = serde_json::json!({
+            "deviceId": "0123456789abcdef0123456789abcdef",
+            "deviceLabel": "mfeth\u{202E}win",
+            "createdAt": "2026-01-01T00:00:00Z",
+        })
+        .to_string();
+
+        for bad in [bad_id.as_str(), bad_label.as_str()] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("device.json");
+            std::fs::write(&path, bad).unwrap();
+
+            let identity = load_or_create_at(&path)
+                .expect("an invalid stored file must never fail the caller");
+            validate_identity(&identity).expect("the replacement must be valid");
+            assert!(path.with_extension("json.corrupt").exists(), "quarantined");
+            // And the replacement sticks.
+            assert_eq!(load_or_create_at(&path).unwrap(), identity);
+        }
+    }
+
+    #[test]
+    fn hostname_suggestion_is_valid_when_present() {
+        if let Some(suggestion) = hostname_suggestion() {
+            validate_device_label(&suggestion)
+                .expect("a suggestion offered to the owner must already be valid");
+        }
     }
 
     #[test]

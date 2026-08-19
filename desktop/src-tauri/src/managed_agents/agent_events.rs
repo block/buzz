@@ -92,7 +92,23 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
     // Device fields describe the INSTANCE (which install holds its secret),
     // never the definition, so they are emitted regardless of slimming.
     // `None` before the Tauri setup hook runs — unit tests publish no stamp.
-    let device = crate::device_identity::current();
+    //
+    // Only a LOCAL backend is device-bound. A `Provider` backend's body runs
+    // elsewhere — deployed to Kubernetes from a laptop, say — and stays online
+    // after this install sleeps, so stamping it with this Desktop would make
+    // the mention UI claim "only that device can reply" about a machine that is
+    // not where the agent runs. Such a record publishes no device at all and
+    // degrades to the same "no device information" rendering as a pre-Stage-0
+    // peer.
+    //
+    // Future work (out of scope for Stage 0): a provider-backed agent still has
+    // a *custody* device — the install holding its secret — which is a
+    // different coordinate from its *execution* location. Distinguishing the
+    // two needs a protocol change, not a second stamp here.
+    let device = match record.backend {
+        super::BackendKind::Local => crate::device_identity::current(),
+        super::BackendKind::Provider { .. } => None,
+    };
     ManagedAgentEventContent {
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
@@ -481,6 +497,9 @@ mod tests {
     /// device fields existed. This is why no other test in the crate changed.
     #[test]
     fn projection_omits_device_fields_without_a_device_identity() {
+        // Takes the guard (with `None`) purely to serialize against the tests
+        // below that seed a device — `CURRENT` is process-global.
+        let _guard = crate::device_identity::DeviceGuard::set(None);
         assert!(
             crate::device_identity::current().is_none(),
             "unit tests must never boot the device identity"
@@ -494,6 +513,54 @@ mod tests {
         assert!(!json.contains("device_id"), "{json}");
         assert!(!json.contains("deviceLabel"), "{json}");
         assert!(!json.contains("device_label"), "{json}");
+    }
+
+    /// A local-backend agent's secret lives on this install, so it is the one
+    /// case where naming this computer is true.
+    #[test]
+    fn projection_stamps_the_device_for_a_local_backend() {
+        use crate::device_identity::DeviceGuard;
+        let device = DeviceGuard::sample();
+        let _guard = DeviceGuard::set(Some(device.clone()));
+
+        let mut record = sample_agent();
+        record.backend = super::super::BackendKind::Local;
+
+        let content = agent_event_content(&record);
+        assert_eq!(
+            content.device_id.as_deref(),
+            Some(device.device_id.as_str())
+        );
+        assert_eq!(
+            content.device_label.as_deref(),
+            Some(device.device_label.as_str())
+        );
+    }
+
+    /// A provider-backed agent's body runs elsewhere and outlives this install,
+    /// so stamping it here would make the mention UI claim "only that device can
+    /// reply" about a machine that is not where the agent runs.
+    #[test]
+    fn projection_omits_the_device_for_a_provider_backend() {
+        use crate::device_identity::DeviceGuard;
+        let _guard = DeviceGuard::set(Some(DeviceGuard::sample()));
+
+        let mut record = sample_agent();
+        record.backend = super::super::BackendKind::Provider {
+            id: "buzz-backend-x".to_string(),
+            config: serde_json::json!({ "cluster": "staging" }),
+        };
+
+        let content = agent_event_content(&record);
+        assert_eq!(
+            content.device_id, None,
+            "a remote body must not be given this computer's id"
+        );
+        assert_eq!(content.device_label, None);
+
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(!json.contains("deviceId"), "{json}");
+        assert!(!json.contains("deviceLabel"), "{json}");
     }
 
     /// Mixed-fleet back-compat: a 30177 event published by a build that predates
