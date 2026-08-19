@@ -56,6 +56,8 @@ import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
 import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
 import { useAddressMentionPulse } from "./useAddressMentionPulse";
+import { useAlwaysAddressShortcut } from "./useAlwaysAddressShortcut";
+import { useComposerMentionPicker } from "./useComposerMentionPicker";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
@@ -463,39 +465,17 @@ function MessageComposerImpl({
     },
     [richText.editor, mentions.clearMentions, customEmoji],
   );
-  const openMentionPicker = React.useCallback(
-    (insertTrigger = true) => {
-      if (!richText.editor) return;
-      const { text, cursor } = richText.getPlainTextAndCursor();
-      if (!insertTrigger) {
-        mentions.openMentionPicker(cursor);
-        setIsEmojiPickerOpen(false);
-        richText.focus();
-        return;
-      }
-      const beforeCursor = text.slice(0, cursor);
-      if (/(?:^|[\s])@[^\s]*$/.test(beforeCursor)) {
-        mentions.updateMentionQuery(text, cursor);
-        richText.focus();
-        return;
-      }
-      const previousChar = text.slice(0, cursor).slice(-1);
-      const prefix =
-        cursor > 0 && previousChar && !/\s/.test(previousChar) ? " @" : "@";
-      richText.editor.chain().focus().insertContent(prefix).run();
-      setIsEmojiPickerOpen(false);
-      const { text: updatedText, cursor: updatedCursor } =
-        richText.getPlainTextAndCursor();
-      mentions.updateMentionQuery(updatedText, updatedCursor);
-    },
-    [
-      richText.editor,
-      richText.getPlainTextAndCursor,
-      richText.focus,
-      mentions.openMentionPicker,
-      mentions.updateMentionQuery,
-    ],
-  );
+  const openMentionPicker = useComposerMentionPicker({
+    mentions,
+    richText,
+    setIsEmojiPickerOpen,
+  });
+  const handleAlwaysAddressShortcut = useAlwaysAddressShortcut({
+    enabled: Boolean(audienceScope && editTarget == null),
+    mentions,
+    onOpenPicker: openMentionPicker,
+    onToggle: toggleAlwaysAddressAgent,
+  });
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
@@ -657,6 +637,8 @@ function MessageComposerImpl({
   // handles autocomplete arrow/enter keys and Escape for edit mode.
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (handleAlwaysAddressShortcut(event)) return;
+
       // Let autocomplete handle keys first
       const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
       if (emojiResult.handled) {
@@ -699,6 +681,7 @@ function MessageComposerImpl({
       }
     },
     [
+      handleAlwaysAddressShortcut,
       emojiAutocomplete.handleEmojiKeyDown,
       applyEmojiInsert,
       channelLinks.handleChannelKeyDown,

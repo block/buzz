@@ -135,11 +135,15 @@ test("always addresses multiple agents without closing the mention picker", asyn
     name: "Always address Morgarita",
   });
   await morgaritaPin.hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Always address");
+  await expect(page.getByRole("tooltip")).toContainText("Always address");
+  await expect(page.getByRole("tooltip")).toContainText("Enter");
   await morgaritaPin.click();
   await expect(morgaritaPin).toHaveAttribute("aria-pressed", "true");
   await expect(menu).toBeVisible();
-  await expect(input).toHaveText("@Mor");
+  await expect(input).toHaveText("");
+  await expect(menu.getByTestId(`mention-suggestion-${AGENT_A}`)).toHaveClass(
+    /(?:^|\s)bg-accent(?:\s|$)/,
+  );
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
   await expect(
     composer.getByRole("button", {
@@ -154,7 +158,10 @@ test("always addresses multiple agents without closing the mention picker", asyn
   await voguePin.click();
   await expect(voguePin).toHaveAttribute("aria-pressed", "true");
   await expect(menu).toBeVisible();
-  await expect(input).toHaveText("@Vog");
+  await expect(input).toHaveText("");
+  await expect(menu.getByTestId(`mention-suggestion-${AGENT_B}`)).toHaveClass(
+    /(?:^|\s)bg-accent(?:\s|$)/,
+  );
   await expect(
     composer.getByRole("button", { name: "Stop always mentioning Vogue" }),
   ).toHaveCount(1);
@@ -171,6 +178,58 @@ test("always addresses multiple agents without closing the mention picker", asyn
       ),
     )
     .toEqual([AGENT_A, AGENT_B]);
+});
+
+test("Tab selects the highlighted agent as a one-shot mention", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+
+  await input.press("Tab");
+
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
+  await expect(
+    composer.getByRole("button", {
+      name: "Stop always mentioning Morgarita",
+    }),
+  ).toHaveCount(0);
+});
+
+test("primary+Shift+Enter opens the picker, then pins the highlighted agent", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("draft text");
+  await input.press("Meta+Shift+Enter");
+
+  const menu = composer.getByTestId("mention-autocomplete");
+  await expect(menu).toBeVisible();
+  await expect(input).toHaveText("draft text");
+
+  await input.fill("@Mor");
+  await expect(menu.getByTestId(`mention-suggestion-${AGENT_A}`)).toHaveClass(
+    /(?:^|\s)bg-accent(?:\s|$)/,
+  );
+  await input.press("Meta+Shift+Enter");
+
+  await expect(menu).toBeVisible();
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByRole("button", {
+      name: "Stop always mentioning Morgarita",
+    }),
+  ).toBeVisible();
 });
 
 test("the ingress opens the mention menu without editing the draft", async ({

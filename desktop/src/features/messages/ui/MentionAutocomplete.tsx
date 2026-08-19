@@ -14,6 +14,7 @@ import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
 
 export type MentionSuggestion = {
   pubkey?: string;
@@ -49,38 +50,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   position = "above",
 }: MentionAutocompleteProps) {
   const listRef = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => {
-    const list = listRef.current;
-    const form = list?.closest("form");
-    if (!list || !form) return;
-
-    const focusSelectedAgentAction = (event: KeyboardEvent) => {
-      if (
-        event.key !== "Tab" ||
-        event.shiftKey ||
-        list.contains(event.target as Node)
-      )
-        return;
-      const editor = form.querySelector('[data-testid="message-input-scroll"]');
-      if (!editor?.contains(event.target as Node)) return;
-
-      const selectedSuggestion = suggestions[selectedIndex];
-      if (!selectedSuggestion?.isAgent || !selectedSuggestion.pubkey) return;
-      const action = list.querySelector<HTMLButtonElement>(
-        `[data-always-address-pubkey="${selectedSuggestion.pubkey.toLowerCase()}"]`,
-      );
-      if (!action) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-      action.focus();
-    };
-
-    form.addEventListener("keydown", focusSelectedAgentAction, true);
-    return () =>
-      form.removeEventListener("keydown", focusSelectedAgentAction, true);
-  }, [selectedIndex, suggestions]);
+  const alwaysAddressShortcut = getPlatformKeysById("always-address-agent");
 
   React.useEffect(() => {
     const activeItem = listRef.current?.querySelector<HTMLElement>(
@@ -302,7 +272,28 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                       </Toggle>
                     </span>
                   </TooltipTrigger>
-                  <TooltipContent side="top">Always address</TooltipContent>
+                  <TooltipContent
+                    className="flex flex-col items-center gap-1.5"
+                    side="top"
+                  >
+                    <span>Always address</span>
+                    {alwaysAddressShortcut ? (
+                      <span className="flex items-center gap-1">
+                        {alwaysAddressShortcut.split("+").map((key, index) => (
+                          <React.Fragment key={key}>
+                            {index > 0 ? (
+                              <span className="text-primary-foreground/50">
+                                +
+                              </span>
+                            ) : null}
+                            <kbd className="rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0.5 font-mono text-2xs text-primary-foreground/70">
+                              {key}
+                            </kbd>
+                          </React.Fragment>
+                        ))}
+                      </span>
+                    ) : null}
+                  </TooltipContent>
                 </Tooltip>
               ) : null}
             </div>

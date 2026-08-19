@@ -89,7 +89,7 @@ test("agent rows offer an Always address pin", async () => {
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });
 
-test("Tab from the editor focuses the selected agent action", async () => {
+test("does not intercept Tab from the editor", async () => {
   const React = await import("react");
   const { fireEvent, render } = await import("@testing-library/react");
   const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
@@ -130,10 +130,8 @@ test("Tab from the editor focuses the selected agent action", async () => {
 
   const input = view.getByRole("textbox", { name: "Message" });
   input.focus();
-  fireEvent.keyDown(input, { key: "Tab" });
+  const wasNotCancelled = fireEvent.keyDown(input, { key: "Tab" });
 
-  assert.equal(
-    document.activeElement,
-    view.getByRole("button", { name: "Always address Agent Bea" }),
-  );
+  assert.equal(wasNotCancelled, true);
+  assert.equal(document.activeElement, input);
 });

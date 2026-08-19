@@ -45,6 +45,10 @@ import {
   type PersonaMentionTarget,
 } from "./extractMentionPersonas";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
+import {
+  type MentionPickerMode,
+  useMentionSelection,
+} from "./useMentionSelection";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
@@ -59,9 +63,7 @@ import {
 } from "./mentionCandidates";
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-type UseMentionsOptions = {
-  channelType?: ChannelType | null;
-};
+type UseMentionsOptions = { channelType?: ChannelType | null };
 export function useMentions(
   channelId: string | null,
   externalMembers?: ChannelMember[],
@@ -70,7 +72,6 @@ export function useMentions(
 ) {
   const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
   const [mentionStartIndex, setMentionStartIndex] = React.useState(0);
-  const [mentionSelectedIndex, setMentionSelectedIndex] = React.useState(0);
   const [selectedMentionNames, setSelectedMentionNames] = React.useState<
     string[]
   >([]);
@@ -592,12 +593,9 @@ export function useMentions(
     }
   }, [matchingSuggestions, mentionQuery, userSearchQuery.isFetching]);
 
-  React.useEffect(() => {
-    setMentionSelectedIndex((current) =>
-      suggestions.length === 0 ? 0 : Math.min(current, suggestions.length - 1),
-    );
-  }, [suggestions.length]);
-
+  const mentionSelection = useMentionSelection(suggestions);
+  const { mentionSelectedIndex, setMentionSelectedIndex: setSelected } =
+    mentionSelection;
   const isMentionOpen = mentionQuery !== null && suggestions.length > 0;
 
   const insertMention = React.useCallback(
@@ -663,7 +661,7 @@ export function useMentions(
       trimMapToSize(mentions, 200);
       trimMapToSize(personaMentions, 200);
       setMentionQuery(null);
-      setMentionSelectedIndex(0);
+      setSelected(0);
 
       const startIndex =
         flushedMentionStartIndexRef.current ?? mentionStartIndex;
@@ -674,7 +672,7 @@ export function useMentions(
         insertText,
       };
     },
-    [knownAgentPubkeys, mentionStartIndex],
+    [knownAgentPubkeys, mentionStartIndex, setSelected],
   );
 
   const registerMentionPubkey = React.useCallback(
@@ -759,6 +757,7 @@ export function useMentions(
   const autocompleteGenerationRef = React.useRef(0);
   const updateMentionQuery = React.useCallback(
     (value: string, cursorPosition: number) => {
+      mentionSelection.clearAgentSelectionPreference();
       const generation = ++autocompleteGenerationRef.current;
       latestValueRef.current = value;
       latestCursorRef.current = cursorPosition;
@@ -780,26 +779,34 @@ export function useMentions(
         if (mention) {
           setMentionQuery(mention.query);
           setMentionStartIndex(mention.startIndex);
-          setMentionSelectedIndex(0);
+          setSelected(0);
         } else {
           setMentionQuery(null);
         }
       }, MENTION_DEBOUNCE_MS);
     },
-    [],
+    [mentionSelection.clearAgentSelectionPreference, setSelected],
   );
 
-  const openMentionPicker = React.useCallback((cursorPosition: number) => {
-    autocompleteGenerationRef.current += 1;
-    if (debounceTimerRef.current !== null) {
-      clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
-    }
-    flushedMentionStartIndexRef.current = null;
-    setMentionQuery("");
-    setMentionStartIndex(cursorPosition);
-    setMentionSelectedIndex(0);
-  }, []);
+  const openMentionPicker = React.useCallback(
+    (cursorPosition: number, preference: MentionPickerMode = null) => {
+      autocompleteGenerationRef.current += 1;
+      if (debounceTimerRef.current !== null) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      flushedMentionStartIndexRef.current = null;
+      if (preference === "preserve") {
+        setMentionStartIndex(cursorPosition);
+        return;
+      }
+      mentionSelection.prepareSelectionPreference(preference);
+      setMentionQuery("");
+      setMentionStartIndex(cursorPosition);
+      setSelected(0);
+    },
+    [mentionSelection.prepareSelectionPreference, setSelected],
+  );
 
   const extractMentionPubkeysForCurrentMentions = React.useCallback(
     (text: string): string[] => {
@@ -851,9 +858,10 @@ export function useMentions(
       debounceTimerRef.current = null;
     }
     flushedMentionStartIndexRef.current = null;
+    mentionSelection.clearAgentSelectionPreference();
     setMentionQuery(null);
-    setMentionSelectedIndex(0);
-  }, []);
+    setSelected(0);
+  }, [mentionSelection.clearAgentSelectionPreference, setSelected]);
   const clearMentions = React.useCallback(() => {
     cancelMentionAutocomplete();
     mentionMapRef.current.clear();
@@ -883,7 +891,7 @@ export function useMentions(
 
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setMentionSelectedIndex((current) =>
+        setSelected((current) =>
           current < suggestions.length - 1 ? current + 1 : 0,
         );
         return { handled: true };
@@ -891,7 +899,7 @@ export function useMentions(
 
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setMentionSelectedIndex((current) =>
+        setSelected((current) =>
           current > 0 ? current - 1 : suggestions.length - 1,
         );
         return { handled: true };
@@ -952,6 +960,7 @@ export function useMentions(
       options?.channelType,
       ownerProfilesQuery.data?.profiles,
       profiles,
+      setSelected,
       suggestions,
     ],
   );
@@ -986,5 +995,4 @@ export function useMentions(
     updateMentionQuery,
   };
 }
-
 export type UseMentionsResult = ReturnType<typeof useMentions>;

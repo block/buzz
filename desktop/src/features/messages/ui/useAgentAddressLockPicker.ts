@@ -8,6 +8,7 @@ import type {
   UseRichTextEditorResult,
 } from "@/features/messages/lib/useRichTextEditor";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import type { ComposerAddressLock } from "./ComposerAddressLocks";
 import type { MentionSuggestion } from "./MentionAutocomplete";
@@ -142,13 +143,38 @@ export function useAgentAddressLockPicker({
         audience.addPubkey(pubkey);
         onPulseAddressLock(pubkey);
       }
+
+      if (mentions.isMentionOpen) {
+        const { text, cursor } = richText.getPlainTextAndCursor();
+        const activeMention = detectPrefixQuery("@", text, cursor, [
+          suggestion.displayName.toLowerCase(),
+        ]);
+        const queryStart = Math.max(
+          0,
+          Math.min(
+            activeMention?.startIndex ?? mentions.mentionStartIndex,
+            text.length,
+          ),
+        );
+        applyAutocompleteEdit({
+          replaceFromOffset: queryStart,
+          replaceToOffset: Math.max(queryStart, Math.min(cursor, text.length)),
+          insertText: "",
+        });
+        mentions.openMentionPicker(queryStart, "preserve");
+      }
     },
     [
+      applyAutocompleteEdit,
       audience.addPubkey,
       audience.removePubkey,
       audienceScope,
       lockedAgentPubkeys,
+      mentions.isMentionOpen,
+      mentions.mentionStartIndex,
+      mentions.openMentionPicker,
       onPulseAddressLock,
+      richText.getPlainTextAndCursor,
     ],
   );
 
