@@ -1409,6 +1409,12 @@ const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(300); // 5 minute
 const RESPAWN_BASE_DELAY: Duration = Duration::from_secs(1);
 /// Maximum respawn backoff delay.
 const RESPAWN_MAX_DELAY: Duration = Duration::from_secs(30);
+/// Grace for in-flight failure notices during shutdown. `post_failure_notice`
+/// bounds its HTTP POST at `pool::FAILURE_NOTICE_TIMEOUT`; one extra second
+/// lets that completion wake and reap without allowing a hung relay to block
+/// shutdown indefinitely.
+const FAILURE_NOTICE_DRAIN_GRACE: Duration =
+    pool::FAILURE_NOTICE_TIMEOUT.saturating_add(Duration::from_secs(1));
 
 /// Per-slot circuit breaker state.
 ///
@@ -2311,6 +2317,9 @@ async fn tokio_main() -> Result<()> {
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     let (wake_tx, mut wake_rx) = mpsc::channel::<(u32, Result<AgentPool, String>)>(1);
     let mut wake_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    // Failure notices are best-effort, but must outlive the main loop long
+    // enough to finish their bounded POST before Tokio tears down the runtime.
+    let mut failure_notice_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Channel for non-cancelling steer ack watchers to forward outcomes back
     // to the main loop. Each `pool.send_steer(...) == Ok(())` spawns a
@@ -2519,6 +2528,15 @@ async fn tokio_main() -> Result<()> {
         // slot's `respawn_in_flight` is cleared when its payload is received),
         // not JoinSet occupancy.
         while respawn_tasks.join_next().now_or_never().flatten().is_some() {}
+        // Failure notices have no out-of-band payload. Reap completed handles
+        // non-blockingly so steady dead-letter traffic cannot grow the JoinSet
+        // until shutdown.
+        while failure_notice_tasks
+            .join_next()
+            .now_or_never()
+            .flatten()
+            .is_some()
+        {}
         // Flush requeued events that were waiting for a live agent. Without
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
@@ -3181,6 +3199,7 @@ async fn tokio_main() -> Result<()> {
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
+                    &mut failure_notice_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
                 ) == LoopAction::Exit
@@ -3197,6 +3216,7 @@ async fn tokio_main() -> Result<()> {
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
+                    &mut failure_notice_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
                 ) == LoopAction::Exit
@@ -3222,6 +3242,7 @@ async fn tokio_main() -> Result<()> {
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
+                    &mut failure_notice_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
                 );
@@ -3435,16 +3456,15 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    shutdown_after_main_loop(&shutdown_tx, &mut failure_notice_tasks).await;
+
     // Drain wake tasks gracefully rather than aborting: an in-flight
     // initialize_agent_pool observes the shutdown watch at its biased per-slot
     // select and reaps its partially-spawned agents itself. `shutdown()` here
     // would abort the task mid-init and drop those AcpClients via best-effort
     // Drop — the exact zombie class the eager path's spawn-outside-the-timeout
-    // comment exists to prevent. Fire the watch first so exits that bypass the
-    // signal handlers (result channel closed, LoopAction::Exit) cancel the wake
-    // just as promptly. Timeout is a backstop for a slot stuck outside the
-    // select (e.g. in spawn); only then do we fall back to aborting.
-    let _ = shutdown_tx.send(());
+    // comment exists to prevent. Timeout is a backstop for a slot stuck outside
+    // the select (e.g. in spawn); only then do we fall back to aborting.
     let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
         while wake_tasks.join_next().await.is_some() {}
     })
@@ -3960,11 +3980,12 @@ fn retry_exhausted_notice(reason: &str) -> String {
     )
 }
 
-/// Spawn a task that posts a user-visible failure notice to the relay.
+/// Spawn an owned task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
-/// dead-letter path so neither duplicates the tokio::spawn block.
+/// dead-letter path so neither duplicates the JoinSet spawn block.
 fn spawn_failure_notice(
+    failure_notice_tasks: &mut tokio::task::JoinSet<()>,
     rest_client: Option<&relay::RestClient>,
     batch: &FlushBatch,
     content: String,
@@ -3977,9 +3998,35 @@ fn spawn_failure_notice(
             .unwrap_or_default();
         let rest = rest.clone();
         let channel_id = batch.channel_id;
-        tokio::spawn(async move {
+        failure_notice_tasks.spawn(async move {
             pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
         });
+    }
+}
+
+/// Start the shutdown work shared by every main-loop exit path.
+async fn shutdown_after_main_loop(
+    shutdown_tx: &watch::Sender<()>,
+    failure_notice_tasks: &mut tokio::task::JoinSet<()>,
+) {
+    // Exits through a closed result channel or `LoopAction::Exit` bypass the
+    // signal handlers, so notify lazy pool wakes here as well.
+    let _ = shutdown_tx.send(());
+    shutdown_failure_notice_tasks(failure_notice_tasks).await;
+}
+
+/// Drain failure notices that were already spawned when the main loop exited.
+async fn shutdown_failure_notice_tasks(failure_notice_tasks: &mut tokio::task::JoinSet<()>) {
+    let failure_notice_drain = tokio::time::timeout(FAILURE_NOTICE_DRAIN_GRACE, async {
+        while failure_notice_tasks.join_next().await.is_some() {}
+    })
+    .await;
+    if failure_notice_drain.is_err() {
+        tracing::warn!(
+            grace_seconds = FAILURE_NOTICE_DRAIN_GRACE.as_secs(),
+            "failure notice task did not drain within grace period — aborting"
+        );
+        failure_notice_tasks.shutdown().await;
     }
 }
 
@@ -3994,6 +4041,7 @@ fn handle_prompt_result(
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
+    failure_notice_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
@@ -4078,7 +4126,7 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
                     config.max_turn_duration_secs
                 );
-                spawn_failure_notice(rest_client, &batch, content);
+                spawn_failure_notice(failure_notice_tasks, rest_client, &batch, content);
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
             } else if matches!(
                 result.outcome,
@@ -4096,7 +4144,7 @@ fn handle_prompt_result(
                         "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
                         config.max_turn_duration_secs
                     );
-                    spawn_failure_notice(rest_client, &dead, content);
+                    spawn_failure_notice(failure_notice_tasks, rest_client, &dead, content);
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
@@ -4115,7 +4163,7 @@ fn handle_prompt_result(
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
                     and then re-send."
                     .to_string();
-                spawn_failure_notice(rest_client, &batch, content);
+                spawn_failure_notice(failure_notice_tasks, rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4127,7 +4175,7 @@ fn handle_prompt_result(
                     _ => "repeated failures".to_string(),
                 };
                 let content = retry_exhausted_notice(&reason);
-                spawn_failure_notice(rest_client, &dead, content);
+                spawn_failure_notice(failure_notice_tasks, rest_client, &dead, content);
             }
         } else {
             tracing::debug!(
@@ -4382,6 +4430,7 @@ fn recover_panicked_agent(
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
+    failure_notice_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
 ) {
@@ -4406,7 +4455,7 @@ fn recover_panicked_agent(
                         "dead-lettered batch for panicked agent {i}"
                     );
                     let content = retry_exhausted_notice("the agent crashed");
-                    spawn_failure_notice(rest_client, &dead, content);
+                    spawn_failure_notice(failure_notice_tasks, rest_client, &dead, content);
                 } else {
                     tracing::warn!("requeued batch for panicked agent {i}");
                 }
@@ -4491,6 +4540,7 @@ fn drain_ready_join_results(
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
+    failure_notice_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
@@ -4508,6 +4558,7 @@ fn drain_ready_join_results(
                 crash_history,
                 respawn_tx,
                 respawn_tasks,
+                failure_notice_tasks,
                 observer.clone(),
                 rest_client,
             );
@@ -7535,6 +7586,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             None,
             None,
         );
@@ -7607,6 +7659,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             None,
             None,
         );
@@ -7721,6 +7774,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             None,
             None,
         );
@@ -7784,6 +7838,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             Some(observer.clone()),
             None,
         );
@@ -7858,6 +7913,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             Some(observer.clone()),
             None,
         );
@@ -7874,7 +7930,10 @@ mod error_outcome_emission_tests {
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
     }
 
-    async fn read_submitted_event(listener: &tokio::net::TcpListener) -> (String, Event) {
+    async fn read_submitted_event(
+        listener: &tokio::net::TcpListener,
+        response_delay: Duration,
+    ) -> (String, Event) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let (mut socket, _) = listener.accept().await.expect("accept request");
@@ -7906,6 +7965,7 @@ mod error_outcome_emission_tests {
         let event = serde_json::from_slice(&request[header_end..header_end + content_length])
             .expect("POST /events body must be a Nostr event");
 
+        tokio::time::sleep(response_delay).await;
         socket
             .write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
@@ -7975,7 +8035,9 @@ mod error_outcome_emission_tests {
         batch: Option<FlushBatch>,
         removed_channels: &HashSet<Uuid>,
         rest: &relay::RestClient,
-    ) {
+        final_worker_exits: bool,
+        failure_notice_tasks: &mut tokio::task::JoinSet<()>,
+    ) -> LoopAction {
         let mut pool = AgentPool::from_slots(vec![]);
         let handle = pool
             .join_set
@@ -8002,13 +8064,18 @@ mod error_outcome_emission_tests {
             open_until: None,
             respawn_in_flight: false,
         }];
+        if final_worker_exits {
+            // Make this the last worker: recovery still dead-letters the
+            // batch, then the already-open circuit prevents a respawn.
+            crash_history[0].open_until = Some(std::time::Instant::now() + Duration::from_secs(1));
+        }
         let (respawn_tx, _respawn_rx) = mpsc::channel(8);
         let mut respawn_tasks = tokio::task::JoinSet::new();
         let observer = ObserverHandle::in_process();
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let action = tokio::time::timeout(Duration::from_secs(5), async {
             while pool.task_map().contains_key(&task_id) {
-                drain_ready_join_results(
+                let action = drain_ready_join_results(
                     &mut pool,
                     queue,
                     &config,
@@ -8018,11 +8085,16 @@ mod error_outcome_emission_tests {
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
+                    failure_notice_tasks,
                     Some(observer.clone()),
                     Some(rest),
                 );
+                if action == LoopAction::Exit {
+                    return action;
+                }
                 tokio::task::yield_now().await;
             }
+            LoopAction::Continue
         })
         .await
         .expect("production join-drain path must consume the panic");
@@ -8034,6 +8106,8 @@ mod error_outcome_emission_tests {
                 .any(|event| event.kind == "agent_panic"),
             "the production drain must observe a genuine task panic"
         );
+
+        action
     }
 
     /// A panicking agent whose batch has already burned its retry budget must
@@ -8052,12 +8126,24 @@ mod error_outcome_emission_tests {
         }
         let (batch, root_id, parent_id) = threaded_batch(channel_id);
 
-        drain_panicked_batch(&mut queue, channel_id, Some(batch), &HashSet::new(), &rest).await;
+        let mut failure_notice_tasks = tokio::task::JoinSet::new();
+        drain_panicked_batch(
+            &mut queue,
+            channel_id,
+            Some(batch),
+            &HashSet::new(),
+            &rest,
+            false,
+            &mut failure_notice_tasks,
+        )
+        .await;
 
-        let (request_line, event) =
-            tokio::time::timeout(Duration::from_secs(5), read_submitted_event(&listener))
-                .await
-                .expect("dead-lettering a panicked batch must post a failure notice");
+        let (request_line, event) = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_submitted_event(&listener, Duration::ZERO),
+        )
+        .await
+        .expect("dead-lettering a panicked batch must post a failure notice");
         assert_eq!(request_line, "POST /events HTTP/1.1");
         event
             .verify()
@@ -8114,11 +8200,99 @@ mod error_outcome_emission_tests {
         .await;
     }
 
+    /// The final worker can take `LoopAction::Exit` immediately after its
+    /// panic dead-letters a batch. The notice's POST is deliberately held
+    /// open until after that exit, proving the shutdown drain keeps Tokio
+    /// alive until the client observes the relay response.
+    ///
+    /// The agent runtime is explicitly dropped before the test observes the
+    /// relay result. Removing the failure-notice drain from the production
+    /// shutdown coordinator tears down the runtime before the POST completes,
+    /// so this receiver times out.
+    #[test]
+    fn final_panicked_agent_drains_delayed_failure_notice_before_exit() {
+        let (address_tx, address_rx) = std::sync::mpsc::sync_channel(1);
+        let (submission_tx, submission_rx) = std::sync::mpsc::sync_channel(1);
+        let relay_thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build delayed relay runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind delayed relay listener");
+                address_tx
+                    .send(listener.local_addr().expect("delayed relay address"))
+                    .expect("send delayed relay address");
+                let submission = read_submitted_event(&listener, Duration::from_millis(100)).await;
+                submission_tx
+                    .send(submission)
+                    .expect("send delayed relay submission");
+            });
+        });
+        let address = address_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("delayed relay must start");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build agent runtime");
+        runtime.block_on(async move {
+            let rest = relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url: format!("http://{address}"),
+                keys: Keys::generate(),
+                auth_tag_json: None,
+            };
+            let channel_id = Uuid::new_v4();
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            for _ in 0..queue::MAX_RETRIES {
+                assert!(queue.requeue(empty_batch(channel_id)).is_none());
+            }
+
+            let mut failure_notice_tasks = tokio::task::JoinSet::new();
+            let exit = drain_panicked_batch(
+                &mut queue,
+                channel_id,
+                Some(empty_batch(channel_id)),
+                &HashSet::new(),
+                &rest,
+                true,
+                &mut failure_notice_tasks,
+            )
+            .await;
+            assert!(
+                matches!(exit, LoopAction::Exit),
+                "the final worker must take the exit path"
+            );
+
+            let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(());
+            shutdown_after_main_loop(&shutdown_tx, &mut failure_notice_tasks).await;
+            assert!(
+                failure_notice_tasks.is_empty(),
+                "shutdown must reap the completed failure-notice task"
+            );
+        });
+        drop(runtime);
+
+        let (request_line, event) = submission_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shutdown must wait for the delayed failure-notice POST");
+        relay_thread
+            .join()
+            .expect("delayed relay thread must complete");
+        assert_eq!(request_line, "POST /events HTTP/1.1");
+        assert_eq!(event.kind, Kind::Custom(9));
+    }
+
     #[tokio::test]
     async fn panic_retry_before_dead_letter_posts_no_failure_notice() {
         let (listener, rest) = test_rest_client().await;
         let channel_id = Uuid::new_v4();
         let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut failure_notice_tasks = tokio::task::JoinSet::new();
 
         drain_panicked_batch(
             &mut queue,
@@ -8126,9 +8300,15 @@ mod error_outcome_emission_tests {
             Some(empty_batch(channel_id)),
             &HashSet::new(),
             &rest,
+            false,
+            &mut failure_notice_tasks,
         )
         .await;
 
+        assert!(
+            failure_notice_tasks.is_empty(),
+            "a retryable panic must not spawn a notice"
+        );
         assert_no_submitted_event(
             &listener,
             "a retryable panic must not post a terminal failure notice",
@@ -8144,6 +8324,7 @@ mod error_outcome_emission_tests {
         for _ in 0..queue::MAX_RETRIES {
             assert!(queue.requeue(empty_batch(channel_id)).is_none());
         }
+        let mut failure_notice_tasks = tokio::task::JoinSet::new();
 
         drain_panicked_batch(
             &mut queue,
@@ -8151,9 +8332,15 @@ mod error_outcome_emission_tests {
             Some(empty_batch(channel_id)),
             &HashSet::from([channel_id]),
             &rest,
+            false,
+            &mut failure_notice_tasks,
         )
         .await;
 
+        assert!(
+            failure_notice_tasks.is_empty(),
+            "a removed channel must not spawn a notice"
+        );
         assert_no_submitted_event(
             &listener,
             "a removed channel must never receive a failure notice",
@@ -8248,6 +8435,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                &mut tokio::task::JoinSet::new(),
                 Some(observer.clone()),
                 None,
             );
@@ -8339,6 +8527,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                &mut tokio::task::JoinSet::new(),
                 None,
                 None,
             );
@@ -8445,6 +8634,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                &mut tokio::task::JoinSet::new(),
                 None,
                 None,
             );
@@ -8537,6 +8727,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             Some(observer.clone()),
             None,
         );
@@ -8631,6 +8822,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             Some(observer.clone()),
             None,
         );
@@ -8747,6 +8939,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             Some(observer.clone()),
             None,
         );
@@ -8880,6 +9073,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             Some(observer.clone()),
             None,
         );
@@ -9063,6 +9257,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             None,
             None,
         );
@@ -9149,6 +9344,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            &mut tokio::task::JoinSet::new(),
             None,
             None,
         );
