@@ -9,6 +9,7 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
     HarnessSource,
 };
+mod auth_status_cache;
 mod presets;
 mod runtime_metadata;
 #[macro_use]
@@ -577,6 +578,9 @@ pub fn clear_resolve_cache() {
     // Also invalidate the adapter-availability cache so a freshly-installed
     // adapter is reflected the next time the summary builder checks the badge.
     clear_adapter_availability_cache();
+    // And the auth-status cache so a forced re-discovery re-probes rather than
+    // reusing stale login state.
+    auth_status_cache::clear();
 }
 
 // ── Adapter availability cache (Phase-2 badge fallback) ─────────────────────
@@ -1295,7 +1299,7 @@ struct PartialEntry {
     entry: AcpRuntimeCatalogEntry,
 }
 
-fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntry {
+fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -> PartialEntry {
     let adapter_result = runtime
         .commands
         .iter()
@@ -1308,14 +1312,20 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
     let (mut availability, command, binary_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
 
-    // For codex-acp: when the adapter resolves as Available, probe its full
-    // version. An adapter below MIN_CODEX_ACP_VERSION is treated as outdated.
+    // For codex-acp: when the adapter resolves as Available, determine its full
+    // version. A forced discovery probes the binary (spawns a subprocess); the
+    // cheap default path reuses the last cached availability so it stays
+    // process-free. An adapter below MIN_CODEX_ACP_VERSION is treated as outdated.
     if runtime.id == "codex"
         && availability == AcpAvailabilityStatus::Available
         && command.as_deref() == Some("codex-acp")
     {
-        if let Some(path_str) = &binary_path {
-            availability = codex_adapter_availability(&PathBuf::from(path_str));
+        if force {
+            if let Some(path_str) = &binary_path {
+                availability = codex_adapter_availability(&PathBuf::from(path_str));
+            }
+        } else if let Some(cached) = adapter_availability_cached() {
+            availability = cached;
         }
     }
 
@@ -1415,7 +1425,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
 /// resolves, so it should not pay the cost of authenticating every catalog entry.
 pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpAvailabilityStatus> {
     known_acp_runtime_exact(runtime_id)
-        .map(discover_acp_runtime_phase1)
+        // Post-install verification wants fresh filesystem/version state, so
+        // probe rather than trust the cheap-path cache.
+        .map(|runtime| discover_acp_runtime_phase1(runtime, true))
         .map(|partial| partial.entry.availability)
 }
 
@@ -1438,47 +1450,17 @@ pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpA
 /// re-running discovery.
 pub fn discover_acp_runtimes_from(
     custom_harnesses_dir: Option<&Path>,
+    force: bool,
 ) -> Vec<AcpRuntimeCatalogEntry> {
     // Phase 1: build all builtin entries (fast — no probes yet).
     let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
         .iter()
-        .map(discover_acp_runtime_phase1)
+        .map(|runtime| discover_acp_runtime_phase1(runtime, force))
         .collect();
 
-    // Phase 2: run auth probes in parallel for entries that need them.
-    // Spawn one thread per probeable entry; total cost = max(probe latency).
-    let probe_handles: Vec<(usize, std::thread::JoinHandle<AuthStatus>)> = partials
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, partial)| {
-            if partial.entry.availability != AcpAvailabilityStatus::Available {
-                return None;
-            }
-            let probe_args = partial.runtime.auth_probe_args?;
-            // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
-            let binary_path = resolve_command(probe_args[0])?;
-            let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
-
-            let handle = std::thread::spawn(move || {
-                let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();
-                probe_auth_status(&binary_path, &refs)
-            });
-            Some((idx, handle))
-        })
-        .collect();
-
-    // Collect probe results and patch entries.
-    for (idx, handle) in probe_handles {
-        let status = handle.join().unwrap_or(AuthStatus::Unknown);
-        let partial = &mut partials[idx];
-        partial.entry.login_hint =
-            if matches!(status, AuthStatus::LoggedIn | AuthStatus::NotApplicable) {
-                None
-            } else {
-                partial.runtime.login_hint.map(str::to_string)
-            };
-        partial.entry.auth_status = status;
-    }
+    // Phase 2: resolve each available runtime's auth status (forced discovery
+    // spawns parallel CLI probes and warms the cache; the cheap path reuses it).
+    auth_status_cache::resolve_auth_statuses(&mut partials, force);
 
     // Fill NotApplicable / Unknown for non-probed entries.
     for partial in &mut partials {

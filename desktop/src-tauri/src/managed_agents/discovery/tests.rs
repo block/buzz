@@ -668,8 +668,8 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
 
 // ── probe_codex_acp_version ───────────────────────────────────────────────────
 
+mod forced_discovery;
 mod managed_path_resolution;
-
 #[cfg(unix)]
 #[test]
 fn probe_codex_acp_version_parses_full_semver_output() {
@@ -1685,7 +1685,7 @@ fn custom_catalog_entry_carries_definition_env_for_edit_roundtrip() {
     )
     .unwrap();
 
-    let entries = discover_acp_runtimes_from(Some(dir.path()));
+    let entries = discover_acp_runtimes_from(Some(dir.path()), true);
     let entry = entries
         .iter()
         .find(|e| e.id == "env-harness")
@@ -1715,7 +1715,7 @@ fn builtin_catalog_entry_has_empty_definition_env() {
     // publishes to the global registry.
     let _path_guard = crate::managed_agents::lock_path_mutex();
     let _lock = registry_test_lock();
-    let entries = discover_acp_runtimes_from(None);
+    let entries = discover_acp_runtimes_from(None, true);
     // Find any builtin entry (e.g. "goose" or "claude").
     let builtin = entries
         .iter()
@@ -1796,7 +1796,7 @@ fn discovery_publish_path_survives_mid_flight_save() {
         assert!(lookup_loaded_harness_by_id("mid-flight-save").is_some());
     }));
 
-    let _entries = discover_acp_runtimes_from(Some(dir.path()));
+    let _entries = discover_acp_runtimes_from(Some(dir.path()), true);
 
     assert!(
         lookup_loaded_harness_by_id("mid-flight-save").is_some(),
@@ -1829,7 +1829,7 @@ fn discovery_publish_path_drops_mid_flight_delete() {
         assert!(lookup_loaded_harness_by_id("mid-flight-delete").is_none());
     }));
 
-    let _entries = discover_acp_runtimes_from(Some(dir.path()));
+    let _entries = discover_acp_runtimes_from(Some(dir.path()), true);
 
     assert!(
         lookup_loaded_harness_by_id("mid-flight-delete").is_none(),

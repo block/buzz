@@ -3,7 +3,7 @@ import { ChevronRight, ExternalLink, Plus, Search } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
-  useAcpRuntimesQuery,
+  useAcpRuntimesQueryForced,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
@@ -62,7 +62,7 @@ export function HarnessCatalogDialog({
   open: boolean;
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
-  const runtimesQuery = useAcpRuntimesQuery();
+  const runtimesQuery = useAcpRuntimesQueryForced({ enabled: open });
   const isLoading = runtimesQuery.isLoading;
   const entries = React.useMemo(
     () => catalogDialogEntries(runtimesQuery.data ?? []),
