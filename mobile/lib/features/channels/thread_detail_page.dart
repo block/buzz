@@ -106,6 +106,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
     final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
     final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
+    final relayRepliesAvailable = relayReplyState.value != null;
     // The thread query is one-shot and asks only for content kinds, so a
     // reaction, edit, or deletion that lands while the thread is open never
     // reaches it — a new pill (and its burst) only showed up after leaving and
@@ -257,7 +258,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // authoritative replies arrive, suppress only the frame(s) used to place
     // the hydrated target, then reveal the settled viewport.
     final threadViewportVisible =
-        !hasFetchedReplies || initialViewportReady.value;
+        !relayRepliesAvailable || initialViewportReady.value;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;

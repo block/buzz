@@ -22,6 +22,7 @@ import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
+import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -1328,6 +1329,12 @@ void main() {
       expect(findRichText('joined the channel'), findsOneWidget);
       expect(hapticCalls, hasLength(1));
       expect(hapticCalls.single.arguments, 'HapticFeedbackType.mediumImpact');
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
     });
 
     testWidgets('reaction popover leaves existing reactions in the blur', (
@@ -1382,6 +1389,12 @@ void main() {
       expect(blurPath.contains(messageCenter - backgroundOrigin), isFalse);
       expect(blurPath.contains(reactionPillTop - backgroundOrigin), isTrue);
       expect(blurPath.contains(reactionCenter - backgroundOrigin), isTrue);
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
     });
 
     testWidgets('reaction-only and full actions share the stronger backdrop', (
@@ -1453,38 +1466,56 @@ void main() {
       expect(messageActionBackdropActive.value, isFalse);
     });
 
-    testWidgets('reaction-only popovers serialize concurrent long presses', (
+    testWidgets('reaction-only popovers serialize concurrent requests', (
       tester,
     ) async {
-      addTearDown(() => messageActionBackdropActive.value = false);
       await tester.pumpWidget(
         _buildTestable(
-          messages: [
-            _systemMsg(
-              id: 'concurrent-reaction',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'alice',
-                'target': 'alice',
-              },
+          messages: const [],
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) => TextButton(
+                key: const ValueKey('concurrent-reaction-launcher'),
+                onPressed: () {
+                  final message = formatTimeline([
+                    _systemMsg(
+                      id: 'concurrent-reaction',
+                      payload: {
+                        'type': 'member_joined',
+                        'actor': 'alice',
+                        'target': 'alice',
+                      },
+                    ),
+                  ]).single;
+                  const anchorRect = Rect.fromLTWH(32, 260, 300, 72);
+                  showMessageActions(
+                    context: context,
+                    ref: ref,
+                    message: message,
+                    channelId: _channelId,
+                    canManageMessage: false,
+                    anchorRect: anchorRect,
+                  );
+                  showMessageActions(
+                    context: context,
+                    ref: ref,
+                    message: message,
+                    channelId: _channelId,
+                    canManageMessage: false,
+                    anchorRect: anchorRect,
+                  );
+                },
+                child: const Text('Open concurrent reactions'),
+              ),
             ),
-          ],
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
+          ),
         ),
       );
       await tester.pumpAndSettle();
 
-      final target = find.byKey(
-        const ValueKey('system-message-row-concurrent-reaction'),
+      await tester.tap(
+        find.byKey(const ValueKey('concurrent-reaction-launcher')),
       );
-      final center = tester.getCenter(target);
-      final firstGesture = await tester.startGesture(center, pointer: 1);
-      final secondGesture = await tester.startGesture(center, pointer: 2);
-      await tester.pump(const Duration(milliseconds: 501));
-      await firstGesture.up();
-      await secondGesture.up();
       await tester.pumpAndSettle();
 
       expect(
@@ -1499,13 +1530,21 @@ void main() {
       await tester.pumpAndSettle();
       expect(messageActionBackdropActive.value, isFalse);
 
-      await tester.longPress(target);
+      await tester.tap(
+        find.byKey(const ValueKey('concurrent-reaction-launcher')),
+      );
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('reaction-popover-tray')),
         findsOneWidget,
         reason: 'The presentation latch must release after dismissal.',
       );
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
     });
 
     testWidgets('reaction popover grows right from a fixed left edge', (
@@ -1546,6 +1585,12 @@ void main() {
       expect(laterRect.left, moreOrLessEquals(earlyRect.left));
       expect(laterRect.width, greaterThan(earlyRect.width));
       await tester.pumpAndSettle();
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
     });
 
     testWidgets('long press survives a message rebuild during the hold', (
@@ -1588,6 +1633,12 @@ void main() {
         find.byKey(const ValueKey('reaction-popover-tray')),
         findsOneWidget,
       );
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
     });
 
     testWidgets('long press works over nested rich message content', (
@@ -1642,6 +1693,12 @@ void main() {
       );
       expect(find.byType(BottomSheet), findsNothing);
       expect(find.text('Copy text'), findsOneWidget);
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('message-action-surface'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
     });
 
     testWidgets(
@@ -7434,6 +7491,7 @@ void main() {
     ) async {
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = previousPlatform);
       tester.view.physicalSize = const Size(400, 800);
       tester.view.devicePixelRatio = 1;
       tester.view.viewPadding = const FakeViewPadding(bottom: 20);
@@ -7517,8 +7575,23 @@ void main() {
           .jumpTo(index: 5);
       await tester.pumpAndSettle();
       final latestButton = find.byKey(const ValueKey('thread-jump-to-latest'));
+      expect(
+        latestReply,
+        findsNothing,
+        reason: 'Detaching from the tail should unmount the final reply.',
+      );
       final latestButtonWasVisible = latestButton.evaluate().length == 1;
-      await tester.tap(latestButton);
+      final nativeView = tester.widget<UiKitView>(
+        find.byKey(const ValueKey('thread-jump-to-latest-ios-glass')),
+      );
+      nativeView.onPlatformViewCreated!(42);
+      await tester.pump();
+      const nativeChannel = MethodChannel('buzz/jump_to_latest_glass/42');
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        nativeChannel.name,
+        nativeChannel.codec.encodeMethodCall(const MethodCall('pressed')),
+        (_) {},
+      );
       await tester.pumpAndSettle();
       final latestReplyBottom = tester.getBottomLeft(latestReply).dy;
       debugDefaultTargetPlatformOverride = previousPlatform;
@@ -7763,11 +7836,19 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.byKey(const ValueKey('thread-jump-to-latest')),
-        findsNothing,
+        tester
+            .widget<Opacity>(
+              find.byKey(const ValueKey('thread-initial-viewport-gate')),
+            )
+            .opacity,
+        1,
         reason:
-            'The thread must not expose navigation before its authoritative '
-            'Inbox target is placed.',
+            'Pending local replies must not make an in-flight relay query '
+            'look hydrated and blank the route snapshot.',
+      );
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-5')),
+        findsOneWidget,
       );
 
       authoritativeReplies.complete(replies);
