@@ -1,5 +1,7 @@
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 
+import { cronExpressionError } from "./cronExpression";
+
 export const TRIGGER_TYPES = [
   "message_posted",
   "reaction_added",
@@ -14,6 +16,7 @@ export const SELECTABLE_TRIGGER_TYPES = [
   "reaction_added",
   "diff_posted",
   "webhook",
+  "schedule",
 ] as const satisfies readonly TriggerType[];
 
 export const ACTION_TYPES = [
@@ -197,8 +200,11 @@ export function formStateToYaml(state: WorkflowFormState): string {
     trigger.emoji = state.trigger.emoji;
   }
   if (state.trigger.on === "schedule") {
-    if (state.trigger.cron) trigger.cron = state.trigger.cron;
-    if (state.trigger.interval) trigger.interval = state.trigger.interval;
+    if (state.trigger.cron) {
+      trigger.cron = state.trigger.cron;
+    } else if (state.trigger.interval) {
+      trigger.interval = state.trigger.interval;
+    }
   }
 
   const steps = state.steps.map((step) => ({
@@ -381,12 +387,6 @@ export function yamlToFormState(
       };
     }
     const triggerOn = rawTrigger.on as TriggerType;
-    if (triggerOn === "schedule") {
-      return {
-        ok: false,
-        error: "Schedule triggers are only available in the YAML editor",
-      };
-    }
     const triggerUnknown = unknownKey(rawTrigger, TRIGGER_KEYS[triggerOn]);
     if (triggerUnknown) {
       return {
@@ -394,14 +394,45 @@ export function yamlToFormState(
         error: `Unsupported ${triggerOn} trigger field "${triggerUnknown}" — use the YAML editor`,
       };
     }
-    for (const key of ["filter", "emoji"] as const) {
+    for (const key of ["filter", "emoji", "cron", "interval"] as const) {
       const error = optionalOwnedStringError(rawTrigger, key, `trigger.${key}`);
-      if (error) return { ok: false, error };
+      if (error) {
+        return {
+          ok: false,
+          error:
+            triggerOn === "schedule" && !error.includes("YAML editor")
+              ? `${error} — use the YAML editor`
+              : error,
+        };
+      }
+    }
+    if (triggerOn === "schedule") {
+      const hasCron = rawTrigger.cron !== undefined;
+      const hasInterval = rawTrigger.interval !== undefined;
+      if (hasCron === hasInterval) {
+        return {
+          ok: false,
+          error: hasCron
+            ? "Schedule triggers cannot specify both cron and interval — use the YAML editor"
+            : "Schedule triggers require either cron or interval — use the YAML editor",
+        };
+      }
+      if (typeof rawTrigger.cron === "string") {
+        const error = cronExpressionError(rawTrigger.cron);
+        if (error) {
+          return {
+            ok: false,
+            error: `Unsupported cron expression: ${error} Use the YAML editor`,
+          };
+        }
+      }
     }
     const trigger: TriggerConfig = {
       on: triggerOn,
       filter: rawTrigger.filter as string | undefined,
       emoji: rawTrigger.emoji as string | undefined,
+      cron: rawTrigger.cron as string | undefined,
+      interval: rawTrigger.interval as string | undefined,
     };
 
     if (!Array.isArray(parsed.steps)) {

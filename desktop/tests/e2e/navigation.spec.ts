@@ -136,7 +136,8 @@ test("direct workflow detail links close back to workflows", async ({
 
   await page.goto(`/#/workflows/${workflowId}`);
 
-  const dialog = page.getByRole("dialog", { name: workflowName });
+  const dialog = page.getByRole("dialog", { name: "Edit workflow" });
+  await expect(dialog.getByText(workflowName, { exact: true })).toBeVisible();
   await expect(
     dialog.getByRole("button", { name: "Trigger: Message Posted" }),
   ).toBeVisible();

@@ -26,6 +26,9 @@ const acceptedFixtures = [
   `name: React\ndescription: React to a message\nenabled: false\ntrigger:\n  on: reaction_added\n  emoji: eyes\n  filter: trigger_message_id == "abc123"\nsteps:\n  - id: react\n    name: Add reaction\n    timeout_secs: 30\n    action: add_reaction\n    emoji: white_check_mark\n`,
   `name: Webhook\ntrigger:\n  on: webhook\nsteps:\n  - id: call\n    action: call_webhook\n    url: https://example.com/hook\n    method: PATCH\n    headers:\n      Authorization: secret\n      X-Trace: trace\n    body: '{"ok":true}'\n`,
   `name: Legacy actions\ntrigger:\n  on: diff_posted\n  filter: str_contains(trigger_text, "deploy")\nsteps:\n  - id: dm\n    action: send_dm\n    to: abc123\n    text: hello\n  - id: approval\n    action: request_approval\n    from: manager\n    message: Approve?\n    timeout: 24h\n  - id: topic\n    action: set_channel_topic\n    topic: Deployed\n  - id: wait\n    action: delay\n    duration: 5m\n`,
+  `name: Scheduled preset\ntrigger:\n  on: schedule\n  interval: 15m\nsteps:\n  - id: notify\n    action: send_message\n    text: hello\n`,
+  `name: Scheduled custom\ntrigger:\n  on: schedule\n  cron: 0 */2 * * 1,3,5\nsteps:\n  - id: notify\n    action: send_message\n    text: hello\n`,
+  `name: Scheduled legacy interval\ntrigger:\n  on: schedule\n  interval: 2h30m\nsteps:\n  - id: notify\n    action: send_message\n    text: hello\n`,
 ];
 
 test("accepted Form fixtures survive a semantic YAML round trip", () => {
@@ -108,16 +111,56 @@ test("invalid IDs, shapes, and scalar types are refused", () => {
   }
 });
 
-test("excluded schedule and condition capabilities stay in YAML mode", () => {
-  const schedule = `name: Scheduled\ntrigger: { on: schedule, interval: 5m }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`;
+test("step condition capabilities stay in YAML mode", () => {
   const condition = `name: Conditional\ntrigger: { on: webhook }\nsteps: [{ id: s1, if: trigger_author == "abc", action: send_message, text: hi }]\n`;
 
-  const scheduleResult = yamlToFormState(schedule);
-  assert.equal(scheduleResult.ok, false);
-  assert.match(scheduleResult.error, /Schedule.*YAML editor/);
   const conditionResult = yamlToFormState(condition);
   assert.equal(conditionResult.ok, false);
   assert.match(conditionResult.error, /conditions.*YAML editor/);
+});
+
+test("malformed and unowned schedule definitions stay losslessly in YAML mode", () => {
+  const fixtures = [
+    `name: Missing\ntrigger: { on: schedule }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Both\ntrigger: { on: schedule, cron: "0 9 * * *", interval: 1h }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Numeric\ntrigger: { on: schedule, interval: 30 }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Unknown\ntrigger: { on: schedule, cron: "0 9 * * *", timezone: UTC }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+    `name: Invalid cron\ntrigger: { on: schedule, cron: "60 9 * * *" }\nsteps: [{ id: s1, action: send_message, text: hi }]\n`,
+  ];
+
+  for (const yaml of fixtures) {
+    const original = yaml;
+    const result = yamlToFormState(yaml);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /YAML editor/);
+    assert.equal(yaml, original);
+  }
+});
+
+test("the serializer emits only one schedule representation", () => {
+  const yaml = formStateToYaml({
+    name: "Exclusive",
+    description: "",
+    enabled: true,
+    trigger: { on: "schedule", cron: "0 9 * * *", interval: "1h" },
+    steps: [{ id: "s1", action: "send_message", text: "hi" }],
+  });
+  assert.deepEqual(parseYaml(yaml).trigger, {
+    on: "schedule",
+    cron: "0 9 * * *",
+  });
+});
+
+test("advanced message expressions survive unrelated Form serialization", () => {
+  const filter =
+    'str_contains(trigger_text, "deploy") && trigger_author == "abc"';
+  const yaml = `name: Advanced\ndescription: Before\ntrigger:\n  on: message_posted\n  filter: '${filter}'\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n`;
+  const state = accepted(yaml);
+  state.description = "After";
+  const generated = parseYaml(formStateToYaml(state));
+
+  assert.equal(generated.description, "After");
+  assert.equal(generated.trigger.filter, filter);
 });
 
 test("values the Form serializer would normalize are refused", () => {
