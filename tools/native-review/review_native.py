@@ -874,8 +874,10 @@ def metric_value(receipt: dict[str, Any], metric: str) -> float:
         value = receipt.get("performance", {}).get("process", {}).get(metric.removeprefix("process."))
     else:
         value = receipt.get("measurements", {}).get(metric, {}).get("value")
-    if not numeric(value):
-        raise HarnessError(f"receipt {receipt.get('run_id')} has no finite numeric metric {metric}")
+    if not numeric(value) or value < 0:
+        raise HarnessError(
+            f"receipt {receipt.get('run_id')} has no nonnegative finite numeric metric {metric}"
+        )
     return float(value)
 
 

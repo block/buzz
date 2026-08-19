@@ -310,6 +310,49 @@ metrics:
             self.assertEqual(result["status"], "passed")
             self.assertEqual(result["baseline"]["metrics"]["tooltip_open_latency"]["median"], 101)
 
+    def test_comparison_rejects_negative_measurement_and_process_metrics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cases = (
+                ("tooltip_open_latency", {"timing": -5, "memory": 100}),
+                ("process.resident_mb_peak", {"timing": 100, "memory": -5}),
+            )
+            for metric, values in cases:
+                with self.subTest(metric=metric):
+                    baseline = [
+                        self.receipt(root / f"{metric}-b{i}.json", "base", 100)
+                        for i in range(3)
+                    ]
+                    candidate = [
+                        self.receipt(
+                            root / f"{metric}-c{i}.json", "head", values["timing"],
+                            memory=values["memory"],
+                        )
+                        for i in range(3)
+                    ]
+                    with self.assertRaisesRegex(
+                        review_native.HarnessError,
+                        f"nonnegative finite numeric metric {re.escape(metric)}",
+                    ):
+                        review_native.compare_performance(
+                            baseline, candidate, self.budget(root / f"{metric}-budget.yaml")
+                        )
+
+    def test_receipt_schema_requires_nonnegative_comparison_metrics(self):
+        schema = json.loads(
+            (MODULE_PATH.parent / "schemas/receipt.schema.json").read_text()
+        )
+        properties = schema["properties"]
+        measurement_value = properties["measurements"]["additionalProperties"]["properties"]["value"]
+        process = properties["performance"]["properties"]["process"]
+        self.assertEqual(measurement_value["minimum"], 0)
+        for metric in (
+            "cpu_percent_median", "cpu_percent_peak",
+            "resident_mb_median", "resident_mb_peak",
+        ):
+            self.assertEqual(process["properties"][metric]["minimum"], 0)
+        self.assertEqual(process["properties"]["sample_count"]["minimum"], 0)
+
     def test_comparison_fails_when_one_sample_exceeds_absolute_maximum(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

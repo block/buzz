@@ -48,7 +48,51 @@
       ]
     },
     "provenance": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "head_sha",
+        "dirty",
+        "dirty_state_sha256",
+        "status"
+      ],
+      "properties": {
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "dirty_state_sha256": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "artifact_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "initial_window": {
+          "type": "object"
+        }
+      }
     },
     "isolation": {
       "type": "object"
@@ -63,7 +107,26 @@
       }
     },
     "cleanup": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_started",
+            "passed",
+            "failed"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "measurements": {
       "type": "object",
@@ -76,7 +139,8 @@
         ],
         "properties": {
           "value": {
-            "type": "number"
+            "type": "number",
+            "minimum": 0
           },
           "unit": {
             "const": "ms"
@@ -127,7 +191,37 @@
           }
         },
         "process": {
-          "type": "object"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sample_count"
+          ],
+          "properties": {
+            "sample_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "interval_ms": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "cpu_percent_median": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cpu_percent_peak": {
+              "type": "number",
+              "minimum": 0
+            },
+            "resident_mb_median": {
+              "type": "number",
+              "minimum": 0
+            },
+            "resident_mb_peak": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
         }
       }
     }
