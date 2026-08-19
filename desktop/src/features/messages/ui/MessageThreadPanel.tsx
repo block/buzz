@@ -1,5 +1,4 @@
 import * as React from "react";
-import { ArrowDown } from "lucide-react";
 
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleTranscriptIntro } from "@/features/huddle/components/HuddleTranscriptIntro";
@@ -33,7 +32,6 @@ import {
   THREAD_PANEL_COMPOSER_GUTTER_CLASS,
   THREAD_PANEL_MESSAGE_GUTTER_CLASS,
 } from "@/features/messages/lib/messageThreadPanelLayout";
-import { Button } from "@/shared/ui/button";
 import { Separator } from "@/shared/ui/separator";
 import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
@@ -57,7 +55,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channelName: string;
   currentPubkey?: string;
   disabled?: boolean;
-  expandedReplyIds: ReadonlySet<string>;
+  expandedReplyIds?: ReadonlySet<string>;
   firstUnreadReplyId?: string | null;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
@@ -193,7 +191,7 @@ export function MessageThreadPanel({
   columnMaxWidthPx,
   currentPubkey,
   disabled = false,
-  expandedReplyIds,
+  expandedReplyIds = new Set(),
   firstUnreadReplyId,
   huddleMemberPubkeys,
   huddleMemberPubkeysPending = false,

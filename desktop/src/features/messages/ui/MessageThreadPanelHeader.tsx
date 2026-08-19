@@ -78,29 +78,29 @@ export function MessageThreadPanelHeader({
       >
         <AuxiliaryPanelTitle>{title}</AuxiliaryPanelTitle>
         {threadRail.isScoped && channelId ? (
-        <Button
-          aria-label={isPinned ? "Thread pinned" : "Pin to thread rail"}
-          aria-pressed={isPinned}
-          data-testid="pin-thread-to-rail"
-          disabled={isPinned}
-          onClick={() =>
-            threadRail.pin(
-              makeThreadRailPin({
-                channelId,
-                channelName,
-                rootExcerpt: threadHead.body.slice(0, 96),
-                rootId: threadHead.id,
-                returnAnchorId: returnAnchorId ?? undefined,
-                expandedReplyIds: [...expandedReplyIds],
-              }),
-            )
-          }
-          size="icon-xs"
-          type="button"
-          variant="ghost"
-        >
-          <Pin aria-hidden />
-        </Button>
+          <Button
+            aria-label={isPinned ? "Thread pinned" : "Pin to thread rail"}
+            aria-pressed={isPinned}
+            data-testid="pin-thread-to-rail"
+            disabled={isPinned}
+            onClick={() =>
+              threadRail.pin(
+                makeThreadRailPin({
+                  channelId,
+                  channelName,
+                  rootExcerpt: threadHead.body.slice(0, 96),
+                  rootId: threadHead.id,
+                  returnAnchorId: returnAnchorId ?? undefined,
+                  expandedReplyIds: [...expandedReplyIds],
+                }),
+              )
+            }
+            size="icon-xs"
+            type="button"
+            variant="ghost"
+          >
+            <Pin aria-hidden />
+          </Button>
         ) : null}
       </AuxiliaryPanelHeaderGroup>
     </AuxiliaryPanelHeader>
