@@ -364,10 +364,17 @@ export function AgentsView() {
       <RemoveRegisteredAgentDialog
         isPending={unregisterReferenceMutation.isPending}
         onConfirm={(reference) => {
+          agents.setActionErrorMessage(null);
           void unregisterReferenceMutation
             .mutateAsync(reference)
             .then(() => setReferenceToRemove(null))
-            .catch(() => undefined);
+            .catch((error) => {
+              agents.setActionErrorMessage(
+                error instanceof Error
+                  ? error.message
+                  : "Couldn't remove registered agent reference.",
+              );
+            });
         }}
         onOpenChange={(open) => {
           if (!open) setReferenceToRemove(null);

@@ -41,4 +41,8 @@ test("unregister rejection is consumed instead of escaping the UI event", () => 
     agentsView,
     /unregisterReferenceMutation[\s\S]*\.mutateAsync\(reference\)[\s\S]*\.then\([\s\S]*\.catch\(/,
   );
+  assert.match(
+    agentsView,
+    /\.catch\(\(error\) =>[\s\S]*agents\.setActionErrorMessage\(/,
+  );
 });

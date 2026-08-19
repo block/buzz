@@ -49,7 +49,7 @@ fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn normalize_pubkey(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.len() != 64 || !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("agent pubkey must be exactly 64 ASCII hex characters".to_string());
+        return Err("invalid public key".to_string());
     }
     Ok(trimmed.to_ascii_lowercase())
 }
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn rejects_non_exact_ascii_hex_pubkeys_and_overlong_fields() {
-        assert!(normalize_pubkey("abc").is_err());
+        assert_eq!(normalize_pubkey("abc").unwrap_err(), "invalid public key");
         assert!(normalize_pubkey(
             "g000000000000000000000000000000000000000000000000000000000000000"
         )

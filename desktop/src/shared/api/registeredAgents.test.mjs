@@ -58,6 +58,6 @@ test("malformed registered agent store entries fail visibly instead of being fil
         created_at: "2026-08-18T12:00:00Z",
         updated_at: "2026-08-18T12:30:00Z",
       }),
-    /registered agent pubkey/i,
+    /invalid public key/i,
   );
 });

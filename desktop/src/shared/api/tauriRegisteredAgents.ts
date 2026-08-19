@@ -50,7 +50,7 @@ function nullableString(value: unknown, field: string): string | null {
 function normalizeRegisteredPubkey(value: unknown): string {
   const pubkey = normalizePubkey(requiredString(value, "pubkey"));
   if (!HEX_PUBKEY_RE.test(pubkey)) {
-    throw new Error("Malformed registered agent pubkey.");
+    throw new Error("invalid public key");
   }
   return pubkey;
 }
