@@ -33,6 +33,20 @@ async function expectSecondarySurface(tooltip: Locator) {
   expect(colors.color).toBe(colors.expectedColor);
 }
 
+async function expectMutedSupportingText(
+  trigger: Locator,
+  expectedText: string | RegExp,
+) {
+  await trigger.hover();
+  const footer = trigger
+    .page()
+    .getByRole("tooltip")
+    .locator('[data-buzz-tooltip-metadata-type=""]');
+  await expect(footer).toHaveText(expectedText);
+  await expect(footer).toHaveClass(/text-secondary-foreground\/80/);
+  await expect(footer).not.toHaveClass(/text-primary-foreground/);
+}
+
 for (const theme of THEMES) {
   test(`simple and rich tooltips use the secondary surface — ${theme}`, async ({
     page,
@@ -90,5 +104,57 @@ for (const theme of THEMES) {
     await dialog.screenshot({
       path: `test-results/tooltip-semantics/${theme}-team-tooltip.png`,
     });
+  });
+
+  test(`link tooltip supporting text uses the muted secondary foreground — ${theme}`, async ({
+    page,
+  }) => {
+    await seedTheme(page, theme);
+    await installMockBridge(page);
+    await page.goto("/");
+    await page.getByTestId("channel-general").click();
+    const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+    const owner = "a".repeat(64);
+    const issueId = "b".repeat(64);
+    const links = [
+      `buzz://channel/${channelId}`,
+      `buzz://message?channel=${channelId}&id=mock-general-welcome`,
+      `buzz://issue?id=${issueId}&owner=${owner}&d=buzz-world`,
+    ].join(" ");
+    const composer = page.getByTestId("message-input");
+    await composer.evaluate((element, text) => {
+      const clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", text);
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        }),
+      );
+    }, links);
+
+    const composerChips = composer.locator('[data-composer-buzz-link=""]');
+    await expect(composerChips).toHaveCount(3);
+    await page.getByTestId("send-message").click();
+
+    const row = page.getByTestId("message-row").last();
+    await expect(row).toBeVisible();
+    await expectMutedSupportingText(
+      row.getByRole("button", { name: "Open channel general" }),
+      /Public channel · Active \d+[mhdw] ago/,
+    );
+    await page.mouse.move(0, 0);
+    await expectMutedSupportingText(
+      row.getByRole("button", { name: "Open message in channel general" }),
+      /#general · .+ · (just now|\d+[mhdw] ago)/,
+    );
+    await page.mouse.move(0, 0);
+    await expectMutedSupportingText(
+      row.getByRole("button", {
+        name: /Open issue .* in repository buzz-world/,
+      }),
+      "Issue · buzz-world",
+    );
   });
 }

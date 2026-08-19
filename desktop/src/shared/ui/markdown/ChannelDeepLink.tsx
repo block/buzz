@@ -77,7 +77,7 @@ function ChannelMetadataTooltip({
           ) : null}
           <span
             className={cn(
-              "block max-w-full truncate whitespace-nowrap text-2xs text-primary-foreground/70",
+              "block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/80",
               description && "mt-1",
             )}
             data-buzz-tooltip-metadata-type=""

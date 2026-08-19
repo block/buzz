@@ -259,7 +259,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     '[data-buzz-tooltip-metadata-type=""]',
   );
   await expect(missingRepoFooter).toHaveText("Repository");
-  await expect(missingRepoFooter).toHaveClass(/text-secondary-foreground\/70/);
+  await expect(missingRepoFooter).toHaveClass(/text-secondary-foreground\/80/);
   await expect(missingRepoFooter).not.toHaveClass(/text-primary-foreground/);
   // Default typography is 14px; keep the image-less card compact while
   // allowing fractional line-height rounding across rendering platforms.
