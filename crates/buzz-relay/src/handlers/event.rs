@@ -262,7 +262,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
         return;
     }
 
-    let event_json = match serde_json::to_string(&stored.event) {
+    let event_json = match state.cached_event_json(stored) {
         Ok(json) => json,
         Err(e) => {
             error!(event_id = %stored.event.id.to_hex(), "Failed to serialize event for fan-out: {e}");
@@ -322,7 +322,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
         return;
     }
 
-    let event_json = match serde_json::to_string(&stored.event) {
+    let event_json = match state.cached_event_json(&stored) {
         Ok(json) => json,
         Err(e) => {
             tracing::error!("Failed to serialize event for multi-node fan-out: {e}");
@@ -457,7 +457,7 @@ async fn dispatch_persistent_event_inner(
         "Fan-out"
     );
 
-    let event_json = match serde_json::to_string(&stored_event.event) {
+    let event_json = match state.cached_event_json(stored_event) {
         Ok(json) => json,
         Err(e) => {
             error!(event_id = %event_id_hex, "Failed to serialize event for fan-out: {e}");

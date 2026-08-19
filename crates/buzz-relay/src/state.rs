@@ -18,7 +18,7 @@ use uuid::Uuid;
 use buzz_audit::AuditService;
 use buzz_auth::{AuthService, Nip98ReplayGuard};
 use buzz_core::tenant::TenantContext;
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
@@ -681,6 +681,14 @@ pub struct AppState {
     /// cross-community non-interference violation. Entries expire after 60
     /// seconds via moka's TTL eviction — bounded regardless of subscriber health.
     pub local_event_ids: Arc<moka::sync::Cache<(CommunityId, [u8; 32]), ()>>,
+    /// Process-wide cache of fan-out event JSON, keyed by event id bytes.
+    /// First writer for an event serializes; subsequent readers (the local
+    /// fan-out helper, the persistent-event inner, the cross-node pubsub
+    /// consumer) get the same `Arc<str>` back, deduplicating the JSON body
+    /// that R3-F8 flagged as re-serialized three times per event. Entries
+    /// expire after 60 seconds — fan-out is short-lived and unbounded growth
+    /// would defeat the cache.
+    pub event_json_cache: Arc<moka::sync::Cache<[u8; 32], Arc<str>>>,
     /// Membership cache: (community_id, channel_id, pubkey_bytes) → is_member.
     /// Short TTL (10s) — membership changes are rare but must propagate.
     #[allow(clippy::type_complexity)]
@@ -767,6 +775,24 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+}
+
+/// Serialize `stored.event` exactly once per cache-entry lifetime and hand
+/// out the resulting `Arc<str>` to every subsequent caller. R3-F8 closure:
+/// all three internal fan-out serializations route through here so an event
+/// is only written to JSON once across the local fan-out helper, the
+/// persistent-event inner, and the cross-node pubsub consumer.
+fn cached_or_serialize_event_json(
+    cache: &moka::sync::Cache<[u8; 32], Arc<str>>,
+    stored: &StoredEvent,
+) -> Result<Arc<str>, serde_json::Error> {
+    let key = stored.event.id.to_bytes();
+    if let Some(hit) = cache.get(&key) {
+        return Ok(hit);
+    }
+    let owned: Arc<str> = Arc::from(serde_json::to_string(&stored.event)?);
+    cache.insert(key, owned.clone());
+    Ok(owned)
 }
 
 impl AppState {
@@ -880,6 +906,12 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(60))
                     .build(),
             ),
+            event_json_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(60))
+                    .build(),
+            ),
             membership_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(10_000)
@@ -964,6 +996,16 @@ impl AppState {
     pub fn mark_local_event(&self, community: CommunityId, event_id: &nostr::EventId) {
         self.local_event_ids
             .insert((community, event_id.to_bytes()), ());
+    }
+
+    /// Return the cached JSON body for `stored`, serializing once on first
+    /// call and cloning the `Arc<str>` out of the cache on every subsequent
+    /// call. R3-F8 closure: the local fan-out helper, the persistent-event
+    /// inner, and the cross-node pubsub consumer all funnel through this
+    /// accessor, so each event is serialized exactly once per relay process
+    /// per cache entry lifetime (60s).
+    pub fn cached_event_json(&self, stored: &StoredEvent) -> Result<Arc<str>, serde_json::Error> {
+        cached_or_serialize_event_json(&self.event_json_cache, stored)
     }
 
     /// Check channel membership with a 10-second cache. Falls back to DB on miss.
@@ -2401,5 +2443,41 @@ mod tests {
             }
             other => panic!("expected a restart close frame, got {other:?}"),
         }
+    }
+
+    /// R3-F8 closure: the fan-out JSON cache must serialize once and hand
+    /// the same `Arc<str>` to every subsequent caller. Anchor on `Arc::ptr_eq`
+    /// — pointer equality proves the second caller reused the original
+    /// allocation, not a freshly allocated `String`.
+    #[test]
+    fn cached_or_serialize_event_json_dedupes_across_callers() {
+        let cache: moka::sync::Cache<[u8; 32], Arc<str>> = moka::sync::Cache::builder()
+            .max_capacity(10_000)
+            .time_to_live(std::time::Duration::from_secs(60))
+            .build();
+
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "fan-out-once")
+            .sign_with_keys(&keys)
+            .expect("sign event");
+        let stored = StoredEvent::new(event, None);
+
+        let first =
+            cached_or_serialize_event_json(&cache, &stored).expect("first caller serializes");
+        let second = cached_or_serialize_event_json(&cache, &stored).expect("second caller reuses");
+        let third = cached_or_serialize_event_json(&cache, &stored).expect("third caller reuses");
+
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "second caller must receive the same Arc as the first"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &third),
+            "third caller must receive the same Arc as the first"
+        );
+        // Body shape sanity check: payload round-trips through JSON and the
+        // content we signed is present.
+        let parsed: serde_json::Value = serde_json::from_str(&first).expect("valid JSON");
+        assert_eq!(parsed["content"], "fan-out-once");
     }
 }
