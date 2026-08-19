@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buzz.local/native-review/journey.schema.json",
+  "title": "Buzz native review journey",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "flow", "platforms", "fixture", "record", "steps", "cleanup"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "flow": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+    "platforms": {"type": "array", "minItems": 1, "items": {"enum": ["macos"]}},
+    "fixture": {"enum": ["local_review_channel"]},
+    "record": {
+      "type": "object", "additionalProperties": false,
+      "required": ["video", "screenshots", "accessibility"],
+      "properties": {
+        "video": {"enum": ["window", "off"]},
+        "screenshots": {"type": "boolean"},
+        "accessibility": {"type": "boolean"}
+      }
+    },
+    "steps": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "act", "expect"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "locate": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/locator"}},
+          "act": {"$ref": "#/$defs/action"},
+          "expect": {"$ref": "#/$defs/expectation"},
+          "expect_for": {
+            "type": "object", "additionalProperties": false,
+            "required": ["duration_ms", "condition"],
+            "properties": {
+              "duration_ms": {"type": "integer", "minimum": 1, "maximum": 30000},
+              "condition": {"$ref": "#/$defs/expectation"}
+            }
+          },
+          "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 60000},
+          "measure": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["terminate_app", "remove_state"],
+      "properties": {"terminate_app": {"type": "boolean"}, "remove_state": {"type": "boolean"}}
+    }
+  },
+  "$defs": {
+    "locator": {
+      "type": "object", "additionalProperties": false, "minProperties": 1,
+      "properties": {"id": {"type": "string"}, "role": {"type": "string"}, "name": {"type": "string"}}
+    },
+    "action": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"const": "activate"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"const": "click"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"const": "move_pointer"}, "duration_ms": {"type": "integer", "minimum": 0, "maximum": 30000}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "key"], "properties": {"type": {"const": "press"}, "key": {"enum": ["tab", "return", "enter", "escape", "space"]}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "duration_ms"], "properties": {"type": {"const": "wait"}, "duration_ms": {"type": "integer", "minimum": 0, "maximum": 30000}}}
+      ]
+    },
+    "expectation": {
+      "type": "object", "additionalProperties": false, "minProperties": 1, "maxProperties": 1,
+      "properties": {
+        "exists": {"$ref": "#/$defs/locator"},
+        "not_exists": {"$ref": "#/$defs/locator"},
+        "focused": {"oneOf": [{"type": "boolean"}, {"$ref": "#/$defs/locator"}]},
+        "enabled": {"type": "boolean"}
+      }
+    }
+  }
+}

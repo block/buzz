@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buzz.local/native-review/receipt.schema.json",
+  "title": "Buzz native review receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "flow", "status", "started_at", "finished_at", "provenance", "isolation", "artifacts", "measurements", "steps", "cleanup"],
+  "properties": {
+    "schema_version": {"const": 1}, "run_id": {"type": "string"}, "flow": {"type": "string"},
+    "status": {"enum": ["passed", "failed"]}, "started_at": {"type": "string"}, "finished_at": {"type": "string"},
+    "failure": {"type": ["string", "null"]},
+    "provenance": {"type": "object"}, "isolation": {"type": "object"}, "artifacts": {"type": "object"},
+    "measurements": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,63}$"},
+      "additionalProperties": {
+        "type": "object", "additionalProperties": false,
+        "required": ["value", "unit"],
+        "properties": {"value": {"type": "number", "minimum": 0}, "unit": {"const": "ms"}}
+      }
+    },
+    "steps": {"type": "array", "items": {"type": "object"}}, "cleanup": {"type": "object"}
+  }
+}
