@@ -1,6 +1,9 @@
 import * as React from "react";
 import { Bot, Users } from "lucide-react";
-import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
+import type {
+  MentionGroupMember,
+  TeamMentionMember,
+} from "@/features/messages/lib/mentionCandidates";
 
 import { Badge } from "@/shared/ui/badge";
 import { cn } from "@/shared/lib/cn";
@@ -18,7 +21,8 @@ export type MentionSuggestion = {
   personaId?: string;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
-  kind?: "identity" | "persona" | "team";
+  channelMembers?: MentionGroupMember[];
+  kind?: "identity" | "persona" | "team" | "channel";
   displayName: string;
   avatarUrl?: string | null;
   isAgent?: boolean;
@@ -99,6 +103,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             suggestion.pubkey ??
             (suggestion.personaId ? `persona-${suggestion.personaId}` : null) ??
             (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
+            (suggestion.kind === "channel" ? "channel-members" : null) ??
             suggestion.displayName;
           const agentLabel = "agent";
           const hasNameCollision =
@@ -125,7 +130,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               tabIndex={-1}
               type="button"
             >
-              {suggestion.kind === "team" ? (
+              {suggestion.kind === "team" || suggestion.kind === "channel" ? (
                 <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                   <Users aria-hidden="true" className="h-4 w-4" />
                 </span>
@@ -145,6 +150,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   {suggestion.displayName}
                 </span>
                 {suggestion.kind === "team" ||
+                suggestion.kind === "channel" ||
                 suggestion.isAgent ||
                 suggestion.role ||
                 suggestion.ownerLabel ||
@@ -161,6 +167,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                       <span className="inline-flex shrink-0 items-center gap-1">
                         <Users aria-hidden="true" className="h-3.5 w-3.5" />
                         team · {suggestion.teamMembers?.length ?? 0} agents
+                      </span>
+                    ) : suggestion.kind === "channel" ? (
+                      <span className="inline-flex shrink-0 items-center gap-1">
+                        <Users aria-hidden="true" className="h-3.5 w-3.5" />
+                        everyone · {suggestion.channelMembers?.length ?? 0}{" "}
+                        members
                       </span>
                     ) : suggestion.isAgent ? (
                       <span className="inline-flex shrink-0 items-center gap-1">

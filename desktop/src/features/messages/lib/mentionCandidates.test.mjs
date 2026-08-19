@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildChannelMentionCandidate,
   buildTeamMentionCandidates,
+  formatChannelMention,
   formatTeamMention,
 } from "./mentionCandidates.ts";
 
@@ -55,6 +57,50 @@ function identity(personaId, displayName, overrides = {}) {
     ...overrides,
   };
 }
+
+test("channel mention expands every other uniquely named channel member", () => {
+  const currentPubkey = "1".repeat(64);
+  const suggestion = buildChannelMentionCandidate(
+    [
+      identity(undefined, "Josh", {
+        isMember: true,
+        isAgent: false,
+        pubkey: currentPubkey,
+      }),
+      identity(undefined, "Nyx", {
+        isMember: true,
+        isAgent: true,
+        pubkey: "2".repeat(64),
+      }),
+      identity(undefined, "Solace", {
+        isMember: true,
+        isAgent: true,
+        pubkey: "3".repeat(64),
+      }),
+      identity(undefined, "Outside", {
+        isMember: false,
+        isAgent: false,
+        pubkey: "4".repeat(64),
+      }),
+    ],
+    currentPubkey,
+  );
+
+  assert.deepEqual(suggestion, {
+    kind: "channel",
+    channelMembers: [
+      { displayName: "Nyx", kind: "identity", pubkey: "2".repeat(64) },
+      { displayName: "Solace", kind: "identity", pubkey: "3".repeat(64) },
+    ],
+    displayName: "Everyone in this channel",
+    isAgent: false,
+    isMember: false,
+  });
+  assert.equal(
+    formatChannelMention(suggestion.channelMembers),
+    "@Nyx @Solace ",
+  );
+});
 
 test("team mentions preserve team order and prefer concrete managed agents", () => {
   const personas = [

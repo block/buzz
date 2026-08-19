@@ -344,6 +344,25 @@ test("relay-only shared agents emit an outbound mention tag when selected", asyn
     .toContain(TEST_IDENTITIES.alice.pubkey);
 });
 
+test("channel mention selects every other current member", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const composer = page.getByTestId("message-composer");
+  const input = composer.getByTestId("message-input");
+  await input.fill("Notify @");
+
+  const channelMention = composer.getByTestId(
+    "mention-suggestion-channel-members",
+  );
+  await expect(channelMention).toContainText("Everyone in this channel");
+  await expect(channelMention).toContainText("everyone · 2 members");
+  await channelMention.click();
+
+  const content = "Notify @alice @bob ";
+  await expect(input).toHaveText(content);
+});
+
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
 }) => {

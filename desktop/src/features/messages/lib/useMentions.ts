@@ -50,7 +50,9 @@ import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   appendUniqueName,
+  buildChannelMentionCandidate,
   buildTeamMentionCandidates,
+  formatChannelMention,
   formatSearchUserDisplayName,
   formatSearchUserSecondaryLabel,
   formatTeamMention,
@@ -439,6 +441,10 @@ export function useMentions(
     () => getAdmittedAgentPubkeys(mentionCandidates),
     [mentionCandidates],
   );
+  const channelMentionCandidate = React.useMemo(
+    () => buildChannelMentionCandidate(mentionCandidates, currentPubkey),
+    [currentPubkey, mentionCandidates],
+  );
   const mentionCandidatesWithTeams = React.useMemo(
     () => [
       ...mentionCandidates,
@@ -447,8 +453,14 @@ export function useMentions(
         personasQuery.data ?? [],
         mentionCandidates,
       ),
+      ...(channelMentionCandidate ? [channelMentionCandidate] : []),
     ],
-    [mentionCandidates, personasQuery.data, teamsQuery.data],
+    [
+      channelMentionCandidate,
+      mentionCandidates,
+      personasQuery.data,
+      teamsQuery.data,
+    ],
   );
   const ownerPubkeys = React.useMemo(
     () => [
@@ -613,15 +625,21 @@ export function useMentions(
       }
 
       const displayName = suggestion.displayName;
-      const teamMembers =
-        suggestion.kind === "team" ? suggestion.teamMembers : null;
-      const insertText = teamMembers
-        ? formatTeamMention(displayName, teamMembers)
+      const mentionGroupMembers =
+        suggestion.kind === "team"
+          ? suggestion.teamMembers
+          : suggestion.kind === "channel"
+            ? suggestion.channelMembers
+            : null;
+      const insertText = mentionGroupMembers
+        ? suggestion.kind === "team"
+          ? formatTeamMention(displayName, mentionGroupMembers)
+          : formatChannelMention(mentionGroupMembers)
         : `@${displayName} `;
 
       const mentions = mentionMapRef.current;
       const personaMentions = personaMentionMapRef.current;
-      const selectedMentions = teamMembers ?? [suggestion];
+      const selectedMentions = mentionGroupMembers ?? [suggestion];
       for (const selected of selectedMentions) {
         if (selected.kind === "persona" && selected.personaId) {
           personaMentions.set(selected.displayName, selected.personaId);

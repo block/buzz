@@ -25,19 +25,22 @@ export function appendUniqueName(current: string[], name: string): string[] {
     : [...current, name];
 }
 
-export type TeamMentionMember = {
+export type MentionGroupMember = {
   displayName: string;
   kind: "identity" | "persona";
   personaId?: string;
   pubkey?: string;
 };
 
+export type TeamMentionMember = MentionGroupMember;
+
 export type MentionCandidate = {
-  kind: "identity" | "persona" | "team";
+  kind: "identity" | "persona" | "team" | "channel";
   pubkey?: string;
   personaId?: string;
   teamId?: string;
   teamMembers?: TeamMentionMember[];
+  channelMembers?: MentionGroupMember[];
   displayName: string | null;
   avatarUrl?: string | null;
   isMember: boolean;
@@ -152,4 +155,50 @@ export function formatTeamMention(
   members: readonly TeamMentionMember[],
 ) {
   return `${teamName}(${members.map((member) => `@${member.displayName}`).join(" ")}) `;
+}
+
+/** Build the safe client-side expansion for the current channel's members. */
+export function buildChannelMentionCandidate(
+  candidates: readonly MentionCandidate[],
+  currentPubkey: string | null,
+): MentionCandidate | null {
+  const channelMembers = candidates.flatMap((candidate) => {
+    if (
+      candidate.kind !== "identity" ||
+      !candidate.isMember ||
+      !candidate.pubkey ||
+      candidate.pubkey === currentPubkey
+    ) {
+      return [];
+    }
+
+    const displayName = candidate.displayName?.trim();
+    return displayName
+      ? [{ displayName, kind: "identity" as const, pubkey: candidate.pubkey }]
+      : [];
+  });
+  const names = new Set<string>();
+  if (
+    channelMembers.length === 0 ||
+    channelMembers.some((member) => {
+      const normalized = member.displayName.toLowerCase();
+      if (names.has(normalized)) return true;
+      names.add(normalized);
+      return false;
+    })
+  ) {
+    return null;
+  }
+
+  return {
+    kind: "channel",
+    channelMembers,
+    displayName: "Everyone in this channel",
+    isAgent: false,
+    isMember: false,
+  };
+}
+
+export function formatChannelMention(members: readonly MentionGroupMember[]) {
+  return `${members.map((member) => `@${member.displayName}`).join(" ")} `;
 }
