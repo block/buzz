@@ -384,8 +384,11 @@ pub enum MessagesCmd {
         #[arg(long)]
         kind: Option<u16>,
         /// Event ID to reply to (creates a thread)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "top_level")]
         reply_to: Option<String>,
+        /// Send at channel root, ignoring automatic reply context
+        #[arg(long, default_value_t = false, conflicts_with = "reply_to")]
+        top_level: bool,
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
@@ -2141,6 +2144,45 @@ mod tests {
             "--emoji alone must not imply a status"
         );
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
+    fn message_send_top_level_is_explicit_and_conflicts_with_reply_to() {
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "00000000-0000-0000-0000-000000000000",
+            "--content",
+            "announcement",
+            "--top-level",
+        ])
+        .expect("--top-level should parse");
+        let Cmd::Messages(MessagesCmd::Send {
+            top_level,
+            reply_to,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected messages send");
+        };
+        assert!(top_level);
+        assert!(reply_to.is_none());
+
+        let conflict = Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "00000000-0000-0000-0000-000000000000",
+            "--content",
+            "announcement",
+            "--top-level",
+            "--reply-to",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ]);
+        assert!(conflict.is_err(), "explicit destinations must not conflict");
     }
 
     #[test]

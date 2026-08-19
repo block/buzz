@@ -1942,6 +1942,15 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("buzz-acp starting: {}", config.summary());
 
+    let reply_to_dir = tempfile::tempdir()?;
+    let reply_to_files: Vec<std::path::PathBuf> = (0..config.agents)
+        .map(|index| reply_to_dir.path().join(format!("agent-{index}")))
+        .collect();
+    for path in &reply_to_files {
+        std::fs::write(path, "")?;
+    }
+    config.reply_to_files = reply_to_files;
+
     let observer = config
         .relay_observer
         .then(observer::ObserverHandle::in_process);
@@ -1963,7 +1972,11 @@ async fn tokio_main() -> Result<()> {
     let mut pool = if config.lazy_pool {
         AgentPool::from_slots((0..config.agents).map(|_| None).collect())
     } else {
-        initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
+        initialize_agent_pool(
+            &PoolStartup::from_config(&config, observer.clone(), config.reply_to_files.clone()),
+            None,
+        )
+        .await?
     };
     let mut pool_ready = !config.lazy_pool;
     let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
@@ -2207,6 +2220,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        reply_to_files: config.reply_to_files.clone(),
     });
 
     if !config.memory_enabled {
@@ -2407,7 +2421,11 @@ async fn tokio_main() -> Result<()> {
                     "waking",
                     None,
                 );
-                let startup = PoolStartup::from_config(&config, observer.clone());
+                let startup = PoolStartup::from_config(
+                    &config,
+                    observer.clone(),
+                    config.reply_to_files.clone(),
+                );
                 let wake_tx = wake_tx.clone();
                 let wake_shutdown = shutdown_rx.clone();
                 wake_tasks.spawn(async move {
@@ -2445,9 +2463,19 @@ async fn tokio_main() -> Result<()> {
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
+                let reply_to_file = config.reply_to_files.get(idx).cloned();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        reply_to_file.as_deref(),
+                        has_codex,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -4328,13 +4356,23 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let reply_to_file = config.reply_to_files.get(i).cloned();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            reply_to_file.as_deref(),
+            has_codex,
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -4430,6 +4468,25 @@ fn dispatch_heartbeat(
 
 #[cfg(test)]
 mod agent_draft_prompt_tests {
+    use super::spawn_env_for_slot;
+
+    #[test]
+    fn spawn_env_for_slot_uses_slot_file_and_preserves_persona_env() {
+        let persona_env = vec![("MODEL".to_string(), "test-model".to_string())];
+        let path = std::path::Path::new("/runtime/reply/agent-2");
+
+        assert_eq!(
+            spawn_env_for_slot(&persona_env, Some(path)),
+            vec![
+                ("MODEL".to_string(), "test-model".to_string()),
+                (
+                    "BUZZ_REPLY_TO_FILE".to_string(),
+                    path.to_string_lossy().into_owned(),
+                ),
+            ]
+        );
+    }
+
     #[test]
     fn shared_base_prompt_teaches_portable_agent_drafts() {
         let prompt = include_str!("base_prompt.md");
@@ -4539,6 +4596,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let reply_to_file = config.reply_to_files.get(index).cloned();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
@@ -4551,7 +4609,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            reply_to_file.as_deref(),
+            has_codex,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -4594,6 +4661,7 @@ struct PoolStartup {
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
+    reply_to_files: Vec<std::path::PathBuf>,
     has_generated_codex_config: bool,
     model: Option<String>,
     effort_level: Option<String>,
@@ -4601,12 +4669,17 @@ struct PoolStartup {
 }
 
 impl PoolStartup {
-    fn from_config(config: &Config, observer: Option<observer::ObserverHandle>) -> Self {
+    fn from_config(
+        config: &Config,
+        observer: Option<observer::ObserverHandle>,
+        reply_to_files: Vec<std::path::PathBuf>,
+    ) -> Self {
         Self {
             agents: config.agents,
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
+            reply_to_files,
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
@@ -4623,10 +4696,15 @@ async fn initialize_agent_pool(
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
+        let reply_to_file = startup
+            .reply_to_files
+            .get(i)
+            .ok_or_else(|| anyhow::anyhow!("missing reply context file for agent slot {i}"))?;
+        let extra_env = spawn_env_for_slot(&startup.extra_env, Some(reply_to_file));
         let spawn_result = AcpClient::spawn(
             &startup.command,
             &startup.args,
-            &startup.extra_env,
+            &extra_env,
             startup.has_generated_codex_config,
         )
         .await;
@@ -4726,15 +4804,31 @@ async fn initialize_agent_pool(
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
 /// borrowing `Config`. All respawn/refill paths use this.
+fn spawn_env_for_slot(
+    extra_env: &[(String, String)],
+    reply_to_file: Option<&std::path::Path>,
+) -> Vec<(String, String)> {
+    let mut spawn_env = extra_env.to_vec();
+    if let Some(reply_to_file) = reply_to_file {
+        spawn_env.push((
+            "BUZZ_REPLY_TO_FILE".into(),
+            reply_to_file.to_string_lossy().into_owned(),
+        ));
+    }
+    spawn_env
+}
+
 async fn spawn_and_init(
     command: &str,
     args: &[String],
     extra_env: &[(String, String)],
+    reply_to_file: Option<&std::path::Path>,
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
+    let spawn_env = spawn_env_for_slot(extra_env, reply_to_file);
+    let mut acp = AcpClient::spawn(command, args, &spawn_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
@@ -6779,6 +6873,7 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            reply_to_files: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
@@ -7003,6 +7098,7 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            reply_to_files: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,

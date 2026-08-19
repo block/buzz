@@ -1194,8 +1194,8 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
         "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
          on `buzz messages send` so the conversation stays threaded. \
          If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
-         If the requested destination is ambiguous, ask before sending."
+         or broadcast post, send that message with `--top-level` instead of \
+         `--reply-to`. If the requested destination is ambiguous, ask before sending."
     ));
 }
 
@@ -1210,7 +1210,8 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
          this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
          triggering message is the thread root. Do NOT reply into any other \
          (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
+         top-level, or broadcast post, send that message with `--top-level` \
+         instead of `--reply-to`."
     ));
 }
 
@@ -1545,6 +1546,33 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
     format!("[Base]\n{}", base_prompt.trim_end())
 }
 
+/// Resolve the automatic reply target for the last event in a batch.
+pub(crate) fn reply_anchor_for_batch(
+    batch: &FlushBatch,
+    channel_info: Option<&PromptChannelInfo>,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<String> {
+    let last_event = batch.events.last()?;
+    let thread_tags = parse_thread_tags(&last_event.event);
+    let is_dm = channel_info
+        .map(|info| info.channel_type == "dm")
+        .unwrap_or(false);
+
+    if is_dm {
+        thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| last_event.event.id.to_hex())
+    } else {
+        resolve_reply_anchor(
+            &last_event.event.pubkey.to_hex(),
+            &thread_tags,
+            &last_event.event.id.to_hex(),
+            profile_lookup,
+        )
+    }
+}
+
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
@@ -1611,20 +1639,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
-    let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
-    } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            args.profile_lookup,
-        )
-    };
+    let reply_anchor = reply_anchor_for_batch(batch, args.channel_info, args.profile_lookup);
     sections.push(format_context_hints(
         batch.channel_id,
         args.channel_info,
@@ -4277,8 +4292,8 @@ mod tests {
             "channel thread reply should describe reply-to as the default"
         );
         assert!(
-            prompt.contains("send that message without `--reply-to`"),
-            "channel thread reply should allow explicit channel-root/top-level requests"
+            prompt.contains("send that message with `--top-level`"),
+            "channel thread reply should teach the automatic-context opt-out"
         );
         assert!(
             !prompt.contains("Do not broadcast to the channel"),
@@ -4352,6 +4367,10 @@ mod tests {
         assert!(
             prompt.contains("new top-level message"),
             "top-level human message should use the new-thread instruction"
+        );
+        assert!(
+            prompt.contains("send that message with `--top-level`"),
+            "new-thread instruction should teach the automatic-context opt-out"
         );
     }
 
