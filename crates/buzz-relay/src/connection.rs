@@ -545,7 +545,7 @@ async fn recv_loop(
 }
 
 async fn handle_text_message(text: &str, conn: Arc<ConnectionState>, state: Arc<AppState>) {
-    let msg = match ClientMessage::parse(&text) {
+    let msg = match ClientMessage::parse(text) {
         Ok(m) => m,
         Err(e) => {
             conn.send(RelayMessage::notice(&format!("invalid message: {e}")));
