@@ -286,19 +286,30 @@ impl ActionSink for RelayActionSink {
             };
 
             // NIP-10 e-tags for the thread. Marked `root`/`reply` so clients and
-            // the ingest resolver read the ancestry the same way. When the reply
-            // is directly under the root, both markers point at the same event.
+            // the ingest resolver read the ancestry the same way. A direct reply
+            // (parent == root) emits a single `reply` tag; a nested reply emits
+            // the `root` + `reply` pair — matching `buzz_sdk::builders::thread_tags`
+            // so every writer produces one wire shape per reply kind.
             if let Some(ancestry) = &reply_ancestry {
                 let root_hex = ancestry.root_hex();
                 let parent_hex = ancestry.parent_hex();
-                tags.push(
-                    Tag::parse(["e", &root_hex, "", "root"])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("root e tag: {e}")))?,
-                );
-                tags.push(
-                    Tag::parse(["e", &parent_hex, "", "reply"])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("reply e tag: {e}")))?,
-                );
+                if root_hex == parent_hex {
+                    tags.push(
+                        Tag::parse(["e", &root_hex, "", "reply"]).map_err(|e| {
+                            ActionSinkError::EventBuild(format!("reply e tag: {e}"))
+                        })?,
+                    );
+                } else {
+                    tags.push(
+                        Tag::parse(["e", &root_hex, "", "root"])
+                            .map_err(|e| ActionSinkError::EventBuild(format!("root e tag: {e}")))?,
+                    );
+                    tags.push(
+                        Tag::parse(["e", &parent_hex, "", "reply"]).map_err(|e| {
+                            ActionSinkError::EventBuild(format!("reply e tag: {e}"))
+                        })?,
+                    );
+                }
             }
 
             // Resolve `@Name` mentions to channel-member pubkeys and append a
@@ -846,8 +857,16 @@ mod integration_tests {
                 }
             })
         };
-        assert_eq!(marker("root").as_deref(), Some(root_hex.as_str()));
-        assert_eq!(marker("reply").as_deref(), Some(root_hex.as_str()));
+        assert_eq!(
+            marker("reply").as_deref(),
+            Some(root_hex.as_str()),
+            "direct reply emits a single reply marker at the root"
+        );
+        assert_eq!(
+            marker("root"),
+            None,
+            "direct reply omits the root marker (matches SDK thread_tags)"
+        );
 
         // Thread metadata reflects a depth-1 reply parented on the root.
         let meta = state

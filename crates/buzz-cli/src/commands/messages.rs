@@ -14,36 +14,29 @@ use buzz_sdk::mentions::{
 
 /// Extract the thread root event ID from a Nostr tag array.
 ///
-/// Parses `"e"` tags with NIP-10 markers:
-/// - If a `"root"` marker exists, returns that event ID.
-/// - Otherwise, if only a `"reply"` marker exists, returns the reply target
+/// Delegates marker parsing to [`buzz_core::nip10`] (shared with relay ingest
+/// and ACP) so id-validity and marker selection cannot drift:
+/// - If a `root` marker exists, returns that event ID.
+/// - Otherwise, if only a `reply` marker exists, returns the reply target
 ///   (a direct reply's parent IS the root, and nested replies need that root
 ///   to thread correctly).
-/// - If no thread markers exist, returns `None` (parent is a top-level message,
-///   so it is itself the root).
+/// - If no valid thread markers exist, returns `None` (parent is a top-level
+///   message, so it is itself the root).
 fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
-    fn valid_event_id(s: &str) -> bool {
-        s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
-    }
-    let arr = tags.as_array()?;
-    let mut root = None;
-    let mut reply = None;
-    for tag in arr {
-        let Some(parts) = tag.as_array() else {
-            continue;
-        };
-        if parts.len() >= 4 && parts[0].as_str() == Some("e") {
-            // Defensively ignore malformed marker values so a bad tag on the
-            // parent event can't block the reply — fall back to root == parent.
-            let id = parts[1].as_str().filter(|s| valid_event_id(s));
-            match (parts[3].as_str(), id) {
-                (Some("root"), Some(id)) => root = Some(id.to_string()),
-                (Some("reply"), Some(id)) => reply = Some(id.to_string()),
-                _ => {}
-            }
-        }
-    }
-    root.or(reply)
+    let parts: Vec<Vec<String>> = tags
+        .as_array()?
+        .iter()
+        .filter_map(|tag| {
+            tag.as_array().map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+        })
+        .collect();
+    let markers =
+        buzz_core::nip10::parse_thread_markers_from_parts(parts.iter().map(Vec::as_slice));
+    markers.root.or(markers.reply)
 }
 
 /// Build a `ThreadRef` for a reply, given the immediate parent's event ID.

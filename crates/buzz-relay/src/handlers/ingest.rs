@@ -725,17 +725,10 @@ pub(crate) async fn resolve_nip10_thread_meta(
     state: &AppState,
 ) -> Result<Option<ThreadMetadataOwned>, String> {
     let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
-    let root_hex = markers.root;
-    let reply_hex = markers.reply;
 
-    if root_hex.is_none() && reply_hex.is_none() {
-        return Ok(None);
-    }
-
-    let (root_hex, parent_hex) = match (root_hex, reply_hex) {
-        (Some(r), Some(p)) => (r, p),
-        (None, Some(p)) => (p.clone(), p),
-        (Some(_), None) | (None, None) => return Ok(None),
+    let (root_hex, parent_hex) = match markers.resolve() {
+        Some(pair) => pair,
+        None => return Ok(None),
     };
 
     let parent_bytes =
@@ -848,18 +841,13 @@ async fn derive_ancestry_from_parent_tags(
     parent_created: chrono::DateTime<Utc>,
     state: &AppState,
 ) -> (Vec<u8>, chrono::DateTime<Utc>, i32) {
-    let marked_ancestor = |marker: &str| {
-        parent_event.tags.iter().find_map(|t| {
-            let parts = t.as_slice();
-            if parts.len() >= 4 && parts[0] == "e" && parts[3] == marker {
-                hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-            } else {
-                None
-            }
-        })
-    };
-    let parent_root = marked_ancestor("root")
-        .or_else(|| marked_ancestor("reply"))
+    let marked_ancestor = |id_hex: &str| hex::decode(id_hex).ok().filter(|b| b.len() == 32);
+    let markers = buzz_core::nip10::parse_thread_markers(&parent_event.tags);
+    let parent_root = markers
+        .root
+        .as_deref()
+        .and_then(marked_ancestor)
+        .or_else(|| markers.reply.as_deref().and_then(marked_ancestor))
         .unwrap_or_else(|| parent_bytes.to_vec());
 
     if parent_root.as_slice() == parent_bytes {
