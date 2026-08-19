@@ -369,13 +369,13 @@ pub struct CliArgs {
 
     /// Maximum number of context messages to include for thread replies and DMs.
     /// Set to 0 to disable automatic context fetching. Max 100.
-    #[arg(long, env = "BUZZ_ACP_CONTEXT_MESSAGE_LIMIT", default_value_t = 12,
+    #[arg(long, env = "BUZZ_ACP_CONTEXT_MESSAGE_LIMIT", default_value_t = 6,
           value_parser = clap::value_parser!(u32).range(0..=100))]
     pub context_message_limit: u32,
 
     /// Maximum turns per session before proactive rotation. 0 = disabled
     /// (rotate only on MaxTokens / MaxTurnRequests).
-    #[arg(long, env = "BUZZ_ACP_MAX_TURNS_PER_SESSION", default_value_t = 0,
+    #[arg(long, env = "BUZZ_ACP_MAX_TURNS_PER_SESSION", default_value_t = 8,
           value_parser = clap::value_parser!(u32))]
     pub max_turns_per_session: u32,
 
@@ -763,7 +763,7 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// that blocks all outbound network by default. Without this env var, `buzz-cli`
 /// requests are blocked before they can reach the relay WebSocket.
 ///
-/// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
+/// Returns a `CODEX_CONFIG` object with network access and autonomous-agent plugin defaults for
 /// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
 ///
 /// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
@@ -805,8 +805,19 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
 
     Some((
         "CODEX_CONFIG".into(),
-        "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
+        "{\"sandbox_workspace_write\":{\"network_access\":true},\"features\":{\"apps\":false,\"plugins\":false,\"remote_plugin\":false}}".into(),
     ))
+}
+
+fn codex_initial_agent_mode_env(
+    agent_command: &str,
+    permission_mode: PermissionMode,
+) -> Option<(String, String)> {
+    (matches!(
+        normalize_agent_command_identity(agent_command).as_str(),
+        "codex" | "codex-acp"
+    ) && permission_mode == PermissionMode::BypassPermissions)
+        .then(|| ("INITIAL_AGENT_MODE".into(), "agent-full-access".into()))
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -1088,6 +1099,11 @@ impl Config {
             } else {
                 false
             };
+        if let Some(initial_mode_env) =
+            codex_initial_agent_mode_env(&agent_command, args.permission_mode)
+        {
+            persona_env_vars.push(initial_mode_env);
+        }
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
@@ -1700,6 +1716,25 @@ mod tests {
     }
 
     #[test]
+    fn codex_bypass_permissions_starts_in_full_access_mode() {
+        assert_eq!(
+            codex_initial_agent_mode_env("codex-acp", PermissionMode::BypassPermissions),
+            Some((
+                "INITIAL_AGENT_MODE".to_string(),
+                "agent-full-access".to_string(),
+            ))
+        );
+        assert_eq!(
+            codex_initial_agent_mode_env("codex-acp", PermissionMode::Default),
+            None
+        );
+        assert_eq!(
+            codex_initial_agent_mode_env("goose", PermissionMode::BypassPermissions),
+            None
+        );
+    }
+
+    #[test]
     fn strips_legacy_acp_arg_case_insensitively() {
         assert_eq!(
             normalize_agent_args("codex-acp", vec!["ACP".into()]),
@@ -1709,7 +1744,7 @@ mod tests {
 
     // --- codex_network_env tests ---
 
-    const CODEX_CONFIG_JSON: &str = "{\"sandbox_workspace_write\":{\"network_access\":true}}";
+    const CODEX_CONFIG_JSON: &str = "{\"sandbox_workspace_write\":{\"network_access\":true},\"features\":{\"apps\":false,\"plugins\":false,\"remote_plugin\":false}}";
 
     #[test]
     fn codex_network_env_wss_url() {
@@ -2209,6 +2244,14 @@ channels = "ALL"
     fn test_turn_liveness_one_rejected() {
         let err = validate_turn_liveness(1).unwrap_err();
         assert!(err.to_string().contains("turn liveness interval must be 0"));
+    }
+
+    #[test]
+    fn context_defaults_bound_history_and_rotate_sessions() {
+        let key = "0".repeat(64);
+        let args = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(args.context_message_limit, 6);
+        assert_eq!(args.max_turns_per_session, 8);
     }
 
     #[test]
