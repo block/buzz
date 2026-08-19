@@ -522,3 +522,26 @@ fn mirror_only_refresh_does_not_ask_for_a_relay_republish() {
         "gate unchanged — nothing to republish"
     );
 }
+
+/// The false positive georgerous found on #4270: with mirrors stamped at
+/// mint, a freshly minted instance that the dialog then pins to owner-only
+/// has SET mirrors and a mint-default gate -- which must read as a pin, not
+/// as a pre-fix record to heal. Only records whose mirrors are genuinely
+/// unset (predating the cascade entirely) qualify for the heal.
+#[test]
+fn stamped_mirrors_with_a_default_gate_is_a_pin_not_a_heal_candidate() {
+    let mut records = vec![agent("persona-1", "A1", RespondTo::OwnerOnly)];
+    // Minted post-fix under an `anyone` persona: mirrors stamped at mint...
+    records[0].definition_respond_to = Some("anyone".to_string());
+    // ...then dialog-pinned to owner-only (the #4270 transition matrix).
+    let updated = persona(Some("allowlist"), vec!["e".repeat(64)], None);
+
+    let cascade =
+        propagate_persona_behavior(&mut records, "persona-1", RespondTo::Anyone, &[], &updated)
+            .unwrap();
+
+    // The pin survives the persona edit.
+    assert_eq!(records[0].respond_to, RespondTo::OwnerOnly);
+    assert!(records[0].respond_to_allowlist.is_empty());
+    assert!(cascade.adopted.is_empty());
+}
