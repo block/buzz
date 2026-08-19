@@ -264,7 +264,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   });
 });
 
-test("entity tooltip keeps stable identity while relay metadata is delayed", async ({
+test("entity tooltip uses project context while relay metadata is delayed", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -294,7 +294,7 @@ test("entity tooltip keeps stable identity while relay metadata is delayed", asy
     page
       .getByRole("tooltip")
       .locator('[data-buzz-tooltip-metadata-content=""]'),
-  ).toHaveText(`buzz · ${ISSUE_ID.slice(0, 8)}`);
+  ).toHaveText("buzz · The complete Buzz community platform.");
 });
 
 test("desktop composer shows entity card and send is not blocked by missing snapshot", async ({
