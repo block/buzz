@@ -1,6 +1,10 @@
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 
 import { cronExpressionError } from "./cronExpression";
+import {
+  formatDurationSeconds,
+  parseDurationSeconds,
+} from "./workflowDuration";
 
 export const TRIGGER_TYPES = [
   "message_posted",
@@ -143,10 +147,8 @@ function headersToRecord(
 
 function parseTimeoutSecs(timeoutSecs: string | undefined): number | undefined {
   if (!timeoutSecs) return undefined;
-  const trimmed = timeoutSecs.trim();
-  if (!/^\d+$/.test(trimmed)) return undefined;
-  const parsed = Number(trimmed);
-  return parsed > 0 ? parsed : undefined;
+  const parsed = parseDurationSeconds(timeoutSecs);
+  return parsed !== null && parsed > 0 ? parsed : undefined;
 }
 
 function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
@@ -573,7 +575,7 @@ export function yamlToFormState(
         timeoutSecs:
           step.timeout_secs === undefined
             ? undefined
-            : String(step.timeout_secs),
+            : formatDurationSeconds(step.timeout_secs as number),
         duration: step.duration as string | undefined,
         text: step.text as string | undefined,
         channel: step.channel as string | undefined,

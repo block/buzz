@@ -187,7 +187,9 @@ test("hides and clears message-text step conditions for schedule triggers", asyn
   await dialog.getByRole("button", { name: "Run controls" }).click();
 
   await expect(dialog.getByLabel("Text to match")).toHaveCount(0);
-  await expect(dialog.getByLabel("Timeout (seconds)")).toBeVisible();
+  await expect(
+    dialog.getByRole("textbox", { name: "Timeout", exact: true }),
+  ).toBeVisible();
 
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const definition = parseYaml(

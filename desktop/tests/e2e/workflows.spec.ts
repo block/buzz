@@ -110,7 +110,9 @@ async function createWorkflow(
     await dialog.getByLabel("Text to match").fill(options.stepConditionText);
   }
   if (options?.stepTimeoutSecs) {
-    await dialog.getByLabel("Timeout (seconds)").fill(options.stepTimeoutSecs);
+    await dialog
+      .getByRole("textbox", { name: "Timeout", exact: true })
+      .fill(options.stepTimeoutSecs);
   }
 
   await dialog.getByRole("button", { name: "Create" }).click();
@@ -263,7 +265,7 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
     trigger: "diff_posted",
     stepName: "Notify reviewers",
     stepConditionText: "src/",
-    stepTimeoutSecs: "45",
+    stepTimeoutSecs: "45s",
   });
 
   const card = page
@@ -568,7 +570,17 @@ test("preserves final sequence affordances and responsive inspector behavior", a
   await runControls.click();
   await expect(runControls).toHaveAttribute("aria-expanded", "true");
   await inspector.getByLabel("Text to match").fill("deploy");
-  await inspector.getByLabel("Timeout (seconds)").fill("45");
+  const timeoutField = inspector.getByRole("textbox", {
+    name: "Timeout",
+    exact: true,
+  });
+  const timeoutSlider = inspector.getByRole("slider", {
+    name: "Timeout slider",
+  });
+  await expect(timeoutSlider).toHaveAttribute("aria-valuetext", "5m");
+  await timeoutField.fill("1h 2s");
+  await expect(timeoutSlider).toHaveAttribute("aria-valuetext", "1h");
+  await timeoutField.fill("45s");
   await expect(runControls).toContainText("Conditional · 45s");
 
   await stepDetails.click();

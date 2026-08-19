@@ -5,6 +5,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+import { WorkflowDurationField } from "./WorkflowDurationField";
 import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEditor";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
@@ -13,6 +14,8 @@ import {
   type StepFormState,
   type TriggerType,
 } from "./workflowFormTypes";
+
+const DEFAULT_STEP_TIMEOUT_SECONDS = 5 * 60;
 
 type StepSetting = "run-controls" | "details";
 
@@ -66,9 +69,9 @@ function StepSettingAccordion({
 function runControlsSummary(step: StepFormState): string {
   const hasCondition = Boolean(step.condition?.trim());
   const timeout = step.timeoutSecs?.trim();
-  if (hasCondition && timeout) return `Conditional · ${timeout}s`;
+  if (hasCondition && timeout) return `Conditional · ${timeout}`;
   if (hasCondition) return "Conditional";
-  if (timeout) return `${timeout}s`;
+  if (timeout) return timeout;
   return "Default";
 }
 
@@ -446,25 +449,15 @@ export function WorkflowStepCard({
                 value={step.condition ?? ""}
               />
             ) : null}
-            <div className="space-y-1.5">
-              <FieldLabel htmlFor={`${prefix}-timeout-secs`}>
-                Timeout (seconds)
-              </FieldLabel>
-              <Input
-                autoCapitalize="off"
-                disabled={disabled}
-                id={`${prefix}-timeout-secs`}
-                inputMode="numeric"
-                onChange={(event) =>
-                  onUpdate({ ...step, timeoutSecs: event.target.value })
-                }
-                placeholder="e.g. 300"
-                value={step.timeoutSecs ?? ""}
-              />
-              <p className="text-xs text-muted-foreground">
-                Defaults to the workflow timeout.
-              </p>
-            </div>
+            <WorkflowDurationField
+              disabled={disabled}
+              fallbackSeconds={DEFAULT_STEP_TIMEOUT_SECONDS}
+              id={`${prefix}-timeout-secs`}
+              label="Timeout"
+              onChange={(timeoutSecs) => onUpdate({ ...step, timeoutSecs })}
+              placeholder="5m"
+              value={step.timeoutSecs ?? ""}
+            />
           </div>
         </StepSettingAccordion>
 

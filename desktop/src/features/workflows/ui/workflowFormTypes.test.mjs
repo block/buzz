@@ -163,6 +163,15 @@ test("the serializer emits only one schedule representation", () => {
   });
 });
 
+test("presents step timeout seconds as durations and serializes them numerically", () => {
+  const yaml = `name: Timed\ntrigger: { on: webhook }\nsteps: [{ id: s1, timeout_secs: 3602, action: send_message, text: hi }]\n`;
+  const state = accepted(yaml);
+
+  assert.equal(state.steps[0].timeoutSecs, "1h 2s");
+  state.steps[0].timeoutSecs = "5m";
+  assert.equal(parseYaml(formStateToYaml(state)).steps[0].timeout_secs, 300);
+});
+
 test("advanced message expressions survive unrelated Form serialization", () => {
   const filter =
     'str_contains(trigger_text, "deploy") && trigger_author == "abc"';
