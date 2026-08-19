@@ -1,3 +1,7 @@
+use super::smart_turn_cache::{
+    smart_turn_model_slot, SMART_TURN_MODEL_DIR_NAME, SMART_TURN_MODEL_FILENAME,
+    SMART_TURN_MODEL_SIZE, SMART_TURN_MODEL_VERSION,
+};
 use super::*;
 
 fn create_ready_model_dir(root: &Path) -> PathBuf {
