@@ -159,7 +159,7 @@ const PROJECT_STAT_ITEMS = [
     iconClass: "text-primary",
     barClass: "bg-primary",
     columnClass: "w-16",
-    label: (count: number) => (count === 1 ? "PR" : "PRs"),
+    label: (count: number) => (count === 1 ? "review" : "reviews"),
   },
   {
     key: "issueCount",
@@ -167,7 +167,7 @@ const PROJECT_STAT_ITEMS = [
     iconClass: "text-orange-500",
     barClass: "bg-orange-500",
     columnClass: "w-20",
-    label: (count: number) => (count === 1 ? "issue" : "issues"),
+    label: (count: number) => (count === 1 ? "task" : "tasks"),
   },
 ] as const;
 

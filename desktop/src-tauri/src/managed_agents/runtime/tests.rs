@@ -1206,7 +1206,7 @@ fn receipt_invalid_when_process_not_running() {
     );
 }
 
-// ── Test helpers ────────────────────────────────────────────────────────────
+// ── Test helpers (spawn-key regressions: see `runtime/spawn_key.rs`) ───────
 
 fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
     serde_json::from_str(&format!(

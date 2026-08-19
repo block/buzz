@@ -120,6 +120,10 @@ export function useCommunityInit(
   // same-relay reconnect during onboarding must not cancel that work, while an
   // actual relay boundary must clear both the queue and its presentation probe.
   const appliedRelayUrlRef = useRef<string | null>(null);
+  // Deferred avatar work is also signed by the identity that queued it: a
+  // same-relay identity replacement (in-app key import) must clear it so
+  // pending profile writes are never published as the new signer.
+  const appliedPubkeyRef = useRef<string | null>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
@@ -215,6 +219,22 @@ export function useCommunityInit(
         appliedKey: communityKey,
       });
 
+      // Resolve the active signer before resetting singletons so
+      // identity-scoped state is discarded when the pubkey changed, not only
+      // when the relay boundary moved. The same value seeds the draft store
+      // below. A failed read degrades exactly like the previous behavior:
+      // relay-only reset semantics and an uninitialized draft store.
+      let identityPubkey: string | null = null;
+      try {
+        identityPubkey = (await getIdentity()).pubkey;
+      } catch (err) {
+        console.error(
+          "[useCommunityInit] getIdentity failed, draft store uninitialized:",
+          err,
+        );
+      }
+      if (cancelled) return;
+
       // On community switch (not initial mount), reset module singletons
       // so the new tree starts with a clean slate.
       if (hasInitializedRef.current) {
@@ -230,7 +250,10 @@ export function useCommunityInit(
         try {
           await resetCommunityState({
             resetAvatarState:
-              appliedRelayUrlRef.current !== activeCommunity.relayUrl,
+              appliedRelayUrlRef.current !== activeCommunity.relayUrl ||
+              (identityPubkey !== null &&
+                appliedPubkeyRef.current !== null &&
+                appliedPubkeyRef.current !== identityPubkey),
           });
         } catch (error) {
           console.error("Failed to reset community state:", error);
@@ -250,6 +273,7 @@ export function useCommunityInit(
       }
       hasInitializedRef.current = true;
       appliedRelayUrlRef.current = activeCommunity.relayUrl;
+      appliedPubkeyRef.current = identityPubkey ?? appliedPubkeyRef.current;
 
       // Apply community config to the Tauri backend.
       //
@@ -301,16 +325,8 @@ export function useCommunityInit(
         // and bypass the localhost proxy.
         resetMediaCaches();
 
-        try {
-          const identity = await getIdentity();
-          if (cancelled) return;
-          initDraftStore(identity.pubkey, activeCommunity.relayUrl);
-        } catch (err) {
-          if (cancelled) return;
-          console.error(
-            "[useCommunityInit] getIdentity failed, draft store uninitialized:",
-            err,
-          );
+        if (identityPubkey !== null) {
+          initDraftStore(identityPubkey, activeCommunity.relayUrl);
         }
         // Restore any turn state saved for this community (a prior A→B round-
         // trip). This runs after applyCommunity succeeds and before the app

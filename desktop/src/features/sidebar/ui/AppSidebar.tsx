@@ -597,7 +597,7 @@ export function AppSidebar({
           ) : null}
 
           <SidebarContent
-            className="buzz-sidebar-scrollbar overscroll-none"
+            className="buzz-sidebar-scrollbar overscroll-none [overflow-anchor:none]"
             data-sidebar-background
             ref={scrollRef}
           >
