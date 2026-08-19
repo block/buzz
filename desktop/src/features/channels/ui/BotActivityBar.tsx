@@ -10,7 +10,12 @@ import {
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/shared/ui/popover";
 import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -26,7 +31,6 @@ type BotActivityBarProps = {
   variant?: "toolbar" | "inline";
 };
 
-const HOVER_OPEN_DELAY_MS = 150;
 const HOVER_CLOSE_DELAY_MS = 180;
 const HEADLINE_ROTATION_MS = 2200;
 
@@ -106,7 +110,7 @@ export function BotActivityComposerAction({
     clearHoverTimer();
     hoverTimerRef.current = setTimeout(() => {
       setOpen(true);
-    }, HOVER_OPEN_DELAY_MS);
+    }, DEFAULT_POPOVER_HOVER_OPEN_DELAY_MS);
   }, [clearHoverTimer]);
 
   const closeWithDelay = React.useCallback(() => {
@@ -164,7 +168,7 @@ export function BotActivityComposerAction({
           className={cn(
             "inline-flex items-center justify-center rounded-full border border-border/60 bg-background font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:border-primary/40 data-[state=open]:bg-primary/10 data-[state=open]:text-primary",
             isInline
-              ? "h-7 min-w-0 gap-2 overflow-visible border-transparent bg-transparent px-0 text-xs font-semibold leading-none shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
+              ? "min-w-0 gap-1.5 overflow-visible border-transparent bg-transparent px-0 text-xs font-normal leading-normal shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
               : "h-9 min-w-9 gap-1.5 px-2 text-xs",
           )}
           data-testid="bot-activity-composer-trigger"
@@ -178,17 +182,16 @@ export function BotActivityComposerAction({
           onMouseLeave={closeWithDelay}
           type="button"
         >
-          <span className="flex items-center overflow-visible py-px -space-x-1">
+          <span className="flex h-4.5 items-center overflow-visible -space-x-1">
             {workingAgents.slice(0, 2).map((agent) => (
               <UserAvatar
                 avatarUrl={agentAvatarUrl(agent)}
                 className={cn(
                   "border border-background",
-                  isInline
-                    ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-3xs"
-                    : "shrink-0",
+                  isInline ? "!h-4.5 !w-4.5 text-3xs" : "shrink-0",
                 )}
                 displayName={agent.name}
+                fallbackDelayMs={isInline ? 0 : undefined}
                 key={agent.pubkey}
                 size="xs"
               />
@@ -201,11 +204,15 @@ export function BotActivityComposerAction({
           ) : null}
           <span
             className={cn(
-              isInline ? "min-w-0 flex-1 overflow-hidden" : "sr-only",
+              isInline
+                ? "flex h-4.5 min-w-0 flex-1 items-center overflow-visible leading-none"
+                : "sr-only",
             )}
           >
             {isInline ? (
-              <Shimmer className="block truncate">{visibleStatusLabel}</Shimmer>
+              <Shimmer className="-my-px truncate py-px">
+                {visibleStatusLabel}
+              </Shimmer>
             ) : (
               "working"
             )}

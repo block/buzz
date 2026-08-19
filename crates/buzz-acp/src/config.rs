@@ -124,6 +124,11 @@ pub enum PermissionMode {
     /// Agent default — permission requests per tool call.
     #[value(alias = "default")]
     Default,
+    /// Auto mode — fully autonomous execution; model-gated (requires a model
+    /// that supports `supportsAutoMode`).  Degrades gracefully to `default`
+    /// when the session's active model does not support it.
+    #[value(alias = "auto")]
+    Auto,
     /// Auto-approve file edits, still ask for other tools.
     #[value(alias = "acceptEdits")]
     AcceptEdits,
@@ -144,6 +149,7 @@ impl PermissionMode {
     pub fn as_wire_str(&self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Auto => "auto",
             Self::AcceptEdits => "acceptEdits",
             Self::BypassPermissions => "bypassPermissions",
             Self::DontAsk => "dontAsk",
@@ -240,7 +246,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     pub private_key: String,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
@@ -423,6 +429,20 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
+    /// Persisted effort level value (e.g. "high", "medium", "low") to apply via
+    /// `session/set_config_option` at the first session creation. The configId is
+    /// resolved from the adapter's advertised `thought_level` capability — not
+    /// hardcoded. Non-fatal: if the adapter does not advertise `thought_level`,
+    /// the value is silently ignored and the persisted effort is not overwritten.
+    #[arg(long, env = "BUZZ_ACP_EFFORT_LEVEL")]
+    pub effort_level: Option<String>,
+
+    /// Title for the agent's ACP sessions, passed out-of-band in `session/new`
+    /// `_meta`. Adapters that recognize it name the session after this value;
+    /// others ignore it. Never enters the prompt.
+    #[arg(long, env = "BUZZ_ACP_SESSION_TITLE")]
+    pub session_title: Option<String>,
+
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
@@ -468,9 +488,21 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Exit after this many seconds with no dispatched events and no turn in flight.
+    /// 0 disables inactivity self-termination.
+    #[arg(long, env = "BUZZ_ACP_EXIT_AFTER_INACTIVITY", default_value_t = 0)]
+    pub exit_after_inactivity: u64,
+
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
+
+    /// Tear the woken pool back down to the lazy empty-slot state after this
+    /// many seconds with no dispatched turn in flight and an empty queue,
+    /// releasing worker subprocesses until the next accepted event re-wakes.
+    /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
+    #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
+    pub idle_pool_sleep: u64,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -522,6 +554,15 @@ pub struct Config {
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
+    /// Persisted effort level value (e.g. "high", "medium", "low"). Held as a
+    /// per-worker spawn-scoped value and applied at the first session creation
+    /// by pairing with the adapter's advertised `thought_level` configId.
+    /// Non-fatal when absent or when the adapter does not advertise
+    /// `thought_level`.
+    pub effort_level: Option<String>,
+    /// Sanitized session title, sent as `_meta.sessionTitle` on `session/new`.
+    /// `None` when unset or when the configured value sanitized to empty.
+    pub session_title: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
@@ -541,8 +582,14 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
+    pub exit_after_inactivity_secs: u64,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
+    /// Seconds with no dispatched turn in flight and an empty queue before a
+    /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
+    /// Only meaningful when `lazy_pool` is true.
+    pub idle_pool_sleep_secs: u64,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -552,6 +599,68 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+}
+
+/// Maximum length, in characters, of a session title sent to the adapter.
+const SESSION_TITLE_MAX_CHARS: usize = 80;
+
+/// Normalize a configured session title into something safe to hand an adapter.
+///
+/// Control characters are dropped, runs of whitespace collapse to a single
+/// space, and the result is trimmed and capped at
+/// [`SESSION_TITLE_MAX_CHARS`]. Returns `None` when nothing printable is left.
+///
+/// Buzz is the only guard here: Codex's own `normalize_thread_name` merely
+/// trims, so an unbounded display name would be persisted verbatim into its
+/// thread store.
+fn sanitize_session_title(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .split_whitespace()
+        .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Truncate by chars, not bytes, so a multi-byte name can't be cut mid-UTF-8.
+    let title: String = collapsed
+        .chars()
+        .take(SESSION_TITLE_MAX_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
+/// Separator between the agent name and the channel in a composed title.
+/// U+00B7 MIDDLE DOT, spaces on both sides.
+const SESSION_TITLE_SEPARATOR: &str = " · ";
+
+/// Compose a per-session title as `Agent · #channel`.
+///
+/// One agent in five channels gets five sessions; a bare agent name would show
+/// five identical rows in the adapter's thread list. Only the channel part is
+/// truncated to fit [`SESSION_TITLE_MAX_CHARS`], so the agent name always
+/// survives. Returns the bare agent name when there is no channel, the channel
+/// name is blank, or no room is left for it.
+pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> String {
+    let Some(channel) = channel_name.and_then(sanitize_session_title) else {
+        return agent.to_string();
+    };
+    // Reserve the separator and the `#` sigil alongside the agent name.
+    let reserved = agent.chars().count() + SESSION_TITLE_SEPARATOR.chars().count() + 1;
+    let channel: String = channel
+        .chars()
+        .take(SESSION_TITLE_MAX_CHARS.saturating_sub(reserved))
+        .collect::<String>()
+        .trim_end()
+        .to_string();
+    if channel.is_empty() {
+        return agent.to_string();
+    }
+    format!("{agent}{SESSION_TITLE_SEPARATOR}#{channel}")
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
@@ -605,7 +714,12 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .next()
         .expect("rsplit always yields at least one element");
     let lower = basename.to_ascii_lowercase();
-    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    // Windows resolves commands through `.exe` binaries and npm's `.cmd`/`.bat`
+    // shims; all three name the same runtime identity.
+    let stem = [".exe", ".cmd", ".bat"]
+        .iter()
+        .find_map(|extension| lower.strip_suffix(extension))
+        .unwrap_or(&lower);
     stem.chars()
         .map(|character| match character {
             ' ' | '_' => '-',
@@ -620,6 +734,25 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
+    }
+}
+
+/// Per-runtime environment defaults applied when Buzz owns the agent process.
+///
+/// Mirrors [`default_agent_args`]: keyed on the normalized command identity,
+/// with the merge (in `AcpClient::spawn`) giving explicit persona env and
+/// inherited parent env precedence over these defaults.
+///
+/// Hermes: ACP hosts supply session MCP servers explicitly through
+/// `session/new`, but Hermes otherwise starts every profile-configured MCP
+/// server before it responds to `initialize` — which can exhaust the host's
+/// startup budget (see block/buzz#3355). Skip that unrelated global startup
+/// by default; an operator or persona can still opt back in by setting the
+/// variable explicitly.
+pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'static str)] {
+    match normalize_agent_command_identity(command).as_str() {
+        "hermes" | "hermes-agent" | "hermes-acp" => &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+        _ => &[],
     }
 }
 
@@ -992,6 +1125,11 @@ impl Config {
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
             model,
+            effort_level: args.effort_level,
+            session_title: args
+                .session_title
+                .as_deref()
+                .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
@@ -999,7 +1137,9 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
+            idle_pool_sleep_secs: args.idle_pool_sleep,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1371,6 +1511,8 @@ mod tests {
             typing_enabled: true,
             memory_enabled: true,
             model: None,
+            effort_level: None,
+            session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
@@ -1378,7 +1520,9 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            exit_after_inactivity_secs: 0,
             lazy_pool: false,
+            idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -1556,6 +1700,15 @@ mod tests {
             "claude-code"
         );
         assert_eq!(normalize_agent_command_identity("Goose.EXE"), "goose");
+        // Windows npm shims resolve to `.cmd`/`.bat` wrappers.
+        assert_eq!(
+            normalize_agent_command_identity(r"C:\Users\test\AppData\Roaming\npm\hermes-acp.cmd"),
+            "hermes-acp"
+        );
+        assert_eq!(
+            normalize_agent_command_identity(r"C:\Tools\Hermes\HERMES-AGENT.BAT"),
+            "hermes-agent"
+        );
         // Non-ASCII must not panic.
         assert_eq!(normalize_agent_command_identity("my-agënt"), "my-agënt");
         // Edge cases: empty, whitespace-only, bare separators.
@@ -1563,6 +1716,30 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn default_agent_env_recognizes_hermes_identities() {
+        for command in [
+            "hermes",
+            "hermes-agent",
+            "hermes-acp",
+            "/opt/hermes/bin/hermes-acp",
+            r"C:\Users\test\bin\HERMES_ACP.EXE",
+            r"C:\Users\test\AppData\Roaming\npm\hermes-acp.cmd",
+        ] {
+            assert_eq!(
+                default_agent_env(command),
+                &[("HERMES_ACP_SKIP_CONFIGURED_MCP", "1")],
+                "unexpected env defaults for {command}"
+            );
+        }
+        for command in ["goose", "codex-acp", "claude-agent-acp", "buzz-agent", ""] {
+            assert!(
+                default_agent_env(command).is_empty(),
+                "non-Hermes command must have no env defaults: {command}"
+            );
+        }
     }
 
     #[test]
@@ -2078,9 +2255,41 @@ channels = "ALL"
     }
 
     #[test]
+    fn inactivity_exit_defaults_disabled_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.exit_after_inactivity, 0);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--exit-after-inactivity",
+            "120",
+        ]);
+        assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
     fn lazy_pool_defaults_off() {
         let key = "0".repeat(64);
         assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
+    }
+
+    #[test]
+    fn idle_pool_sleep_defaults_disabled_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.idle_pool_sleep, 0);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--idle-pool-sleep",
+            "300",
+        ]);
+        assert_eq!(configured.idle_pool_sleep, 300);
     }
 
     #[test]
@@ -2154,6 +2363,7 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_wire_strings() {
         assert_eq!(PermissionMode::Default.as_wire_str(), "default");
+        assert_eq!(PermissionMode::Auto.as_wire_str(), "auto");
         assert_eq!(PermissionMode::AcceptEdits.as_wire_str(), "acceptEdits");
         assert_eq!(
             PermissionMode::BypassPermissions.as_wire_str(),
@@ -2166,10 +2376,22 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_is_default() {
         assert!(PermissionMode::Default.is_default());
+        assert!(!PermissionMode::Auto.is_default());
         assert!(!PermissionMode::BypassPermissions.is_default());
         assert!(!PermissionMode::AcceptEdits.is_default());
         assert!(!PermissionMode::DontAsk.is_default());
         assert!(!PermissionMode::Plan.is_default());
+    }
+
+    #[test]
+    fn test_permission_mode_auto_degrades_to_default_when_unsupported() {
+        // The wire string is "auto" — the adapter handles graceful downgrade
+        // to "default" when the active model does not support Auto mode.
+        // Verify only that the wire string is correct and distinct from "default".
+        let auto = PermissionMode::Auto;
+        assert_eq!(auto.as_wire_str(), "auto");
+        assert_ne!(auto.as_wire_str(), "default");
+        assert!(!auto.is_default());
     }
 
     #[test]
@@ -2179,6 +2401,7 @@ channels = "ALL"
             "bypassPermissions"
         );
         assert_eq!(format!("{}", PermissionMode::Default), "default");
+        assert_eq!(format!("{}", PermissionMode::Auto), "auto");
     }
 
     #[test]
@@ -2216,6 +2439,7 @@ channels = "ALL"
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("accept-edits", PermissionMode::AcceptEdits),
             ("bypass-permissions", PermissionMode::BypassPermissions),
             ("dont-ask", PermissionMode::DontAsk),
@@ -2238,6 +2462,7 @@ channels = "ALL"
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("acceptEdits", PermissionMode::AcceptEdits),
             ("bypassPermissions", PermissionMode::BypassPermissions),
             ("dontAsk", PermissionMode::DontAsk),
@@ -2748,5 +2973,94 @@ channels = "ALL"
         const {
             assert!(MAX_TURN_DURATION_CEILING_SECS < u64::MAX - 100);
         }
+    }
+
+    #[test]
+    fn sanitize_session_title_collapses_whitespace_and_strips_control_chars() {
+        assert_eq!(
+            sanitize_session_title("  Fizz\t\tthe\n Bot\u{7}  "),
+            Some("Fizz the Bot".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_session_title_returns_none_when_nothing_printable_remains() {
+        assert_eq!(sanitize_session_title("   \n\t "), None);
+        assert_eq!(sanitize_session_title(""), None);
+        assert_eq!(sanitize_session_title("\u{1}\u{2}"), None);
+    }
+
+    #[test]
+    fn sanitize_session_title_caps_length_without_splitting_multibyte_chars() {
+        let raw = "\u{1f41d}".repeat(SESSION_TITLE_MAX_CHARS + 10);
+        let title = sanitize_session_title(&raw).expect("emoji title survives sanitizing");
+        assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
+        assert!(title.chars().all(|c| c == '\u{1f41d}'));
+    }
+
+    #[test]
+    fn sanitize_session_title_does_not_leave_a_trailing_space_after_the_cap() {
+        // The cap lands mid-word, so trimming must not leave a dangling space.
+        let raw = format!("{} tail", "a".repeat(SESSION_TITLE_MAX_CHARS - 1));
+        let title = sanitize_session_title(&raw).expect("title survives sanitizing");
+        assert_eq!(title, "a".repeat(SESSION_TITLE_MAX_CHARS - 1));
+    }
+
+    #[test]
+    fn compose_session_title_qualifies_the_agent_name_with_the_channel() {
+        assert_eq!(
+            compose_session_title("Fizz", Some("buzz-dev")),
+            "Fizz · #buzz-dev"
+        );
+    }
+
+    #[test]
+    fn compose_session_title_falls_back_to_bare_agent_name_without_a_channel() {
+        assert_eq!(compose_session_title("Fizz", None), "Fizz");
+        assert_eq!(compose_session_title("Fizz", Some("   ")), "Fizz");
+    }
+
+    #[test]
+    fn compose_session_title_truncates_the_channel_and_keeps_the_agent_name() {
+        let channel = "c".repeat(200);
+        let title = compose_session_title("Fizz", Some(&channel));
+        assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
+        assert!(title.starts_with("Fizz · #c"));
+    }
+
+    #[test]
+    fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
+        let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
+        assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH
+    /// must set `hide_env_values = true` to prevent credential leakage in --help.
+    #[test]
+    fn secret_env_args_hide_their_values_in_help() {
+        use clap::CommandFactory;
+
+        const SECRET_PATTERNS: &[&str] = &["KEY", "SECRET", "TOKEN", "PASSWORD", "CRED", "AUTH"];
+
+        let cmd = CliArgs::command();
+        let violations: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|arg| {
+                let env_key = arg.get_env()?;
+                let env_name = env_key.to_string_lossy().to_uppercase();
+                let is_secret = SECRET_PATTERNS.iter().any(|pat| env_name.contains(pat));
+                if is_secret && !arg.is_hide_env_values_set() {
+                    Some(env_name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            violations.is_empty(),
+            "Found secret-bearing env args without hide_env_values=true. \
+             Add `hide_env_values = true` to each: {violations:?}"
+        );
     }
 }

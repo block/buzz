@@ -103,25 +103,7 @@ export type AddChannelMembersResult = {
   }>;
 };
 
-export type Identity = {
-  pubkey: string;
-  displayName: string;
-  /** True when the app booted in "identity lost" recovery mode — the OS
-   *  keyring was empty despite a prior successful migration. The frontend
-   *  should route to nsec re-import instead of normal onboarding.
-   *  Mutually exclusive with `locked`. */
-  lost?: boolean;
-  /** True when the app booted with an ephemeral key because the OS keyring
-   *  holding the real identity is UNREACHABLE (e.g. GNOME Keyring / KWallet
-   *  locked). The real key still exists; no in-app recovery is possible —
-   *  the user must unlock the keyring externally and relaunch.
-   *  Mutually exclusive with `lost`. */
-  locked?: boolean;
-  /** True when the boot-time Phase 2 reset attempted a wipe but verification
-   *  failed. Identity resolution was skipped; the sentinel is preserved so
-   *  the next relaunch retries the wipe automatically. */
-  resetFailed?: boolean;
-};
+export type { Identity, IdentityStorage } from "./identityTypes";
 
 export type Profile = {
   pubkey: string;
@@ -268,28 +250,11 @@ export type GetHomeFeedInput = {
   types?: string;
 };
 
-export type SearchMessagesInput = {
-  q: string;
-  limit?: number;
-  channelId?: string;
-};
-
-export type SearchHit = {
-  eventId: string;
-  content: string;
-  kind: number;
-  pubkey: string;
-  channelId: string | null;
-  channelName: string | null;
-  createdAt: number;
-  score: number;
-  threadRootId?: string | null;
-};
-
-export type SearchMessagesResponse = {
-  hits: SearchHit[];
-  found: number;
-};
+export type {
+  SearchHit,
+  SearchMessagesInput,
+  SearchMessagesResponse,
+} from "./searchTypes";
 
 // ── Relay Members ────────────────────────────────────────────────────────────
 
@@ -301,9 +266,9 @@ export type RelayMember = {
   addedBy: string | null;
   createdAt: string;
 };
-
 export type RelayAgent = {
   pubkey: string;
+  ownerPubkey: string | null;
   name: string;
   agentType: string;
   channels: string[];
@@ -339,10 +304,18 @@ export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
 
+import type { RestartDiffEntry } from "./restartDiff";
+export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
+  /**
+   * The record's harness/runtime id (e.g. "goose", "my-custom-harness").
+   * `null` means the agent inherits its harness from the linked persona.
+   * Used to count agents referencing a harness definition (delete confirm).
+   */
+  runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
@@ -363,20 +336,12 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   avatarUrl: string | null;
   model: string | null;
+  modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
-  /**
-   * `true` when the linked persona has been edited since this agent was
-   * created — the running agent uses the older pinned snapshot. Surface a
-   * "out of date" marker and prompt the user to delete + respawn to update.
-   * Always `false` for non-persona agents and for orphaned agents.
-   */
+  /** True when the linked persona has been edited since this agent was created. */
   personaOutOfDate: boolean;
-  /**
-   * `true` when the agent's linked persona no longer exists. Distinct from
-   * out-of-date: there is no current persona to respawn into, so do not prompt
-   * a respawn — the pinned snapshot is all the config that remains.
-   */
+  /** True when this agent's linked persona no longer exists. */
   personaOrphaned: boolean;
   /**
    * `true` when the running process was spawned with a config that no longer
@@ -385,6 +350,8 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
+  /** Non-empty iff `needsRestart` is true. Empty when Rust omits the field. */
+  restartDiff: RestartDiffEntry[];
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -410,11 +377,7 @@ export type ManagedAgent = {
   respondToAllowlist: string[];
 };
 
-/**
- * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
- * `"nobody"` is supported by the harness but not surfaced through this API —
- * it's a heartbeat-only mode without a meaningful GUI use case.
- */
+/** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
 export type BackendProviderCandidate = {
@@ -489,23 +452,23 @@ export type CancelManagedAgentTurnResult = {
   status: "sent" | "no_active_turn";
 };
 
-/**
- * Outcome of a live `switch_model` control frame, surfaced asynchronously via
- * the agent's `control_result` observer frame. Busy path: `sent` (cancel +
- * requeue on the new model) or `turn_ending` (oneshot already consumed this
- * turn). Idle path: `switched`, `unsupported_model`, or `no_active_turn`.
- */
+/** Outcome of a live `switch_model` control frame; `failure` lands late. */
 export type SwitchManagedAgentModelStatus =
   | "sent"
   | "turn_ending"
   | "switched"
   | "unsupported_model"
-  | "no_active_turn";
+  | "no_active_turn"
+  | "failure";
 
 export type ControlResultFrame = {
   type: "cancel_turn" | "switch_model";
   status: string;
   modelId?: string;
+  /** Opaque per-pick id echoed from the request; correlates late frames. */
+  requestId?: string;
+  /** Buzz channel UUID from the observer envelope; disambiguates channels. */
+  channelId?: string | null;
 };
 
 export type GitBashPrerequisite = {
@@ -545,9 +508,14 @@ export type AcpRuntimeCatalogEntry = {
   providerEnvVar: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
+  maxTokensEnvVar: string | null;
+  contextLimitEnvVar: string | null;
+  maxRoundsEnvVar: string | null;
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
+  /** True when the runtime depends on a separately installed vendor CLI. */
+  requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;
@@ -555,6 +523,16 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
+  /** "builtin" (compiled in), "preset" (PATH-probed, not editable), or "custom" (user JSON). Controls UI editability. */
+  source: "builtin" | "preset" | "custom";
+  /**
+   * Definition-level env vars for `source: custom` entries. Populated from
+   * `HarnessDefinition.env` so saves don't erase existing vars. Absent for
+   * builtin/preset entries.
+   */
+  definitionEnv?: Record<string, string>;
+  /** Spawn-time parallelism cap; absent for uncapped harnesses. */
+  maxParallelism?: number;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
@@ -564,22 +542,10 @@ export type AcpRuntime = AcpRuntimeCatalogEntry & {
   binaryPath: string;
 };
 
-export type InstallStepResult = {
-  step: string;
-  command: string;
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  hint?: string;
-};
-
-export type InstallRuntimeResult = {
-  success: boolean;
-  steps: InstallStepResult[];
-  restartedCount: number;
-  failedRestartCount: number;
-};
+export type {
+  InstallRuntimeResult,
+  InstallStepResult,
+} from "./installTypes";
 
 export type AcpAuthMethod = {
   id: string;
@@ -625,7 +591,6 @@ export type AgentModelInfo = {
 };
 
 // ── Config bridge types ──────────────────────────────────────────────────────
-
 export type ConfigOrigin =
   | "buzzExplicit"
   | "acpNativeRead"
@@ -635,7 +600,8 @@ export type ConfigOrigin =
   | "personaDefault"
   | "globalDefault"
   | "runtimeOverride"
-  | "harnessConstraint";
+  | "harnessConstraint"
+  | "harnessDefault";
 
 export type ConfigWriteMechanism =
   | { type: "respawnWithEnvVar"; envKey: string }
@@ -682,6 +648,9 @@ export type ConfigSourceReport = {
 
 export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
 
+/** B5/I-7: a single adapter-advertised value for an ACP config option. */
+export type AcpConfigOptionValue = { value: string; displayName?: string };
+
 export type NormalizedConfig = {
   model: NormalizedField | null;
   provider: NormalizedField | null;
@@ -700,6 +669,12 @@ export type RuntimeConfigSurface = {
   advanced: ConfigField[];
   extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
+  /** #3493: `true` when the surface was read from a user-set `CLAUDE_CONFIG_DIR` — drives the Keychain caveat note in the panel. */
+  claudeConfigDirCustom?: boolean;
+  /** B5: the adapter-advertised `thought_level` configId, discovered from the running session. Present only for claude after the first session. Drives the effort picker. */
+  effortConfigId?: string;
+  /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
+  effortOptions?: AcpConfigOptionValue[];
 };
 
 export type UpdateManagedAgentInput = {
@@ -746,10 +721,17 @@ export type AgentPersona = {
   namePool: string[];
   isBuiltIn: boolean;
   isActive: boolean;
+  /** Whether this persona is discoverable in the active community catalog. */
+  shared: boolean;
   /** Team ID if this persona was imported from a team directory. Team personas are non-editable. */
   sourceTeam?: string | null;
-  /** Environment variables injected for agents created from this persona.
-   * Layered as: desktop parent env < persona envVars < agent envVars. */
+  /**
+   * Set only on a local copy of another owner's shared catalog entry. A copy
+   * carries a fresh local `id`, so this coordinate is the only thing that can
+   * answer "is this catalog entry already added" without minting a duplicate.
+   */
+  catalogSource?: CatalogSourceCoordinate | null;
+  /** Agent environment variables, layered after desktop parent and persona values. */
   envVars: Record<string, string>;
   /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
   respondTo: RespondToMode | null;
@@ -760,9 +742,18 @@ export type AgentPersona = {
 };
 
 /**
- * NIP-AP behavioral group for a definition, sent as one group: absent = don't
- * touch the stored behavior group (legacy callers), present = replace the fields as a
- * unit. Mirrors `PersonaBehaviorRequest`.
+ * A catalog publication's coordinate: the owner who published it and the
+ * `d`-tag identifying the persona within that owner's catalog. Mirrors the
+ * backend `CatalogSource`.
+ */
+export type CatalogSourceCoordinate = {
+  ownerPubkey: string;
+  personaId: string;
+};
+
+/**
+ * NIP-AP behavioral group for a definition: absent preserves the stored group
+ * for legacy callers; present replaces it as a unit. Mirrors `PersonaBehaviorRequest`.
  */
 export type PersonaBehaviorInput = {
   respondTo?: RespondToMode;
@@ -780,6 +771,11 @@ export type CreatePersonaInput = {
   namePool?: string[];
   envVars?: Record<string, string>;
   behavior?: PersonaBehaviorInput;
+  /**
+   * Set when this persona is a copy of another owner's shared catalog entry,
+   * so the catalog can tell an already-added foreign entry from a new one.
+   */
+  catalogSource?: CatalogSourceCoordinate;
 };
 
 export type UpdatePersonaInput = {

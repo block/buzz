@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Search, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Search, X } from "lucide-react";
 import {
   mergeAllowlist,
   parsePubkeyInput,
@@ -13,6 +13,11 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  type AgentRunLocation,
+  agentAccessWarningText,
+} from "@/features/agents/lib/agentAccessWarning";
+import { useAgentRunLocation } from "./AgentRunLocationContext";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { PersonaDropdownOption } from "./agentConfigOptions";
 
@@ -20,13 +25,30 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  * Inbound author gate UI for create/edit agent dialogs.
  *
  * Dropdown:
- *   - Owner only  (default; matches `buzz-acp --respond-to=owner-only`)
- *   - Anyone      (`--respond-to=anyone` — fully open bot)
- *   - Allowlist   (`--respond-to=allowlist`, plus the chip list as
- *                  `--respond-to-allowlist`)
+ *   - Only me        (default; maps to `buzz-acp --respond-to=owner-only`)
+ *   - Anyone         (`--respond-to=anyone` — fully open agent)
+ *   - Selected people (`--respond-to=allowlist`, plus the selected pubkeys as
+ *                     `--respond-to-allowlist`)
  *
  * `nobody` is intentionally not surfaced — it pairs with a heartbeat-only
  * setup that has no meaningful GUI use case.
+ *
+ * Anyone and Selected people both share the host's access with someone other
+ * than the owner, so both render the persistent warning; only the audience
+ * phrase differs. It leads with the audience so it reads as a warning rather
+ * than an explanation, and stays one sentence — Only me already owns the line
+ * below the control.
+ *
+ * The line below Only me says "Only you and your agents", because the harness
+ * gate admits the owner and every verified same-owner agent, not the owner
+ * alone (see `managed_agents/access_policy.rs`). The dropdown label stays
+ * "Only me": it is the audience the user picks, and it has meant this since
+ * before agents could instruct each other.
+ *
+ * Which machine and stakes it names follow the optional `runLocation` prop, and
+ * an unknown location falls back to the local wording rather than hedging with
+ * "computer or server" — see `lib/agentAccessWarning.ts` for the copy and the
+ * reasoning.
  *
  * Validation is duplicated lightly here for inline UX feedback only; the
  * authoritative validator is `validate_respond_to_allowlist` in
@@ -53,8 +75,11 @@ function formatSearchUserSecondary(user: UserSearchResult) {
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
   { label: "Only me (default)", value: "owner-only" },
   { label: "Anyone", value: "anyone" },
-  { label: "Allowlist", value: "allowlist" },
+  { label: "Selected people", value: "allowlist" },
 ];
+
+export const OWNER_ONLY_ACCESS_DISABLED_REASON =
+  "This build disallows changing this setting.";
 
 export function CreateAgentRespondToField({
   mode,
@@ -63,7 +88,9 @@ export function CreateAgentRespondToField({
   onAllowlistChange,
   ownerPubkey,
   disabled,
+  disabledReason,
   variant,
+  runLocation,
 }: {
   mode: RespondToMode;
   allowlist: string[];
@@ -76,8 +103,16 @@ export function CreateAgentRespondToField({
    */
   ownerPubkey?: string | null;
   disabled?: boolean;
+  /** Explanation shown when this access control is unavailable. */
+  disabledReason?: string;
   /** When "persona", uses PersonaDropdownField styling to match the persona dialog. */
   variant?: "default" | "persona";
+  /**
+   * Where the agent's process runs, when the surface can tell. Omit or pass
+   * `null` when it can't — the warning then uses the same "your computer"
+   * wording as a local agent rather than hedging. Never synthesize a value.
+   */
+  runLocation?: AgentRunLocation | null;
 }) {
   const [query, setQuery] = React.useState("");
   const [isDirectEntryOpen, setIsDirectEntryOpen] = React.useState(false);
@@ -132,6 +167,33 @@ export function CreateAgentRespondToField({
 
   const isPersonaVariant = variant === "persona";
 
+  // An explicit prop wins; otherwise inherit from the dialog subtree. Surfaces
+  // inside AgentDialog get it from context (see AgentRunLocationContext for
+  // why), standalone ones like EditRespondToDialog pass the prop.
+  const inheritedRunLocation = useAgentRunLocation();
+  const warningText = agentAccessWarningText(
+    mode,
+    runLocation ?? inheritedRunLocation,
+  );
+
+  // Rendered in two positions: directly below the selector for Anyone, but
+  // after the people picker for Selected people, so it never sits between the
+  // user and the selection they came here to make.
+  const accessWarning = warningText ? (
+    <div
+      className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning-bg px-3 py-2.5"
+      data-testid="agent-access-warning"
+    >
+      <AlertTriangle
+        aria-hidden="true"
+        className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+      />
+      <p aria-live="polite" className="text-xs leading-5 text-warning">
+        {warningText}
+      </p>
+    </div>
+  ) : null;
+
   return (
     <div className="space-y-2" data-testid="agent-respond-to">
       <label
@@ -142,7 +204,7 @@ export function CreateAgentRespondToField({
         }
         htmlFor="agent-respond-to"
       >
-        Who can talk to this agent
+        Who can send instructions
       </label>
       {isPersonaVariant ? (
         <PersonaDropdownField
@@ -162,16 +224,25 @@ export function CreateAgentRespondToField({
           onChange={(e) => onModeChange(e.target.value as RespondToMode)}
           value={mode}
         >
-          <option value="owner-only">Owner only (default)</option>
-          <option value="anyone">Anyone</option>
-          <option value="allowlist">Allowlist</option>
+          {RESPOND_TO_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
         </select>
       )}
-      {!isPersonaVariant ? (
+      {disabledReason ? (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="agent-respond-to-disabled-reason"
+        >
+          {disabledReason}
+        </p>
+      ) : null}
+      {mode === "anyone" ? accessWarning : null}
+      {mode === "owner-only" ? (
         <p className="text-xs text-muted-foreground">
-          Controls which Nostr authors the agent listens to (@mentions, DMs,
-          thread replies). The agent&apos;s owner can always shut it down with
-          <span className="font-mono"> !shutdown</span>.
+          Only you and your agents can send instructions.
         </p>
       ) : null}
       {mode === "allowlist" ? (
@@ -202,6 +273,7 @@ export function CreateAgentRespondToField({
           variant={isPersonaVariant ? "persona" : "default"}
         />
       ) : null}
+      {mode === "allowlist" ? accessWarning : null}
     </div>
   );
 }
@@ -269,7 +341,7 @@ function AllowlistPicker({
     >
       {!isPersona ? (
         <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium">Allowed pubkeys</span>
+          <span className="text-sm font-medium">Selected people</span>
           <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
             {allowlist.length} selected
           </span>
@@ -277,13 +349,13 @@ function AllowlistPicker({
       ) : null}
       {!isPersona && ownerPubkey ? (
         <p className="text-xs text-muted-foreground">
-          Owner (
-          <PubKey pubkey={ownerPubkey} />) is always implicitly allowed by the
-          harness — no need to add it here.
+          You (
+          <PubKey pubkey={ownerPubkey} />) can always use this agent. You
+          don&apos;t need to add yourself.
         </p>
       ) : !isPersona ? (
         <p className="text-xs text-muted-foreground">
-          The agent&apos;s owner is always implicitly allowed.
+          You can always use this agent.
         </p>
       ) : null}
       <div className="rounded-lg border border-border/80 bg-background">
@@ -452,7 +524,7 @@ function AllowlistPicker({
                   onClick={onAddFromPaste}
                   type="button"
                 >
-                  Add to allowlist
+                  Add people
                 </button>
               </div>
             </div>

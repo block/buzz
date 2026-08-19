@@ -1,4 +1,7 @@
-import type { Project, ProjectRepoSnapshot } from "@/features/projects/hooks";
+import type {
+  ProjectRepoSnapshot,
+  Repository as Project,
+} from "@/features/projects/hooks";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
@@ -7,6 +10,7 @@ export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
   issues: "Issues",
   prs: "Pull Request",
   contributors: "Contributors",
+  channels: "Channels",
 };
 
 /** Tooltip for the push/pull sync buttons, e.g. "Pull 2 remote commits". */

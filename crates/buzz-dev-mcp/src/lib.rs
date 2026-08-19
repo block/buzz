@@ -84,7 +84,7 @@ impl DevMcp {
 
     #[tool(
         name = "todo",
-        description = "Session task list. Omit `todos` to read current state. Provide a full replacement array to update. Items are {text, done}. Open items removed without being marked done will trigger a warning. If the operator enables hooks for this server, the agent's _Stop hook will advise against ending the turn while items are open."
+        description = "Session checklist only for work that must continue across turns or survive context compaction. Do not use for work you can finish in the current turn. Omit `todos` to read; provide the full {text, done} list to replace it. Open items let the _Stop hook advise against ending."
     )]
     async fn todo(
         &self,
@@ -183,4 +183,31 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     let service = DevMcp::new(state).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Suppress the console window that Windows otherwise allocates for every
+/// console-subsystem child process spawned from a non-console parent.
+/// No-op on non-Windows platforms.
+pub(crate) fn configure_no_window(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Suppress the console window for async (`tokio::process::Command`) spawns.
+/// Equivalent to `configure_no_window` but accepts a tokio command.
+/// No-op on non-Windows platforms.
+pub(crate) fn configure_no_window_async(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
 }

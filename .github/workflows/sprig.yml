@@ -42,7 +42,7 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -116,7 +116,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Download all Sprig artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -139,27 +139,10 @@ jobs:
           TITLE="Sprig (rolling)"
           NOTES="Rolling Linux build of Sprig (all-in-one buzz-acp + buzz-agent + buzz-dev-mcp), tracking \`main\` (\`${SHA}\`)."
 
-          if gh api "repos/${REPO}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
-            gh api -X PATCH "repos/${REPO}/git/refs/tags/${TAG}" \
-              -f sha="${SHA}" -F force=true >/dev/null
-          else
-            gh api -X POST "repos/${REPO}/git/refs" \
-              -f ref="refs/tags/${TAG}" -f sha="${SHA}" >/dev/null
-          fi
-
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --prerelease \
-              --target "${SHA}" \
-              --title "$TITLE" \
-              --notes "$NOTES"
-          else
-            gh release edit "$TAG" \
-              --prerelease \
-              --target "${SHA}" \
-              --title "$TITLE" \
-              --notes "$NOTES"
-          fi
+          gh release edit "$TAG" \
+            --prerelease \
+            --title "$TITLE" \
+            --notes "$NOTES"
           gh release upload "$TAG" dist/* --clobber
 
   publish-tag:
@@ -171,7 +154,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Download all Sprig artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

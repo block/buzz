@@ -61,19 +61,16 @@ pub struct SttPipeline {
 impl SttPipeline {
     /// Spawn the pipeline thread.
     ///
-    /// `tts_active` is a shared flag set by the TTS pipeline while audio is
-    /// playing. The STT worker uses it to:
-    ///   - discard accumulated speech (echo prevention / barge-in gating)
-    ///   - apply a 200 ms cooldown after TTS stops before re-enabling STT
-    ///   - detect barge-in: speech onset during TTS → set `tts_cancel`
+    /// Mic input is transcribed even while agent TTS is playing: the huddle UI
+    /// already tells users to wear headphones, so speaker bleed is accepted in
+    /// exchange for never dropping human speech that overlaps agent audio.
+    /// Local mic frames still never cancel TTS — push-to-talk and remote
+    /// participant speech remain the explicit barge-in paths.
     ///
-    /// `tts_cancel` (optional) is the TTS pipeline's cancel flag. When the STT
-    /// worker detects speech onset while TTS is active, it sets this flag to
-    /// stop playback immediately (barge-in). Pass `None` if TTS is unavailable.
-    ///
-    /// `ptt_active` (optional) is the push-to-talk flag. When `Some`, the STT
-    /// pipeline only accumulates speech while the flag is true (key held).
-    /// When `None`, the pipeline runs in continuous VAD mode.
+    /// `ptt_active` and `manual_mic_unmuted` are present when the PTT shortcut
+    /// is enabled. The pipeline accepts speech while either input path is open;
+    /// manual unmute uses normal VAD flushing while a shortcut hold is grouped
+    /// into one utterance.
     ///
     /// Returns `Err` only if the thread cannot be spawned (OS error).
     /// If model files are missing, the worker logs and exits cleanly —
@@ -85,17 +82,16 @@ impl SttPipeline {
     /// thread on every `recv_timeout` call).
     pub fn new(
         model_dir: PathBuf,
-        tts_active: Arc<AtomicBool>,
-        tts_cancel: Option<Arc<AtomicBool>>,
         ptt_active: Option<Arc<AtomicBool>>,
+        manual_mic_unmuted: Option<Arc<AtomicBool>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let shutdown_worker = Arc::clone(&shutdown);
-        let tts_cancel_worker = tts_cancel.as_ref().map(Arc::clone);
         let ptt_active_worker = ptt_active.as_ref().map(Arc::clone);
+        let manual_mic_unmuted_worker = manual_mic_unmuted.as_ref().map(Arc::clone);
         let handle = thread::Builder::new()
             .name("stt-worker".into())
             .spawn(move || {
@@ -104,9 +100,8 @@ impl SttPipeline {
                     audio_rx,
                     text_tx,
                     shutdown_worker,
-                    tts_active,
-                    tts_cancel_worker,
                     ptt_active_worker,
+                    manual_mic_unmuted_worker,
                 )
             })
             .map_err(|e| format!("failed to spawn stt-worker thread: {e}"))?;
@@ -165,15 +160,12 @@ impl Drop for SttPipeline {
 /// How many 16 kHz samples of silence before we flush to STT.
 /// 300 ms × 16 000 Hz / 256 samples-per-frame ≈ 19 frames.
 /// Previous value (28 frames / 450 ms) felt sluggish in conversation.
+///
+/// This window is a turn-taking quality knob, not a latency lever: an earlier
+/// env override (`BUZZ_STT_FLUSH_MS`) let it be lowered to 150 ms, which split
+/// natural mid-sentence pauses into separate messages and confused the
+/// listening agents. Reverted — the window is fixed at the production value.
 const SILENCE_FLUSH_FRAMES: usize = 19;
-
-/// Consecutive VAD speech frames required before triggering barge-in during TTS.
-/// 20 frames × 256 samples / 16 kHz ≈ 320 ms — must be long enough to filter
-/// speaker-to-mic feedback (TTS audio bleeding through the mic) while still
-/// catching real human interruptions. 80 ms (previous: 5 frames) was too
-/// aggressive — laptop speakers without headphones triggered false barge-in
-/// within the first word of TTS playback.
-const BARGE_IN_DEBOUNCE_FRAMES: usize = 20;
 
 /// earshot requires exactly 256 samples per frame at 16 kHz.
 const VAD_FRAME_SAMPLES: usize = 256;
@@ -181,14 +173,14 @@ const VAD_FRAME_SAMPLES: usize = 256;
 /// VAD probability threshold — above this is considered speech.
 const VAD_THRESHOLD: f32 = 0.5;
 
+/// Minimum voiced audio needed before an utterance may be decoded.
+/// One earshot false-positive frame is only 16 ms; requiring 192 ms prevents
+/// silence/room-noise blips from reaching Parakeet and becoming hallucinated
+/// transcript text while still preserving short replies such as "yes".
+const MIN_VOICED_FRAMES: usize = 12;
+
 /// How long the worker waits on the audio channel before checking the shutdown flag.
 const RECV_TIMEOUT: Duration = Duration::from_millis(50);
-
-/// 50 ms cooldown after TTS stops before STT re-enables.
-/// Prevents the tail of TTS audio from being transcribed as speech.
-/// Previous value (200 ms) was eating the first word when the user spoke
-/// immediately after the agent finished.
-const TTS_COOLDOWN: Duration = Duration::from_millis(50);
 
 /// Number of ONNX Runtime intra-op threads used by the offline recognizer.
 ///
@@ -201,14 +193,33 @@ const TTS_COOLDOWN: Duration = Duration::from_millis(50);
 /// shows it's safe on the minimum-spec target.
 const STT_NUM_THREADS: i32 = 1;
 
+/// EXPERIMENTAL (latency bench): override recognizer intra-op threads via
+/// `BUZZ_STT_THREADS`. Default preserves the production single thread.
+fn stt_num_threads() -> i32 {
+    std::env::var("BUZZ_STT_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(STT_NUM_THREADS)
+}
+
+/// EXPERIMENTAL (latency bench): `BUZZ_STT_SPECULATIVE=1` starts the Parakeet
+/// decode at the FIRST silent VAD frame instead of after the full flush
+/// window, overlapping the ~150-250 ms decode with the silence wait. If
+/// speech resumes, the speculative result is discarded. When silence holds
+/// to the flush threshold the transcript is emitted immediately, so the STT
+/// leg collapses to ~max(flush window, decode time).
+fn stt_speculative_decode() -> bool {
+    std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
+}
+
 fn stt_worker(
     model_dir: PathBuf,
     audio_rx: Receiver<Vec<u8>>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
-    tts_active: Arc<AtomicBool>,
-    tts_cancel: Option<Arc<AtomicBool>>,
     ptt_active: Option<Arc<AtomicBool>>,
+    manual_mic_unmuted: Option<Arc<AtomicBool>>,
 ) {
     // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
     use rubato::{Fft, FixedSync, Resampler};
@@ -249,7 +260,7 @@ fn stt_worker(
     let mut cfg = OfflineRecognizerConfig::default();
     cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
     cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
-    cfg.model_config.num_threads = STT_NUM_THREADS;
+    cfg.model_config.num_threads = stt_num_threads();
     // Explicit — defaults are not part of the API contract, and noisy debug
     // logging in release builds would be expensive on every VAD chunk.
     cfg.model_config.debug = false;
@@ -274,43 +285,44 @@ fn stt_worker(
     let mut silence_frames: usize = 0;
     // Whether we're currently in a speech segment.
     let mut in_speech = false;
-    // Consecutive speech frames seen during TTS — used for barge-in debounce.
-    let mut barge_in_frames: usize = 0;
-    // Timestamp when TTS last stopped — used for the 200 ms cooldown.
-    let mut tts_stopped_at: Option<std::time::Instant> = None;
+    // Number of frames earshot classified as voiced in the current segment.
+    let mut voiced_frames = 0;
+    // Silence flush window (frames) — fixed at the production value.
+    let flush_frames = SILENCE_FLUSH_FRAMES;
+    // EXPERIMENTAL: speculative decode result + the voiced-frame count it was
+    // computed at. Valid only while no new voiced frame has arrived since.
+    let speculative_enabled = stt_speculative_decode();
+    let mut speculative: Option<(String, usize)> = None;
 
     // ── 5. Main loop ──────────────────────────────────────────────────────────
-    let mut tts_was_active = false;
-    let mut ptt_was_active = ptt_active
+    let mut transmit_was_active = ptt_active
         .as_ref()
-        .is_some_and(|p| p.load(Ordering::Acquire));
+        .is_some_and(|ptt| ptt.load(Ordering::Acquire))
+        || manual_mic_unmuted
+            .as_ref()
+            .is_some_and(|manual| manual.load(Ordering::Acquire));
     loop {
         // Check shutdown flag before blocking.
         if shutdown.load(Ordering::Acquire) {
             break;
         }
 
-        // Track TTS transitions to set the cooldown timer.
-        let tts_now = tts_active.load(Ordering::Acquire);
-        if tts_was_active && !tts_now {
-            // TTS just stopped — record the timestamp for the cooldown window.
-            tts_stopped_at = Some(std::time::Instant::now());
-        }
-        tts_was_active = tts_now;
-
-        // Track PTT transitions — flush accumulated speech when key is released.
-        // The worklet stops sending frames when PTT is inactive, so the normal
-        // silence-accumulation flush path never runs. We must flush here on the
-        // active→inactive edge to avoid buffering speech across PTT presses.
+        // Track the combined manual/PTT transmission edge. When both paths
+        // close, the worklet stops sending frames, so flush here rather than
+        // waiting for silence that will never arrive.
         if let Some(ref ptt) = ptt_active {
-            let ptt_now = ptt.load(Ordering::Acquire);
-            if ptt_was_active && !ptt_now && in_speech && !speech_buf.is_empty() {
-                flush_to_stt(&speech_buf, &recognizer, &text_tx);
+            let transmit_now = ptt.load(Ordering::Acquire)
+                || manual_mic_unmuted
+                    .as_ref()
+                    .is_some_and(|manual| manual.load(Ordering::Acquire));
+            if transmit_was_active && !transmit_now && in_speech && !speech_buf.is_empty() {
+                flush_to_stt(&speech_buf, voiced_frames, &recognizer, &text_tx);
                 speech_buf.clear();
                 silence_frames = 0;
                 in_speech = false;
+                voiced_frames = 0;
             }
-            ptt_was_active = ptt_now;
+            transmit_was_active = transmit_now;
         }
 
         // Use recv_timeout so we can periodically check the shutdown flag.
@@ -342,13 +354,13 @@ fn stt_worker(
                     &mut speech_buf,
                     &mut silence_frames,
                     &mut in_speech,
-                    &mut barge_in_frames,
+                    &mut voiced_frames,
+                    flush_frames,
+                    (speculative_enabled, &mut speculative),
                     &recognizer,
                     &text_tx,
-                    &tts_active,
-                    tts_cancel.as_deref(),
-                    &mut tts_stopped_at,
                     ptt_active.as_ref(),
+                    manual_mic_unmuted.as_ref(),
                 );
             }
         }
@@ -386,16 +398,16 @@ fn resample_chunk(resampler: &mut rubato::Fft<f32>, chunk_48k: &[f32]) -> Vec<f3
 /// Feed 16 kHz samples through the VAD and accumulate speech.
 /// Flushes to STT when silence exceeds threshold.
 ///
-/// When `tts_active` is set:
-///   - In PTT mode: skip accumulation (PTT press handles TTS cancellation).
-///   - In VAD mode: speech onset triggers barge-in via `tts_cancel`.
-///   - After TTS stops, a cooldown prevents tail audio from being transcribed.
+/// Mic input keeps flowing while agent TTS plays: the huddle UI instructs
+/// users to wear headphones, so overlapping human speech is transcribed
+/// instead of discarded.
 ///
-/// When `ptt_active` is `Some`:
-///   - VAD `is_speech` is ANDed with the PTT flag — when the key is released,
-///     `is_speech` becomes false, silence_frames accumulates, and the existing
-///     flush logic kicks in naturally. The 200 ms release delay + ~300 ms
-///     silence flush gives a natural utterance tail.
+/// When `ptt_active` is `Some`, input is accepted while either the shortcut is
+/// held or the microphone is manually unmuted. A held shortcut is an explicit
+/// "I am not done talking" signal, so silence NEVER flushes while it is held —
+/// even when the microphone is also manually open. The utterance flushes on
+/// shortcut release (the transmit-edge flush in the worker loop) or, with a
+/// manually open mic, via normal VAD pause flushing once the shortcut is up.
 #[allow(clippy::too_many_arguments)]
 fn process_16k_samples(
     samples: &[f32],
@@ -404,14 +416,15 @@ fn process_16k_samples(
     speech_buf: &mut Vec<f32>,
     silence_frames: &mut usize,
     in_speech: &mut bool,
-    barge_in_frames: &mut usize,
+    voiced_frames: &mut usize,
+    flush_frames: usize,
+    speculative: (bool, &mut Option<(String, usize)>),
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
-    tts_active: &Arc<AtomicBool>,
-    tts_cancel: Option<&AtomicBool>,
-    tts_stopped_at: &mut Option<std::time::Instant>,
     ptt_active: Option<&Arc<AtomicBool>>,
+    manual_mic_unmuted: Option<&Arc<AtomicBool>>,
 ) {
+    let (speculative_enabled, speculative) = speculative;
     leftover.extend_from_slice(samples);
 
     while leftover.len() >= VAD_FRAME_SAMPLES {
@@ -420,101 +433,68 @@ fn process_16k_samples(
         let prob = vad.predict_f32(&clamped);
         let is_speech = prob > VAD_THRESHOLD;
 
-        // PTT gating: when PTT key is not held, treat as silence.
-        // This causes natural flush when the key is released — silence_frames
-        // accumulates and the existing flush logic kicks in after
-        // SILENCE_FLUSH_FRAMES. The 200 ms release delay + ~300 ms silence
-        // flush gives a natural utterance tail.
-        let is_speech = if let Some(ptt) = ptt_active {
-            is_speech && ptt.load(Ordering::Acquire)
+        let manually_open = manual_mic_unmuted.is_some_and(|manual| manual.load(Ordering::Acquire));
+        let ptt_held = ptt_active.is_some_and(|ptt| ptt.load(Ordering::Acquire));
+        // Shortcut-enabled mode accepts input from either the held shortcut or
+        // a manually open microphone.
+        let is_speech = if ptt_active.is_some() {
+            is_speech && (ptt_held || manually_open)
         } else {
             is_speech
         };
-
-        let tts_playing = tts_active.load(Ordering::Acquire);
-
-        // While TTS is playing: skip accumulation (echo prevention).
-        if tts_playing {
-            if ptt_active.is_some() {
-                // PTT mode — PTT press handles TTS cancellation directly
-                // (via the global shortcut handler). Just skip accumulation.
-                *in_speech = false;
-                *barge_in_frames = 0;
-                speech_buf.clear();
-                *silence_frames = 0;
-                continue;
-            }
-
-            // VAD mode — barge-in detection.
-            // Without acoustic echo cancellation, this requires a longer
-            // debounce (BARGE_IN_DEBOUNCE_FRAMES ≈ 320 ms) to filter
-            // speaker-to-mic feedback.
-            if is_speech {
-                *barge_in_frames += 1;
-                if *barge_in_frames >= BARGE_IN_DEBOUNCE_FRAMES {
-                    // Real speech detected during TTS — trigger barge-in.
-                    if let Some(cancel) = tts_cancel {
-                        cancel.store(true, Ordering::Release);
-                    }
-                    *barge_in_frames = 0;
-                }
-            } else {
-                *barge_in_frames = 0;
-            }
-            // Don't accumulate speech during TTS (echo prevention).
-            *in_speech = false;
-            speech_buf.clear();
-            *silence_frames = 0;
-            continue;
-        }
-
-        // TTS not playing — check cooldown window.
-        if let Some(stopped) = *tts_stopped_at {
-            if stopped.elapsed() < TTS_COOLDOWN {
-                // Still in cooldown — discard but keep tracking speech state.
-                if !is_speech {
-                    *in_speech = false;
-                }
-                speech_buf.clear();
-                *silence_frames = 0;
-                *barge_in_frames = 0;
-                continue;
-            } else {
-                // Cooldown expired — clear the timer and reset all segment state.
-                *tts_stopped_at = None;
-                *in_speech = false;
-                *silence_frames = 0;
-                *barge_in_frames = 0;
-            }
-        }
+        // A held shortcut means "I am not done talking": silence never ends
+        // the utterance while it is held. VAD pause flushing applies in pure
+        // VAD mode, or with a manually open mic once the shortcut is up.
+        let vad_flush_allowed = vad_flush_allowed(ptt_active.is_some(), manually_open, ptt_held);
 
         if is_speech {
             *silence_frames = 0;
             *in_speech = true;
+            *voiced_frames += 1;
             speech_buf.extend_from_slice(&frame);
+            // New voiced audio invalidates any speculative decode.
+            speculative.take();
 
             // OOM guard: flush and reset if the buffer exceeds 30 s of audio.
             if speech_buf.len() >= MAX_SPEECH_SAMPLES {
-                flush_to_stt(speech_buf, recognizer, text_tx);
+                flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx);
                 speech_buf.clear();
                 *silence_frames = 0;
                 *in_speech = false;
+                *voiced_frames = 0;
             }
         } else if *in_speech {
             // Still accumulate during brief silence gaps.
             speech_buf.extend_from_slice(&frame);
             *silence_frames += 1;
 
-            // In PTT mode, don't flush on silence — accumulate the entire
-            // key-hold as one utterance. The PTT release edge in the main
-            // loop handles the flush. In VAD mode, flush after the silence
-            // threshold so each natural pause becomes a separate message.
-            if ptt_active.is_none() && *silence_frames >= SILENCE_FLUSH_FRAMES {
-                // End of utterance — transcribe.
-                flush_to_stt(speech_buf, recognizer, text_tx);
+            // EXPERIMENTAL: kick the Parakeet decode at the first silent
+            // frame so it overlaps the flush window. speech_buf keeps
+            // accumulating silence afterwards, but trailing silence does not
+            // change the transcript; any resumed speech invalidates the
+            // speculative result above.
+            if speculative_enabled
+                && speculative.is_none()
+                && vad_flush_allowed
+                && has_enough_voiced_audio(*voiced_frames)
+            {
+                speculative.replace((decode_speech(recognizer, speech_buf), *voiced_frames));
+            }
+
+            // A manually open microphone behaves like normal VAD. A held
+            // shortcut keeps the utterance grouped until key release.
+            if vad_flush_allowed && *silence_frames >= flush_frames {
+                // End of utterance — transcribe (or emit the speculative decode).
+                match speculative.take() {
+                    Some((text, decoded_at)) if decoded_at == *voiced_frames => {
+                        send_transcript(text, text_tx);
+                    }
+                    _ => flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx),
+                }
                 speech_buf.clear();
                 *silence_frames = 0;
                 *in_speech = false;
+                *voiced_frames = 0;
             }
         }
         // If not in speech and not accumulating, just discard the frame.
@@ -527,27 +507,49 @@ fn process_16k_samples(
 /// The tokio channel's `blocking_send` is safe to call from sync contexts.
 fn flush_to_stt(
     speech_buf: &[f32],
+    voiced_frames: usize,
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
 ) {
-    if speech_buf.is_empty() {
+    if speech_buf.is_empty() || !has_enough_voiced_audio(voiced_frames) {
         return;
     }
+    send_transcript(decode_speech(recognizer, speech_buf), text_tx);
+}
 
+/// Run the Parakeet decode on a speech buffer and return the trimmed text.
+fn decode_speech(recognizer: &sherpa_onnx::OfflineRecognizer, speech_buf: &[f32]) -> String {
     let stream = recognizer.create_stream();
     stream.accept_waveform(16_000, speech_buf);
     recognizer.decode(&stream);
 
-    let text = stream
+    stream
         .get_result()
         .map(|r| r.text.trim().to_string())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
+fn send_transcript(text: String, text_tx: &tokio_mpsc::Sender<String>) {
     if !text.is_empty() {
         if let Err(e) = text_tx.blocking_send(text) {
             eprintln!("buzz-desktop: STT text channel closed: {e}");
         }
     }
+}
+
+fn has_enough_voiced_audio(voiced_frames: usize) -> bool {
+    voiced_frames >= MIN_VOICED_FRAMES
+}
+
+/// Whether a silence run may end the current utterance and flush it to STT.
+///
+/// Pure VAD mode (no shortcut configured) always allows pause flushing. When
+/// the push-to-talk shortcut is configured, a held shortcut is an explicit
+/// "I am not done talking" signal, so silence never flushes while it is held
+/// — even if the microphone is also manually open. A manually open mic with
+/// the shortcut up behaves like normal VAD.
+fn vad_flush_allowed(ptt_mode: bool, manually_open: bool, ptt_held: bool) -> bool {
+    !ptt_mode || (manually_open && !ptt_held)
 }
 
 /// Convert raw bytes (f32 LE) to f32 samples.
@@ -565,3 +567,30 @@ fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
 
 // drain_until_shutdown lives in super (huddle/mod.rs) — shared with tts.rs.
 use super::drain_until_shutdown;
+
+#[cfg(test)]
+mod tests {
+    use super::{has_enough_voiced_audio, vad_flush_allowed, MIN_VOICED_FRAMES};
+
+    #[test]
+    fn short_vad_blips_do_not_reach_the_recognizer() {
+        assert!(!has_enough_voiced_audio(1));
+        assert!(!has_enough_voiced_audio(MIN_VOICED_FRAMES - 1));
+        assert!(has_enough_voiced_audio(MIN_VOICED_FRAMES));
+    }
+
+    #[test]
+    fn held_push_to_talk_never_silence_flushes() {
+        // Pure VAD mode: silence always ends the utterance.
+        assert!(vad_flush_allowed(false, false, false));
+        // Shortcut configured, nothing transmitting: nothing to flush anyway,
+        // but the pause path stays closed.
+        assert!(!vad_flush_allowed(true, false, false));
+        // Shortcut held: "I am not done talking" — never flush on silence,
+        // regardless of the manual mic state.
+        assert!(!vad_flush_allowed(true, false, true));
+        assert!(!vad_flush_allowed(true, true, true));
+        // Manually open mic with the shortcut up: normal VAD behavior.
+        assert!(vad_flush_allowed(true, true, false));
+    }
+}

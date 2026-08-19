@@ -7,9 +7,13 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
+    managed_agents::persona_events::monotonic_created_at,
     models::{ProfileInfo, SearchUsersResponse, UserNotesResponse, UsersBatchResponse},
     nostr_convert,
-    relay::{query_relay, submit_event},
+    relay::{
+        query_relay, query_relay_at_with_keys, relay_http_base_url, submit_event,
+        submit_event_at_with_keys,
+    },
 };
 
 #[tauri::command]
@@ -92,6 +96,85 @@ pub async fn update_profile(
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
         .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state))))
+}
+
+#[tauri::command]
+pub async fn update_profile_at_relay(
+    relay_url: String,
+    expected_pubkey: String,
+    expected_avatar_url: Option<String>,
+    avatar_url: String,
+    state: State<'_, AppState>,
+) -> Result<ProfileInfo, String> {
+    let signer = capture_expected_signer(&state, &expected_pubkey)?;
+
+    let api_base_url = relay_http_base_url(&relay_url);
+    let filter = serde_json::json!({
+        "kinds": [0],
+        "authors": [expected_pubkey],
+        "limit": 1
+    });
+    let prior_events = query_relay_at_with_keys(
+        &state,
+        &api_base_url,
+        std::slice::from_ref(&filter),
+        &signer,
+        None,
+    )
+    .await?;
+    let prior_event = prior_events.first();
+    let current: Value = prior_event
+        .and_then(|event| serde_json::from_str::<Value>(&event.content).ok())
+        .unwrap_or(Value::Null);
+    let current_avatar_url = current
+        .get("picture")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if normalized_avatar_url(current_avatar_url.as_deref())
+        != normalized_avatar_url(expected_avatar_url.as_deref())
+    {
+        return Err("profile avatar changed before deferred save".to_string());
+    }
+
+    let builder = build_deferred_profile_event(&current, &avatar_url, prior_event)?;
+    submit_event_at_with_keys(builder, &state, &api_base_url, &signer).await?;
+
+    let events = query_relay_at_with_keys(&state, &api_base_url, &[filter], &signer, None).await?;
+    Ok(events
+        .first()
+        .map(nostr_convert::profile_info_from_event)
+        .transpose()?
+        .unwrap_or_else(|| empty_profile_info(&expected_pubkey)))
+}
+
+fn build_deferred_profile_event(
+    current: &Value,
+    avatar_url: &str,
+    prior_event: Option<&nostr::Event>,
+) -> Result<nostr::EventBuilder, String> {
+    let display_name = current.get("display_name").and_then(Value::as_str);
+    let name = current.get("name").and_then(Value::as_str);
+    let about = current.get("about").and_then(Value::as_str);
+    let nip05 = current.get("nip05").and_then(Value::as_str);
+
+    Ok(
+        events::build_profile(display_name, name, Some(avatar_url), about, nip05)?
+            .custom_created_at(monotonic_created_at(
+                prior_event.map(|event| event.created_at.as_secs() as i64),
+            )),
+    )
+}
+
+fn capture_expected_signer(state: &AppState, expected_pubkey: &str) -> Result<nostr::Keys, String> {
+    let signer = state.signing_keys()?;
+    if signer.public_key().to_hex() != expected_pubkey {
+        return Err("profile identity changed before avatar save".to_string());
+    }
+    Ok(signer)
+}
+
+fn normalized_avatar_url(avatar_url: Option<&str>) -> Option<&str> {
+    avatar_url.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[tauri::command]
@@ -334,6 +417,56 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_profile_signer_is_captured_and_rejects_wrong_identity() {
+        let state = crate::app_state::build_app_state();
+        let original = state.signing_keys().expect("signable identity");
+        let original_pubkey = original.public_key().to_hex();
+
+        let captured = capture_expected_signer(&state, &original_pubkey)
+            .expect("matching identity should be captured");
+        *state.keys.lock().expect("lock keys") = nostr::Keys::generate();
+
+        assert_eq!(captured.public_key().to_hex(), original_pubkey);
+        assert_ne!(
+            state.keys.lock().expect("lock keys").public_key().to_hex(),
+            original_pubkey
+        );
+        assert_eq!(
+            capture_expected_signer(&state, &original_pubkey).unwrap_err(),
+            "profile identity changed before avatar save"
+        );
+    }
+
+    #[test]
+    fn deferred_profile_event_is_strictly_newer_than_prior_head() {
+        let keys = nostr::Keys::generate();
+        let prior_created_at = nostr::Timestamp::now().as_secs() + 60;
+        let prior_event = nostr::EventBuilder::new(
+            nostr::Kind::Metadata,
+            serde_json::json!({"display_name": "Larry"}).to_string(),
+        )
+        .custom_created_at(nostr::Timestamp::from(prior_created_at))
+        .sign_with_keys(&keys)
+        .expect("sign prior profile");
+
+        let builder = build_deferred_profile_event(
+            &serde_json::json!({"display_name": "Larry"}),
+            "https://example.com/avatar.png",
+            Some(&prior_event),
+        )
+        .expect("build deferred profile");
+        let event = builder
+            .sign_with_keys(&keys)
+            .expect("sign deferred profile");
+
+        assert_eq!(event.created_at.as_secs(), prior_created_at + 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&event.content).unwrap()["picture"],
+            "https://example.com/avatar.png"
+        );
+    }
 
     #[test]
     fn user_search_filter_requests_prefix_mode_for_typeahead() {

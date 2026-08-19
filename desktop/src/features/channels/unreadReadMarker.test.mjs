@@ -7,6 +7,7 @@ import {
   countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
+  hasUnreadTopLevelObservedEvent,
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
 } from "./unreadChannelCounts.ts";
@@ -18,6 +19,7 @@ import {
 } from "./useUnreadChannels.ts";
 import {
   isChannelUnreadTriggerKind,
+  trackSeenEvent,
   withChannelTagFallback,
 } from "./useLiveChannelUpdates.ts";
 import {
@@ -88,6 +90,16 @@ test("live event with h tag is preserved", () => {
   };
 
   assert.equal(withChannelTagFallback(message, "other-channel"), message);
+});
+
+test("notification event guard suppresses reconnect replay and stays bounded", () => {
+  const seen = new Set();
+
+  assert.equal(trackSeenEvent(seen, "event-a", 2), true);
+  assert.equal(trackSeenEvent(seen, "event-a", 2), false);
+  assert.equal(trackSeenEvent(seen, "event-b", 2), true);
+  assert.equal(trackSeenEvent(seen, "event-c", 2), true);
+  assert.deepEqual([...seen], ["event-b", "event-c"]);
 });
 
 test("dmHuddleStart_isDmOnlyUnreadTrigger", () => {
@@ -355,6 +367,30 @@ test("countUnreadObservedEvents_topLevelUsesChannelMarker", () => {
   ]);
 
   assert.equal(countUnreadObservedEvents(events, readAtFor(300, new Map())), 1);
+});
+
+test("hasUnreadTopLevelObservedEvent_ignoresUnreadThreadReplies", () => {
+  const events = new Map([
+    ["top-old", observed("top-old", 250)],
+    ["thread-new", observed("thread-new", 500, "root-1")],
+  ]);
+
+  assert.equal(
+    hasUnreadTopLevelObservedEvent(events, readAtFor(300, new Map())),
+    false,
+  );
+});
+
+test("hasUnreadTopLevelObservedEvent_detectsUnreadTopLevelMessage", () => {
+  const events = new Map([
+    ["top-new", observed("top-new", 350)],
+    ["thread-new", observed("thread-new", 500, "root-1")],
+  ]);
+
+  assert.equal(
+    hasUnreadTopLevelObservedEvent(events, readAtFor(300, new Map())),
+    true,
+  );
 });
 
 test("countUnreadBadgeObservedEvents_skipsBoldOnlyGeneralChannelItems", () => {

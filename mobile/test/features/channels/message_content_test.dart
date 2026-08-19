@@ -1,18 +1,43 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+import 'package:buzz/shared/emoji/emoji_only.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
-Widget _testable(Widget child, {List<Override> overrides = const []}) {
+Widget _testable(
+  Widget child, {
+  List<Override> overrides = const [],
+  bool disableAnimations = false,
+  VideoPreviewFrameLoader? videoPreviewFrameLoader,
+}) {
   return ProviderScope(
-    overrides: overrides,
+    overrides: [
+      videoPreviewFrameLoaderProvider.overrideWithValue(
+        videoPreviewFrameLoader ?? (_) async => null,
+      ),
+      ...overrides,
+    ],
     child: MaterialApp(
       theme: AppTheme.light(),
-      home: Scaffold(body: child),
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(disableAnimations: disableAnimations),
+          child: Scaffold(body: child),
+        ),
+      ),
     ),
   );
 }
@@ -118,23 +143,91 @@ bool _spanHasStyle(
   String text,
   bool Function(TextStyle) check,
 ) {
-  var found = false;
-  root.visitChildren((span) {
-    if (span is TextSpan &&
-        span.text != null &&
+  bool visit(InlineSpan span, TextStyle? inheritedStyle) {
+    if (span is! TextSpan) return false;
+    final effectiveStyle = inheritedStyle?.merge(span.style) ?? span.style;
+    if (span.text != null &&
         span.text!.contains(text) &&
-        span.style != null &&
-        check(span.style!)) {
-      found = true;
-      return false; // stop visiting
+        effectiveStyle != null &&
+        check(effectiveStyle)) {
+      return true;
     }
-    return true;
-  });
-  return found;
+    for (final child in span.children ?? const <InlineSpan>[]) {
+      if (visit(child, effectiveStyle)) return true;
+    }
+    return false;
+  }
+
+  return visit(root, null);
+}
+
+class _TestChannelsNotifier extends ChannelsNotifier {
+  _TestChannelsNotifier(this.channels);
+
+  final Future<List<Channel>> channels;
+
+  @override
+  Future<List<Channel>> build() => channels;
 }
 
 void main() {
   group('MessageContent', () {
+    testWidgets('forwards text alignment to markdown rendering', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(
+            content: 'Centered status',
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+
+      expect(
+        tester.widget<GptMarkdown>(find.byType(GptMarkdown)).textAlign,
+        TextAlign.center,
+      );
+    });
+
+    testWidgets('opens local file links through an authenticated download', (
+      tester,
+    ) async {
+      const url = 'https://relay.example/media/report.pdf';
+      String? openedUrl;
+      Map<String, String>? openedHeaders;
+      String? openedFilename;
+      final auth = MediaGetAuthService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+      );
+
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(content: '[report.pdf]($url)'),
+          overrides: [
+            mediaGetAuthServiceProvider.overrideWithValue(auth),
+            openDownloadedFileProvider.overrideWithValue((
+              url,
+              headers,
+              filename,
+            ) async {
+              openedUrl = url;
+              openedHeaders = headers;
+              openedFilename = filename;
+            }),
+          ],
+        ),
+      );
+
+      await tester.tap(find.text('report.pdf'));
+      await tester.pump();
+
+      expect(openedUrl, url);
+      expect(openedFilename, 'report.pdf');
+      expect(openedHeaders?['Authorization'], startsWith('Nostr '));
+    });
+
     test('buildImageViewerRoute uses modal-style page route builder', () {
       final route = buildImageViewerRoute(
         imageUrl: 'https://example.com/media/image.png',
@@ -142,11 +235,22 @@ void main() {
       );
 
       expect(route, isA<PageRouteBuilder<void>>());
-      expect(route.transitionDuration, const Duration(milliseconds: 280));
+      expect(route.transitionDuration, const Duration(milliseconds: 260));
       expect(
         route.reverseTransitionDuration,
-        const Duration(milliseconds: 220),
+        const Duration(milliseconds: 170),
       );
+    });
+
+    test('buildImageViewerRoute disables motion when requested', () {
+      final route = buildImageViewerRoute(
+        imageUrl: 'https://example.com/media/image.png',
+        heroTag: Object(),
+        disableAnimations: true,
+      );
+
+      expect(route.transitionDuration, Duration.zero);
+      expect(route.reverseTransitionDuration, Duration.zero);
     });
 
     group('plain text', () {
@@ -197,6 +301,93 @@ void main() {
 
         expect(find.byType(Image), findsNothing);
         expect(_allRichText(tester), contains(':shipit:'));
+      });
+    });
+
+    group('emoji-only bodies', () {
+      /// Font size the body text actually rendered at.
+      ///
+      /// gpt_markdown resolves the style onto the spans rather than the root
+      /// RichText, which keeps the ambient 14px — so read the span carrying the
+      /// text, not the root.
+      double bodyFontSize(WidgetTester tester, String text) {
+        final richText = tester.widget<RichText>(_findRich(text).first);
+        double? size;
+        richText.text.visitChildren((span) {
+          if (span is TextSpan && (span.text ?? '').contains(text)) {
+            size ??= span.style?.fontSize;
+          }
+          return size == null;
+        });
+        return size ?? richText.text.style!.fontSize!;
+      }
+
+      testWidgets('an all-emoji body renders larger, like desktop', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: '\u{1F389}', scaleEmojiOnly: true),
+          ),
+        );
+
+        expect(bodyFontSize(tester, '\u{1F389}'), kEmojiOnlyFontSize);
+      });
+
+      testWidgets('one word alongside the emoji keeps body size', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'ship it \u{1F389}',
+              scaleEmojiOnly: true,
+            ),
+          ),
+        );
+
+        expect(bodyFontSize(tester, 'ship it'), lessThan(kEmojiOnlyFontSize));
+      });
+
+      testWidgets('the scale is opt-in, so previews are unaffected', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '\u{1F389}')),
+        );
+
+        expect(bodyFontSize(tester, '\u{1F389}'), lessThan(kEmojiOnlyFontSize));
+      });
+
+      testWidgets('a tagged custom emoji alone scales its image too', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: ':shipit:',
+              scaleEmojiOnly: true,
+              tags: [
+                ['emoji', 'shipit', 'https://relay.example/shipit.png'],
+              ],
+            ),
+          ),
+        );
+
+        final image = tester.widget<Image>(find.byType(Image));
+        expect(image.height, kEmojiOnlyCustomEmojiSize);
+      });
+
+      testWidgets('an unresolvable shortcode stays body size', (tester) async {
+        // Without a matching emoji tag it renders as literal text, so scaling it
+        // would blow up a `:word:` that was never emoji at all.
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: ':shipit:', scaleEmojiOnly: true),
+          ),
+        );
+
+        expect(bodyFontSize(tester, ':shipit:'), lessThan(kEmojiOnlyFontSize));
       });
     });
 
@@ -256,6 +447,333 @@ void main() {
         expect(allText, isNot(contains('(https://example.com)')));
       });
 
+      testWidgets('renders and routes a buzz message link', (tester) async {
+        const url =
+            'buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&thread=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '[Open message]($url)')),
+        );
+
+        expect(find.text('Open message'), findsOneWidget);
+        await tester.tap(find.text('Open message'));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const MessageDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+            messageId:
+                'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            threadRootId:
+                'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+          ),
+        );
+      });
+
+      testWidgets('renders and routes bare Buzz message links', (tester) async {
+        const url =
+            'buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: 'See $url now')),
+        );
+
+        expect(find.byKey(ValueKey('buzz-link-chip:$url')), findsOneWidget);
+        await tester.tap(find.byKey(ValueKey('buzz-link-chip:$url')));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const MessageDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+            messageId:
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          ),
+        );
+      });
+
+      testWidgets('keeps Markdown delimiters outside bare Buzz links', (
+        tester,
+      ) async {
+        const url =
+            'buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '**$url**. and _${url}_')),
+        );
+
+        expect(find.byKey(ValueKey('buzz-link-chip:$url')), findsNWidgets(2));
+
+        await tester.tap(find.byKey(ValueKey('buzz-link-chip:$url')).first);
+        await tester.pump();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const MessageDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+            messageId:
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          ),
+        );
+      });
+
+      testWidgets('keeps non-adjacent Markdown delimiters outside links', (
+        tester,
+      ) async {
+        const url =
+            'buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  '*join $url* and **open $url** and '
+                  '~~visit $url~~ and **_${url}_**.',
+            ),
+          ),
+        );
+
+        expect(find.byKey(ValueKey('buzz-link-chip:$url')), findsNWidgets(4));
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        for (final link
+            in find.byKey(ValueKey('buzz-link-chip:$url')).evaluate()) {
+          await tester.tap(find.byWidget(link.widget));
+          await tester.pump();
+          expect(
+            container.read(pendingDeepLinkProvider),
+            const MessageDeepLink(
+              channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+              messageId:
+                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            ),
+          );
+          container.read(pendingDeepLinkProvider.notifier).state = null;
+        }
+      });
+
+      testWidgets('excludes sentence punctuation from bare Buzz links', (
+        tester,
+      ) async {
+        const messageUrl =
+            'buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+        const joinUrl =
+            'buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=invite-1';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: 'See $messageUrl. Then $joinUrl!'),
+          ),
+        );
+
+        expect(
+          find.byKey(ValueKey('buzz-link-chip:$messageUrl')),
+          findsOneWidget,
+        );
+        expect(find.text(joinUrl), findsOneWidget);
+        expect(_allRichText(tester), contains('See \u{FFFC}. Then \u{FFFC}!'));
+
+        await tester.tap(find.byKey(ValueKey('buzz-link-chip:$messageUrl')));
+        await tester.pump();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const MessageDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+            messageId:
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          ),
+        );
+
+        container.read(pendingDeepLinkProvider.notifier).consume();
+        await tester.tap(find.text(joinUrl));
+        await tester.pump();
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'invite-1',
+          ),
+        );
+      });
+
+      testWidgets('renders and routes autolinked Buzz thread links', (
+        tester,
+      ) async {
+        const url =
+            'buzz://message?channel=580ca78b-9dae-46f3-8854-bd671853ba32&id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&thread=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '<$url>')),
+        );
+
+        expect(find.byKey(ValueKey('buzz-link-chip:$url')), findsOneWidget);
+        await tester.tap(find.byKey(ValueKey('buzz-link-chip:$url')));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const MessageDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+            messageId:
+                'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            threadRootId:
+                'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+          ),
+        );
+      });
+
+      testWidgets('renders and routes bare Buzz join links', (tester) async {
+        const url =
+            'buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=invite-1';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: 'Join with $url')),
+        );
+
+        expect(find.text(url), findsOneWidget);
+        await tester.tap(find.text(url));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const InviteDeepLink(
+            relayUrl: 'wss://relay.example.com',
+            code: 'invite-1',
+          ),
+        );
+      });
+
+      testWidgets('renders and routes bare Buzz channel links', (tester) async {
+        const url = 'buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: 'See $url now')),
+        );
+
+        expect(find.byKey(ValueKey('buzz-link-chip:$url')), findsOneWidget);
+        await tester.tap(find.byKey(ValueKey('buzz-link-chip:$url')));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const ChannelDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+          ),
+        );
+      });
+
+      testWidgets('renders and routes labeled Buzz channel links', (
+        tester,
+      ) async {
+        const url = 'buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '[Open channel]($url)')),
+        );
+
+        await tester.tap(find.text('Open channel'));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const ChannelDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+          ),
+        );
+      });
+
+      testWidgets('routes rendered Buzz channel links through callback', (
+        tester,
+      ) async {
+        const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+        const url = 'buzz://channel/$channelId';
+        String? tappedChannelId;
+
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: '[Open channel]($url)',
+              onChannelTap: (id) => tappedChannelId = id,
+            ),
+          ),
+        );
+
+        await tester.tap(find.text('Open channel'));
+        await tester.pump();
+
+        expect(tappedChannelId, channelId);
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(container.read(pendingDeepLinkProvider), isNull);
+      });
+
+      testWidgets('renders and routes autolinked Buzz channel links', (
+        tester,
+      ) async {
+        const url = 'buzz://channel/580ca78b-9dae-46f3-8854-bd671853ba32';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: '<$url>')),
+        );
+
+        await tester.tap(find.byKey(ValueKey('buzz-link-chip:$url')));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const ChannelDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+          ),
+        );
+      });
+
+      testWidgets('leaves malformed Buzz channel forms as plain text', (
+        tester,
+      ) async {
+        const url =
+            'buzz://channel?channel=580ca78b-9dae-46f3-8854-bd671853ba32';
+
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: 'See $url now')),
+        );
+
+        expect(find.text(url), findsNothing);
+        expect(_allRichText(tester), contains(url));
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(container.read(pendingDeepLinkProvider), isNull);
+      });
+
       testWidgets('renders bare URL as link', (tester) async {
         await tester.pumpWidget(
           _testable(
@@ -265,8 +783,11 @@ void main() {
 
         // The URL text should be rendered and tappable.
         expect(find.text('https://example.com'), findsOneWidget);
-        final urlWidget = tester.widget<Text>(find.text('https://example.com'));
-        expect(urlWidget.style?.decoration, TextDecoration.underline);
+        final linkText = tester.widget<Text>(find.text('https://example.com'));
+        expect(
+          linkText.style?.decoration ?? linkText.textSpan?.style?.decoration,
+          TextDecoration.underline,
+        );
       });
     });
 
@@ -391,6 +912,242 @@ void main() {
       });
 
       testWidgets(
+        'groups uploaded photos into a carousel and opens the full gallery',
+        (tester) async {
+          const first = 'https://example.com/media/one.png';
+          const second = 'https://example.com/media/two.png';
+          const third = 'https://example.com/media/three.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+Photos
+![image]($first)
+![image]($second)
+![image]($third)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png', 'alt First photo'],
+                  ['imeta', 'url $second', 'm image/png', 'alt Second photo'],
+                  ['imeta', 'url $third', 'm image/png', 'alt Third photo'],
+                ],
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final carousel = find.byKey(const ValueKey('message-media-carousel'));
+          expect(carousel, findsOneWidget);
+          expect(find.text('3 images'), findsOneWidget);
+
+          await tester.drag(carousel, const Offset(-600, 0));
+          await tester.pumpAndSettle();
+
+          await tester.tap(
+            find.byKey(const ValueKey('message-media-carousel-item:$second')),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('message-media-image-viewer')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(const ValueKey('message-media-image-viewer-filmstrip')),
+            findsOneWidget,
+          );
+          expect(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail:1'),
+            ),
+            findsOneWidget,
+          );
+          final displayedImage = tester.widget<MediaImage>(
+            find.byKey(const ValueKey('message-media-image-viewer-image:1')),
+          );
+          expect(displayedImage.decodeWidth, isNotNull);
+          final selectedThumbnailClip = tester.widget<ClipRRect>(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail-clip:1'),
+            ),
+          );
+          final selectedThumbnailRadius =
+              selectedThumbnailClip.borderRadius as BorderRadius;
+          expect(
+            selectedThumbnailRadius.topLeft.x,
+            closeTo(Radii.sm - 2.5, 0.01),
+          );
+
+          await tester.fling(
+            find.byKey(const ValueKey('message-media-image-viewer-pages')),
+            const Offset(-700, 0),
+            1200,
+          );
+          await tester.pumpAndSettle();
+
+          final thirdThumbnail = find.byKey(
+            const ValueKey('message-media-image-viewer-thumbnail:2'),
+          );
+          final thirdSemantics = tester.widget<Semantics>(
+            find
+                .ancestor(of: thirdThumbnail, matching: find.byType(Semantics))
+                .first,
+          );
+          expect(thirdSemantics.properties.selected, isTrue);
+        },
+      );
+
+      testWidgets(
+        'keeps adjacent carousel images active and ends with a gutter',
+        (tester) async {
+          const first = 'https://example.com/media/gutter-one.png';
+          const second = 'https://example.com/media/gutter-two.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+![image]($first)
+![image]($second)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png'],
+                  ['imeta', 'url $second', 'm image/png'],
+                ],
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final carousel = find.byKey(const ValueKey('message-media-carousel'));
+          final pageViewFinder = find.descendant(
+            of: carousel,
+            matching: find.byType(PageView),
+          );
+          final pageView = tester.widget<PageView>(pageViewFinder);
+
+          expect(pageView.allowImplicitScrolling, isTrue);
+          expect(pageView.clipBehavior, Clip.none);
+
+          pageView.controller!.jumpToPage(1);
+          await tester.pumpAndSettle();
+
+          final lastCard = find.byKey(
+            const ValueKey('message-media-carousel-item:$second'),
+          );
+          expect(
+            tester.getRect(carousel).right - tester.getRect(lastCard).right,
+            Grid.gutter,
+          );
+        },
+      );
+
+      testWidgets(
+        'jumps to a selected gallery thumbnail when motion is disabled',
+        (tester) async {
+          const first = 'https://example.com/media/reduced-motion-one.png';
+          const second = 'https://example.com/media/reduced-motion-two.png';
+          await tester.pumpWidget(
+            _testable(
+              const MessageContent(
+                content:
+                    '''
+![image]($first)
+![image]($second)
+''',
+                tags: [
+                  ['imeta', 'url $first', 'm image/png'],
+                  ['imeta', 'url $second', 'm image/png'],
+                ],
+              ),
+              disableAnimations: true,
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          await tester.tap(
+            find.byKey(const ValueKey('message-media-carousel-item:$first')),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.byKey(
+              const ValueKey('message-media-image-viewer-thumbnail:1'),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final selectedThumbnail = tester.widget<Semantics>(
+            find
+                .ancestor(
+                  of: find.byKey(
+                    const ValueKey('message-media-image-viewer-thumbnail:1'),
+                  ),
+                  matching: find.byType(Semantics),
+                )
+                .first,
+          );
+          expect(selectedThumbnail.properties.selected, isTrue);
+          expect(tester.takeException(), isNull);
+        },
+      );
+
+      testWidgets('resets carousel paging when gallery images change', (
+        tester,
+      ) async {
+        const firstGallery = [
+          'https://example.com/media/first-a.png',
+          'https://example.com/media/first-b.png',
+          'https://example.com/media/first-c.png',
+        ];
+        const secondGallery = [
+          'https://example.com/media/second-a.png',
+          'https://example.com/media/second-b.png',
+        ];
+
+        Widget gallery(List<String> urls) => _testable(
+          MessageContent(
+            content: urls.map((url) => '![image]($url)').join('\n'),
+            tags: [
+              for (final url in urls) ['imeta', 'url $url', 'm image/png'],
+            ],
+          ),
+        );
+
+        await tester.pumpWidget(gallery(firstGallery));
+        await tester.pumpAndSettle();
+        final firstCarousel = tester.widget<PageView>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-media-carousel')),
+            matching: find.byType(PageView),
+          ),
+        );
+
+        await tester.fling(
+          find.byKey(const ValueKey('message-media-carousel')),
+          const Offset(-700, 0),
+          1200,
+        );
+        await tester.pumpAndSettle();
+        expect(firstCarousel.controller!.page, greaterThan(0));
+
+        await tester.pumpWidget(gallery(secondGallery));
+        await tester.pumpAndSettle();
+        final secondCarousel = tester.widget<PageView>(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-media-carousel')),
+            matching: find.byType(PageView),
+          ),
+        );
+
+        expect(
+          secondCarousel.controller,
+          isNot(same(firstCarousel.controller)),
+        );
+        expect(secondCarousel.controller!.page, 0);
+      });
+
+      testWidgets(
         'disables hero on close after the fullscreen image is transformed',
         (tester) async {
           const imageUrl = 'https://example.com/media/transformed.png';
@@ -443,6 +1200,90 @@ void main() {
           );
         },
       );
+
+      testWidgets('double tap resets the fullscreen image transform', (
+        tester,
+      ) async {
+        const imageUrl = 'https://example.com/media/double-tap-reset.png';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'Look\n![image](https://example.com/media/double-tap-reset.png)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/double-tap-reset.png',
+                  'm image/png',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final transformationController = await _openImageViewer(
+          tester,
+          imageUrl,
+        );
+        _applyImageViewerTransform(
+          transformationController,
+          dx: 32,
+          dy: 24,
+          scale: 2,
+        );
+        await tester.pump();
+
+        final gestureSurface = find.byKey(
+          const ValueKey('message-media-image-viewer-gesture:0'),
+        );
+        await tester.tap(gestureSurface);
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.tap(gestureSurface);
+        await tester.pumpAndSettle();
+
+        expect(
+          transformationController.value.storage,
+          orderedEquals(Matrix4.identity().storage),
+        );
+        expect(_isImageViewerHeroEnabled(tester), isTrue);
+      });
+
+      testWidgets('swiping down dismisses the fullscreen gallery', (
+        tester,
+      ) async {
+        const imageUrl = 'https://example.com/media/swipe-dismiss.png';
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content:
+                  'Look\n![image](https://example.com/media/swipe-dismiss.png)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/swipe-dismiss.png',
+                  'm image/png',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await _openImageViewer(tester, imageUrl);
+
+        await tester.drag(
+          find.byKey(const ValueKey('message-media-image-viewer-gesture:0')),
+          const Offset(0, 180),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('message-media-image-viewer')),
+          findsNothing,
+        );
+      });
 
       testWidgets(
         'disables hero on back navigation after the fullscreen image is transformed',
@@ -605,6 +1446,52 @@ void main() {
         expect(find.byIcon(LucideIcons.play), findsOneWidget);
       });
 
+      testWidgets('derives a first frame for a posterless video event', (
+        tester,
+      ) async {
+        const videoUrl = 'https://example.com/media/legacy-video.mp4';
+        var disposed = false;
+
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video]($videoUrl)',
+              tags: [
+                ['imeta', 'url $videoUrl', 'm video/mp4', 'dim 1080x1920'],
+              ],
+            ),
+            videoPreviewFrameLoader: (url) async {
+              expect(url, videoUrl);
+              return LoadedVideoPreviewFrame(
+                aspectRatio: 9 / 16,
+                child: const ColoredBox(
+                  key: ValueKey('derived-video-frame'),
+                  color: Colors.blue,
+                ),
+                dispose: () async => disposed = true,
+              );
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey('message-media-video-first-frame:$videoUrl'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('derived-video-frame')),
+          findsOneWidget,
+        );
+        expect(find.text('Video attachment'), findsNothing);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        expect(disposed, isTrue);
+      });
+
       testWidgets(
         'tapping video preview opens overlay viewer with close button',
         (tester) async {
@@ -644,6 +1531,15 @@ void main() {
           );
           expect(viewer.backgroundColor, Colors.black);
           expect(viewer.appBar, isNull);
+          expect(
+            find.descendant(
+              of: find.byKey(
+                const ValueKey('message-media-video-viewer-reply-thread'),
+              ),
+              matching: find.byType(IconButton),
+            ),
+            findsNothing,
+          );
 
           // Close button is present
           expect(
@@ -663,6 +1559,46 @@ void main() {
           );
         },
       );
+
+      testWidgets('swiping down on the video dismisses its viewer', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video](https://example.com/media/clip.mp4)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/clip.mp4',
+                  'm video/mp4',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(
+            const ValueKey(
+              'message-media-video-preview:https://example.com/media/clip.mp4',
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.drag(
+          find.byKey(const ValueKey('message-media-video-viewer-gesture')),
+          const Offset(0, 140),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('message-media-video-viewer')),
+          findsNothing,
+        );
+      });
 
       testWidgets('treats only mp4 fallback URLs as videos', (tester) async {
         await tester.pumpWidget(
@@ -702,6 +1638,43 @@ void main() {
           findsOneWidget,
         );
       });
+
+      testWidgets('renders an explicitly tagged non-mp4 video preview', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '![video](https://example.com/media/clip.mov)',
+              tags: [
+                [
+                  'imeta',
+                  'url https://example.com/media/clip.mov',
+                  'm video/quicktime',
+                ],
+              ],
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(
+            const ValueKey(
+              'message-media-video-preview:https://example.com/media/clip.mov',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(
+            const ValueKey(
+              'message-media-image-preview:https://example.com/media/clip.mov',
+            ),
+          ),
+          findsNothing,
+        );
+      });
     });
 
     group('blockquotes', () {
@@ -717,6 +1690,136 @@ void main() {
       });
     });
 
+    group('Buzz permalink chips', () {
+      testWidgets('keeps authored Buzz labels as ordinary links', (
+        tester,
+      ) async {
+        final owner = 'ab' * 32;
+        final id = 'cd' * 32;
+        const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+        final links = {
+          'Open message': 'buzz://message?channel=$channelId&id=$id',
+          'Open channel': 'buzz://channel/$channelId',
+          'Release candidate': 'buzz://pr?id=$id&owner=$owner&d=buzz',
+        };
+
+        await tester.pumpWidget(
+          _testable(
+            MessageContent(
+              content: links.entries
+                  .map((entry) => '[${entry.key}](${entry.value})')
+                  .join(' '),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        for (final entry in links.entries) {
+          expect(
+            find.byKey(ValueKey('buzz-link-chip:${entry.value}')),
+            findsNothing,
+          );
+          expect(find.text(entry.key), findsOneWidget);
+        }
+      });
+
+      testWidgets('preserves formatting in authored Buzz labels', (
+        tester,
+      ) async {
+        const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: '[**design discussion**](buzz://channel/$channelId)',
+            ),
+          ),
+        );
+        await tester.pump();
+
+        expect(_hasBoldSpan(tester, 'design discussion'), isTrue);
+      });
+
+      testWidgets(
+        'renders message, channel, repo, PR, and issue links as chips',
+        (tester) async {
+          final owner = 'ab' * 32;
+          final id = 'cd' * 32;
+          const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+          final urls = [
+            'buzz://message?channel=$channelId&id=$id',
+            'buzz://channel/$channelId',
+            'buzz://repo?owner=$owner&d=buzz',
+            'buzz://pr?id=$id&owner=$owner&d=buzz',
+            'buzz://issue?id=$id&owner=$owner&d=buzz',
+          ];
+          await tester.pumpWidget(
+            _testable(
+              MessageContent(
+                content: urls.join(' '),
+                channelNames: const {'engineering': channelId},
+              ),
+            ),
+          );
+          await tester.pump();
+
+          for (final url in urls) {
+            expect(find.byKey(ValueKey('buzz-link-chip:$url')), findsOneWidget);
+          }
+          expect(find.text('engineering · cdcdcdcd'), findsOneWidget);
+          expect(find.text('engineering'), findsOneWidget);
+          expect(find.text('buzz'), findsOneWidget);
+          expect(find.text('buzz · cdcdcdcd'), findsNWidgets(2));
+          expect(find.byIcon(LucideIcons.messageSquare), findsOneWidget);
+          expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+          expect(find.byIcon(LucideIcons.folderGit2), findsOneWidget);
+          expect(find.byIcon(LucideIcons.gitPullRequest), findsOneWidget);
+          expect(find.byIcon(LucideIcons.circleDot), findsOneWidget);
+          expect(
+            find.bySemanticsLabel(
+              'Open message cdcdcdcd in channel engineering',
+            ),
+            findsOneWidget,
+          );
+          expect(
+            find.bySemanticsLabel('Pull request cdcdcdcd in repository buzz'),
+            findsOneWidget,
+          );
+          for (final url in urls.skip(2)) {
+            final chipKey = ValueKey('buzz-link-chip:$url');
+            final ignoredChip = find.ancestor(
+              of: find.byKey(chipKey),
+              matching: find.byWidgetPredicate(
+                (widget) => widget is IgnorePointer && widget.ignoring,
+              ),
+            );
+            expect(ignoredChip, findsOneWidget, reason: url);
+            expect(
+              tester.widget<IgnorePointer>(ignoredChip).ignoring,
+              isTrue,
+              reason: url,
+            );
+          }
+        },
+      );
+
+      testWidgets('uses shortened channel identifiers when names are missing', (
+        tester,
+      ) async {
+        final id = 'cd' * 32;
+        const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+        final messageUrl = 'buzz://message?channel=$channelId&id=$id';
+        const channelUrl = 'buzz://channel/$channelId';
+
+        await tester.pumpWidget(
+          _testable(MessageContent(content: '$messageUrl $channelUrl')),
+        );
+        await tester.pump();
+
+        expect(find.text('580ca78b · cdcdcdcd'), findsOneWidget);
+        expect(find.text('580ca78b'), findsOneWidget);
+      });
+    });
+
     group('@mentions', () {
       testWidgets('renders @mention with highlight', (tester) async {
         await tester.pumpWidget(
@@ -728,8 +1831,47 @@ void main() {
           ),
         );
 
-        // Mention should be rendered as @Alice in a highlighted container.
-        expect(find.text('@Alice'), findsOneWidget);
+        // The desktop-style mention chip renders the prefix and label
+        // separately so they can be aligned independently.
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
+      });
+
+      testWidgets('renders a known agent mention with the bot chip', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+              maxLines: 2,
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('@'), findsNothing);
+        expect(find.text('Helper Bot'), findsOneWidget);
+      });
+
+      testWidgets('normalizes passed multi-word agent mentions', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Ask @Helper Bot to investigate',
+              mentionNames: {'agent-pubkey': 'Helper Bot'},
+              agentMentionPubkeys: {'agent-pubkey'},
+            ),
+          ),
+        );
+
+        expect(find.byIcon(LucideIcons.bot), findsOneWidget);
+        expect(find.text('Helper Bot'), findsOneWidget);
+        expect(_allRichText(tester), isNot(contains('Bot Bot')));
       });
 
       testWidgets('highlights an entire multi-word display name', (
@@ -744,7 +1886,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@Kenny Lopez'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Kenny Lopez'), findsOneWidget);
         expect(find.text('@Kenny'), findsNothing);
         expect(_allRichText(tester), isNot(contains('Lopez Lopez')));
       });
@@ -759,7 +1902,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@unknown'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('unknown'), findsOneWidget);
       });
 
       testWidgets('does not treat email addresses as mentions', (tester) async {
@@ -788,7 +1932,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@Alice'));
+        await tester.tap(find.text('Alice'));
         expect(tappedPubkey, 'pk1');
       });
 
@@ -806,7 +1950,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@Kenny Lopez'));
+        await tester.tap(find.text('Kenny Lopez'));
         expect(tappedPubkey, 'pk1');
       });
 
@@ -822,7 +1966,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@unknown'), warnIfMissed: false);
+        await tester.tap(find.text('unknown'), warnIfMissed: false);
         expect(tapped, isFalse);
       });
     });
@@ -838,7 +1982,9 @@ void main() {
           ),
         );
 
-        expect(find.text('#general'), findsOneWidget);
+        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+        expect(find.text('general'), findsOneWidget);
+        expect(find.text('#general'), findsNothing);
       });
 
       testWidgets('channel tap callback fires', (tester) async {
@@ -853,8 +1999,50 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('#general'));
+        await tester.tap(find.text('general'));
         expect(tappedId, 'ch-id-1');
+      });
+
+      testWidgets('resolved #channel defaults to in-app navigation', (
+        tester,
+      ) async {
+        final channels = Future.value([
+          Channel(
+            id: '580ca78b-9dae-46f3-8854-bd671853ba32',
+            name: 'general',
+            channelType: 'stream',
+            visibility: 'open',
+            description: '',
+            createdBy: 'creator',
+            createdAt: DateTime(2026),
+            memberCount: 1,
+            isMember: true,
+          ),
+        ]);
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(content: 'See #general'),
+            overrides: [
+              channelsProvider.overrideWith(
+                () => _TestChannelsNotifier(channels),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('general'));
+        await tester.pump();
+
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MessageContent)),
+        );
+        expect(
+          container.read(pendingDeepLinkProvider),
+          const ChannelDeepLink(
+            channelId: '580ca78b-9dae-46f3-8854-bd671853ba32',
+          ),
+        );
       });
 
       testWidgets('unknown channel renders without tap', (tester) async {
@@ -864,7 +2052,9 @@ void main() {
           ),
         );
 
-        expect(find.text('#unknown'), findsOneWidget);
+        expect(find.byIcon(LucideIcons.hash), findsOneWidget);
+        expect(find.text('unknown'), findsOneWidget);
+        expect(find.text('#unknown'), findsNothing);
       });
 
       testWidgets('does not treat URL fragments as channel links', (
@@ -896,7 +2086,8 @@ void main() {
         );
 
         expect(_hasBoldSpan(tester, 'Important'), isTrue);
-        expect(find.text('@Alice'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
       });
 
       testWidgets('preserves markdown around mentions', (tester) async {
@@ -909,7 +2100,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@Alice'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('**')));
       });
 

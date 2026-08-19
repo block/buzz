@@ -12,6 +12,7 @@ import {
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./agentConfigOptions";
 import { providerRequiresExplicitModel } from "./agentConfigOptions";
+import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -64,7 +65,7 @@ export function getDiscoveredPersonaModelOptions(
               provider === "relay-mesh"
                 ? "Default (auto)"
                 : agentDefaultModel
-                  ? `Default model (${agentDefaultModel})`
+                  ? `Default model (${resolveModelLabel(agentDefaultModel, null, provider)})`
                   : "Default model",
           },
         ];
@@ -77,7 +78,7 @@ export function getDiscoveredPersonaModelOptions(
     ...defaultModelOption,
     ...explicitModels.map((model) => ({
       id: model.id,
-      label: model.name?.trim() || model.id,
+      label: resolveModelLabel(model.id, model.name, provider),
     })),
   ];
 }
@@ -139,6 +140,28 @@ export function deriveModelDiscoveryPending({
   );
 }
 
+/**
+ * True when discovery IPC resolved with a response that yielded no usable
+ * model options. Distinct from a thrown/unavailable failure (data stays null).
+ * Callers that omit the Model control or heal persisted values must gate on
+ * this — not on `discoveredModelOptions === null` alone.
+ */
+export function isSuccessfulEmptyDiscovery({
+  activeModelDiscoveryData,
+  discoveredModelOptions,
+  modelDiscoveryPending,
+}: {
+  activeModelDiscoveryData: AgentModelsResponse | null;
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  modelDiscoveryPending: boolean;
+}): boolean {
+  return (
+    !modelDiscoveryPending &&
+    activeModelDiscoveryData !== null &&
+    discoveredModelOptions === null
+  );
+}
+
 export function usePersonaModelDiscovery({
   envVars,
   isCustomProviderEditing,
@@ -181,7 +204,9 @@ export function usePersonaModelDiscovery({
   // reference from a React Query refetch (same data, unstable ref) does not
   // abandon and re-issue an in-flight discovery IPC call.
   const selectedRuntimeAvailability = selectedRuntime?.availability;
+  const selectedRuntimeLabel = selectedRuntime?.label;
   const selectedRuntimeDefaultArgs = selectedRuntime?.defaultArgs;
+  const selectedRuntimeDefinitionEnv = selectedRuntime?.definitionEnv;
   const canDiscoverModelOptions =
     open &&
     modelFieldVisible &&
@@ -229,6 +254,7 @@ export function usePersonaModelDiscovery({
           formatModelDiscoveryErrorStatus(
             new Error(`Runtime not available: ${selectedRuntimeAvailability}`),
             trimmedProvider,
+            selectedRuntimeLabel,
           ),
         );
         setModelDiscoveryStatusKey(null);
@@ -267,6 +293,7 @@ export function usePersonaModelDiscovery({
         agentArgs: selectedRuntimeDefaultArgs ?? [],
         provider: trimmedProvider || undefined,
         envVars,
+        definitionEnv: selectedRuntimeDefinitionEnv ?? {},
       })
         .then((response) => {
           if (modelDiscoveryRequestRef.current !== requestId) {
@@ -296,7 +323,11 @@ export function usePersonaModelDiscovery({
           setModelDiscoveryData(null);
           setModelDiscoveryDataKey(null);
           setModelDiscoveryStatus(
-            formatModelDiscoveryErrorStatus(error, trimmedProvider),
+            formatModelDiscoveryErrorStatus(
+              error,
+              trimmedProvider,
+              selectedRuntimeLabel,
+            ),
           );
           setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
@@ -330,6 +361,8 @@ export function usePersonaModelDiscovery({
     modelDiscoveryKey,
     selectedRuntimeAvailability,
     selectedRuntimeDefaultArgs,
+    selectedRuntimeDefinitionEnv,
+    selectedRuntimeLabel,
     shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);
@@ -358,6 +391,11 @@ export function usePersonaModelDiscovery({
     activeModelDiscoveryData,
     activeModelDiscoveryStatus,
   });
+  const modelDiscoverySuccessfulEmpty = isSuccessfulEmptyDiscovery({
+    activeModelDiscoveryData,
+    discoveredModelOptions,
+    modelDiscoveryPending,
+  });
 
   return {
     discoveredModelOptions,
@@ -366,5 +404,6 @@ export function usePersonaModelDiscovery({
       modelDiscoveryPending || discoveredModelOptions !== null
         ? null
         : activeModelDiscoveryStatus,
+    modelDiscoverySuccessfulEmpty,
   };
 }

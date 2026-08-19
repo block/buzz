@@ -10,12 +10,13 @@ import type {
   ProjectRepoContributor,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoCommit } from "@/shared/api/types";
 import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { GitBranch, GitCommitHorizontal } from "lucide-react";
+import { GitBranch } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
@@ -24,33 +25,11 @@ import {
   ProjectFeedRowCluster,
   ProjectFeedRowMonoCell,
 } from "./ProjectFeedRow";
+import {
+  PROJECT_DETAIL_PANEL_CLASS,
+  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
+} from "./projectPanelStyles";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
-
-function compactDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function relativeCommitTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "min", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-}
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -91,24 +70,28 @@ export function ContributorsPanel({
 
   if (rows.length === 0) {
     return (
-      <p className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <p
+        className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
+        data-project-detail-panel
+      >
         No git contributors are available yet.
       </p>
     );
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
+    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       {rows.map((row, index) => (
         <div
           className={cn(
-            "flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/35",
+            "flex min-w-0 items-center gap-3 p-3 transition-colors hover:bg-muted/35",
             index !== rows.length - 1 && "border-border/50 border-b",
           )}
+          data-testid="project-contributor-row"
           key={row.id}
         >
           <ProfileIdentityButton
-            avatarClassName="mt-0.5 shrink-0"
+            avatarClassName="shrink-0"
             avatarSize="md"
             avatarUrl={row.avatarUrl}
             isAgent={row.isAgent}
@@ -127,14 +110,17 @@ export function ContributorsPanel({
                   ? "No git commits"
                   : `${row.commitCount} commit${row.commitCount === 1 ? "" : "s"}`}
               </span>
-              {row.lastCommitAt ? (
-                <>
-                  <span>·</span>
-                  <span>updated {compactDate(row.lastCommitAt)}</span>
-                </>
-              ) : null}
             </div>
           </div>
+          {row.lastCommitAt ? (
+            <span
+              className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground sm:block"
+              data-testid="project-contributor-row-date"
+              title={new Date(row.lastCommitAt * 1_000).toLocaleString()}
+            >
+              {relativeTime(row.lastCommitAt)}
+            </span>
+          ) : null}
         </div>
       ))}
     </div>
@@ -169,7 +155,10 @@ export function ActivityPanel({
 
   if (isLoading) {
     return (
-      <p className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <p
+        className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
+        data-project-detail-panel
+      >
         Loading activity…
       </p>
     );
@@ -177,7 +166,10 @@ export function ActivityPanel({
 
   if (commits.length === 0) {
     return (
-      <p className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+      <p
+        className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
+        data-project-detail-panel
+      >
         {error
           ? "Could not load repository activity from git."
           : "No commits are available yet."}
@@ -186,13 +178,7 @@ export function ActivityPanel({
   }
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-14 items-center gap-2 border-border/50 border-b px-4 py-3">
-        <GitCommitHorizontal className="h-4 w-4 text-muted-foreground" />
-        <h3 className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-          Commits
-        </h3>
-      </div>
+    <section className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
       <div className="divide-y divide-border/50">
         {commits.map((commit) => {
           const matchedProfile = profileForCommit(
@@ -253,12 +239,6 @@ export function ActivityPanel({
               title={commit.subject}
               trailing={
                 <>
-                  <span
-                    className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground sm:block"
-                    title={new Date(commit.timestamp * 1_000).toLocaleString()}
-                  >
-                    {relativeCommitTime(commit.timestamp)}
-                  </span>
                   <ProjectFeedRowCluster>
                     <ProjectFeedRowMonoCell
                       label={commit.shortHash}
@@ -271,6 +251,13 @@ export function ActivityPanel({
                     />
                     <CopyCommitHashButton hash={commit.hash} />
                   </ProjectFeedRowCluster>
+                  <span
+                    className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground sm:block"
+                    data-testid="project-commit-row-date"
+                    title={new Date(commit.timestamp * 1_000).toLocaleString()}
+                  >
+                    {relativeTime(commit.timestamp)}
+                  </span>
                 </>
               }
             />

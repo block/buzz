@@ -1,17 +1,27 @@
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt as _;
 use sqlx::{Acquire, PgPool, Row};
-use tracing::{debug, instrument, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
+use buzz_datastore_tracing::datastore_span;
 
 use crate::{
     action::AuditAction,
     entry::{AuditEntry, NewAuditEntry},
     error::AuditError,
-    hash::compute_hash,
+    hash::{compute_hash, to_storage_precision},
 };
+
+/// The `created_at` stamped on a new entry.
+///
+/// Reduced to the precision Postgres round-trips before it is hashed — see
+/// [`to_storage_precision`]. Split out from [`AuditService::log_inner`] so the
+/// invariant is testable without a database.
+fn log_timestamp() -> DateTime<Utc> {
+    to_storage_precision(Utc::now())
+}
 
 /// Per-community advisory lock key. Derived in Postgres from the community UUID
 /// so two communities never serialize each other's audit writes (which would be
@@ -40,7 +50,11 @@ impl AuditService {
     /// Serialized per-community via `pg_advisory_lock`. Postgres advisory locks
     /// are session-scoped, so we acquire before the transaction and release
     /// after commit (or on any error path).
-    #[instrument(skip(self, entry), fields(action = %entry.action))]
+    #[datastore_span(
+        name = "audit_log",
+        system = "postgresql",
+        fields(action = %entry.action)
+    )]
     pub async fn log(&self, entry: NewAuditEntry) -> Result<AuditEntry, AuditError> {
         let mut conn = self.pool.acquire().await?;
 
@@ -100,7 +114,7 @@ impl AuditService {
         };
         let seq = prev_seq + 1;
 
-        let created_at: DateTime<Utc> = Utc::now();
+        let created_at: DateTime<Utc> = log_timestamp();
 
         let mut audit_entry = AuditEntry {
             community_id,
@@ -147,7 +161,11 @@ impl AuditService {
     /// Reads exactly that community's chain — it can never observe another
     /// community's entries or head. Returns `Ok(false)` if the range is empty,
     /// `Ok(true)` if the segment is internally consistent.
-    #[instrument(skip(self))]
+    #[datastore_span(
+        name = "audit_verify_chain",
+        system = "postgresql",
+        fields(from_seq = from_seq, to_seq = to_seq)
+    )]
     pub async fn verify_chain(
         &self,
         community: CommunityId,
@@ -199,7 +217,11 @@ impl AuditService {
     /// Returns up to `limit` entries from one community's chain starting at
     /// `from_seq`, ordered by sequence number. Scoped to `community` — never
     /// returns another community's rows.
-    #[instrument(skip(self))]
+    #[datastore_span(
+        name = "audit_get_entries",
+        system = "postgresql",
+        fields(from_seq = from_seq, limit = limit)
+    )]
     pub async fn get_entries(
         &self,
         community: CommunityId,
@@ -251,6 +273,7 @@ mod tests {
     use super::*;
     use crate::action::AuditAction;
     use crate::entry::NewAuditEntry;
+    use chrono::SubsecRound;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
     use uuid::Uuid;
@@ -264,8 +287,21 @@ mod tests {
 
     async fn test_pool() -> Option<PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test fixture
         PgPool::connect(&url).await.ok()
+    }
+
+    /// Runs without Postgres, so a regression here is caught by `just
+    /// test-unit` rather than only by the `#[ignore]` chain tests below.
+    #[test]
+    fn log_timestamp_carries_no_sub_microsecond_digits() {
+        let ts = log_timestamp();
+        assert_eq!(
+            ts,
+            ts.trunc_subsecs(6),
+            "created_at is hashed and then stored in a TIMESTAMPTZ column; \
+             sub-microsecond digits make every entry fail verify_chain"
+        );
     }
 
     /// A `community_id` known to exist in `communities` (FK target). Inserts a

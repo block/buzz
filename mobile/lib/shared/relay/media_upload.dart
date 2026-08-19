@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
+import 'package:file_selector/file_selector.dart' as file_selector;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -9,6 +12,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
@@ -18,7 +22,10 @@ const _legacyMediaUploadPath = '/media/upload';
 const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
+const _generateVideoPosterMethod = 'generateVideoPoster';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
+const _requiresLegacyMediaStoragePermissionMethod =
+    'requiresLegacyMediaStoragePermission';
 const _readClipboardImageMethod = 'readClipboardImage';
 const _clipboardHasImageMethod = 'clipboardHasImage';
 const _uploadAuthKind = 24242;
@@ -37,24 +44,41 @@ final _mediaUploadPlatformChannel = MethodChannel(
   _mediaUploadPlatformChannelName,
 );
 
-const _allowedImageMimeTypes = {'image/jpeg', 'image/png', 'image/webp'};
+/// Whether saving media needs Android's pre-scoped-storage runtime permission.
+Future<bool> requiresLegacyMediaStoragePermission() async {
+  if (defaultTargetPlatform != TargetPlatform.android) {
+    return false;
+  }
+  return await _mediaUploadPlatformChannel.invokeMethod<bool>(
+        _requiresLegacyMediaStoragePermissionMethod,
+      ) ??
+      false;
+}
+
+const _allowedImageMimeTypes = {
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+};
 const _allowedVideoMimeTypes = {'video/mp4'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
-const _unsupportedAnimatedImageMimeTypes = {'image/gif'};
-const _unsupportedGifUploadMessage =
-    'GIF uploads are not supported on mobile yet';
-const _unsupportedAnimatedPngUploadMessage =
-    'Animated PNG uploads are not supported on mobile yet';
-const _unsupportedAnimatedWebpUploadMessage =
-    'Animated WebP uploads are not supported on mobile yet';
+const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
+
+/// Selects multiple gallery images for upload in picker order.
+typedef PickGalleryImages = Future<List<XFile>> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
+typedef PickAttachmentFile = Future<XFile?> Function();
 typedef SanitizeImageBytes =
     Future<Uint8List> Function(Uint8List bytes, String mimeType);
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
+
+/// Generates poster-frame bytes for the video at [filePath], when available.
+typedef GenerateVideoPoster = Future<Uint8List?> Function(String filePath);
 typedef ReadClipboardImage = Future<Uint8List?> Function();
 
 class MediaPolicyUploadException implements Exception {
@@ -62,6 +86,28 @@ class MediaPolicyUploadException implements Exception {
 
   @override
   String toString() => _mediaPolicyUploadMessage;
+}
+
+/// Cancels a single user-initiated media upload without closing the shared
+/// HTTP client used by later uploads.
+class UploadCancellationToken {
+  final Completer<void> _cancelled = Completer<void>();
+
+  /// Whether cancellation has been requested.
+  bool get isCancelled => _cancelled.isCompleted;
+
+  /// Completes when cancellation is first requested.
+  Future<void> get whenCancelled => _cancelled.future;
+
+  /// Requests cancellation. Calling this more than once has no effect.
+  void cancel() {
+    if (!_cancelled.isCompleted) _cancelled.complete();
+  }
+}
+
+/// Indicates that a user cancelled a media upload before it completed.
+class UploadCancelledException implements Exception {
+  const UploadCancelledException();
 }
 
 @immutable
@@ -84,6 +130,7 @@ class BlobDescriptor {
   final String? thumb;
   final double? duration;
   final String? image;
+  final String? filename;
 
   const BlobDescriptor({
     required this.url,
@@ -96,6 +143,7 @@ class BlobDescriptor {
     this.thumb,
     this.duration,
     this.image,
+    this.filename,
   });
 
   factory BlobDescriptor.fromJson(Map<String, dynamic> json) => BlobDescriptor(
@@ -109,6 +157,36 @@ class BlobDescriptor {
     thumb: json['thumb'] as String?,
     duration: (json['duration'] as num?)?.toDouble(),
     image: json['image'] as String?,
+    filename: json['filename'] as String?,
+  );
+
+  BlobDescriptor withFilename(String value) => BlobDescriptor(
+    url: url,
+    sha256: sha256,
+    size: size,
+    type: type,
+    uploaded: uploaded,
+    dim: dim,
+    blurhash: blurhash,
+    thumb: thumb,
+    duration: duration,
+    image: image,
+    filename: value,
+  );
+
+  /// Returns a descriptor with [value] as its NIP-71 video poster URL.
+  BlobDescriptor withImage(String value) => BlobDescriptor(
+    url: url,
+    sha256: sha256,
+    size: size,
+    type: type,
+    uploaded: uploaded,
+    dim: dim,
+    blurhash: blurhash,
+    thumb: thumb,
+    duration: duration,
+    image: value,
+    filename: filename,
   );
 
   List<String> toImetaTag() => [
@@ -122,20 +200,31 @@ class BlobDescriptor {
     if (thumb != null) 'thumb $thumb',
     if (duration != null) 'duration $duration',
     if (image != null) 'image $image',
+    if (filename != null) 'filename $filename',
   ];
 
-  String toMarkdownImage() =>
-      type.startsWith('video/') ? '![video]($url)' : '![image]($url)';
+  String toMarkdownImage() {
+    if (type.startsWith('video/')) return '![video]($url)';
+    if (type.startsWith('image/')) return '![image]($url)';
+    final label = (filename ?? 'file').replaceAllMapped(
+      RegExp(r'[\\\[\]]'),
+      (match) => '\\${match[0]}',
+    );
+    return '[$label]($url)';
+  }
 }
 
 class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
+  final PickGalleryImages _pickGalleryImages;
   final PickGalleryVideo _pickGalleryVideo;
+  final PickAttachmentFile? _pickAttachmentFile;
   final SanitizeImageBytes _sanitizeImageBytes;
   final TranscodeImageToJpeg _transcodeImageToJpeg;
   final TranscodeVideoToMp4 _transcodeVideoToMp4;
+  final GenerateVideoPoster _generateVideoPoster;
   final ReadClipboardImage _readClipboardImage;
   final DateTime Function() _now;
   final http.Client _http;
@@ -145,21 +234,32 @@ class MediaUploadService {
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
+    PickGalleryImages? pickGalleryImages,
     required PickGalleryVideo pickGalleryVideo,
+    PickAttachmentFile? pickAttachmentFile,
     SanitizeImageBytes? sanitizeImageBytes,
     TranscodeImageToJpeg? transcodeImageToJpeg,
     TranscodeVideoToMp4? transcodeVideoToMp4,
+    GenerateVideoPoster? generateVideoPoster,
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
+       _pickGalleryImages =
+           pickGalleryImages ??
+           (() async {
+             final image = await pickGalleryImage();
+             return image == null ? const <XFile>[] : [image];
+           }),
        _pickGalleryVideo = pickGalleryVideo,
+       _pickAttachmentFile = pickAttachmentFile,
        _sanitizeImageBytes = sanitizeImageBytes ?? _sanitizePickedImageBytes,
        _transcodeImageToJpeg =
            transcodeImageToJpeg ?? _transcodePickedImageToJpeg,
        _transcodeVideoToMp4 = transcodeVideoToMp4 ?? _transcodePickedVideoToMp4,
+       _generateVideoPoster = generateVideoPoster ?? _generatePickedVideoPoster,
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
        _http = httpClient ?? http.Client(),
@@ -177,9 +277,22 @@ class MediaUploadService {
     return uploadImage(pickedImage);
   }
 
-  Future<BlobDescriptor> uploadImage(XFile image) async {
+  /// Opens the system picker with multi-selection enabled.
+  Future<List<XFile>> pickGalleryImages() => _pickGalleryImages();
+
+  Future<BlobDescriptor> uploadImage(
+    XFile image, {
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
     final preparedImage = await _prepareUploadImage(image);
-    return uploadBytes(preparedImage.bytes, mimeType: preparedImage.mimeType);
+    _throwIfCancelled(cancellationToken);
+    return _uploadPreparedBytes(
+      preparedImage.bytes,
+      mimeType: preparedImage.mimeType,
+      onProgress: onProgress,
+      cancellationToken: cancellationToken,
+    );
   }
 
   Future<bool> clipboardHasImage() async {
@@ -190,16 +303,28 @@ class MediaUploadService {
   }
 
   Future<BlobDescriptor> readAndUploadClipboardImage() async {
-    final bytes = await _readClipboardImage();
-    if (bytes == null || bytes.isEmpty) {
-      throw Exception('Unable to read pasted image');
-    }
-    return uploadImage(XFile.fromData(bytes));
+    final image = await readClipboardImage();
+    if (image == null) throw Exception('Unable to read pasted image');
+    return uploadImage(image);
   }
 
-  Future<BlobDescriptor?> pickAndUploadVideo() async {
-    final pickedVideo = await _pickGalleryVideo();
-    if (pickedVideo == null) return null;
+  /// Reads a clipboard image for composer preview before the user sends it.
+  Future<XFile?> readClipboardImage() async {
+    final bytes = await _readClipboardImage();
+    if (bytes == null || bytes.isEmpty) return null;
+    return XFile.fromData(bytes, name: 'Pasted image');
+  }
+
+  /// Opens the system gallery video picker.
+  Future<XFile?> pickGalleryVideo() => _pickGalleryVideo();
+
+  /// Sanitizes and uploads [pickedVideo] as an MP4 attachment.
+  Future<BlobDescriptor> uploadVideo(
+    XFile pickedVideo, {
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    _throwIfCancelled(cancellationToken);
     final length = await pickedVideo.length();
     if (length > _maxVideoSizeBytes) {
       throw Exception(
@@ -212,6 +337,7 @@ class MediaUploadService {
     String? transcodedPath;
     try {
       transcodedPath = await _transcodeVideoToMp4(pickedVideo.path);
+      _throwIfCancelled(cancellationToken);
       final transcodedFile = File(transcodedPath);
       final transcodedLength = await transcodedFile.length();
       if (transcodedLength > _maxVideoSizeBytes) {
@@ -220,7 +346,63 @@ class MediaUploadService {
         );
       }
       final bytes = await transcodedFile.readAsBytes();
-      return uploadBytes(bytes, mimeType: 'video/mp4');
+      _throwIfCancelled(cancellationToken);
+      final video = await uploadBytes(
+        bytes,
+        mimeType: 'video/mp4',
+        onProgress: onProgress == null
+            ? null
+            : (progress) => onProgress(progress * 0.9),
+        cancellationToken: cancellationToken,
+      );
+
+      // Extract from the canonical output first so the poster matches the
+      // uploaded orientation. Some AVFoundation exports need a moment before
+      // their first frame is seekable; fall back to the picked source instead
+      // of silently sending a permanently gray video card.
+      Uint8List? posterBytes;
+      Object? posterExtractionError;
+      for (final sourcePath in {transcodedPath, pickedVideo.path}) {
+        try {
+          final candidate = await _generateVideoPoster(sourcePath);
+          if (candidate != null && candidate.isNotEmpty) {
+            posterBytes = candidate;
+            break;
+          }
+        } catch (error) {
+          posterExtractionError = error;
+        }
+      }
+
+      if (posterBytes == null) {
+        if (posterExtractionError != null) {
+          debugPrint('Unable to generate video poster: $posterExtractionError');
+        }
+        onProgress?.call(1);
+        return video;
+      }
+
+      // Posters are best-effort: a video that passed the media policy should
+      // still send if the separate preview upload fails.
+      try {
+        _throwIfCancelled(cancellationToken);
+        final poster = await uploadImage(
+          XFile.fromData(
+            posterBytes,
+            mimeType: 'image/jpeg',
+            name: 'video-poster.jpg',
+          ),
+          onProgress: onProgress == null
+              ? null
+              : (progress) => onProgress(0.9 + (progress * 0.1)),
+          cancellationToken: cancellationToken,
+        );
+        return video.withImage(poster.url);
+      } catch (error) {
+        debugPrint('Unable to upload video poster: $error');
+        onProgress?.call(1);
+        return video;
+      }
     } finally {
       if (transcodedPath != null) {
         try {
@@ -232,36 +414,112 @@ class MediaUploadService {
     }
   }
 
+  Future<BlobDescriptor?> pickAndUploadVideo() async {
+    final pickedVideo = await pickGalleryVideo();
+    if (pickedVideo == null) return null;
+    return uploadVideo(pickedVideo);
+  }
+
+  /// Opens the system document picker for a generic file attachment.
+  Future<XFile?> pickAttachmentFile() async {
+    final pickAttachmentFile = _pickAttachmentFile;
+    if (pickAttachmentFile == null) {
+      throw Exception("File attachments aren't available on this device.");
+    }
+    return pickAttachmentFile();
+  }
+
+  /// Uploads [pickedFile] as a size-limited generic attachment.
+  Future<BlobDescriptor> uploadFile(
+    XFile pickedFile, {
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    _throwIfCancelled(cancellationToken);
+    final length = await pickedFile.length();
+    if (length == 0) {
+      throw Exception('File is empty.');
+    }
+    if (length > _maxFileSizeBytes) {
+      throw Exception(
+        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
+      );
+    }
+    final bytes = await pickedFile.readAsBytes();
+    _throwIfCancelled(cancellationToken);
+    final descriptor = await _uploadPreparedBytes(
+      bytes,
+      mimeType: 'application/octet-stream',
+      allowGenericFile: true,
+      onProgress: onProgress,
+      cancellationToken: cancellationToken,
+    );
+    return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+  }
+
+  Future<BlobDescriptor?> pickAndUploadFile() async {
+    final pickedFile = await pickAttachmentFile();
+    if (pickedFile == null) return null;
+    return uploadFile(pickedFile);
+  }
+
   Future<BlobDescriptor> uploadBytes(
     Uint8List bytes, {
     required String mimeType,
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
   }) async {
-    _validateUpload(bytes, mimeType);
-    if (!_allowedImageMimeTypes.contains(mimeType) &&
+    _throwIfCancelled(cancellationToken);
+    if (mimeType == 'image/gif' ||
+        (mimeType == 'image/png' && _isAnimatedPng(bytes)) ||
+        (mimeType == 'image/webp' && _isAnimatedWebp(bytes))) {
+      try {
+        bytes = sanitizeAnimatedImageForUpload(bytes, mimeType);
+      } on FormatException {
+        throw Exception('failed to sanitize image for upload');
+      }
+    }
+    return _uploadPreparedBytes(
+      bytes,
+      mimeType: mimeType,
+      onProgress: onProgress,
+      cancellationToken: cancellationToken,
+    );
+  }
+
+  Future<BlobDescriptor> _uploadPreparedBytes(
+    Uint8List bytes, {
+    required String mimeType,
+    bool allowGenericFile = false,
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    _throwIfCancelled(cancellationToken);
+    if (!allowGenericFile &&
+        !_allowedImageMimeTypes.contains(mimeType) &&
         !_allowedVideoMimeTypes.contains(mimeType)) {
       throw Exception('unsupported file type: $mimeType');
     }
 
     final sha256 = _sha256Hex(bytes);
-    var request = _buildUploadRequest(
+    var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
       sha256: sha256,
       path: _mediaUploadPath,
+      onProgress: onProgress,
+      cancellationToken: cancellationToken,
     );
-
-    var streamed = await _http.send(request);
-    var response = await http.Response.fromStream(streamed);
     if (response.statusCode == HttpStatus.notFound ||
         response.statusCode == HttpStatus.methodNotAllowed) {
-      request = _buildUploadRequest(
+      response = await _sendUploadRequest(
         bytes: bytes,
         mimeType: mimeType,
         sha256: sha256,
         path: _legacyMediaUploadPath,
+        onProgress: onProgress,
+        cancellationToken: cancellationToken,
       );
-      streamed = await _http.send(request);
-      response = await http.Response.fromStream(streamed);
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
       if (_allowedImageMimeTypes.contains(mimeType) &&
@@ -279,18 +537,37 @@ class MediaUploadService {
     );
   }
 
-  http.Request _buildUploadRequest({
+  Future<http.Response> _sendUploadRequest({
     required Uint8List bytes,
     required String mimeType,
     required String sha256,
     required String path,
-  }) {
-    final request = http.Request('PUT', Uri.parse(_baseUrl).resolve(path));
-    request.bodyBytes = bytes;
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    _throwIfCancelled(cancellationToken);
+    final request = http.AbortableStreamedRequest(
+      'PUT',
+      Uri.parse(_baseUrl).resolve(path),
+      abortTrigger: cancellationToken?.whenCancelled,
+    );
+    request.contentLength = bytes.length;
     request.headers.addAll(
       _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
     );
-    return request;
+    final writeRequest = request.sink
+        .addStream(_uploadByteStream(bytes, onProgress))
+        .whenComplete(request.sink.close);
+    final response = await _http.send(request);
+    await writeRequest;
+    _throwIfCancelled(cancellationToken);
+    return http.Response.fromStream(response);
+  }
+
+  void _throwIfCancelled(UploadCancellationToken? cancellationToken) {
+    if (cancellationToken?.isCancelled ?? false) {
+      throw const UploadCancelledException();
+    }
   }
 
   Map<String, String> _buildUploadHeaders({
@@ -360,7 +637,6 @@ class MediaUploadService {
     Uint8List bytes,
     String mimeType,
   ) async {
-    _validateUpload(bytes, mimeType);
     final preparedBytes = await _sanitizeImageBytesIfNeeded(bytes, mimeType);
     return _buildPreparedUploadImage(preparedBytes);
   }
@@ -383,6 +659,16 @@ class MediaUploadService {
     Uint8List bytes,
     String mimeType,
   ) async {
+    if (mimeType == 'image/gif' ||
+        (mimeType == 'image/png' && _isAnimatedPng(bytes)) ||
+        (mimeType == 'image/webp' && _isAnimatedWebp(bytes))) {
+      try {
+        return sanitizeAnimatedImageForUpload(bytes, mimeType);
+      } on FormatException {
+        throw Exception('failed to sanitize image for upload');
+      }
+    }
+
     if (!_shouldSanitizePickedImage(mimeType)) {
       return bytes;
     }
@@ -392,6 +678,46 @@ class MediaUploadService {
       throw Exception('failed to sanitize image for upload');
     }
     return sanitizedBytes;
+  }
+}
+
+String _safeAttachmentFilename(String filename) {
+  final segments = filename.split(RegExp(r'[/\\]'));
+  final basename = segments.isEmpty ? '' : segments.last;
+  final sanitized = StringBuffer();
+  var byteLength = 0;
+
+  for (final rune in basename.runes) {
+    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
+      continue;
+    }
+
+    final character = String.fromCharCode(rune);
+    final characterByteLength = utf8.encode(character).length;
+    if (byteLength + characterByteLength > 255) break;
+
+    sanitized.write(character);
+    byteLength += characterByteLength;
+  }
+
+  final safeBasename = sanitized.toString().trim();
+  return safeBasename.isEmpty ? 'file' : safeBasename;
+}
+
+Stream<List<int>> _uploadByteStream(
+  Uint8List bytes,
+  ValueChanged<double>? onProgress,
+) async* {
+  const chunkSize = 64 * 1024;
+  onProgress?.call(0);
+  if (bytes.isEmpty) {
+    onProgress?.call(1);
+    return;
+  }
+  for (var start = 0; start < bytes.length; start += chunkSize) {
+    final end = math.min(start + chunkSize, bytes.length);
+    yield Uint8List.sublistView(bytes, start, end);
+    onProgress?.call(end / bytes.length);
   }
 }
 
@@ -405,18 +731,6 @@ String? _tryDetectImageMimeType(Uint8List bytes) {
     return _detectImageMimeType(bytes);
   } on Exception {
     return null;
-  }
-}
-
-void _validateUpload(Uint8List bytes, String mimeType) {
-  if (_unsupportedAnimatedImageMimeTypes.contains(mimeType)) {
-    throw Exception(_unsupportedGifUploadMessage);
-  }
-  if (mimeType == 'image/png' && _isAnimatedPng(bytes)) {
-    throw Exception(_unsupportedAnimatedPngUploadMessage);
-  }
-  if (mimeType == 'image/webp' && _isAnimatedWebp(bytes)) {
-    throw Exception(_unsupportedAnimatedWebpUploadMessage);
   }
 }
 
@@ -590,12 +904,16 @@ int _readUint32LittleEndian(Uint8List bytes, int offset) {
       (bytes[offset + 3] << 24);
 }
 
-/// Always returns `video/mp4` — the relay only accepts MP4 and does its own
-/// magic-byte validation. Most iPhone `.mov` files are ftyp-isom containers
-/// that the relay accepts as MP4.
 Future<Uint8List?> _readPlatformClipboardImage() async {
   return _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
     _readClipboardImageMethod,
+  );
+}
+
+Future<Uint8List?> _generatePickedVideoPoster(String filePath) {
+  return _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
+    _generateVideoPosterMethod,
+    filePath,
   );
 }
 
@@ -672,7 +990,9 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
       source: ImageSource.gallery,
       requestFullMetadata: false,
     ),
+    pickGalleryImages: () => picker.pickMultiImage(requestFullMetadata: false),
     pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
+    pickAttachmentFile: file_selector.openFile,
   );
   ref.onDispose(service.dispose);
   return service;

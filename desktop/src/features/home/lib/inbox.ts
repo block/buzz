@@ -6,6 +6,10 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import {
+  getProjectInboxReference,
+  isProjectInboxItem,
+} from "@/features/home/lib/projectInbox";
 import type { TimelineReaction } from "@/features/messages/types";
 import type {
   Channel,
@@ -14,14 +18,18 @@ import type {
   HomeFeedResponse,
   RelayEvent,
 } from "@/shared/api/types";
+import {
+  formatDayGroupLabel,
+  formatItemTimestamp,
+} from "@/shared/lib/datetime";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 export type InboxFilter =
   | "all"
+  | "project"
   | "mention"
   | "thread"
   | "needs_action"
-  | "activity"
   | "agent_activity"
   | "reminders"
   | "drafts";
@@ -29,10 +37,10 @@ export type InboxFilter =
 export type InboxItem = {
   avatarUrl: string | null;
   /**
-   * Stable conversation identity: `rootId ?? parentId ?? event.id` for the
-   * thread group. Does NOT change when a new reply advances the representative
-   * latest event. Use this for lifecycle continuity: scroll gating, draft
-   * keys, local-reply storage, and selection identity.
+   * Stable conversation identity: the NIP-10 root for messages, or a
+   * repository-scoped root for Buzz Git work. Does NOT change when a new reply
+   * advances the representative latest event. Use this for lifecycle
+   * continuity: scroll gating, draft keys, local-reply storage, and selection.
    */
   conversationId: string;
   id: string;
@@ -50,6 +58,7 @@ export type InboxItem = {
   senderLabel: string;
   subject: string;
   timestampLabel: string;
+  unreadCount: number;
 };
 
 export type InboxTypeLabel = {
@@ -81,6 +90,7 @@ export type InboxReply = {
    */
   signerPubkey?: string;
   tags?: string[][];
+  /** Clock time only, for the hover gutter on continuation rows. */
   timeLabel?: string;
 };
 
@@ -98,11 +108,6 @@ export type InboxGroup = {
 
 type InboxChannel = Pick<Channel, "channelType" | "id" | "name">;
 
-const listTimeFormatter = new Intl.DateTimeFormat("en-US", {
-  hour: "numeric",
-  minute: "2-digit",
-});
-
 const fullTimeFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
@@ -111,32 +116,33 @@ const fullTimeFormatter = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-const shortDateFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-});
-
-const shortDateWithYearFormatter = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-});
-
-const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
-  weekday: "long",
-});
-
-function startOfDay(value: Date) {
-  return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+function tagValue(item: FeedItem, name: string) {
+  return item.tags.find((tag) => tag[0] === name)?.[1]?.trim() || null;
 }
 
-function diffInDays(from: Date, to: Date) {
-  return Math.round(
-    (startOfDay(from).getTime() - startOfDay(to).getTime()) / 86_400_000,
+function projectRootItem(item: FeedItem, groupItems: readonly FeedItem[]) {
+  return (
+    groupItems.find(
+      (candidate) => candidate.kind === 1618 || candidate.kind === 1621,
+    ) ?? item
   );
 }
 
-function feedHeadline(item: FeedItem) {
+function projectTypeLabel(item: FeedItem) {
+  if (item.kind === 1618) return "Pull request";
+  if (item.kind === 1621) return "Issue";
+  return "Project update";
+}
+
+function feedHeadline(item: FeedItem, groupItems: readonly FeedItem[] = []) {
+  if (isProjectInboxItem(item)) {
+    const root = projectRootItem(item, groupItems);
+    return (
+      (tagValue(root, "subject") ?? root.content.trim().split("\n")[0]) ||
+      projectTypeLabel(root)
+    );
+  }
+
   switch (item.kind) {
     case 40007:
       return "Reminder";
@@ -207,6 +213,29 @@ export function isThreadActivityItem(item: FeedItem) {
   return thread.parentId !== null && !isBroadcastReply(item.tags);
 }
 
+function isThreadReplyItem(item: FeedItem) {
+  const thread = getThreadReference(item.tags);
+  return thread.parentId !== null && !isBroadcastReply(item.tags);
+}
+
+function uniqueItemsById(items: readonly FeedItem[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function isItemUnread(
+  item: FeedItem,
+  readAt: number | null,
+  getMessageReadAt?: (messageId: string) => number | null,
+) {
+  const messageReadAt = getMessageReadAt?.(item.id) ?? null;
+  return item.createdAt > Math.max(readAt ?? 0, messageReadAt ?? 0);
+}
+
 function activityHeadline(item: FeedItem) {
   return feedHeadline(item);
 }
@@ -241,6 +270,14 @@ function resolveGroupChannel(
 
 export function getInboxTypeLabel(item: InboxItem): InboxTypeLabel {
   const channelName = item.channelLabel;
+
+  if (item.groupItems.some(isProjectInboxItem)) {
+    const root = projectRootItem(item.item, item.groupItems);
+    return {
+      text: projectTypeLabel(root),
+      channelLabel: null,
+    };
+  }
 
   if (item.item.channelType === "dm") {
     return {
@@ -299,42 +336,91 @@ function categoryPriority(category: FeedItemCategory) {
   }
 }
 
-function getInboxThreadKey(item: FeedItem) {
-  const thread = getThreadReference(item.tags);
-  return thread.rootId ?? thread.parentId ?? item.id;
+function getInboxThreadKey(
+  item: FeedItem,
+  channelById: ReadonlyMap<string, InboxChannel>,
+) {
+  const projectReference = getProjectInboxReference(item);
+  if (projectReference) {
+    return `project:${projectReference.repoAddress}:${projectReference.rootId}`;
+  }
+
+  const channelType = resolveItemChannel(item, channelById).type;
+  return getInboxConversationId(
+    item.tags,
+    item.id,
+    item.channelId,
+    channelType,
+    item.kind,
+  );
+}
+
+function getStableConversationId(
+  item: FeedItem,
+  channelById: ReadonlyMap<string, InboxChannel>,
+) {
+  return getInboxThreadKey(item, channelById);
 }
 
 /**
- * Returns the stable conversation ID for any FeedItem or relay event: the
- * NIP-10 root tag id, falling back to parent-reply tag id, then event id.
+ * Returns the stable conversation ID for any FeedItem or relay event. Buzz Git
+ * roots include their repository coordinate; messages use the NIP-10 root,
+ * parent-reply tag, then event id.
  * This is the same derivation used by `buildInboxItems` for `conversationId`.
  */
 export function getInboxConversationId(
   tags: string[][],
   eventId: string,
+  channelId?: string | null,
+  channelType?: string,
+  kind?: number,
 ): string {
+  if (kind !== undefined) {
+    const projectReference = getProjectInboxReference({
+      id: eventId,
+      kind,
+      tags,
+    });
+    if (projectReference) {
+      return `project:${projectReference.repoAddress}:${projectReference.rootId}`;
+    }
+  }
+
+  if (channelType === "dm" && channelId) {
+    return `dm:${channelId}`;
+  }
+
   const thread = getThreadReference(tags);
   return thread.rootId ?? thread.parentId ?? eventId;
 }
 
+/** Returns the stable conversation identity for a complete Inbox feed item. */
+export function getInboxItemConversationId(item: FeedItem) {
+  return getInboxConversationId(
+    item.tags,
+    item.id,
+    item.channelId,
+    item.channelType,
+    item.kind,
+  );
+}
+
+/** Finds the Inbox row containing an event, including grouped events. */
+export function findInboxItemByEventId(
+  items: readonly InboxItem[],
+  eventId: string,
+): InboxItem | null {
+  return (
+    items.find((item) => item.id === eventId) ??
+    items.find((item) =>
+      item.groupItems.some((groupItem) => groupItem.id === eventId),
+    ) ??
+    null
+  );
+}
+
 function formatInboxTimestamp(unixSeconds: number) {
-  const date = new Date(unixSeconds * 1_000);
-  const now = new Date();
-  const dayDiff = diffInDays(now, date);
-
-  if (dayDiff === 0) {
-    return listTimeFormatter.format(date);
-  }
-
-  if (dayDiff === 1) {
-    return "Yesterday";
-  }
-
-  if (now.getFullYear() === date.getFullYear()) {
-    return shortDateFormatter.format(date);
-  }
-
-  return shortDateWithYearFormatter.format(date);
+  return formatItemTimestamp(unixSeconds);
 }
 
 export function formatInboxFullTimestamp(unixSeconds: number) {
@@ -353,21 +439,14 @@ export function relayEventFromFeedItem(item: FeedItem): RelayEvent {
   };
 }
 
-export function groupInboxItems(items: InboxItem[]): InboxGroup[] {
+export function groupInboxItems(
+  items: InboxItem[],
+  nowSeconds = Date.now() / 1_000,
+): InboxGroup[] {
   const groups = new Map<string, InboxItem[]>();
-  const now = new Date();
 
   for (const item of items) {
-    const date = new Date(item.latestActivityAt * 1_000);
-    const dayDiff = diffInDays(now, date);
-    const label =
-      dayDiff === 0
-        ? "Today"
-        : dayDiff === 1
-          ? "Yesterday"
-          : dayDiff < 7
-            ? weekdayFormatter.format(date)
-            : shortDateWithYearFormatter.format(date);
+    const label = formatDayGroupLabel(item.latestActivityAt, nowSeconds);
 
     const current = groups.get(label) ?? [];
     current.push(item);
@@ -384,11 +463,20 @@ export function buildInboxItems({
   channels,
   currentPubkey,
   feed,
+  getChannelReadAt,
+  getMessageReadAt,
+  getThreadReadAt,
   profiles,
 }: {
   channels?: InboxChannel[];
   currentPubkey?: string;
   feed?: HomeFeedResponse;
+  getChannelReadAt?: (channelId: string) => number | null;
+  getMessageReadAt?: (messageId: string) => number | null;
+  getThreadReadAt?: (
+    rootId: string,
+    channelId?: string | null,
+  ) => number | null;
   profiles?: UserProfileLookup;
 }): InboxItem[] {
   if (!feed) {
@@ -427,7 +515,7 @@ export function buildInboxItems({
   >();
 
   for (const item of feedItems) {
-    const threadKey = getInboxThreadKey(item);
+    const threadKey = getInboxThreadKey(item, channelById);
     const group = threadGroups.get(threadKey) ?? {
       items: [],
       latestActivityAt: 0,
@@ -436,7 +524,7 @@ export function buildInboxItems({
 
     group.items.push(item);
     group.latestActivityAt = Math.max(group.latestActivityAt, item.createdAt);
-    if (item.id === threadKey) {
+    if (item.id === getStableConversationId(item, channelById)) {
       group.rootItem = item;
     }
 
@@ -447,11 +535,50 @@ export function buildInboxItems({
     .sort(
       ([, left], [, right]) => right.latestActivityAt - left.latestActivityAt,
     )
-    .map(([conversationId, group]) => {
+    .map(([, group]) => {
+      const conversationId = getStableConversationId(
+        group.items[0],
+        channelById,
+      );
       const latestItem = group.items.reduce((latest, current) =>
         current.createdAt > latest.createdAt ? current : latest,
       );
-      const item = latestItem;
+      const groupChannel = resolveGroupChannel(
+        latestItem,
+        group.items,
+        channelById,
+      );
+      const groupChannelId = group.items.find(
+        (candidate) => candidate.channelId,
+      )?.channelId;
+      const channelReadAt =
+        groupChannel.type === "dm" && groupChannelId && getChannelReadAt
+          ? getChannelReadAt(groupChannelId)
+          : undefined;
+      const uniqueGroupItems = uniqueItemsById(group.items);
+      const threadReplyItems = uniqueGroupItems.filter(isThreadReplyItem);
+      const threadReadAt =
+        groupChannel.type !== "dm" &&
+        threadReplyItems.length > 0 &&
+        getThreadReadAt
+          ? getThreadReadAt(conversationId, groupChannelId)
+          : undefined;
+      const unreadItems = (
+        channelReadAt !== undefined
+          ? uniqueGroupItems.filter((candidate) =>
+              isItemUnread(candidate, channelReadAt),
+            )
+          : threadReplyItems.length > 0 && getMessageReadAt
+            ? threadReplyItems.filter((candidate) =>
+                isItemUnread(candidate, null, getMessageReadAt),
+              )
+            : threadReadAt !== undefined
+              ? threadReplyItems.filter((candidate) =>
+                  isItemUnread(candidate, threadReadAt),
+                )
+              : []
+      ).sort((left, right) => left.createdAt - right.createdAt);
+      const item = unreadItems[0] ?? latestItem;
       const categories = [
         ...new Set(group.items.map((groupItem) => groupItem.category)),
       ].sort((left, right) => categoryPriority(left) - categoryPriority(right));
@@ -461,13 +588,12 @@ export function buildInboxItems({
         profiles,
         preferResolvedSelfLabel: true,
       });
-      const subject = feedHeadline(item);
+      const subject = feedHeadline(item, group.items);
       const preview = feedPreview(item);
       const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
         item.tags,
         profiles,
       );
-      const groupChannel = resolveGroupChannel(item, group.items, channelById);
       const channelLabel = groupChannel.name;
       const displayItem: FeedItem = {
         ...item,
@@ -494,6 +620,7 @@ export function buildInboxItems({
         senderLabel,
         subject,
         timestampLabel: formatInboxTimestamp(group.latestActivityAt),
+        unreadCount: unreadItems.length,
       };
     });
 }

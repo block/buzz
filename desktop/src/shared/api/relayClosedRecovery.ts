@@ -35,7 +35,7 @@ export function handleRelayClosed({
 }) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
-  if (subscription.mode === "history") {
+  if (subscription.mode !== "live") {
     // Classify before rejecting so a `rate-limited:` history CLOSED arms the
     // gate for concurrent ops. A history sub can't be retried (the caller holds
     // the promise), so we still reject immediately after arming.
@@ -73,7 +73,7 @@ function recoverLiveSubscriptionFromClosed({
   message: string;
   sendReq: (subId: string, filter: RelaySubscriptionFilter) => Promise<void>;
 }) {
-  subscription.resolveReady?.();
+  subscription.resolveReady?.("closed");
   subscription.resolveReady = undefined;
 
   const closedClass = classifyRelayClosed(message);
@@ -133,6 +133,9 @@ export function prepareSubscriptionEvent(
     subscription.events.push(event);
     return false;
   }
+  if (subscription.mode === "first") {
+    return false;
+  }
   subscription.closedRetryAttempt = 0;
   clearClosedRetry(subscription);
   subscription.lastSeenCreatedAt = Math.max(
@@ -154,7 +157,7 @@ export function handleSubscriptionEose({
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "live") {
-    subscription.resolveReady?.();
+    subscription.resolveReady?.("eose");
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;
     clearClosedRetry(subscription);
@@ -163,5 +166,9 @@ export function handleSubscriptionEose({
   window.clearTimeout(subscription.timeout);
   subscriptions.delete(subId);
   void closeSubscription(subId);
-  subscription.resolve(sortEvents(subscription.events));
+  if (subscription.mode === "first") {
+    subscription.resolve(null);
+  } else {
+    subscription.resolve(sortEvents(subscription.events));
+  }
 }

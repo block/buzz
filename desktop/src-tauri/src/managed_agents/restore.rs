@@ -1,5 +1,3 @@
-#[cfg(feature = "mesh-llm")]
-use super::relay_mesh_model_id;
 use super::{
     find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, load_personas,
     save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
@@ -20,7 +18,9 @@ use tauri::Manager;
 /// restore would kill reconcile's lazy child by its receipt and replace it with
 /// an eager one, flipping the pair's laziness on a startup race.
 enum SpawnOutcome {
-    Spawned(super::ManagedAgentRuntimeKey, ManagedAgentProcess),
+    /// Boxed: the spawned process carries its full spawn-config snapshot, so an
+    /// inline variant would make every `Skipped`/`Failed` outcome pay for it.
+    Spawned(super::ManagedAgentRuntimeKey, Box<ManagedAgentProcess>),
     Skipped,
     Failed(String),
 }
@@ -36,10 +36,9 @@ type AgentSpawnResult = (String, SpawnOutcome);
 /// `model`/`provider` were clobbered by the old unconditional snapshot code before
 /// this fix — are skipped here; they self-heal on the next manual start via the
 /// start-path re-snapshot in `start_local_agent_with_preflight`.
-/// If the linked persona is gone, we log loudly and leave the snapshot empty —
-/// the record's own `system_prompt`/`model` (possibly empty for persona-created
-/// agents) is then all the config that remains, which is the same fallback an
-/// orphaned agent already gets.
+/// If the linked persona is gone, we log loudly and leave the record untouched —
+/// it stays orphaned and `spawn_agent_child` refuses to start it (see
+/// `effective_config::resolve_effective_config`'s `OrphanedInstance` arm).
 pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _store_guard = state
@@ -66,7 +65,7 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
         }
         let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
             eprintln!(
-                "buzz-desktop: persona-snapshot backfill: agent {} links persona {persona_id} which no longer exists; leaving snapshot empty — it will spawn from its record fields",
+                "buzz-desktop: persona-snapshot backfill: agent {} links persona {persona_id} which no longer exists; leaving it orphaned — spawn will refuse it",
                 record.pubkey
             );
             continue;
@@ -206,6 +205,9 @@ pub async fn restore_managed_agents_on_launch(
                 continue;
             };
             let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
+                // Orphaned: no current persona to re-snapshot from. Leave the
+                // record as-is — `spawn_agent_child` (Phase B below) refuses to
+                // spawn it and Phase C persists the refusal to `last_error`.
                 continue;
             };
             super::persona_events::apply_persona_snapshot(record, persona);
@@ -240,16 +242,26 @@ pub async fn restore_managed_agents_on_launch(
 
     #[cfg(feature = "mesh-llm")]
     let agents_to_start = {
+        // Preflight against the same resolution spawn uses — `resolve_effective_config`
+        // (definition → global fallback). A linked instance's own `provider`/`model`/
+        // `relay_mesh` bytes never contribute. See `start_local_agent_with_preflight`
+        // in `commands/agents.rs` for the identical rationale on the interactive path.
+        let personas = load_personas(app).unwrap_or_default();
+        let global = super::load_global_agent_config(app).unwrap_or_default();
         let mut mesh_preflight_failures = std::collections::HashSet::new();
         for record in &agents_to_start {
-            if relay_mesh_model_id(record).is_none() {
+            let mesh_model_id = super::effective_config::resolve_effective_relay_mesh_model_id(
+                record, &personas, &global,
+            );
+            if mesh_model_id.is_none() {
                 continue;
             }
             // Auto-start after relaunch: re-resolve a live bootstrap target and
             // dial it. Skip (with an actionable error) only when no live target
             // serves this model right now.
             if let Err(error) =
-                crate::commands::ensure_relay_mesh_for_record(app, record, false).await
+                crate::commands::ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false)
+                    .await
             {
                 persist_restore_error(app, &state, &record.pubkey, error)?;
                 mesh_preflight_failures.insert(record.pubkey.clone());
@@ -328,7 +340,9 @@ pub async fn restore_managed_agents_on_launch(
                                                 owner_hex_ref,
                                             )
                                         }) {
-                                        Ok(process) => SpawnOutcome::Spawned(key, process),
+                                        Ok(process) => {
+                                            SpawnOutcome::Spawned(key, Box::new(process))
+                                        }
                                         Err(error) => SpawnOutcome::Failed(error),
                                     }
                                 }
@@ -390,7 +404,7 @@ pub async fn restore_managed_agents_on_launch(
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(key, super::ManagedAgentPairRuntime::starting(process));
+                runtimes.insert(key, super::ManagedAgentPairRuntime::starting(*process));
                 successfully_spawned.push(pubkey);
             }
             SpawnOutcome::Failed(error) => {
@@ -424,6 +438,7 @@ pub async fn restore_managed_agents_on_launch(
                         private_key_nsec: record.private_key_nsec.clone(),
                         name: record.name.clone(),
                         relay_url: record.relay_url.clone(),
+                        target_relay_url: None,
                         avatar_url: record.avatar_url.clone(),
                         auth_tag: record.auth_tag.clone(),
                         pubkey: record.pubkey.clone(),
@@ -456,6 +471,73 @@ pub async fn restore_managed_agents_on_launch(
     }
 
     Ok(())
+}
+
+fn profile_reconcile_completed(outcome: crate::commands::ProfileReconcileOutcome) -> bool {
+    outcome == crate::commands::ProfileReconcileOutcome::Reconciled
+}
+
+pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, workspace_relay: &str) {
+    let state = app.state::<AppState>();
+    if !state
+        .managed_agent_profile_reconcile_enabled
+        .load(Ordering::Acquire)
+    {
+        return;
+    }
+    let items = match crate::commands::load_pending_profile_reconciliations(app, workspace_relay) {
+        Ok(items) => items,
+        Err(error) => {
+            eprintln!("buzz-desktop: failed to load pending profile reconciliations: {error}");
+            return;
+        }
+    };
+
+    for (pubkey, data) in items {
+        let reconcile_app = app.clone();
+        let relay_url = data
+            .target_relay_url
+            .clone()
+            .unwrap_or_else(|| data.relay_url.clone());
+        tauri::async_runtime::spawn(async move {
+            let state = reconcile_app.state::<AppState>();
+            match crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
+                .await
+            {
+                Ok(outcome) if profile_reconcile_completed(outcome) => {
+                    if let Err(error) = crate::commands::mark_profile_reconciled(
+                        &reconcile_app,
+                        &pubkey,
+                        &relay_url,
+                    ) {
+                        eprintln!(
+                            "buzz-desktop: failed to record profile reconciliation for agent {pubkey}: {error}"
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!(
+                    "buzz-desktop: profile reconciliation failed for agent {pubkey}: {error}"
+                ),
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod profile_reconcile_tests {
+    use super::profile_reconcile_completed;
+    use crate::commands::ProfileReconcileOutcome;
+
+    #[test]
+    fn skipped_reconciliation_never_retires_pending_work() {
+        assert!(profile_reconcile_completed(
+            ProfileReconcileOutcome::Reconciled
+        ));
+        assert!(!profile_reconcile_completed(
+            ProfileReconcileOutcome::SkippedDisabled
+        ));
+    }
 }
 
 #[cfg(feature = "mesh-llm")]

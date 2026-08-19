@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
+import { ChevronDown } from "lucide-react";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -20,6 +21,13 @@ import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomple
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import type { ForumComposerProps } from "./ForumComposer.types";
 import { ForumComposerAutocompletes } from "./ForumComposerAutocompletes";
 import { ForumComposerCompactLayout } from "./ForumComposerCompactLayout";
@@ -28,6 +36,7 @@ import { useCompactComposerInteractions } from "./useCompactComposerInteractions
 
 export function ForumComposer({
   channelId = null,
+  channelType,
   members,
   className,
   placeholder,
@@ -35,7 +44,9 @@ export function ForumComposer({
   header,
   isSending,
   onCancel,
+  onSecondarySubmit,
   onSubmit,
+  secondarySubmitLabel,
   compact = false,
   autocompleteBelow = false,
   profiles,
@@ -47,6 +58,10 @@ export function ForumComposer({
   const [isCompactExpanded, setIsCompactExpanded] = React.useState(!compact);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
+  const [isSubmissionPending, setIsSubmissionPending] = React.useState(false);
+  const [submitMode, setSubmitMode] = React.useState<"primary" | "secondary">(
+    "primary",
+  );
 
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
@@ -56,7 +71,7 @@ export function ForumComposer({
     if (compact) setIsCompactExpanded(true);
   }, [compact]);
 
-  const mentions = useMentions(channelId, members, profiles);
+  const mentions = useMentions(channelId, members, profiles, { channelType });
   const channelLinks = useChannelLinks();
   const media = useMediaUpload();
   const { handlePaperclipClick, handleToolbarMouseDown, shouldIgnoreBlur } =
@@ -69,11 +84,16 @@ export function ForumComposer({
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
   const isUploadingRef = React.useRef(media.isUploading);
+  const isSubmissionPendingRef = React.useRef(false);
   const onSubmitRef = React.useRef(onSubmit);
+  const onSecondarySubmitRef = React.useRef(onSecondarySubmit);
+  const submitModeRef = React.useRef(submitMode);
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
   isUploadingRef.current = media.isUploading;
   onSubmitRef.current = onSubmit;
+  onSecondarySubmitRef.current = onSecondarySubmit;
+  submitModeRef.current = onSecondarySubmit ? submitMode : "primary";
 
   const isAutocompleteOpenRef = React.useRef(false);
   isAutocompleteOpenRef.current =
@@ -93,9 +113,10 @@ export function ForumComposer({
 
   const richText = useRichTextEditor({
     placeholder,
-    editable: !disabled,
+    editable: !disabled && !isSubmissionPending,
     mentionNames: mentions.knownNames,
     channelNames: channelLinks.knownChannelNames,
+    messageLinkChannels: channelLinks.channels,
     onSubmit: () => submitMessageRef.current(),
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
@@ -120,6 +141,7 @@ export function ForumComposer({
   // Native ProseMirror transactions — no markdown round-trip.
   const applyMentionInsert = React.useCallback(
     (suggestion: MentionSuggestion) => {
+      if (isSubmissionPendingRef.current) return;
       const { cursor } = richText.getPlainTextAndCursor();
       const { replaceFromOffset, replaceToOffset, insertText } =
         mentions.insertMention(suggestion, cursor);
@@ -138,6 +160,7 @@ export function ForumComposer({
 
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
+      if (isSubmissionPendingRef.current) return;
       const { cursor } = richText.getPlainTextAndCursor();
       const { replaceFromOffset, replaceToOffset, insertText } =
         channelLinks.insertChannel(suggestion, cursor);
@@ -156,7 +179,7 @@ export function ForumComposer({
 
   const insertEmoji = React.useCallback(
     (emoji: string) => {
-      if (!richText.editor) return;
+      if (isSubmissionPendingRef.current || !richText.editor) return;
       richText.editor.chain().focus().insertContent(emoji).run();
       setIsEmojiPickerOpen(false);
       mentions.clearMentions();
@@ -193,78 +216,100 @@ export function ForumComposer({
   ]);
 
   // ── Submit ──────────────────────────────────────────────────────────
-  const submitMessage = React.useCallback(() => {
-    const trimmed = contentRef.current.trim();
-    const currentPendingImeta = media.pendingImetaRef.current;
-    const hasMedia = currentPendingImeta.length > 0;
+  const submitMessage = React.useCallback(
+    async (submitter = onSubmitRef.current) => {
+      const trimmed = contentRef.current.trim();
+      const currentPendingImeta = media.pendingImetaRef.current;
+      const hasMedia = currentPendingImeta.length > 0;
 
-    if (
-      (!trimmed && !hasMedia) ||
-      disabledRef.current ||
-      isSendingRef.current ||
-      isUploadingRef.current
-    ) {
-      return;
-    }
+      if (
+        (!trimmed && !hasMedia) ||
+        disabledRef.current ||
+        isSendingRef.current ||
+        isUploadingRef.current ||
+        isSubmissionPendingRef.current
+      ) {
+        return;
+      }
 
-    const pubkeys = mentions.extractMentionPubkeys(trimmed);
+      isSubmissionPendingRef.current = true;
+      setIsSubmissionPending(true);
+      mentions.cancelMentionAutocomplete();
+      channelLinks.clearChannels();
+      setIsEmojiPickerOpen(false);
+      try {
+        const pubkeys = await mentions.revalidateMentionPubkeys(
+          mentions.extractMentionPubkeys(trimmed),
+        );
 
-    // Reuse the shared send-path builder so forum/notes posts emit the same
-    // body + imeta as chat: generic files become `[filename](url)` links with a
-    // `filename` imeta tag (FileCard renderer), images/video stay inline. Send
-    // semantics use `undefined` for "no attachments" (no imeta tags emitted).
-    const { content: finalContent, mediaTags } = buildOutgoingMessage(
-      trimmed,
-      currentPendingImeta,
+        // Reuse the shared send-path builder so forum/notes posts emit the same
+        // body + imeta as chat: generic files become `[filename](url)` links with a
+        // `filename` imeta tag (FileCard renderer), images/video stay inline. Send
+        // semantics use `undefined` for "no attachments" (no imeta tags emitted).
+        const { content: finalContent, mediaTags } = buildOutgoingMessage(
+          trimmed,
+          currentPendingImeta,
+        );
+
+        // Save draft state so we can restore on failure.
+        const savedContent = contentRef.current;
+        const savedImeta = [...currentPendingImeta];
+
+        setContent("");
+        contentRef.current = "";
+        richText.clearContent();
+        media.setPendingImeta([]);
+        mentions.clearMentions();
+        channelLinks.clearChannels();
+        setIsEmojiPickerOpen(false);
+
+        try {
+          await submitter(finalContent, pubkeys, mediaTags);
+          setSubmitMode("primary");
+          if (compact) setIsCompactExpanded(false);
+        } catch {
+          setContent(savedContent);
+          contentRef.current = savedContent;
+          richText.setContent(savedContent);
+          media.setPendingImeta(savedImeta);
+          if (compact) setIsCompactExpanded(true);
+        }
+      } catch {
+        // Keep the draft intact when authorization refresh fails.
+      } finally {
+        isSubmissionPendingRef.current = false;
+        setIsSubmissionPending(false);
+      }
+    },
+    [
+      compact,
+      media.pendingImetaRef,
+      media.setPendingImeta,
+      mentions.cancelMentionAutocomplete,
+      mentions.extractMentionPubkeys,
+      mentions.revalidateMentionPubkeys,
+      mentions.clearMentions,
+      channelLinks.clearChannels,
+      richText.clearContent,
+      richText.setContent,
+    ],
+  );
+  const submitSelectedMessage = React.useCallback(() => {
+    const secondarySubmit = onSecondarySubmitRef.current;
+    submitMessage(
+      submitModeRef.current === "secondary" && secondarySubmit
+        ? secondarySubmit
+        : onSubmitRef.current,
     );
-
-    // Save draft state so we can restore on failure.
-    const savedContent = contentRef.current;
-    const savedImeta = [...currentPendingImeta];
-
-    setContent("");
-    contentRef.current = "";
-    richText.clearContent();
-    media.setPendingImeta([]);
-    mentions.clearMentions();
-    channelLinks.clearChannels();
-    setIsEmojiPickerOpen(false);
-
-    const result = onSubmitRef.current(finalContent, pubkeys, mediaTags);
-    const collapseCompactComposer = () => {
-      if (compact) setIsCompactExpanded(false);
-    };
-
-    // If onSubmit returns a promise, restore draft on failure.
-    if (result && typeof result.then === "function") {
-      result.then(collapseCompactComposer).catch(() => {
-        setContent(savedContent);
-        contentRef.current = savedContent;
-        richText.setContent(savedContent);
-        media.setPendingImeta(savedImeta);
-        if (compact) setIsCompactExpanded(true);
-      });
-    } else {
-      collapseCompactComposer();
-    }
-  }, [
-    compact,
-    media.pendingImetaRef,
-    media.setPendingImeta,
-    mentions.extractMentionPubkeys,
-    mentions.clearMentions,
-    channelLinks.clearChannels,
-    richText.clearContent,
-    richText.setContent,
-  ]);
-  submitMessageRef.current = submitMessage;
+  }, [submitMessage]);
+  submitMessageRef.current = submitSelectedMessage;
 
   const handleSubmit = React.useCallback(
     (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      submitMessage();
+      submitSelectedMessage();
     },
-    [submitMessage],
+    [submitSelectedMessage],
   );
 
   // ── Keyboard handling ───────────────────────────────────────────────
@@ -344,9 +389,16 @@ export function ForumComposer({
   const sendDisabled = React.useMemo(
     () =>
       disabled ||
+      isSubmissionPending ||
       media.isUploading ||
       (content.trim().length === 0 && media.pendingImeta.length === 0),
-    [disabled, media.isUploading, content, media.pendingImeta.length],
+    [
+      disabled,
+      isSubmissionPending,
+      media.isUploading,
+      content,
+      media.pendingImeta.length,
+    ],
   );
   const hasComposerContent =
     content.trim().length > 0 ||
@@ -417,15 +469,30 @@ export function ForumComposer({
           "relative rounded-2xl border border-input bg-card px-3 py-2 sm:px-4",
           className,
         )}
+        inert={isSubmissionPending ? true : undefined}
         onBlurCapture={handleFormBlur}
         onDragEnter={(event) => {
+          if (isSubmissionPending) {
+            event.preventDefault();
+            return;
+          }
           expandCompactComposer();
           media.handleDragEnter(event);
         }}
         onDragLeave={media.handleDragLeave}
-        onDragOver={media.handleDragOver}
-        onDrop={(e) => {
-          void media.handleDrop(e);
+        onDragOver={(event) => {
+          if (isSubmissionPending) {
+            event.preventDefault();
+            return;
+          }
+          media.handleDragOver(event);
+        }}
+        onDrop={(event) => {
+          if (isSubmissionPending) {
+            event.preventDefault();
+            return;
+          }
+          void media.handleDrop(event);
         }}
         onFocusCapture={expandCompactComposer}
         onSubmit={handleSubmit}
@@ -435,7 +502,7 @@ export function ForumComposer({
           <ForumComposerCompactLayout
             editor={richText.editor}
             header={header}
-            isSending={isSending}
+            isSending={Boolean(isSending || isSubmissionPending)}
             onEditorKeyDown={handleEditorKeyDown}
             sendDisabled={sendDisabled}
           />
@@ -465,7 +532,15 @@ export function ForumComposer({
               position={autocompletePosition}
             />
 
-            <ForumComposerMediaStatus media={media} />
+            <fieldset
+              className="min-w-0 border-0 p-0"
+              disabled={isSubmissionPending}
+            >
+              <ForumComposerMediaStatus
+                disabled={isSubmissionPending}
+                media={media}
+              />
+            </fieldset>
 
             {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
             <div
@@ -476,25 +551,67 @@ export function ForumComposer({
             </div>
 
             <MessageComposerToolbar
-              composerDisabled={disabled ?? false}
+              composerDisabled={Boolean(disabled || isSubmissionPending)}
               editor={richText.editor}
               extraActions={
-                onCancel ? (
-                  <Button
-                    disabled={isSending}
-                    onClick={onCancel}
-                    size="sm"
-                    type="button"
-                    variant="ghost"
-                  >
-                    Cancel
-                  </Button>
+                onCancel || (onSecondarySubmit && secondarySubmitLabel) ? (
+                  <>
+                    {onCancel ? (
+                      <Button
+                        disabled={isSending || isSubmissionPending}
+                        onClick={onCancel}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        Cancel
+                      </Button>
+                    ) : null}
+                    {onSecondarySubmit && secondarySubmitLabel ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            className={cn(
+                              submitMode === "secondary" &&
+                                "border-amber-500/40 text-amber-700 hover:bg-amber-500/10 hover:text-amber-800 dark:text-amber-400 dark:hover:text-amber-300",
+                            )}
+                            disabled={
+                              disabled || isSending || isSubmissionPending
+                            }
+                            size="sm"
+                            type="button"
+                            variant="outline"
+                          >
+                            {submitMode === "secondary"
+                              ? secondarySubmitLabel
+                              : "Comment"}
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuRadioGroup
+                            onValueChange={(value) =>
+                              setSubmitMode(value as "primary" | "secondary")
+                            }
+                            value={submitMode}
+                          >
+                            <DropdownMenuRadioItem value="primary">
+                              Comment
+                            </DropdownMenuRadioItem>
+                            <DropdownMenuRadioItem value="secondary">
+                              {secondarySubmitLabel}
+                            </DropdownMenuRadioItem>
+                          </DropdownMenuRadioGroup>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : null}
+                  </>
                 ) : undefined
               }
-              formattingDisabled={disabled ?? false}
+              formattingDisabled={Boolean(disabled || isSubmissionPending)}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
-              isSending={isSending ?? false}
+              isSending={Boolean(isSending || isSubmissionPending)}
               isUploading={media.isUploading}
               onCaptureSelection={handleToolbarMouseDown}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
@@ -508,8 +625,8 @@ export function ForumComposer({
           </>
         )}
       </form>
-      {linkEditor.card}
-      {linkEditor.dialog}
+      {!isSubmissionPending && linkEditor.card}
+      {!isSubmissionPending && linkEditor.dialog}
     </>
   );
 }

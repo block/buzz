@@ -1,9 +1,11 @@
+import { hasTypoTolerantPrefixMatch } from "@/shared/lib/fuzzyText";
+
 /**
  * Lightweight fuzzy matching for the channel browser search box.
  *
  * Mirrors the philosophy of `mentionRanking.ts`: cheap, dependency-free,
- * separator-aware scoring — no Levenshtein / typo-tolerance (which reorders
- * results unpredictably and hides the channel a user can plainly see).
+ * separator-aware scoring. Exact and prefix matches retain their stable score
+ * bands; a conservative one-edit typo fallback is considered only afterward.
  *
  * The one thing plain substring search gets wrong is contiguity across
  * separators: typing `releasenotes` or `reln` should still find
@@ -11,7 +13,8 @@
  *
  *  1. word-boundary tokens (split on space/`-`/`_`), so multi-word names match
  *     when the separators are dropped or a later word is typed, and
- *  2. an in-order subsequence check, so `reln` matches `release-notes`.
+ *  2. an in-order subsequence check, so `reln` matches `release-notes`, and
+ *  3. a one-edit word-prefix fallback, so `genral` matches `general`.
  *
  * Lower score === better match. `null` means "no match".
  */
@@ -27,7 +30,8 @@ const SCORE_WORD_PREFIX = 3;
 const SCORE_SUBSTRING = 4;
 const SCORE_COLLAPSED_SEPARATORS = 5;
 const SCORE_SUBSEQUENCE = 6;
-const SCORE_DESCRIPTION = 7;
+const SCORE_TYPO = 7;
+const SCORE_DESCRIPTION = 8;
 
 /** Strip separators so `release-notes` and `releasenotes` compare equal. */
 function collapseSeparators(value: string): string {
@@ -85,6 +89,10 @@ export function scoreChannelName(
   // 1-char queries producing noise by requiring at least 2 chars here.
   if (collapsedQuery.length >= 2 && isSubsequence(collapsedQuery, lower)) {
     return SCORE_SUBSEQUENCE;
+  }
+
+  if (hasTypoTolerantPrefixMatch(lower, lowerQuery)) {
+    return SCORE_TYPO;
   }
 
   return null;

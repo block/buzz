@@ -2,8 +2,7 @@ import * as React from "react";
 import { VList } from "virtua";
 import type { VListHandle } from "virtua";
 
-import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
-import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
+import { formatDayGroupLabel } from "@/shared/lib/datetime";
 import {
   buildTimelineDayGroups,
   buildTimelineItems,
@@ -18,30 +17,25 @@ import {
   type VirtualizedTimelineItem,
   virtualizedItemKey,
 } from "@/features/messages/lib/virtualizedTimelineItems";
-import { THREAD_REPLY_ROW_MARGIN_INLINE_REM } from "@/features/messages/lib/threadTreeLayout";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
-import {
-  buildVideoReviewCommentsByRootId,
-  buildVideoReviewContextForMessage,
-  hasVideoAttachment,
-} from "@/features/messages/lib/videoReviewContext";
+import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
-import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { channelChrome } from "@/shared/layout/chromeLayout";
 import { DayDivider } from "./DayDivider";
-import { MessageRow } from "./MessageRow";
-import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
-import { SystemMessageRow } from "./SystemMessageRow";
+import { MessageRowItem, SystemRow } from "./TimelineMessageRow";
+import { TimelineRowShell } from "./TimelineRowShell";
 import { UnreadDivider } from "./UnreadDivider";
 import { useTimelineRetention } from "./useTimelineRetention";
 import { useUpwardPaginationWheel } from "./useUpwardPaginationWheel";
 import { useVirtualizedBottomSettle } from "./useVirtualizedBottomSettle";
 
 export type TimelineVirtualizerApi = {
+  cancelBottomIntent: () => void;
   scrollToBottom: (behavior?: ScrollBehavior) => void;
   settleAtBottom: () => void;
   scrollToMessage: (
@@ -79,6 +73,7 @@ type TimelineMessageListProps = {
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  onOpenThread?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -107,6 +102,12 @@ type TimelineMessageListProps = {
   threadUnreadCounts?: ReadonlyMap<string, number>;
   /** Content rendered as the first virtual row before channel history. */
   leadingContent?: React.ReactNode;
+  /** Hide date boundaries for a huddle's live transcript. */
+  hideDayDividers?: boolean;
+  /** Show speaker identity on every row instead of grouping consecutive messages. */
+  alwaysShowMessageIdentity?: boolean;
+  /** Hide agent access-policy badges in the purpose-built Huddle chat. */
+  hideAgentAccessBadges?: boolean;
   /**
    * True when the loaded window provably starts at the channel's beginning.
    * Proves the oldest loaded day's boundary so its divider may render.
@@ -144,6 +145,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onMarkUnread,
   onMarkRead,
   onReply,
+  onOpenThread,
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
   onToggleReaction,
@@ -156,6 +158,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   unfollowThreadById,
   leadingContent,
   historyExhausted = false,
+  hideDayDividers = false,
+  alwaysShowMessageIdentity = false,
+  hideAgentAccessBadges = false,
   useVirtualizer = false,
   onStartReached,
   onAtBottomStateChange,
@@ -169,40 +174,21 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       buildMainTimelineEntries(messages, undefined, threadSummaries, profiles),
     [mainEntries, messages, profiles, threadSummaries],
   );
-  const reviewCommentsByRootId = React.useMemo(
-    () =>
-      messages.some(hasVideoAttachment)
-        ? buildVideoReviewCommentsByRootId(messages)
-        : new Map<string, TimelineMessage[]>(),
-    [messages],
-  );
   // Contexts are memoized per message id so MessageRow/Markdown memo
   // comparisons hold across unrelated timeline re-renders (typing
   // indicators, presence updates) — a fresh context object per render would
   // defeat the memo and re-render every video message on every pass.
   const videoReviewContextById = React.useMemo(() => {
-    const contexts = new Map<
-      string,
-      NonNullable<ReturnType<typeof buildVideoReviewContextForMessage>>
-    >();
-    for (const message of messages) {
-      const comments = reviewCommentsByRootId.get(message.id) ?? [];
-      const context = buildVideoReviewContextForMessage({
-        channelId,
-        channelName,
-        channelType,
-        comments,
-        isSendingVideoReviewComment,
-        message,
-        onSendVideoReviewComment,
-        onToggleReaction,
-        profiles,
-      });
-      if (context) {
-        contexts.set(message.id, context);
-      }
-    }
-    return contexts;
+    return buildVideoReviewContextsByMessageId({
+      channelId,
+      channelName,
+      channelType,
+      isSendingVideoReviewComment,
+      messages,
+      onSendVideoReviewComment,
+      onToggleReaction,
+      profiles,
+    });
   }, [
     channelId,
     channelName,
@@ -212,7 +198,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     onSendVideoReviewComment,
     onToggleReaction,
     profiles,
-    reviewCommentsByRootId,
   ]);
 
   // The flattened item stream, memoized on the entries and the unread boundary
@@ -266,8 +251,15 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               highlightedMessageId={highlightedMessageId}
               huddleMemberPubkeys={huddleMemberPubkeys}
               huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-              isContinuation={item.isContinuation}
-              isFollowedByContinuation={item.isFollowedByContinuation}
+              hideAgentAccessBadges={hideAgentAccessBadges}
+              isContinuation={
+                alwaysShowMessageIdentity ? false : item.isContinuation
+              }
+              isFollowedByContinuation={
+                alwaysShowMessageIdentity
+                  ? false
+                  : item.isFollowedByContinuation
+              }
               isFollowingThreadById={isFollowingThreadById}
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
               playEntrance={item.entry.message.id === entranceMessageId}
@@ -277,6 +269,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onMarkRead={onMarkRead}
               onMarkUnread={onMarkUnread}
               onReply={onReply}
+              onOpenThread={onOpenThread}
               onToggleReaction={onToggleReaction}
               profiles={profiles}
               searchActiveMessageId={searchActiveMessageId}
@@ -293,11 +286,13 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     },
     [
       channelId,
+      alwaysShowMessageIdentity,
       currentPubkey,
       followThreadById,
       highlightedMessageId,
       huddleMemberPubkeys,
       huddleMemberPubkeysPending,
+      hideAgentAccessBadges,
       isFollowingThreadById,
       isMessageUnreadById,
       entranceMessageId,
@@ -308,6 +303,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       onMarkRead,
       onMarkUnread,
       onReply,
+      onOpenThread,
       onToggleReaction,
       profiles,
       ownerProfiles,
@@ -325,6 +321,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       <VirtualizedTimelineRows
         dayGroups={dayGroups}
         historyExhausted={historyExhausted}
+        hideDayDividers={hideDayDividers}
         leadingContent={leadingContent}
         onAtBottomStateChange={onAtBottomStateChange}
         onStartReached={onStartReached}
@@ -342,19 +339,20 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <section
           className={cn(
             "relative flex flex-col",
-            group.headingTimestamp !== null &&
-              "before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']",
+            !hideDayDividers &&
+              group.headingTimestamp !== null &&
+              "before:absolute before:inset-x-0 before:top-1/2 before:h-px before:-translate-y-1/2 before:bg-border/35 before:content-['']",
           )}
           data-day-label={
             group.headingTimestamp === null
               ? undefined
-              : formatDayHeading(group.headingTimestamp)
+              : formatDayGroupLabel(group.headingTimestamp)
           }
           data-testid="message-timeline-day-group"
           key={group.key}
         >
-          {group.headingTimestamp === null ? null : (
-            <DayDivider label={formatDayHeading(group.headingTimestamp)} />
+          {hideDayDividers || group.headingTimestamp === null ? null : (
+            <DayDivider label={formatDayGroupLabel(group.headingTimestamp)} />
           )}
           {group.items.map((item) => (
             <TimelineRowShell item={item} key={getTimelineItemKey(item)}>
@@ -367,15 +365,19 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   );
 });
 
-function timelineItemMessageId(item: TimelineNonDayItem): string | null {
+function timelineItemMessageIds(item: TimelineNonDayItem): string[] {
+  if (item.kind === "system-group") {
+    return item.entries.map((entry) => entry.message.id);
+  }
   return item.kind === "message" || item.kind === "system"
-    ? item.entry.message.id
-    : null;
+    ? [item.entry.message.id]
+    : [];
 }
 
 type VirtualizedTimelineRowsProps = {
   dayGroups: TimelineDayGroup[];
   historyExhausted: boolean;
+  hideDayDividers: boolean;
   leadingContent?: React.ReactNode;
   onAtBottomStateChange?: (atBottom: boolean) => void;
   onStartReached?: () => boolean;
@@ -415,6 +417,7 @@ function VirtualizedTimelineItemShell({
 function VirtualizedTimelineRows({
   dayGroups,
   historyExhausted,
+  hideDayDividers,
   leadingContent,
   onAtBottomStateChange,
   onStartReached,
@@ -433,6 +436,8 @@ function VirtualizedTimelineRows({
     typeof window === "undefined" ? 1_000 : window.innerHeight,
   );
   const hasInitialPositionedRef = React.useRef(false);
+  const pinnedDayLabelRef = React.useRef<HTMLDivElement>(null);
+  const pinnedDayTranslateYRef = React.useRef(0);
   const estimateCallCountRef = React.useRef(0);
   const estimateItemSize = React.useCallback(
     (item: VirtualizedTimelineItem) => {
@@ -448,158 +453,192 @@ function VirtualizedTimelineRows({
     [],
   );
   const items = React.useMemo(
-    () => buildVirtualizedItems(dayGroups, leadingContent, historyExhausted),
-    [dayGroups, historyExhausted, leadingContent],
+    () =>
+      buildVirtualizedItems(
+        dayGroups,
+        leadingContent,
+        historyExhausted,
+        !hideDayDividers,
+      ),
+    [dayGroups, hideDayDividers, historyExhausted, leadingContent],
   );
   const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
+  const dayDividerItems = React.useMemo(
+    () =>
+      items.flatMap((item, index) =>
+        item.kind === "day-divider" ? [{ index, item }] : [],
+      ),
+    [items],
+  );
+  const [pinnedDay, setPinnedDay] = React.useState<{
+    label: string | null;
+    incomingLabel: string | null;
+  }>({ label: null, incomingLabel: null });
   itemsLengthRef.current = items.length;
   const previousKeysRef = React.useRef<readonly string[]>([]);
-  const prependAnchorRef = React.useRef<{
-    itemKey: string;
-    top: number;
-  } | null>(null);
-  const prependWatcherFrameRef = React.useRef<number | null>(null);
   const [prependShiftEpoch, clearPrependShift] = React.useReducer(
     (version: number) => version + 1,
     0,
   );
-  // Virtua's `shift` is a one-render instruction, not a persistent mode. If it
-  // stays true after a prepend, later measurement changes can keep anchoring
-  // from the end and leave a stale blank range until the next scroll event.
+  const { cancel: cancelBottomSettle, settle: settleAtBottom } =
+    useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
+  const { arm: armUpwardMomentum } = useUpwardPaginationWheel(
+    hostRef,
+    cancelBottomSettle,
+  );
+
+  const updatePinnedDayLabel = React.useCallback(
+    (offset: number) => {
+      const list = listRef.current;
+      const scroller = hostRef.current?.firstElementChild;
+      const pinnedLabel = pinnedDayLabelRef.current;
+      if (!list || !(scroller instanceof HTMLDivElement) || !pinnedLabel) {
+        return;
+      }
+
+      const pinnedTop =
+        pinnedLabel.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top -
+        pinnedDayTranslateYRef.current;
+      const [pinnedPill, incomingPinnedPill] =
+        pinnedLabel.querySelectorAll<HTMLParagraphElement>("p");
+      const pinnedPillHeight = pinnedPill?.offsetHeight ?? 0;
+      if (pinnedPillHeight === 0) return;
+      const renderedDividerPillTop = (
+        divider: (typeof dayDividerItems)[number],
+      ) => {
+        const label = formatDayGroupLabel(divider.item.headingTimestamp);
+        const source = [
+          ...scroller.querySelectorAll<HTMLElement>(
+            '[data-testid="message-timeline-day-divider"]',
+          ),
+        ].find((element) => element.dataset.dayLabel === label);
+        const pill = source?.querySelector<HTMLElement>("p");
+        return pill
+          ? pill.getBoundingClientRect().top -
+              scroller.getBoundingClientRect().top
+          : null;
+      };
+      const sourcePills = [
+        ...scroller.querySelectorAll<HTMLElement>(
+          '[data-testid="message-timeline-day-divider"] p',
+        ),
+      ];
+      // Source dividers are normally visible in the feed. Only hide the one
+      // that physically overlaps the floating chip at the handoff point.
+      for (const pill of sourcePills) {
+        pill.style.removeProperty("visibility");
+      }
+
+      let activeDividerIndex = -1;
+      for (const [index, divider] of dayDividerItems.entries()) {
+        if (list.getItemOffset(divider.index) > offset + pinnedTop) break;
+        activeDividerIndex = index;
+      }
+      const candidateDivider = dayDividerItems[activeDividerIndex];
+      // Retain the previous date while the next in-flow divider is still
+      // above the sticky slot. This avoids changing the label before the
+      // moving chip reaches its handoff point.
+      if (
+        activeDividerIndex > 0 &&
+        candidateDivider &&
+        (renderedDividerPillTop(candidateDivider) ?? -Infinity) > pinnedTop
+      ) {
+        activeDividerIndex -= 1;
+      }
+      const activeDivider = dayDividerItems[activeDividerIndex];
+      const nextDivider = dayDividerItems[activeDividerIndex + 1];
+      const nextDividerTop = nextDivider
+        ? (renderedDividerPillTop(nextDivider) ??
+          list.getItemOffset(nextDivider.index) - offset)
+        : null;
+      const nextTranslateY =
+        nextDividerTop === null
+          ? 0
+          : Math.max(
+              -pinnedPillHeight,
+              Math.min(0, nextDividerTop - pinnedTop - pinnedPillHeight),
+            );
+      if (pinnedDayTranslateYRef.current !== nextTranslateY) {
+        pinnedDayTranslateYRef.current = nextTranslateY;
+        pinnedLabel.style.transform = `translateY(${nextTranslateY}px)`;
+      }
+      const nextLabel = activeDivider
+        ? formatDayGroupLabel(activeDivider.item.headingTimestamp)
+        : null;
+      const incomingLabel =
+        nextDivider && nextTranslateY < 0
+          ? formatDayGroupLabel(nextDivider.item.headingTimestamp)
+          : null;
+      const activeSourcePill = sourcePills.find(
+        (pill) => pill.parentElement?.dataset.dayLabel === nextLabel,
+      );
+      if (activeSourcePill) {
+        const sourceTop =
+          activeSourcePill.getBoundingClientRect().top -
+          scroller.getBoundingClientRect().top;
+        const overlayTop = pinnedTop;
+        const sourceBottom = sourceTop + activeSourcePill.offsetHeight;
+        const overlayBottom = overlayTop + pinnedPillHeight;
+        if (sourceBottom > overlayTop && sourceTop < overlayBottom) {
+          activeSourcePill.style.visibility = "hidden";
+        }
+      }
+      const incomingSourcePill = sourcePills.find(
+        (pill) => pill.parentElement?.dataset.dayLabel === incomingLabel,
+      );
+      if (incomingSourcePill) {
+        incomingSourcePill.style.visibility = "hidden";
+      }
+      if (pinnedPill) {
+        pinnedPill.textContent = nextLabel ?? "";
+        pinnedPill.style.visibility = nextLabel ? "visible" : "hidden";
+      }
+      if (incomingPinnedPill) {
+        incomingPinnedPill.textContent = incomingLabel ?? "";
+        incomingPinnedPill.style.visibility = incomingLabel
+          ? "visible"
+          : "hidden";
+      }
+      setPinnedDay((current) =>
+        current.label === nextLabel && current.incomingLabel === incomingLabel
+          ? current
+          : { label: nextLabel, incomingLabel },
+      );
+    },
+    [dayDividerItems],
+  );
+
+  React.useEffect(
+    () => () => {
+      cancelBottomSettle();
+    },
+    [cancelBottomSettle],
+  );
+
   const isPrepend = React.useMemo(() => {
     void prependShiftEpoch;
     return didPrependVirtualizedTimeline(previousKeysRef.current, keys);
   }, [keys, prependShiftEpoch]);
 
-  const retirePrependAnchor = React.useCallback(() => {
-    if (prependWatcherFrameRef.current !== null) {
-      cancelAnimationFrame(prependWatcherFrameRef.current);
-    }
-    prependWatcherFrameRef.current = null;
-    prependAnchorRef.current = null;
-  }, []);
-  const { cancel: cancelBottomSettle, settle: settleAtBottom } =
-    useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
-  const retireTimelineSettle = React.useCallback(() => {
-    retirePrependAnchor();
-    cancelBottomSettle();
-  }, [cancelBottomSettle, retirePrependAnchor]);
-  const { arm: armUpwardMomentum, clear: clearUpwardMomentum } =
-    useUpwardPaginationWheel(hostRef, retireTimelineSettle);
-
-  const capturePrependAnchor = React.useCallback(() => {
-    // Keep the pending capture current while the fetch is in flight. Once the
-    // prepend commits and the watcher starts, its baseline is frozen.
-    if (prependWatcherFrameRef.current !== null) return;
-    const scroller = hostRef.current?.firstElementChild;
-    if (!(scroller instanceof HTMLDivElement)) return;
-    const scrollerTop = scroller.getBoundingClientRect().top;
-    const row = Array.from(
-      scroller.querySelectorAll<HTMLElement>("[data-timeline-item-key]"),
-    ).find(
-      (candidate) => candidate.getBoundingClientRect().top >= scrollerTop - 1,
-    );
-    const itemKey = row?.dataset.timelineItemKey;
-    if (!row || !itemKey) return;
-    prependAnchorRef.current = {
-      itemKey,
-      top: row.getBoundingClientRect().top - scrollerTop,
-    };
-  }, []);
-
-  React.useLayoutEffect(() => {
-    if (!isPrepend || !prependAnchorRef.current) return;
-    // Virtua's shift mode correctly absorbs prepended measurements, but
-    // estimated offsets can misclassify late row growth deep in history. Keep
-    // the semantic row identity as a short-lived, deviation-gated backstop.
-    // Do not correct in this commit: Virtua has shifted its estimate but has not
-    // applied its ResizeObserver batch yet, so that delta is transient and its
-    // subsequent absolute correction would overwrite our relative write.
-    // This watcher deliberately survives a temporary row unmount and waits for
-    // stable geometry so Virtua remains the primary scroll owner.
-    if (prependWatcherFrameRef.current !== null) {
-      cancelAnimationFrame(prependWatcherFrameRef.current);
-    }
-    const anchor = prependAnchorRef.current;
-    const deadline = performance.now() + 3_000;
-    let previousScrollTop: number | null = null;
-    let settledFrames = 0;
-
-    const watch = () => {
-      const scroller = hostRef.current?.firstElementChild;
-      if (!(scroller instanceof HTMLDivElement)) {
-        prependWatcherFrameRef.current = null;
-        prependAnchorRef.current = null;
-        return;
-      }
-      const atBottom =
-        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <=
-        32;
-      const row = Array.from(
-        scroller.querySelectorAll<HTMLElement>("[data-timeline-item-key]"),
-      ).find(
-        (candidate) => candidate.dataset.timelineItemKey === anchor.itemKey,
-      );
-      const top = row
-        ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
-        : null;
-      const scrollTop = scroller.scrollTop;
-      settledFrames =
-        previousScrollTop !== null &&
-        Math.abs(scrollTop - previousScrollTop) < 0.5
-          ? settledFrames + 1
-          : 0;
-      previousScrollTop = scrollTop;
-
-      if (row && top !== null && settledFrames >= 2) {
-        const delta = top - anchor.top;
-        if (Math.abs(delta) > 4) {
-          scroller.scrollBy({ top: delta });
-          settledFrames = 0;
-          previousScrollTop = null;
-        }
-      }
-
-      const retired =
-        performance.now() >= deadline ||
-        atBottom ||
-        (top !== null && top > scroller.clientHeight * 2);
-      if (retired) {
-        retirePrependAnchor();
-        return;
-      }
-      prependWatcherFrameRef.current = requestAnimationFrame(watch);
-    };
-    prependWatcherFrameRef.current = requestAnimationFrame(watch);
-    clearUpwardMomentum();
-  }, [clearUpwardMomentum, isPrepend, retirePrependAnchor]);
-
-  React.useEffect(
-    () => () => {
-      retirePrependAnchor();
-      cancelBottomSettle();
-    },
-    [cancelBottomSettle, retirePrependAnchor],
-  );
-
   React.useLayoutEffect(() => {
     previousKeysRef.current = keys;
     if (isPrepend) {
-      cancelBottomSettle();
       clearPrependShift();
     }
     if (!hasInitialPositionedRef.current && items.length > 0) {
       hasInitialPositionedRef.current = true;
       settleAtBottom();
     }
-  }, [cancelBottomSettle, isPrepend, items.length, keys, settleAtBottom]);
+  }, [isPrepend, items.length, keys, settleAtBottom]);
 
   const messageItemIndexById = React.useMemo(() => {
     const byId = new Map<string, number>();
     items.forEach((item, index) => {
       if (item.kind !== "timeline-item") return;
-      const messageId = timelineItemMessageId(item.item);
-      if (messageId) byId.set(messageId, index);
+      for (const messageId of timelineItemMessageIds(item.item)) {
+        byId.set(messageId, index);
+      }
     });
     return byId;
   }, [items]);
@@ -620,18 +659,19 @@ function VirtualizedTimelineRows({
   }, [onVirtualizerScrollerChange]);
 
   React.useLayoutEffect(() => {
+    updatePinnedDayLabel(listRef.current?.scrollOffset ?? 0);
+  }, [updatePinnedDayLabel]);
+
+  React.useLayoutEffect(() => {
     if (!onVirtualizerApiChange) return;
     const api: TimelineVirtualizerApi = {
+      cancelBottomIntent: cancelBottomSettle,
       scrollToBottom() {
-        retireTimelineSettle();
-        const lastIndex = itemsLengthRef.current - 1;
-        if (lastIndex >= 0) {
-          listRef.current?.scrollToIndex(lastIndex, { align: "end" });
-        }
+        settleAtBottom();
       },
       settleAtBottom,
       scrollToMessage(messageId) {
-        retireTimelineSettle();
+        cancelBottomSettle();
         const index = messageItemIndexByIdRef.current.get(messageId);
         if (index === undefined) return false;
         listRef.current?.scrollToIndex(index, { align: "center" });
@@ -640,7 +680,7 @@ function VirtualizedTimelineRows({
     };
     onVirtualizerApiChange(api);
     return () => onVirtualizerApiChange(null);
-  }, [onVirtualizerApiChange, retireTimelineSettle, settleAtBottom]);
+  }, [cancelBottomSettle, onVirtualizerApiChange, settleAtBottom]);
 
   React.useLayoutEffect(() => {
     const host = hostRef.current;
@@ -670,15 +710,14 @@ function VirtualizedTimelineRows({
       if (!list || !(scroller instanceof HTMLDivElement)) return;
       onVirtualizerRangeChanged?.();
       const distanceFromBottom = list.scrollSize - list.viewportSize - offset;
-      if (distanceFromBottom > 32) cancelBottomSettle();
+      // Do not infer reader intent from an intermediate virtualizer offset.
+      // Initial channel positioning deliberately chases the floor while rows
+      // are measured; those measurements can briefly report a large gap and
+      // emit `onScroll` without any user input. Cancelling here strands the
+      // channel above its newest message. The settle hook's wheel, pointer,
+      // touch, and key listeners are the authoritative user-interaction gate.
       onAtBottomStateChange?.(distanceFromBottom <= 32);
-      if (
-        prependAnchorRef.current !== null ||
-        offset <= 200 ||
-        prependWatcherFrameRef.current === null
-      ) {
-        capturePrependAnchor();
-      }
+      updatePinnedDayLabel(offset);
       if (offset <= 200) {
         // Layout scrolls near the top must not poison the reader's next input.
         armUpwardMomentum(onStartReached?.() ?? false);
@@ -686,16 +725,15 @@ function VirtualizedTimelineRows({
     },
     [
       armUpwardMomentum,
-      cancelBottomSettle,
-      capturePrependAnchor,
       onAtBottomStateChange,
       onStartReached,
       onVirtualizerRangeChanged,
+      updatePinnedDayLabel,
     ],
   );
 
   return (
-    <div className="h-full min-h-0 w-full" ref={hostRef}>
+    <div className="relative h-full min-h-0 w-full" ref={hostRef}>
       <PreserveVirtualizedItemVisibilityContext value={isPrepend}>
         <VList
           ref={listRef}
@@ -724,23 +762,15 @@ function VirtualizedTimelineRows({
               return <div key={virtualizedItemKey(item)}>{item.content}</div>;
             }
             if (item.kind === "day-divider") {
-              const dayLabel = formatDayHeading(item.headingTimestamp);
+              const dayLabel = formatDayGroupLabel(item.headingTimestamp);
               return (
                 <div
-                  // The sticky pill needs travel room, but its containing block
-                  // is this item wrapper. The trailing spacer extends the content
-                  // box by 4rem while the matching negative margin keeps the
-                  // measured layout height at exactly the divider's height, so
-                  // row spacing and Virtua's size cache are unaffected. Both the
-                  // spacer and the pill are pointer-events-none, and the later
-                  // (absolutely positioned) row siblings paint above the spacer.
-                  className="relative -mb-16 flex flex-col before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']"
+                  className="relative flex flex-col before:absolute before:inset-x-0 before:top-1/2 before:h-px before:-translate-y-1/2 before:bg-border/35 before:content-['']"
                   data-day-label={dayLabel}
                   data-testid="message-timeline-day-group"
                   key={virtualizedItemKey(item)}
                 >
-                  <DayDivider label={dayLabel} />
-                  <div aria-hidden className="pointer-events-none h-16" />
+                  <DayDivider label={dayLabel} sticky={false} />
                 </div>
               );
             }
@@ -756,230 +786,34 @@ function VirtualizedTimelineRows({
           }}
         </VList>
       </PreserveVirtualizedItemVisibilityContext>
-    </div>
-  );
-}
-
-function TimelineRowShell({
-  children,
-  item,
-  useContentVisibility = true,
-}: {
-  children: React.ReactNode;
-  item: TimelineNonDayItem;
-  useContentVisibility?: boolean;
-}) {
-  return (
-    <div
-      className={cn(useContentVisibility && "timeline-row-cv")}
-      data-timeline-item-key={getTimelineItemKey(item)}
-      style={useContentVisibility ? timelineRowReserveStyle(item) : undefined}
-    >
-      {children}
-    </div>
-  );
-}
-
-function SystemRow({
-  currentPubkey,
-  entries,
-  entry,
-  footer,
-  onToggleReaction,
-  profiles,
-  ownerProfiles,
-}: {
-  currentPubkey?: string;
-  entries?: MainTimelineEntry[];
-  entry?: MainTimelineEntry;
-  footer: React.ReactNode;
-  onToggleReaction?: TimelineMessageListProps["onToggleReaction"];
-  profiles?: UserProfileLookup;
-  ownerProfiles?: UserProfileLookup;
-}) {
-  const systemEntries = entries ?? (entry ? [entry] : []);
-  const firstEntry = systemEntries[0];
-  const groupedMessages = React.useMemo(
-    () => entries?.map((systemEntry) => systemEntry.message),
-    [entries],
-  );
-  if (!firstEntry) return null;
-
-  return (
-    <div className="flex flex-col gap-1 pb-2.5">
-      <SystemMessageRow
-        groupedMessages={groupedMessages}
-        message={firstEntry.message}
-        currentPubkey={currentPubkey}
-        onToggleReaction={onToggleReaction}
-        profiles={profiles}
-        ownerProfiles={ownerProfiles}
-      />
-      {footer}
-    </div>
-  );
-}
-
-type MessageRowItemProps = Pick<
-  TimelineMessageListProps,
-  | "channelId"
-  | "currentPubkey"
-  | "followThreadById"
-  | "highlightedMessageId"
-  | "huddleMemberPubkeys"
-  | "huddleMemberPubkeysPending"
-  | "isFollowingThreadById"
-  | "onDelete"
-  | "onEdit"
-  | "onMarkUnread"
-  | "onMarkRead"
-  | "onReply"
-  | "onToggleReaction"
-  | "profiles"
-  | "searchActiveMessageId"
-  | "searchMatchingMessageIds"
-  | "searchQuery"
-  | "threadUnreadCounts"
-  | "unfollowThreadById"
-> & {
-  entry: MainTimelineEntry;
-  footer: React.ReactNode;
-  isContinuation?: boolean;
-  isFollowedByContinuation?: boolean;
-  isUnread?: boolean;
-  playEntrance?: boolean;
-  onEntranceComplete?: (messageId: string) => void;
-  videoReviewContext: ReturnType<typeof buildVideoReviewContextForMessage>;
-};
-
-function MessageRowItem({
-  channelId,
-  currentPubkey,
-  entry,
-  followThreadById,
-  footer,
-  highlightedMessageId,
-  huddleMemberPubkeys,
-  huddleMemberPubkeysPending,
-  isContinuation = false,
-  isFollowedByContinuation = false,
-  isFollowingThreadById,
-  isUnread,
-  playEntrance = false,
-  onEntranceComplete,
-  onDelete,
-  onEdit,
-  onMarkUnread,
-  onMarkRead,
-  onReply,
-  onToggleReaction,
-  profiles,
-  searchActiveMessageId,
-  searchMatchingMessageIds,
-  searchQuery,
-  threadUnreadCounts,
-  unfollowThreadById,
-  videoReviewContext,
-}: MessageRowItemProps) {
-  const { message, summary } = entry;
-  const canManage = canManageMessageForCurrentUser(
-    message,
-    currentPubkey,
-    profiles,
-  );
-  const canDelete = canManage && onDelete ? onDelete : undefined;
-  const canEdit = canManage && onEdit ? onEdit : undefined;
-
-  if (summary && onReply) {
-    const isHighlighted = message.id === highlightedMessageId;
-    return (
       <div
+        aria-hidden
         className={cn(
-          "group/message relative mx-1 mb-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
-          isHighlighted &&
-            "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
+          "pointer-events-none absolute inset-x-0 z-20",
+          channelChrome.stickyTimelineTop,
+          pinnedDay.label || pinnedDay.incomingLabel
+            ? "opacity-100"
+            : "opacity-0",
         )}
+        data-day-label={pinnedDay.label ?? undefined}
+        data-testid="message-timeline-sticky-day-divider"
       >
-        <MessageRow
-          channelId={channelId}
-          highlighted={false}
-          hoverBackground={false}
-          huddleMemberPubkeys={huddleMemberPubkeys}
-          huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-          isFollowingThread={
-            isFollowingThreadById
-              ? isFollowingThreadById(message.id)
-              : undefined
-          }
-          isUnread={isUnread}
-          isContinuation={isContinuation}
-          playEntrance={playEntrance}
-          onEntranceComplete={onEntranceComplete}
-          message={message}
-          onDelete={canDelete}
-          onEdit={canEdit}
-          onFollowThread={
-            followThreadById ? () => followThreadById(message.id) : undefined
-          }
-          onMarkRead={onMarkRead}
-          onMarkUnread={onMarkUnread}
-          onToggleReaction={onToggleReaction}
-          onReply={onReply}
-          onUnfollowThread={
-            unfollowThreadById
-              ? () => unfollowThreadById(message.id)
-              : undefined
-          }
-          profiles={profiles}
-          showDepthGuides={false}
-          videoReviewContext={videoReviewContext}
-        />
-        <MessageThreadSummaryRow
-          depth={message.depth}
-          message={message}
-          onOpenThread={onReply}
-          showDepthGuides={false}
-          summary={summary}
-          summaryIndentOffsetRem={-THREAD_REPLY_ROW_MARGIN_INLINE_REM}
-          unreadCount={threadUnreadCounts?.get(message.id)}
-        />
-        {footer}
+        <div className="invisible flex justify-center">
+          <DayDivider label={pinnedDay.label ?? ""} sticky={false} testId="" />
+        </div>
+        <div
+          className="absolute inset-x-0 top-0 flex flex-col"
+          data-testid="message-timeline-sticky-day-divider-content"
+          ref={pinnedDayLabelRef}
+        >
+          <DayDivider label={pinnedDay.label ?? ""} sticky={false} testId="" />
+          <DayDivider
+            label={pinnedDay.incomingLabel ?? ""}
+            sticky={false}
+            testId=""
+          />
+        </div>
       </div>
-    );
-  }
-
-  const isSearchMatch = searchMatchingMessageIds?.has(message.id) ?? false;
-  const isSearchActive = message.id === searchActiveMessageId;
-
-  return (
-    <div
-      className={cn(
-        "flex flex-col gap-1",
-        isFollowedByContinuation ? "pb-0" : "pb-2.5",
-      )}
-    >
-      <MessageRow
-        channelId={channelId}
-        highlighted={message.id === highlightedMessageId || isSearchActive}
-        huddleMemberPubkeys={huddleMemberPubkeys}
-        huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-        isContinuation={isContinuation}
-        isUnread={isUnread}
-        playEntrance={playEntrance}
-        onEntranceComplete={onEntranceComplete}
-        message={message}
-        onDelete={canDelete}
-        onEdit={canEdit}
-        onMarkRead={onMarkRead}
-        onMarkUnread={onMarkUnread}
-        onToggleReaction={onToggleReaction}
-        onReply={onReply}
-        profiles={profiles}
-        searchQuery={isSearchMatch ? searchQuery : undefined}
-        showDepthGuides={false}
-        videoReviewContext={videoReviewContext}
-      />
-      {footer}
     </div>
   );
 }

@@ -6,9 +6,10 @@ desktop_dir := "desktop"
 desktop_tauri_manifest := "desktop/src-tauri/Cargo.toml"
 web_dir := "web"
 
-# Opt-in mesh-llm. Off by default so `just dev`/`just staging` skip ~420 extra
-# crates + the llama.cpp native runtime build and stay fast to iterate on.
-# Turn on to test mesh compute features: `just mesh=1 dev` / `just mesh=1 staging`.
+# Opt-in mesh-llm. Off by default so `just dev`/`just staging`/`just production`
+# skip ~420 extra crates + the llama.cpp native runtime build and stay fast to
+# iterate on. Turn on to test mesh compute features: `just mesh=1 dev` /
+# `just mesh=1 staging` / `just mesh=1 production`.
 mesh := ""
 
 # Reset only the current standalone desktop instance before launch.
@@ -90,8 +91,17 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+# Run repo lint, formatting, and repository policy checks
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check file-size-check
+
+# Run the repository-wide differential file-size ratchet and its policy tests.
+# The ratchet inspects only files changed from the merge base, so this stays
+# cheap enough to run unconditionally without duplicating path filters.
+file-size-check:
+    node --test scripts/check-file-sizes-core.test.mjs
+    node desktop/scripts/check-file-sizes.mjs
+    node web/scripts/check-file-sizes.mjs
+    node mobile/scripts/check-file-sizes.mjs
 
 # Format all Rust code
 fmt:
@@ -119,7 +129,7 @@ desktop-check:
 
 # Fix desktop lint and format issues
 desktop-fix:
-    cd {{desktop_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{desktop_dir}} && pnpm exec biome check --write .
 
 # Run desktop TS helper unit tests
 desktop-test:
@@ -154,7 +164,11 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${SIDECARS[@]}"; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 
@@ -191,7 +205,7 @@ _ensure-migrations: _ensure-services
 
 # Run clippy on the desktop Tauri Rust crate
 desktop-tauri-clippy: _ensure-sidecar-stubs
-    cargo clippy --manifest-path {{desktop_tauri_manifest}} --all-targets -- -D warnings
+    cargo clippy --manifest-path {{desktop_tauri_manifest}} --workspace --all-targets -- -D warnings
 
 # Check the desktop Tauri Rust crate compiles
 desktop-tauri-check: _ensure-sidecar-stubs
@@ -199,23 +213,42 @@ desktop-tauri-check: _ensure-sidecar-stubs
 
 # Run desktop Tauri Rust unit tests
 desktop-tauri-test: _ensure-sidecar-stubs
-    cd desktop/src-tauri && cargo test
+    cd desktop/src-tauri && cargo test --workspace
 
-# Verify compiled-flag behavior under both compile states (clean + internal).
-# Runs the observer_archive focused test twice with independently supplied
-# expected values; build.rs rerun-if-env-changed triggers recompilation.
+# Run the native terminal latency gate explicitly on a known-idle host.
+# This is intentionally excluded from shared CI: scheduler contention makes a
+# wall-clock assertion flaky, and the release profile is the shipped shape.
+desktop-terminal-performance-test:
+    cargo test --manifest-path desktop/src-tauri/crates/buzz-terminal/Cargo.toml --release --test latency g3_renderer_acquire_stays_within_frame_budget -- --ignored --exact --nocapture
+
+# Verify compiled-flag behavior under both compile states (clean + capability set).
+# Runs the auto-connect and owner-only access focused tests twice with
+# independently supplied expected values; build.rs rerun-if-env-changed
+# triggers recompilation.
 desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     cd desktop/src-tauri
     echo "=== Clean build (no flag) → expect false ==="
-    env -u BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT \
-      BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=false \
-      cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
-    echo "=== Internal build (flag set) → expect true ==="
-    BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT=1 \
-      BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=true \
-      cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
+    env -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
+      cargo test --lib
+    env -u BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=false \
+      cargo test compiled_policy_matches_expected -- --ignored --nocapture
+    echo "=== Internal build (flags set) → expect true ==="
+    BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1 \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
+      cargo test --lib
+    BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
+      BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
+      cargo test compiled_policy_matches_expected -- --ignored --nocapture
     echo "Both compiled states verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
@@ -228,6 +261,9 @@ desktop-release-build target="aarch64-apple-darwin":
     mkdir -p desktop/src-tauri/binaries
     touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+    if [[ "$TARGET" != *windows* ]]; then
+        touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
+    fi
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
@@ -249,6 +285,10 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Run the deterministic desktop correctness smoke against an isolated local relay
+desktop-release-smoke:
+    ./scripts/run-desktop-release-smoke.sh
+
 # Run only the e2e specs changed vs origin/main (both projects) before pushing
 desktop-e2e-pre-push: _ensure-migrations
     git fetch origin main
@@ -266,8 +306,11 @@ test:
 # Run unit tests only (no infra needed)
 test-unit:
     #!/usr/bin/env bash
+    set -euo pipefail
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        cargo nextest run -p buzz-voice --lib
+        cargo nextest run -p buzz-cli
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
         # They guard the embedded-migrator invariant (exactly the consolidated
         # 0001; cutover/backfill stays an operator script, not startup state)
@@ -283,6 +326,20 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        # Kubernetes backend provider: the decision layers (state machine, GC
+        # planner, env precedence, naming, wire) are pure functions with a fake
+        # substrate, so they belong in the unit job. Enumerated explicitly
+        # because nothing in CI runs `cargo test --workspace` — workspace
+        # membership alone buys clippy/check, not a single executed test.
+        cargo nextest run -p buzz-backend-kubernetes
+        # buzz-agent model-capabilities corpus: the Rust half of the
+        # cross-language drift guard. `model_capabilities.rs` embeds
+        # scripts/model-capabilities.json + scripts/normative-corpus.json via
+        # include_str! and replays all 103 vectors as pure in-process tests (no
+        # infra). Enumerated explicitly because nothing in CI runs
+        # `cargo test --workspace`; without this step a manifest edit that
+        # diverges Rust from the corpus ships green.
+        cargo nextest run -p buzz-agent --lib
     else
         ./scripts/run-tests.sh unit
     fi
@@ -290,6 +347,15 @@ test-unit:
 # Run integration tests only (starts services if needed)
 test-integration:
     ./scripts/run-tests.sh integration
+
+# Regenerate the model-capability normative corpus from the production Rust
+# resolver. The corpus is a golden snapshot, never hand-edited: this runs the
+# `#[ignore]`d writer test in buzz-agent, which serializes `resolve()` over the
+# inputs-only question table to scripts/normative-corpus.json. Run this after
+# any model-capabilities.json edit, then commit the regenerated file. The
+# `corpus_matches_generated_snapshot` gate fails CI if the committed file drifts.
+regen-model-corpus:
+    cargo test -p buzz-agent --lib model_capabilities::tests::regen_corpus_file -- --ignored --exact
 
 # Buzz shared compute e2e: current desktop discovery/admission logic and
 # Playwright UI coverage.
@@ -319,7 +385,6 @@ mesh-dev-fresh:
 mesh-e2e-hardware:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p buzz-relay --example mesh_serve_client_smoke
 
 # Three isolated node processes: trusted member joins and infers; stranger is rejected.
@@ -327,14 +392,12 @@ mesh-e2e-hardware:
 mesh-e2e-admission:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p buzz-relay --example mesh_admission_smoke
 
 # Full hardware confidence suite: routing, owner admission, and real agent inference.
 mesh-e2e-confidence:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo build --release -p buzz-agent -p buzz-dev-mcp
     cargo run -p buzz-relay --example mesh_serve_client_smoke
     cargo run -p buzz-relay --example mesh_admission_smoke
@@ -420,10 +483,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
             fi
         done
     fi
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
-    if [[ -n "{{mesh}}" ]]; then
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
-    fi
+    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
     # Docker Desktop's forwarded MinIO port can stall under the deployment
     # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
     # the bounded profile already used by the relay test launcher.
@@ -467,10 +527,10 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+    for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
         cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
         chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
@@ -496,17 +556,25 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     pnpm install  # unconditional: staging must always start with a clean dep tree
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
-    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
+    # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
+    # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
+    # exe dir for executable buzz-backend-* files, so the non-executable stub that
+    # tauri dev copies next to the exe would hide the provider from "Run on".
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    STAGING_SIDECARS=(buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        STAGING_SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${STAGING_SIDECARS[@]}"; do
+        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     source ../scripts/instance-env.sh
@@ -515,6 +583,41 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting staging on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+
+# Run the desktop app against the production relay (installs deps + builds agent tools automatically)
+production *ARGS: bootstrap _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    pnpm install  # unconditional: production must always start with a clean dep tree
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    FEATURES=()
+    if [[ -n "{{mesh}}" ]]; then
+        FEATURES=(--features mesh-llm)
+    fi
+    # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
+    # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
+    # exe dir for executable buzz-backend-* files, so the non-executable stub that
+    # tauri dev copies next to the exe would hide the provider from "Run on".
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    PRODUCTION_SIDECARS=(buzz)
+    if [[ "$TARGET" != *windows* ]]; then
+        PRODUCTION_SIDECARS+=(buzz-backend-kubernetes)
+    fi
+    for bin in "${PRODUCTION_SIDECARS[@]}"; do
+        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
+    cd {{desktop_dir}}
+    export BUZZ_RELAY_URL="wss://buzz.block.builderlab.xyz"
+    source ../scripts/instance-env.sh
+    # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
+    # agent workers. Reap this instance's agents on exit as a backstop.
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
+    echo "Starting production on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop frontend dev server (port derived from worktree)
@@ -547,7 +650,7 @@ web-check:
 
 # Fix web lint and format issues
 web-fix:
-    cd {{web_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{web_dir}} && pnpm exec biome check --write .
 
 # Run web TypeScript checks
 web-typecheck:
@@ -579,17 +682,23 @@ mobile-fix:
 
 # Run mobile lint and format checks
 mobile-check:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze && node ./scripts/check-file-sizes.mjs
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
 
 # Run mobile tests
 mobile-test:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
 
-# Compile an unsigned Android debug APK
+# Regenerate the emoji dataset asset from desktop's emoji-mart install.
+# Output is committed — rerun after bumping @emoji-mart/data.
+mobile-emoji-data:
+    node {{mobile_dir}}/scripts/generate-emoji-data.mjs
+
+# Compile an unsigned Android debug APK (worktree-aware debug identity)
 mobile-build-android:
+    ./scripts/mobile-worktree-overrides.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
 
-# Run the mobile app on iOS simulator
+# Run the mobile app on iOS simulator (worktree-aware debug identity)
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -597,9 +706,14 @@ mobile-dev:
         open -a Simulator
         sleep 3
     fi
+    ./scripts/mobile-worktree-overrides.sh
     cd {{mobile_dir}}
     unset GIT_DIR GIT_WORK_TREE
     flutter run
+
+# Uninstall stale worktree-suffixed Buzz debug installs (production apps kept)
+mobile-clean:
+    ./scripts/mobile-worktree-clean.sh
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
@@ -638,14 +752,6 @@ get-next-patch-version:
 # Compute next relay patch version (e.g., 0.3.0 → 0.3.1)
 get-next-relay-patch-version:
     @python3 -c "v='$(just get-current-relay-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
-
-# Read the current mobile version from pubspec.yaml (strips the +build suffix)
-get-current-mobile-version:
-    @grep -m1 '^version: ' mobile/pubspec.yaml | sed -E 's/version: ([^+]*).*/\1/'
-
-# Compute next mobile patch version (e.g., 0.3.0 → 0.3.1)
-get-next-mobile-patch-version:
-    @python3 -c "v='$(just get-current-mobile-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
 
 # Update version in desktop package manifests and regenerate lockfiles
 bump-desktop-version version:
@@ -686,17 +792,7 @@ bump-relay-version version:
     cargo update -p buzz-relay
     echo "Bumped buzz-relay to {{ version }} and regenerated Cargo.lock"
 
-# Bump the mobile pubspec version and regenerate the lockfile
-bump-mobile-version version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # pubspec carries a `version: X.Y.Z+build`; preserve the `+build` convention
-    # (a literal `+1`, matching the desktop lane's prior behavior).
-    perl -i -pe 's/^version: .*/version: {{ version }}+1/' mobile/pubspec.yaml
-    (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
-    echo "Bumped mobile to {{ version }} and regenerated pubspec.lock"
-
-# Open or update the desktop release PR (signed desktop app)
+# Open or update the desktop release PR from an immutable origin/main snapshot
 release-desktop *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -706,7 +802,7 @@ release-desktop *ARGS:
     else
         VERSION="$ARG"
     fi
-    just _release-pr desktop "$VERSION"
+    scripts/prepare-desktop-release.sh "$VERSION"
 
 # Open or update the relay release PR (ghcr.io/block/buzz image)
 release-relay *ARGS:
@@ -720,22 +816,8 @@ release-relay *ARGS:
     fi
     just _release-pr relay "$VERSION"
 
-# Open or update the mobile release PR (Buzz mobile app)
-release-mobile *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ARG="{{ ARGS }}"
-    if [[ -z "$ARG" || "$ARG" == "patch" ]]; then
-        VERSION=$(just get-next-mobile-patch-version)
-    else
-        VERSION="$ARG"
-    fi
-    just _release-pr mobile "$VERSION"
-
-# Shared release-PR engine. One body, three lanes — the only lane-specific steps
-# are the version-bump command and the file/tag/changelog identifiers selected
-# in the `case` below. Everything else (git preflight, branch reset, changelog
-# generation, commit, push, PR open/edit) is identical across lanes.
+# Shared release-PR engine for desktop and relay. Mobile publishes immutable
+# candidate tags directly from remote main instead of using metadata-only PRs.
 _release-pr lane version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -766,16 +848,6 @@ _release-pr lane version:
             ADD_FILES=(crates/buzz-relay/Cargo.toml Cargo.lock crates/buzz-relay/CHANGELOG.md)
             LOG_PATHS=(crates/buzz-relay/ crates/buzz-core/ crates/buzz-db/ crates/buzz-auth/ crates/buzz-pubsub/ crates/buzz-search/ crates/buzz-audit/ crates/buzz-media/ crates/buzz-sdk/ crates/buzz-workflow/ crates/buzz-conformance/ migrations/)
             ARTIFACT="Buzz Relay" ;;
-        mobile)
-            BRANCH_PREFIX="mobile-release"
-            TAG_FETCH='mobile-v*'
-            TAG_MATCH='mobile-v[0-9]*'
-            TAG_EXCLUDE='mobile-v*-*'
-            TAG_PREFIX="mobile-v"
-            CHANGELOG="mobile/CHANGELOG.md"
-            ADD_FILES=(mobile/pubspec.yaml mobile/pubspec.lock mobile/CHANGELOG.md)
-            LOG_PATHS=(mobile/)
-            ARTIFACT="Buzz Mobile" ;;
         *)
             echo "Error: unknown release lane '{{ lane }}'"
             exit 1 ;;
@@ -816,7 +888,6 @@ _release-pr lane version:
     case "{{ lane }}" in
         desktop) just bump-desktop-version "$VERSION" ;;
         relay)   just bump-relay-version "$VERSION" ;;
-        mobile)  just bump-mobile-version "$VERSION" ;;
     esac
     # Generate the changelog from commits since this lane's last release tag.
     LAST_TAG=$(git describe --tags --abbrev=0 --match "$TAG_MATCH" --exclude "$TAG_EXCLUDE" 2>/dev/null || echo "")

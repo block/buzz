@@ -17,9 +17,14 @@ import {
   saveCommunities,
 } from "./communityStorage";
 import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
+import { removeUserLabelCacheForRelay } from "@/features/profile/lib/userLabelStorage";
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
 import { removeMessageSnapshotsForRelay } from "@/features/messages/lib/messageSnapshot";
 import { clearSavedCommunitySnapshot } from "@/features/agents/activeAgentTurnsStore";
+import {
+  clearCommunityDestinations,
+  removeCommunityDestination,
+} from "./communityNavigationStorage";
 
 export type UpdateCommunityResult =
   | { kind: "updated"; requiresReinit: boolean }
@@ -72,6 +77,59 @@ export function resolveCommunityUpdateResult(
   return { kind: "updated", requiresReinit: backendFieldsChanged };
 }
 
+/**
+ * Permute `communities` so that its order matches `orderedIds`.
+ *
+ * - Communities whose id appears in `orderedIds` are placed first, in the
+ *   order given by `orderedIds`.
+ * - Communities not mentioned in `orderedIds` (e.g. added after the drag
+ *   completed) are appended at the end in their original relative order.
+ *
+ * Pure and side-effect-free — extracted so it can be unit-tested without
+ * a DOM or React.
+ */
+export function applyCommunitiesOrder(
+  communities: Community[],
+  orderedIds: string[],
+): Community[] {
+  const byId = new Map(communities.map((c) => [c.id, c]));
+  const seen = new Set<string>();
+  const reordered: Community[] = [];
+
+  for (const id of orderedIds) {
+    const c = byId.get(id);
+    if (c && !seen.has(id)) {
+      reordered.push(c);
+      seen.add(id);
+    }
+  }
+
+  for (const c of communities) {
+    if (!seen.has(c.id)) {
+      reordered.push(c);
+    }
+  }
+
+  return reordered;
+}
+
+export type CommunityRemovalResult = {
+  communities: Community[];
+  activeId: string | null;
+};
+
+export function resolveCommunityRemoval(
+  communities: Community[],
+  activeId: string | null,
+  id: string,
+): CommunityRemovalResult {
+  const next = communities.filter((community) => community.id !== id);
+  return {
+    communities: next,
+    activeId: activeId === id ? (next[0]?.id ?? null) : activeId,
+  };
+}
+
 export type UseCommunitiesReturn = {
   communities: Community[];
   activeCommunity: Community | null;
@@ -90,6 +148,8 @@ export type UseCommunitiesReturn = {
       Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
     >,
   ) => UpdateCommunityResult;
+  /** Persist a new display order for the rail. IDs not in orderedIds keep their relative position at the end. */
+  reorderCommunities: (orderedIds: string[]) => void;
 };
 
 const CommunitiesContext = createContext<UseCommunitiesReturn | null>(null);
@@ -156,44 +216,46 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
 
   const clearCommunities = useCallback(() => {
     clearCommunityStorage();
+    clearCommunityDestinations();
     setCommunitiesState([]);
     setActiveId(null);
   }, []);
 
   const removeCommunity = useCallback(
     (id: string) => {
-      // GC self-profile caches for the removed community's relay. Mirror the
-      // updater guard (length > 1) so we only GC when removal will actually
-      // proceed. Runs outside the updater — updaters can execute twice under
+      const removed = communitiesRef.current.find(
+        (community) => community.id === id,
+      );
+      if (!removed) return;
+
+      // Relay membership is revoked by the caller before this local cleanup.
+      // Keep side effects outside the updater — updaters can execute twice under
       // React StrictMode.
-      if (communities.length > 1) {
-        const removed = communities.find((w) => w.id === id);
-        if (removed) {
-          removeSelfProfileCachesForRelay(removed.relayUrl);
-          removeChannelSnapshotForRelay(removed.relayUrl);
-          removeMessageSnapshotsForRelay(removed.relayUrl);
-          clearSavedCommunitySnapshot(id);
-        }
-      }
+      removeSelfProfileCachesForRelay(removed.relayUrl);
+      removeUserLabelCacheForRelay(removed.relayUrl);
+      removeChannelSnapshotForRelay(removed.relayUrl);
+      removeMessageSnapshotsForRelay(removed.relayUrl);
+      clearSavedCommunitySnapshot(id);
+      removeCommunityDestination(id);
 
       setCommunitiesState((prev) => {
-        // Never allow removing the last community
-        if (prev.length <= 1) {
-          return prev;
-        }
-        const next = prev.filter((w) => w.id !== id);
-        saveCommunities(next);
+        const result = resolveCommunityRemoval(prev, activeId, id);
+        if (result.communities.length === 0) {
+          clearCommunityStorage();
+          setActiveId(null);
+        } else {
+          saveCommunities(result.communities);
 
-        // If removing the active community, switch to first remaining
-        if (activeId === id && next.length > 0) {
-          saveActiveCommunityId(next[0].id);
-          setActiveId(next[0].id);
+          if (result.activeId !== activeId && result.activeId) {
+            saveActiveCommunityId(result.activeId);
+            setActiveId(result.activeId);
+          }
         }
 
-        return next;
+        return result.communities;
       });
     },
-    [activeId, communities],
+    [activeId],
   );
 
   const switchCommunity = useCallback(
@@ -242,6 +304,14 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     [activeId],
   );
 
+  const reorderCommunities = useCallback((orderedIds: string[]) => {
+    setCommunitiesState((prev) => {
+      const next = applyCommunitiesOrder(prev, orderedIds);
+      saveCommunities(next);
+      return next;
+    });
+  }, []);
+
   return {
     communities,
     activeCommunity,
@@ -252,5 +322,6 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     switchCommunity,
     reconnectCommunity,
     updateCommunity,
+    reorderCommunities,
   };
 }

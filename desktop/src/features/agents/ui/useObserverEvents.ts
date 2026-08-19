@@ -21,6 +21,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import {
   createArchivePagingState,
   applyChannelReset,
+  runHydrationLoop,
 } from "./archivePagingState";
 export type { ArchivePagingState } from "./archivePagingState";
 
@@ -88,7 +89,12 @@ export function useArchivedChannelEvents(
   return React.useSyncExternalStore(subscribeToStore, getSnapshot);
 }
 
-const ARCHIVED_EVENTS_PAGE_SIZE = 50;
+const ARCHIVED_EVENTS_PAGE_SIZE = 200;
+
+// Number of pages to load eagerly on panel open (before any scroll). Each page
+// is ARCHIVED_EVENTS_PAGE_SIZE frames; 10 pages = 2000 frames, which covers
+// agent turns that emit hundreds of frames (e.g. a full code-review turn ~900).
+const INITIAL_HYDRATION_BUDGET_PAGES = 10;
 
 /**
  * Load-older-on-scroll for archived observer frames, scoped to a single channel.
@@ -138,10 +144,13 @@ export function useLoadArchivedObserverEvents(
   // Reset per-channel paging state when channelId changes. Backfill state is
   // identity-level (not per-channel) and must NOT be reset here — the backfill
   // index covers all channels and only needs to run once per identity mount.
-  // Only the cursor, exhaustion flag, and fetching lock are channel-scoped.
+  // Only the cursor, exhaustion flag, fetching lock, channel label, and
+  // resetGeneration are channel-scoped. resetGeneration is incremented by
+  // applyChannelReset so in-flight reads from any prior reset (including
+  // A→B→A) detect staleness and discard their results.
   // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is the intentional reset key; ps is a stable ref excluded from deps by convention; setHasOlderArchived is a stable React state setter
   React.useEffect(() => {
-    applyChannelReset(ps);
+    applyChannelReset(ps, channelId);
     setHasOlderArchived(true);
   }, [channelId]);
 
@@ -259,7 +268,7 @@ export function useLoadArchivedObserverEvents(
     ps.backfillPromise = promise;
   }, [enabled, hasSubscription]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref; ps.isFetching/ps.cursor/ps.backfillPromise/ps.hasOlderArchived are read via the stable ref object, not reactive values
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref; all per-page state (isFetching, cursor, hasOlderArchived, resetGeneration) is read from the ref rather than React state, so this callback is intentionally stable across exhaustion/channel changes
   const fetchOlderArchived = React.useCallback(async () => {
     if (
       !enabled ||
@@ -267,10 +276,17 @@ export function useLoadArchivedObserverEvents(
       !hasSubscription ||
       !channelId ||
       ps.isFetching ||
-      !hasOlderArchived
+      !ps.hasOlderArchived
     ) {
       return;
     }
+
+    // Snapshot the reset generation at the start of this request. Every
+    // shared-state write below rechecks requestGeneration === ps.resetGeneration
+    // first. A mismatch means at least one channel switch occurred while we
+    // were awaiting async I/O — even A→B→A is detected because each switch
+    // increments resetGeneration. Channel ID is kept only as the query input.
+    const requestGeneration = ps.resetGeneration;
 
     // Await backfill completion before reading the channel index. This
     // guarantees the index is populated before the first paginated read, so
@@ -280,12 +296,21 @@ export function useLoadArchivedObserverEvents(
       await ps.backfillPromise;
     }
 
-    // Re-check after awaiting: hasOlderArchived might have been set false
-    // while we were waiting (e.g. subscription check failed).
-    if (!hasOlderArchived) {
+    // Re-check after awaiting: generation may have advanced (channel switched),
+    // archive exhausted, or another concurrent caller may have acquired the
+    // fetch lock while we were suspended on backfill. All three must be
+    // re-evaluated because any of them could have changed mid-await.
+    if (
+      !ps.hasOlderArchived ||
+      requestGeneration !== ps.resetGeneration ||
+      ps.isFetching
+    ) {
       return;
     }
 
+    // Acquire the fetch lock under this request's generation. The finally
+    // block only releases the lock if the generation still matches — so a stale
+    // in-flight request cannot clear the lock that belongs to a later reset.
     ps.isFetching = true;
     try {
       const before = ps.cursor ?? undefined;
@@ -293,6 +318,13 @@ export function useLoadArchivedObserverEvents(
         before: before ?? null,
         limit: ARCHIVED_EVENTS_PAGE_SIZE,
       });
+
+      // Discard result if the generation advanced while the Tauri read was in
+      // flight (channel switch, including A→B→A). The new channel will start
+      // its own read with a null cursor.
+      if (requestGeneration !== ps.resetGeneration) {
+        return;
+      }
 
       if (events.length > 0) {
         // Cursor = the last row in newest-first order = the oldest event on
@@ -306,6 +338,14 @@ export function useLoadArchivedObserverEvents(
         await ingestArchivedObserverEvents(events);
       }
 
+      // Re-check generation after ingestArchivedObserverEvents: ingestion
+      // decrypts each frame asynchronously and may take time. If a channel
+      // switch occurred during that await (including A→B→A), discard all
+      // remaining shared-state writes — exhaustion and React mirror.
+      if (requestGeneration !== ps.resetGeneration) {
+        return;
+      }
+
       // A short page means the archive is exhausted for this channel.
       if (events.length < ARCHIVED_EVENTS_PAGE_SIZE) {
         setHasOlderArchived(false);
@@ -314,9 +354,56 @@ export function useLoadArchivedObserverEvents(
     } catch (error) {
       console.error("[useLoadArchivedObserverEvents] fetch failed:", error);
     } finally {
-      ps.isFetching = false;
+      // Only release the fetch lock if this request still owns it. If the
+      // generation advanced (any channel switch including A→B→A), the new
+      // channel acquired its own lock — releasing here would steal it.
+      if (requestGeneration === ps.resetGeneration) {
+        ps.isFetching = false;
+      }
     }
-  }, [enabled, identityPubkey, hasSubscription, channelId, hasOlderArchived]);
+  }, [enabled, identityPubkey, hasSubscription, channelId]);
+
+  // Eager initial hydration: on panel open (or channel switch), load archive
+  // pages automatically until the budget is reached or the channel is exhausted.
+  // This makes archived history visible immediately without any scrolling.
+  //
+  // Runs when: enabled + subscription confirmed + channelId resolved +
+  // hydration not yet done for this channel. Respects `applyChannelReset`
+  // (which resets initialHydrationDone) so channel switches trigger a fresh
+  // pass. Uses fetchOlderArchived's existing lock/cursor/backfill-await
+  // machinery — no parallel state machine.
+  //
+  // fetchOlderArchived is now stable (it no longer captures hasOlderArchived
+  // from React state — it reads ps.hasOlderArchived from the ref), so it is
+  // safe to call from this effect without coupling the hydration lifecycle to
+  // React state identity changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref; initialHydrationDone is read from ps (not as a reactive dep) to avoid triggering re-runs; fetchOlderArchived is stable and intentionally omitted
+  React.useEffect(() => {
+    if (
+      !enabled ||
+      !identityPubkey ||
+      !hasSubscription ||
+      !channelId ||
+      ps.initialHydrationDone
+    ) {
+      return;
+    }
+
+    // Mark done immediately to prevent concurrent hydration loops. The loop
+    // runs asynchronously; the signal object handles mid-loop cancellation on
+    // channel switch (the cleanup fn sets signal.cancelled = true).
+    ps.initialHydrationDone = true;
+    const signal = { cancelled: false };
+    void runHydrationLoop(
+      ps,
+      fetchOlderArchived,
+      INITIAL_HYDRATION_BUDGET_PAGES,
+      signal,
+    );
+    return () => {
+      signal.cancelled = true;
+    };
+  }, [enabled, identityPubkey, hasSubscription, channelId]);
 
   return { fetchOlderArchived, hasOlderArchived };
 }

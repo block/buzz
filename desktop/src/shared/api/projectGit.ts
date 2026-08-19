@@ -9,6 +9,7 @@ import type {
   ProjectRepoPushResult,
   ProjectRepoSnapshot,
   ProjectRepoSyncStatus,
+  RelayEvent,
 } from "@/shared/api/types";
 import { invokeTauri, TauriInvokeError } from "@/shared/api/tauri";
 
@@ -116,6 +117,7 @@ type RawProjectRepoDiff = {
   files: RawProjectRepoDiffFile[];
   additions: number;
   deletions: number;
+  commit_body: string | null;
 };
 
 function fromRawProjectRepoSnapshot(
@@ -192,6 +194,7 @@ export async function getProjectRepoDiff(input: {
   return {
     additions: diff.additions,
     deletions: diff.deletions,
+    commitBody: diff.commit_body,
     files: diff.files.map((file) => ({
       path: file.path,
       additions: file.additions,
@@ -227,6 +230,7 @@ export async function getProjectLocalRepoDiff(input: {
   return {
     additions: diff.additions,
     deletions: diff.deletions,
+    commitBody: diff.commit_body,
     files: diff.files.map((file) => ({
       path: file.path,
       additions: file.additions,
@@ -593,6 +597,56 @@ export async function signProjectPullRequestReviewRequest(input: {
   await invokeTauri<void>("sign_project_pull_request_review_request", {
     input,
   });
+}
+
+export async function publishProjectOwnerAnnouncement(input: {
+  targetOwner: string;
+  kind: number;
+  content: string;
+  createdAt?: number;
+  tags: string[][];
+}): Promise<{ event: RelayEvent; publicationError: string | null }> {
+  const result = await invokeTauri<{
+    event: string;
+    publication_error: string | null;
+  }>("publish_project_owner_announcement", { input });
+  return {
+    event: JSON.parse(result.event) as RelayEvent,
+    publicationError: result.publication_error,
+  };
+}
+
+export async function signProjectIssueAssignment(input: {
+  targetOwner: string;
+  repoAddress: string;
+  issueId: string;
+  assignees: string[];
+  assigneeLabel: string;
+  createdAt: number;
+}): Promise<void> {
+  await invokeTauri<void>("sign_project_issue_assignment", { input });
+}
+
+export async function signProjectIssueUnassignment(input: {
+  targetOwner: string;
+  repoAddress: string;
+  issueId: string;
+  assignees: string[];
+  assigneeLabel: string;
+  createdAt: number;
+}): Promise<void> {
+  await invokeTauri<void>("sign_project_issue_unassignment", { input });
+}
+
+export async function signProjectPullRequestStatus(input: {
+  targetOwner: string;
+  repoAddress: string;
+  pullRequestId: string;
+  pullRequestAuthor: string;
+  status: "open" | "draft" | "closed";
+  createdAt: number;
+}): Promise<void> {
+  await invokeTauri<void>("sign_project_pull_request_status", { input });
 }
 
 export async function publishProjectPullRequestMergedStatus(input: {

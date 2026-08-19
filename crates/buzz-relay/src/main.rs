@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    EnvFilter::new(rust_log.unwrap_or("buzz_relay=info"))
+}
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
@@ -13,7 +17,7 @@ use buzz_db::{Db, DbConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
-use buzz_relay::config::Config;
+use buzz_relay::config::{Config, MAX_DRAIN_JITTER_MS};
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
@@ -98,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
     // spans under the correct service identity.
     let resource = telemetry::service_resource();
     let tracer_init = telemetry::try_init_tracer(resource.clone());
+    let otel_enabled = matches!(&tracer_init, telemetry::TracerInit::Enabled(_));
     let otel_layer = match &tracer_init {
         telemetry::TracerInit::Enabled(p) => {
             use opentelemetry::trace::TracerProvider as _;
@@ -105,11 +110,26 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    let trace_context_lookup = telemetry::TraceContextLookup::default();
+    let trace_context_lookup_layer = otel_enabled.then(|| {
+        trace_context_lookup
+            .clone()
+            .with_filter(tracing_subscriber::filter::LevelFilter::OFF)
+    });
 
     tracing_subscriber::registry()
-        .with(fmt::layer().json().flatten_event(true))
-        .with(EnvFilter::from_default_env().add_directive("buzz_relay=info".parse()?))
-        .with(otel_layer)
+        .with(
+            fmt::layer()
+                .json()
+                .event_format(trace_context_lookup.json_formatter(otel_enabled))
+                .with_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref())),
+        )
+        .with(otel_layer.map(|layer| {
+            layer.with_filter(telemetry::otel_env_filter(
+                std::env::var("BUZZ_OTEL_FILTER").ok().as_deref(),
+            ))
+        }))
+        .with(trace_context_lookup_layer)
         .init();
 
     // Log any exporter-build failure now that the subscriber is installed.
@@ -146,6 +166,9 @@ async fn main() -> anyhow::Result<()> {
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
+        replica_read_max_age_ms: config.replica_read_max_age_ms,
+        max_connections: config.db_pool_size,
+        read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
@@ -153,7 +176,11 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     if db.has_read_pool() {
-        info!("Postgres connected (writer + read replica)");
+        info!("Postgres connected (writer + lazy read replica pool)");
+        // Reader-down at boot must not crash or block the relay; this warn-only
+        // ping is the sole boot-time visibility that the replica is unreachable
+        // (the lazy pool with min_connections=0 dials nothing until first use).
+        db.spawn_read_pool_boot_ping();
     } else {
         info!("Postgres connected");
     }
@@ -173,6 +200,12 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
     }
+
+    db.validate_deletion_serving_catalog().await.map_err(|e| {
+        error!("Community deletion serving-fence validation failed: {e}");
+        anyhow::anyhow!("Community deletion serving fence is unsafe: {e}")
+    })?;
+    info!("Community deletion serving fences verified");
 
     // Freshness fence probe: cursor pages route to the replica only for
     // history the probe has verified as fully replayed. Deliberately AFTER
@@ -442,6 +475,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
         &state.config,
         state.redis_pool.clone(),
+        state.db.clone(),
         &state.relay_keypair,
         Arc::clone(&state.shutting_down),
     )
@@ -978,6 +1012,12 @@ async fn main() -> anyhow::Result<()> {
                             metrics::gauge!("buzz_db_replica_fence_open").set(0.0);
                         }
                     }
+                    // Probe liveness, ungated by staleness: how long since
+                    // the probe last committed a heartbeat token.
+                    if let Some(age) = pool_state.db.fence().heartbeat_age() {
+                        metrics::gauge!("buzz_db_replica_heartbeat_age_seconds")
+                            .set(age.as_secs_f64());
+                    }
                 }
 
                 let rs = pool_state.redis_pool.status();
@@ -985,6 +1025,24 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
                 metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
                 metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+
+                let deletion_store = pool_state.db.deletion_store();
+                match deletion_store.reap_expired_serving_write_leases(1000).await {
+                    Ok(reaped) => metrics::counter!("buzz_deletion_serving_leases_reaped_total")
+                        .increment(reaped),
+                    Err(error) => tracing::warn!(%error, "serving-lease reaper failed"),
+                }
+                match deletion_store.serving_lease_stats().await {
+                    Ok(stats) => {
+                        metrics::gauge!("buzz_deletion_serving_leases_active")
+                            .set(stats.active as f64);
+                        metrics::gauge!("buzz_deletion_serving_leases_expired")
+                            .set(stats.expired as f64);
+                        metrics::gauge!("buzz_deletion_serving_leases_dead_tuples")
+                            .set(stats.dead_tuples as f64);
+                    }
+                    Err(error) => tracing::warn!(%error, "serving-lease metrics failed"),
+                }
             }
         });
     }
@@ -1060,6 +1118,52 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod env_filter_tests {
+    use super::log_env_filter;
+    use buzz_relay::telemetry::otel_env_filter;
+    use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn unset_enables_datastore_only_for_otel_filter() {
+        let logs = tracing_subscriber::registry().with(log_env_filter(None));
+        tracing::subscriber::with_default(logs, || {
+            assert!(!tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "buzz_relay", tracing::Level::INFO));
+        });
+
+        let otel = tracing_subscriber::registry().with(otel_env_filter(None));
+        tracing::subscriber::with_default(otel, || {
+            assert!(tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+        });
+    }
+
+    #[test]
+    fn explicit_datastore_off_is_preserved_alone() {
+        assert_eq!(
+            otel_env_filter(Some("buzz_datastore=off")).to_string(),
+            "buzz_datastore=off"
+        );
+    }
+
+    #[test]
+    fn explicit_datastore_debug_is_preserved_alone() {
+        assert_eq!(
+            otel_env_filter(Some("buzz_datastore=debug")).to_string(),
+            "buzz_datastore=debug"
+        );
+    }
+
+    #[test]
+    fn log_and_otel_filters_are_configured_independently() {
+        assert_eq!(log_env_filter(Some("warn")).to_string(), "warn");
+        assert_eq!(
+            otel_env_filter(Some("buzz_relay=debug")).to_string(),
+            "buzz_relay=debug"
+        );
+    }
+}
+
 async fn run_community_revalidator(
     state: Arc<AppState>,
     period: std::time::Duration,
@@ -1110,6 +1214,37 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// │         → graceful drain (30s) → exit                   │
 /// └─────────────────────────────────────────────────────────┘
 /// ```
+///
+/// ## Shutdown budget
+///
+/// The full teardown, measured from SIGTERM, is bounded as follows:
+///
+/// 1. `5s` grace. Readiness returns 503 immediately, then the process
+///    sleeps 5 seconds so Kubernetes stops routing new traffic before any
+///    listener closes.
+/// 2. `GRACEFUL_DRAIN_TIMEOUT` (`30s`) hard drain. Started at the end of the
+///    grace, this backstops the whole drain and force-exits the process if
+///    exceeded. It bounds everything after the grace, not the grace itself.
+///
+/// A single WebSocket can therefore stay open, from SIGTERM, for up to:
+///
+/// ```text
+///   5s grace  +  up to 20s jitter  +  up to 5s close-frame ack  =  30s
+///   (fixed)      (MAX_DRAIN_JITTER_MS)  (RESTART_CLOSE_ACK_TIMEOUT)
+/// ```
+///
+/// The 5s grace runs before the 30s hard-drain clock starts, so the jitter
+/// (capped at [`buzz_relay::config::MAX_DRAIN_JITTER_MS`] = 20s) plus the
+/// per-connection close-frame ack wait (`RESTART_CLOSE_ACK_TIMEOUT` = 5s in
+/// `state.rs`) sum to 25s and stay inside the 30s hard drain. Total worst
+/// case from SIGTERM to forced exit is 5s + 30s = 35s. Both fit inside the
+/// chart's `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`),
+/// which leaves headroom but assumes no `preStop` hook adds further delay.
+/// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default) sockets close
+/// all-at-once right after the grace, so the per-socket delay collapses to
+/// roughly the 5s grace plus the ack wait.
+const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn serve(
     router: axum::Router,
     health_router: axum::Router,
@@ -1127,8 +1262,37 @@ async fn serve(
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let shutdown_flag = Arc::clone(&state.shutting_down);
+    let drain_conn_manager = Arc::clone(&state.conn_manager);
+    let drain_jitter_ms = state.config.drain_jitter_ms;
     let tx = shutdown_tx.clone();
-    tokio::spawn(async move {
+    // TODO(coverage): `serve`'s shutdown wiring has no automated test. The
+    // jittered drain helper (`ConnectionManager::drain_all_jittered`) is
+    // covered in `state.rs`, but coverage of the helper is not coverage of
+    // its use here: the three wiring facts below are currently unguarded, and
+    // mutating any one of them leaves the suite green.
+    //   1. Jitter dispatch: `drain_jitter_ms == 0` must pick `drain_all`, and
+    //      a non-zero value must pick `drain_all_jittered(drain_jitter_ms)`.
+    //      A mutant that inverts this condition ships jitter-off in prod.
+    //   2. The shutdown handle must be awaited before the abort. Dropping the
+    //      `shutdown_handle.await` (both the UDS and TCP-only return paths) is
+    //      the exact shape of the previously shipped detached-timer bug,
+    //      relocated from the helper to the call site: the runtime can exit
+    //      before delayed closes flush, so no client sees a 1012.
+    //   3. `shutdown_tx.send(true)` must reach every listener's
+    //      `with_graceful_shutdown` future, on both the UDS and TCP-only paths.
+    //
+    // A focused test would refactor the drain/dispatch decision and the
+    // listener-shutdown fan-out into a small seam that does not need a bound
+    // socket or a real SIGTERM. One shape: extract the body of this spawned
+    // task into a `run_graceful_shutdown(state, shutdown_tx)` fn parameterised
+    // over a signal future and a clock, inject a fake `ConnectionManager`
+    // (or a trait over `drain_all` / `drain_all_jittered`) that records which
+    // path ran, drive it with `tokio::time` paused, and assert: (a) the right
+    // drain path ran for jitter 0 vs non-zero, (b) the drain future completed
+    // before the abort fired, and (c) each subscribed `watch` receiver
+    // observed `true`. This keeps the test off real ports and off wall-clock
+    // sleeps. Not implemented here. This comment records the plan only.
+    let shutdown_handle = tokio::spawn(async move {
         shutdown_signal().await;
         shutdown_flag.store(true, Ordering::Relaxed);
         info!("Shutdown signal received — readiness now returns 503");
@@ -1136,10 +1300,31 @@ async fn serve(
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         info!("Starting graceful drain (30s timeout)");
         let _ = tx.send(true);
-        // Hard timeout: force exit if connections don't drain within 30s.
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        tracing::error!("Drain timeout exceeded — forcing exit");
-        std::process::exit(1);
+        // Keep the original process-level backstop alive while listener and
+        // upgraded-socket shutdown proceeds. The caller aborts it only after
+        // Axum and the owned jitter drain have both completed.
+        let hard_shutdown = tokio::spawn(async {
+            tokio::time::sleep(GRACEFUL_DRAIN_TIMEOUT).await;
+            tracing::error!("Drain timeout exceeded — forcing exit");
+            std::process::exit(1);
+        });
+        let hard_shutdown_abort = hard_shutdown.abort_handle();
+        // Stop accepting first, then close every live socket. Jitter off (the
+        // default) uses the original synchronous all-at-once drain; jitter on
+        // retains ownership of every delayed close until its 1012 frame has
+        // been flushed and acknowledged (or its send loop cancelled).
+        let closed = if drain_jitter_ms == 0 {
+            drain_conn_manager.drain_all()
+        } else {
+            drain_conn_manager.drain_all_jittered(drain_jitter_ms).await
+        };
+        info!(
+            connections = closed,
+            jitter_ms = drain_jitter_ms,
+            max_jitter_ms = MAX_DRAIN_JITTER_MS,
+            "Signalled restart close to all live WebSocket connections"
+        );
+        hard_shutdown_abort
     });
 
     let tcp_listener = tokio::net::TcpListener::bind(&config.bind_addr)
@@ -1187,7 +1372,11 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("TCP server error: {e}"))?;
 
+        let hard_shutdown = shutdown_handle
+            .await
+            .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
         uds_handle.abort();
+        hard_shutdown.abort();
         return Ok(());
     }
 
@@ -1208,6 +1397,10 @@ async fn serve(
     .await
     .map_err(|e| anyhow::anyhow!("Server error: {e}"))?;
 
+    let hard_shutdown = shutdown_handle
+        .await
+        .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
+    hard_shutdown.abort();
     Ok(())
 }
 
@@ -1414,6 +1607,20 @@ async fn run_usage_metrics_tick(
             warn!("Usage metrics leader demoting: DB collection failed");
             *leader = None;
             return Err(error);
+        }
+        let invite_retention_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        match state
+            .db
+            .reap_expired_relay_invites(invite_retention_cutoff)
+            .await
+        {
+            Ok(deleted) if deleted > 0 => {
+                info!(deleted, "reaped expired relay invites");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "failed to reap expired relay invites");
+            }
         }
         run_storage_sweep_tick(state, emission_scope, &host_map).await;
     }

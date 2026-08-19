@@ -3,9 +3,11 @@ import { toast } from "sonner";
 
 import {
   type Project,
+  type Repository,
   useProjectPullRequestsQuery,
   useRepoStateQuery,
 } from "@/features/projects/hooks";
+import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useCreateProjectPullRequestMutation } from "@/features/projects/pullRequestMutations";
 import { useProjectRepoSyncStatusQuery } from "@/features/projects/repoSyncHooks";
 
@@ -25,61 +27,79 @@ export function CreatePullRequestDialog({
   reposDir,
 }: {
   initialProjectId?: string;
-  onCreated: (project: Project, pullRequestId: string) => void | Promise<void>;
+  onCreated: (
+    project: Project,
+    repository: Repository,
+    pullRequestId: string,
+  ) => void | Promise<void>;
   onOpenChange: (open: boolean) => void;
   open: boolean;
   projects: Project[];
   reposDir?: string | null;
 }) {
+  const repositoryOptions = React.useMemo(
+    () =>
+      projects.flatMap((project) =>
+        project.repositories.map((repository) => ({ project, repository })),
+      ),
+    [projects],
+  );
   const initialProject =
     projects.find((project) => project.id === initialProjectId) ?? projects[0];
-  const [projectId, setProjectId] = React.useState(initialProject?.id ?? "");
-  const project =
-    projects.find((candidate) => candidate.id === projectId) ?? initialProject;
-  const repoStateQuery = useRepoStateQuery(project);
-  const pullRequestsQuery = useProjectPullRequestsQuery(project);
+  const initialRepository = selectProjectRepository(initialProject, null);
+  const [repositoryId, setRepositoryId] = React.useState(
+    initialRepository?.id ?? "",
+  );
+  const selection =
+    repositoryOptions.find(
+      (candidate) => candidate.repository.id === repositoryId,
+    ) ?? repositoryOptions[0];
+  const project = selection?.project;
+  const repository = selection?.repository;
+  const repoStateQuery = useRepoStateQuery(repository);
+  const pullRequestsQuery = useProjectPullRequestsQuery(repository);
   const initialSyncQuery = useProjectRepoSyncStatusQuery(
-    project,
+    repository,
     reposDir,
-    project?.defaultBranch,
+    repository?.defaultBranch,
   );
   const branchOptions = React.useMemo(() => {
     const names = [
-      project?.defaultBranch,
+      repository?.defaultBranch,
       ...(repoStateQuery.data?.branches.map((branch) => branch.name) ?? []),
       initialSyncQuery.data?.localBranch,
     ].filter((name): name is string => Boolean(name));
     return [...new Set(names)];
   }, [
     initialSyncQuery.data?.localBranch,
-    project?.defaultBranch,
+    repository?.defaultBranch,
     repoStateQuery.data?.branches,
   ]);
   const [targetBranch, setTargetBranch] = React.useState(
-    project?.defaultBranch ?? "",
+    repository?.defaultBranch ?? "",
   );
   const [sourceBranch, setSourceBranch] = React.useState("");
   const sourceSyncQuery = useProjectRepoSyncStatusQuery(
-    project,
+    repository,
     reposDir,
     sourceBranch || null,
     targetBranch || null,
   );
-  const createMutation = useCreateProjectPullRequestMutation(project);
+  const createMutation = useCreateProjectPullRequestMutation(repository);
 
   React.useEffect(() => {
     if (!open) return;
     const nextProject =
       projects.find((candidate) => candidate.id === initialProjectId) ??
       projects[0];
-    setProjectId(nextProject?.id ?? "");
+    setRepositoryId(selectProjectRepository(nextProject, null)?.id ?? "");
   }, [initialProjectId, open, projects]);
 
   React.useEffect(() => {
-    if (!project) return;
-    setTargetBranch(project.defaultBranch);
+    if (!repository) return;
+    setTargetBranch(repository.defaultBranch);
     setSourceBranch("");
-  }, [project]);
+  }, [repository]);
 
   React.useEffect(() => {
     if (
@@ -104,9 +124,9 @@ export function CreatePullRequestDialog({
     (pullRequest) =>
       (pullRequest.status === "Open" || pullRequest.status === "Draft") &&
       pullRequest.branchName === sourceBranch &&
-      (pullRequest.targetBranch ?? project?.defaultBranch) === targetBranch,
+      (pullRequest.targetBranch ?? repository?.defaultBranch) === targetBranch,
   );
-  const selectionError = !project
+  const selectionError = !repository
     ? "Choose a repository."
     : !targetBranch
       ? "Choose a base branch."
@@ -120,12 +140,12 @@ export function CreatePullRequestDialog({
               ? "The compare branch must be pushed before opening a pull request."
               : null;
   const description =
-    project && sourceBranch && targetBranch
-      ? `${project.name}: ${sourceBranch} → ${targetBranch}${sourceCommit ? ` at ${sourceCommit.slice(0, 7)}` : ""}`
+    repository && sourceBranch && targetBranch
+      ? `${repository.name}: ${sourceBranch} → ${targetBranch}${sourceCommit ? ` at ${sourceCommit.slice(0, 7)}` : ""}`
       : "Choose a repository and branches to compare.";
 
   async function handleCreate(input: CreatePullRequestDialogInput) {
-    if (!project || !sourceCommit || selectionError) {
+    if (!project || !repository || !sourceCommit || selectionError) {
       throw new Error(
         selectionError ?? "Pull request branches are incomplete.",
       );
@@ -139,7 +159,7 @@ export function CreatePullRequestDialog({
       reviewers: [],
     });
     toast.success("Pull request created.");
-    await onCreated(project, pullRequestId);
+    await onCreated(project, repository, pullRequestId);
   }
 
   return (
@@ -165,12 +185,17 @@ export function CreatePullRequestDialog({
             className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm font-normal outline-hidden focus:ring-1 focus:ring-ring"
             data-testid="create-pull-request-repository"
             disabled={createMutation.isPending}
-            onChange={(event) => setProjectId(event.target.value)}
-            value={project?.id ?? ""}
+            onChange={(event) => setRepositoryId(event.target.value)}
+            value={repository?.id ?? ""}
           >
-            {projects.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                {candidate.name}
+            {repositoryOptions.map((candidate) => (
+              <option
+                key={candidate.repository.id}
+                value={candidate.repository.id}
+              >
+                {candidate.project.repositories.length > 1
+                  ? `${candidate.project.name} / ${candidate.repository.name}`
+                  : candidate.project.name}
               </option>
             ))}
           </select>

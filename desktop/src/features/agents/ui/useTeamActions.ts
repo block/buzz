@@ -215,6 +215,7 @@ export function useTeamActions(
         id: team.id,
         name: team.name,
         description: team.description ?? "",
+        instructions: team.instructions ?? undefined,
         personaIds: [...team.personaIds],
       },
     });

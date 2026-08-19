@@ -283,6 +283,7 @@ mod tests {
             runtime_pid: None,
             backend: BackendKind::Local,
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -301,12 +302,15 @@ mod tests {
             name_pool: vec![],
             is_builtin: false,
             is_active: true,
+            shared: false,
             source_team: Some("SENTINEL_SOURCE_TEAM".to_string()), // MUST NOT appear
             source_team_persona_slug: Some("SENTINEL_SLUG".to_string()), // MUST NOT appear
             definition_respond_to: None,
+            catalog_source: None,
             definition_respond_to_allowlist: vec![],
             definition_parallelism: None,
             relay_mesh: None,
+            effort_level: None,
         }
     }
 

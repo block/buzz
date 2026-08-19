@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -18,6 +20,52 @@ val uploadSigningValues =
     )
 val missingUploadSigningValues = uploadSigningValues.filterValues { it.isNullOrBlank() }.keys
 val hasUploadSigning = missingUploadSigningValues.isEmpty()
+
+// Worktree-aware debug identity (gitignored, written by
+// scripts/mobile-worktree-overrides.sh): debug builds from a git worktree get a
+// branch-labelled app name and a unique applicationId suffix so builds from
+// multiple worktrees install side by side. Release builds never read this.
+val worktreePropsFile = rootProject.file("worktree.properties")
+val worktreeProps =
+    Properties().apply {
+        if (worktreePropsFile.isFile) worktreePropsFile.inputStream().use { load(it) }
+    }
+// Optional gitignored developer overrides are loaded after the generated
+// worktree values. They are consumed only by the debug build type below, so a
+// long-lived device test build can keep a stable, descriptive local identity
+// without changing release/profile or being overwritten by the worktree script.
+val appOverridesFile = rootProject.file("AppOverrides.properties")
+val appOverrides =
+    Properties().apply {
+        if (appOverridesFile.isFile) appOverridesFile.inputStream().use { load(it) }
+    }
+val worktreeLabel = worktreeProps.getProperty("label")?.takeIf { it.isNotBlank() }
+if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+"""))) {
+    throw GradleException(
+        "worktree.properties label must match [A-Za-z0-9._-]+ (safe for string " +
+            "resources), got: " + worktreeLabel,
+    )
+}
+val worktreeIdSuffix =
+    worktreeProps.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
+val debugIdSuffix =
+    appOverrides.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
+        ?: worktreeIdSuffix
+if (debugIdSuffix != null && !debugIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*"""))) {
+    throw GradleException(
+        "debug applicationIdSuffix must match \\.[a-z][a-z0-9_]*, got: " +
+            debugIdSuffix,
+    )
+}
+val debugAppName = appOverrides.getProperty("appName")?.takeIf { it.isNotBlank() }
+if (
+    debugAppName != null &&
+        !debugAppName.matches(Regex("""[A-Za-z0-9][A-Za-z0-9 ._()\-]{0,39}"""))
+) {
+    throw GradleException(
+        "debug appName must be 1-40 resource-safe characters, got: " + debugAppName,
+    )
+}
 
 // Release signing modes:
 //   - "upload-keystore" (default): sign with the CI-vended upload keystore;
@@ -64,6 +112,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        resValue("string", "app_name", "Buzz")
     }
 
     signingConfigs {
@@ -78,6 +127,18 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Only debug builds take the worktree identity; release/profile
+            // keep the production applicationId and label.
+            if (debugIdSuffix != null) {
+                applicationIdSuffix = debugIdSuffix
+            }
+            if (debugAppName != null) {
+                resValue("string", "app_name", debugAppName)
+            } else if (worktreeLabel != null) {
+                resValue("string", "app_name", "Buzz ($worktreeLabel)")
+            }
+        }
         release {
             if (hasUploadSigning) {
                 signingConfig = signingConfigs.getByName("upload")
@@ -87,6 +148,8 @@ android {
 }
 
 dependencies {
+    implementation("androidx.appcompat:appcompat:1.6.1")
+
     testImplementation(kotlin("test"))
 
     androidTestImplementation(kotlin("test"))

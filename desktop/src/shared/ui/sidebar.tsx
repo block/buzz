@@ -24,7 +24,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
-
 const SIDEBAR_COOKIE_NAME = "sidebar_state";
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 const SIDEBAR_WIDTH_STORAGE_KEY = "buzz-sidebar-width";
@@ -37,7 +36,8 @@ const SIDEBAR_WIDTH_MAX = 420;
 const SIDEBAR_WIDTH_MOBILE = "288px";
 const SIDEBAR_WIDTH_ICON = "48px";
 const SIDEBAR_KEYBOARD_SHORTCUT = "s";
-
+// Increases button hit areas on mobile without changing their layout.
+const MOBILE_ACTION_HIT_AREA = "after:absolute after:-inset-2 after:md:hidden";
 type SidebarContextProps = {
   state: "expanded" | "collapsed";
   open: boolean;
@@ -52,7 +52,6 @@ type SidebarContextProps = {
   setSidebarWidth: (width: number | ((width: number) => number)) => void;
   toggleSidebar: () => void;
 };
-
 const SidebarContext = React.createContext<SidebarContextProps | null>(null);
 
 function useSidebar() {
@@ -133,7 +132,6 @@ function readSidebarWidth() {
     ? clampSidebarWidth(storedWidth)
     : SIDEBAR_WIDTH_DEFAULT;
 }
-
 const SidebarProvider = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"div"> & {
@@ -220,10 +218,8 @@ const SidebarProvider = React.forwardRef<
       return () => window.removeEventListener("keydown", handleKeyDown);
     }, [toggleSidebar]);
 
-    // We add a state so that we can do data-state="expanded" or "collapsed".
-    // This makes it easier to style the sidebar with Tailwind classes.
+    // Expose semantic state so Tailwind descendants can style both modes.
     const state = open ? "expanded" : "collapsed";
-
     const contextValue = React.useMemo<SidebarContextProps>(
       () => ({
         state,
@@ -255,7 +251,7 @@ const SidebarProvider = React.forwardRef<
 
     return (
       <SidebarContext.Provider value={contextValue}>
-        <TooltipProvider delayDuration={0}>
+        <TooltipProvider>
           <div
             style={
               {
@@ -351,7 +347,7 @@ const Sidebar = React.forwardRef<
         data-variant={variant}
         data-side={side}
       >
-        {/* This is what handles the sidebar gap on desktop */}
+        {/* Sidebar gap on desktop; the offcanvas sibling below also goes invisible, else it paints over the community rail past the overflow-visible shell. */}
         <div
           className={cn(
             "relative w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear",
@@ -365,8 +361,8 @@ const Sidebar = React.forwardRef<
         />
         <div
           className={cn(
-            "absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear md:flex",
-            "group-data-[resizing=true]:transition-none",
+            "absolute inset-y-0 z-10 hidden h-full w-(--sidebar-width) transition-[left,right,width,visibility] duration-200 ease-linear md:flex",
+            "group-data-[resizing=true]:transition-none group-data-[collapsible=offcanvas]:invisible",
             side === "left"
               ? "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]"
               : "right-0 group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)]",
@@ -374,6 +370,7 @@ const Sidebar = React.forwardRef<
               ? "p-[8px] group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)_+_18px)]"
               : "group-data-[collapsible=icon]:w-(--sidebar-width-icon)",
             className,
+            "group-data-[collapsible=offcanvas]:pointer-events-none",
           )}
           {...props}
         >
@@ -381,7 +378,12 @@ const Sidebar = React.forwardRef<
             data-sidebar="sidebar"
             className="flex h-full w-full flex-col bg-sidebar group-data-[variant=sidebar]:pr-px group-data-[variant=floating]:rounded-lg group-data-[variant=floating]:border group-data-[variant=floating]:border-sidebar-border group-data-[variant=floating]:shadow"
           >
-            {children}
+            <div
+              className="flex h-full w-full origin-top flex-col transition-[opacity,scale,translate] duration-200 ease-linear motion-reduce:transition-none motion-reduce:duration-0 group-data-[collapsible=offcanvas]:translate-x-6 group-data-[collapsible=offcanvas]:scale-95 group-data-[collapsible=offcanvas]:opacity-0"
+              data-sidebar-transition-content
+            >
+              {children}
+            </div>
           </div>
         </div>
       </div>
@@ -423,7 +425,6 @@ const SidebarRail = React.forwardRef<
   (
     {
       className,
-      onClick,
       onPointerCancel,
       onPointerDown,
       onPointerMove,
@@ -438,7 +439,6 @@ const SidebarRail = React.forwardRef<
       isRailDisabled,
       sidebarWidth,
       state,
-      toggleSidebar,
     } = useSidebar();
     const resizeStateRef = React.useRef<{
       currentWidth: number;
@@ -451,8 +451,6 @@ const SidebarRail = React.forwardRef<
       startWidth: number;
       startX: number;
     } | null>(null);
-    const suppressClickRef = React.useRef(false);
-
     const finishResize = React.useCallback(
       (event: React.PointerEvent<HTMLButtonElement>) => {
         const resizeState = resizeStateRef.current;
@@ -468,13 +466,6 @@ const SidebarRail = React.forwardRef<
         document.body.style.userSelect = resizeState.previousUserSelect;
         setIsResizing(false);
         resizeStateRef.current = null;
-
-        if (resizeState.hasDragged) {
-          suppressClickRef.current = true;
-          window.requestAnimationFrame(() => {
-            suppressClickRef.current = false;
-          });
-        }
       },
       [setIsResizing],
     );
@@ -483,25 +474,9 @@ const SidebarRail = React.forwardRef<
       <button
         ref={ref}
         data-sidebar="rail"
-        aria-label="Resize or toggle sidebar"
+        aria-label="Resize sidebar"
         tabIndex={-1}
-        disabled={isRailDisabled}
-        onClick={(event) => {
-          if (isRailDisabled) {
-            return;
-          }
-
-          if (suppressClickRef.current) {
-            event.preventDefault();
-            event.stopPropagation();
-            return;
-          }
-
-          onClick?.(event);
-          if (!event.defaultPrevented) {
-            toggleSidebar();
-          }
-        }}
+        disabled={isRailDisabled || state !== "expanded"}
         onPointerCancel={(event) => {
           onPointerCancel?.(event);
           finishResize(event);
@@ -572,16 +547,12 @@ const SidebarRail = React.forwardRef<
           onPointerUp?.(event);
           finishResize(event);
         }}
-        title="Drag to resize or click to toggle sidebar"
+        title="Drag to resize sidebar"
         className={cn(
           "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 sm:flex",
           "cursor-col-resize",
           "after:absolute after:bottom-0 after:left-1/2 after:top-6 after:z-10 after:w-px after:-translate-x-1/2 after:bg-transparent after:content-['']",
-          "[[data-state=collapsed]_&]:cursor-pointer",
-          "group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:hover:bg-sidebar",
-          "[[data-side=left][data-collapsible=offcanvas]_&]:-right-2",
-          "[[data-side=right][data-collapsible=offcanvas]_&]:-left-2",
-          "disabled:pointer-events-none disabled:cursor-default",
+          "disabled:pointer-events-none disabled:hidden",
           className,
         )}
         {...props}
@@ -738,8 +709,7 @@ const SidebarGroupAction = React.forwardRef<
       data-sidebar="group-action"
       className={cn(
         "absolute right-3 top-3.5 z-10 flex size-6 items-center justify-center rounded-[4px] p-1 text-sidebar-foreground outline-hidden ring-sidebar-ring transition-colors hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:ring-2 [&>svg]:size-4 [&>svg]:shrink-0",
-        // Increases the hit area of the button on mobile.
-        "after:absolute after:-inset-2 after:md:hidden",
+        MOBILE_ACTION_HIT_AREA,
         "group-data-[collapsible=icon]:hidden",
         className,
       )}
@@ -769,7 +739,7 @@ const SidebarMenu = React.forwardRef<
   <ul
     ref={ref}
     data-sidebar="menu"
-    className={cn("flex w-full min-w-0 flex-col gap-0.5", className)}
+    className={cn("flex w-full min-w-0 flex-col gap-1", className)}
     {...props}
   />
 ));
@@ -789,7 +759,7 @@ const SidebarMenuItem = React.forwardRef<
 SidebarMenuItem.displayName = "SidebarMenuItem";
 
 const sidebarMenuButtonVariants = cva(
-  "peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm outline-hidden ring-sidebar-ring transition-[width,height,padding] hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 group-has-[[data-sidebar=menu-action]]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-active data-[active=true]:font-semibold data-[active=true]:text-sidebar-active-foreground data-[active=true]:shadow-xs data-[active=true]:hover:bg-sidebar-active data-[active=true]:hover:text-sidebar-active-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground group-data-[collapsible=icon]:!size-8 group-data-[collapsible=icon]:!p-2 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0",
+  "peer/menu-button flex w-full items-center gap-2 overflow-hidden rounded-md p-2 text-left text-sm outline-hidden ring-sidebar-ring transition-[width,height,padding,background-color,box-shadow] duration-100 ease-out motion-reduce:transition-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 group-has-[[data-sidebar=menu-action]]/menu-item:pr-8 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:bg-sidebar-active data-[active=true]:font-semibold data-[active=true]:text-sidebar-active-foreground data-[active=true]:shadow-xs data-[active=true]:hover:bg-sidebar-active data-[active=true]:hover:text-sidebar-active-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground group-data-[collapsible=icon]:!size-8 group-data-[collapsible=icon]:!p-2 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -884,8 +854,7 @@ const SidebarMenuAction = React.forwardRef<
       data-sidebar="menu-action"
       className={cn(
         "absolute right-1 top-1.5 flex aspect-square w-5 items-center justify-center rounded-md p-0 text-sidebar-foreground outline-hidden ring-sidebar-ring transition-transform hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 peer-hover/menu-button:text-sidebar-accent-foreground [&>svg]:size-4 [&>svg]:shrink-0",
-        // Increases the hit area of the button on mobile.
-        "after:absolute after:-inset-2 after:md:hidden",
+        MOBILE_ACTION_HIT_AREA,
         "peer-data-[size=sm]/menu-button:top-1",
         "peer-data-[size=default]/menu-button:top-1.5",
         "peer-data-[size=lg]/menu-button:top-2.5",
@@ -999,7 +968,7 @@ const SidebarMenuSubButton = React.forwardRef<
       data-size={size}
       data-active={isActive}
       className={cn(
-        "flex h-7 min-w-0 items-center gap-2 overflow-hidden rounded-md px-2 text-sidebar-foreground outline-hidden ring-sidebar-ring hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground data-[active=true]:[&>svg]:text-sidebar-active-foreground",
+        "flex h-7 min-w-0 items-center gap-2 overflow-hidden rounded-md px-2 text-sidebar-foreground outline-hidden ring-sidebar-ring transition-[background-color,box-shadow] duration-100 ease-out motion-reduce:transition-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-sidebar-accent-foreground data-[active=true]:[&>svg]:text-sidebar-active-foreground",
         "data-[active=true]:bg-sidebar-active data-[active=true]:font-semibold data-[active=true]:text-sidebar-active-foreground data-[active=true]:hover:bg-sidebar-active data-[active=true]:hover:text-sidebar-active-foreground",
         size === "sm" && "text-xs",
         size === "md" && "text-sm",

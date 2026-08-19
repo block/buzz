@@ -1,8 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { openSettings } from "../helpers/settings";
 
 const SIDEBAR_WIDTH_STORAGE_KEY = "buzz-sidebar-width";
+const COMMUNITY_ONBOARDING_STORAGE_KEY =
+  "buzz-community-onboarding-transaction.v1";
 const DEFAULT_SIDEBAR_WIDTH = 300;
 
 test.beforeEach(async ({ page }) => {
@@ -28,6 +31,12 @@ async function loadTheme(page: Page, theme: string) {
   }, theme);
   await installMockBridge(page);
   await page.goto("/");
+}
+
+async function openAddCommunityDialog(page: Page) {
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+  await page.getByTestId("community-switcher").click();
+  await page.getByRole("menuitem", { name: "Add a community" }).click();
 }
 
 // Regression guard for the "Leave channel" lockup: with two bundled copies of
@@ -65,31 +74,180 @@ async function dragSidebarRail(page: Page, deltaX: number) {
   await page.mouse.up();
 }
 
-test("automatically shows relay join requirements near the relay URL", async ({
+test("sidebar rows separate hover, selected, and reorder states", async ({
   page,
 }) => {
-  await page.route(
-    "https://policy.example.com/api/join-policy",
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          policy: {
-            terms_markdown: "# Terms",
-            privacy_markdown: "# Privacy",
-            age_attestation_required: true,
-            version: "policy-v1",
-          },
-        }),
-      });
-    },
+  await loadTheme(page, "github-light");
+  await page.getByTestId("channel-general").click();
+
+  const selectedRow = page.getByTestId("channel-general");
+  const hoverRow = page.getByTestId("channel-random");
+
+  await page.mouse.move(600, 100);
+  const establishedActiveBackground = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "hsl(var(--sidebar-active))";
+    document.body.append(probe);
+    const background = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return background;
+  });
+  await expect(selectedRow).toHaveCSS(
+    "background-color",
+    establishedActiveBackground,
   );
+  // The spacing and motion experiment must preserve the production selected
+  // row typography.
+  await expect(selectedRow).toHaveCSS("font-weight", "400");
+
+  const rowGap = await page.evaluate(() => {
+    const selected = document.querySelector<HTMLElement>(
+      '[data-testid="channel-general"]',
+    );
+    const following = document.querySelector<HTMLElement>(
+      '[data-testid="channel-random"]',
+    );
+    if (!selected || !following) return null;
+    const selectedBox = selected.getBoundingClientRect();
+    const followingBox = following.getBoundingClientRect();
+    return followingBox.top - selectedBox.bottom;
+  });
+  expect(rowGap).toBe(4);
+
+  const establishedHoverBackground = await page.evaluate(() => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "hsl(var(--sidebar-accent))";
+    document.body.append(probe);
+    const background = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return background;
+  });
+  await hoverRow.hover();
+  await expect(hoverRow).toHaveCSS(
+    "background-color",
+    establishedHoverBackground,
+  );
+
+  const activeForegroundTokens = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const sidebar = document.querySelector<HTMLElement>(
+      '[data-testid="app-sidebar"]',
+    );
+    if (!sidebar) return null;
+    return {
+      root: root.getPropertyValue("--sidebar-active-foreground").trim(),
+      sidebar: getComputedStyle(sidebar)
+        .getPropertyValue("--sidebar-active-foreground")
+        .trim(),
+    };
+  });
+  expect(activeForegroundTokens).not.toBeNull();
+  expect(activeForegroundTokens?.sidebar).toBe(activeForegroundTokens?.root);
+
+  const selectedBox = await selectedRow.boundingBox();
+  expect(selectedBox).not.toBeNull();
+  if (!selectedBox) return;
+
+  const draggableRow = selectedRow.locator("..");
+
+  await page.mouse.move(
+    selectedBox.x + selectedBox.width / 2,
+    selectedBox.y + selectedBox.height / 2,
+  );
+  await page.mouse.down();
+  await expect(selectedRow).toHaveCSS("transform", "none");
+  await expect(draggableRow).not.toHaveAttribute("data-sidebar-drag-state");
+
+  // Small pointer motion still counts as an ordinary click. The row only
+  // scales once dnd-kit's 6px reorder threshold has been crossed.
+  await page.mouse.move(
+    selectedBox.x + selectedBox.width / 2,
+    selectedBox.y + selectedBox.height / 2 + 3,
+    { steps: 3 },
+  );
+  await expect(draggableRow).not.toHaveAttribute("data-sidebar-drag-state");
+  await expect(draggableRow).toHaveCSS("transform", "none");
+
+  await page.mouse.move(
+    selectedBox.x + selectedBox.width / 2,
+    selectedBox.y + selectedBox.height / 2 + 8,
+    { steps: 5 },
+  );
+  await expect(draggableRow).toHaveAttribute(
+    "data-sidebar-drag-state",
+    "dragging",
+  );
+  await expect(page.getByTestId("sidebar-channel-drag-overlay")).toBeVisible();
+  await expect
+    .poll(() =>
+      draggableRow.evaluate((element) => getComputedStyle(element).transform),
+    )
+    .toBe("matrix(0.985, 0, 0, 0.985, 0, 0)");
+  await page.mouse.up();
+  await expect(draggableRow).not.toHaveAttribute("data-sidebar-drag-state");
+  await expect(
+    page.getByTestId("sidebar-channel-drag-overlay"),
+  ).not.toBeVisible();
+  await expect
+    .poll(() =>
+      draggableRow.evaluate((element) => getComputedStyle(element).transform),
+    )
+    .toBe("none");
+});
+
+test("add community starts with create and join choices", async ({ page }) => {
+  await installMockBridge(page, {});
   await page.goto("/");
 
-  await page.getByTestId("sidebar-profile-card").click();
-  await page.getByText("Add Community", { exact: true }).click();
-  await page.getByLabel("Relay URL").fill("wss://policy.example.com");
+  await openAddCommunityDialog(page);
+
+  await expect(
+    page.getByRole("heading", { name: "Add community" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("add-community-create")).toContainText(
+    "Create a new community",
+  );
+  await expect(page.getByTestId("add-community-join")).toContainText(
+    "Join an existing community",
+  );
+  await expect(page.getByLabel("API Token")).toHaveCount(0);
+  await expect(page.getByLabel("Repos Directory")).toHaveCount(0);
+
+  await page.getByTestId("add-community-join").click();
+  await expect(
+    page.getByRole("heading", { name: "Join an existing community" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Community URL or invite link")).toBeVisible();
+  await page.getByTestId("add-community-back").click();
+
+  await page.getByTestId("add-community-create").click();
+  await expect(
+    page.getByRole("heading", { name: "Create a new community" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Continue to Builderlab" }).click();
+  await page.getByRole("button", { name: "Connect and continue" }).click();
+  await expect(page.getByLabel("Community address")).toBeVisible();
+});
+
+test("automatically shows community join requirements near the community URL", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    applyCommunityDelayMs: 1_000,
+    joinPolicy: {
+      terms_markdown: "# Terms",
+      privacy_markdown: "# Privacy",
+      age_attestation_required: true,
+      version: "policy-v1",
+    },
+  });
+  await page.goto("/");
+
+  await openAddCommunityDialog(page);
+  await page.getByTestId("add-community-join").click();
+  await page
+    .getByLabel("Community URL or invite link")
+    .fill("https://policy.example.com");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
@@ -102,21 +260,66 @@ test("automatically shows relay join requirements near the relay URL", async ({
   ).toHaveCount(0);
   await expect(page.getByText(/By continuing, you agree/)).toHaveCount(0);
 
-  const addCommunityButton = page.getByRole("button", {
-    name: "Add Community",
-  });
-  await expect(addCommunityButton).toBeDisabled();
+  const joinCommunityButton = page.getByTestId("invite-redeem-submit");
+  await expect(joinCommunityButton).toBeDisabled();
   await ageConfirmation.check();
   await expect(ageConfirmation.locator("svg path")).toBeVisible();
-  await expect(addCommunityButton).toBeDisabled();
+  await expect(joinCommunityButton).toBeDisabled();
   await agreementConfirmation.check();
-  await expect(addCommunityButton).toBeEnabled();
+  await expect(joinCommunityButton).toBeEnabled();
+  await expect(joinCommunityButton).toHaveText("Accept and join");
 
   const consentBox = await agreementConfirmation.boundingBox();
-  const reposInput = await page.locator("#ws-repos-dir").boundingBox();
-  const addButtonBox = await addCommunityButton.boundingBox();
-  expect(consentBox?.y).toBeGreaterThan(reposInput?.y ?? Number.MAX_VALUE);
-  expect(consentBox?.y).toBeLessThan(addButtonBox?.y ?? 0);
+  const communityInput = await page
+    .getByLabel("Community URL or invite link")
+    .boundingBox();
+  const joinButtonBox = await joinCommunityButton.boundingBox();
+  expect(consentBox?.y).toBeGreaterThan(communityInput?.y ?? Number.MAX_VALUE);
+  expect(consentBox?.y).toBeLessThan(joinButtonBox?.y ?? 0);
+
+  await joinCommunityButton.click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        COMMUNITY_ONBOARDING_STORAGE_KEY,
+      ),
+    )
+    .toContain('"relayUrl":"wss://policy.example.com"');
+});
+
+test("joins a community URL without an API token field", async ({ page }) => {
+  await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
+  await page.goto("/");
+
+  await openAddCommunityDialog(page);
+  await page.getByTestId("add-community-join").click();
+
+  await page
+    .getByLabel("Community URL or invite link")
+    .fill("token.example.com");
+  await expect(page.getByLabel("API token")).toHaveCount(0);
+  await expect(page.getByTestId("community-api-token-reveal")).toHaveCount(0);
+  await page.getByTestId("invite-redeem-submit").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate((key) => {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) return null;
+        return JSON.parse(raw) as { relayUrl?: string };
+      }, COMMUNITY_ONBOARDING_STORAGE_KEY),
+    )
+    .toMatchObject({ relayUrl: "wss://token.example.com" });
+});
+
+test("hides Invites settings on open relays", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page);
+
+  await expect(page.getByTestId("settings-nav-community-members")).toHaveCount(
+    0,
+  );
 });
 
 test("leaving a channel from the context menu never freezes the app", async ({
@@ -326,6 +529,85 @@ test("aligns the sidebar search with the channel title outside the Buzz theme", 
   const searchCenter = searchBox.y + searchBox.height / 2;
   const channelTitleCenter = channelTitleBox.y + channelTitleBox.height / 2;
   expect(Math.abs(searchCenter - channelTitleCenter)).toBeLessThanOrEqual(2);
+});
+
+test("scales the sidebar backward while its chrome closes", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const sidebar = page.getByTestId("app-sidebar");
+  const sidebarSurface = sidebar.locator("[data-sidebar-transition-content]");
+  await expect(sidebarSurface).toHaveCSS("opacity", "1");
+  await expect(sidebarSurface).toHaveCSS("scale", "none");
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+
+  await expect(sidebarSurface).toHaveCSS("opacity", "0");
+  await expect(sidebar).toHaveCSS("pointer-events", "none");
+  await expect(sidebar).toHaveCSS("overflow", "visible");
+  await expect(sidebar.locator(':scope > [data-sidebar="sidebar"]')).toHaveCSS(
+    "background-color",
+    await sidebarSurface.evaluate((element) => {
+      const sidebarElement = element.closest('[data-sidebar="sidebar"]');
+      if (!(sidebarElement instanceof HTMLElement)) return "";
+      return getComputedStyle(sidebarElement).backgroundColor;
+    }),
+  );
+  await expect(sidebarSurface).toHaveCSS("scale", "0.95");
+  await expect(sidebarSurface).toHaveCSS("translate", "24px");
+  const transformOrigin = await sidebarSurface.evaluate(
+    (element) => getComputedStyle(element).transformOrigin,
+  );
+  const [originX, originY] = transformOrigin.split(" ").map(Number.parseFloat);
+  const surfaceWidth = await sidebarSurface.evaluate(
+    (element) => element.clientWidth,
+  );
+  expect(Math.abs(originX - surfaceWidth / 2)).toBeLessThan(0.5);
+  expect(originY).toBe(0);
+  await expect(sidebarSurface).toHaveCSS(
+    "transition-property",
+    "opacity, scale, translate",
+  );
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0.2s");
+  await expect(sidebarSurface).toHaveCSS(
+    "transition-timing-function",
+    "linear",
+  );
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await expect(sidebarSurface).toHaveCSS("opacity", "1");
+  await expect(sidebar).toHaveCSS("pointer-events", "auto");
+  await expect(sidebarSurface).toHaveCSS("scale", "none");
+});
+
+test("disables the sidebar collapse transition for reduced motion", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+
+  const sidebarSurface = page
+    .getByTestId("app-sidebar")
+    .locator("[data-sidebar-transition-content]");
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0s");
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+
+  await expect(sidebarSurface).toHaveCSS("opacity", "0");
+  await expect(sidebarSurface).toHaveCSS("scale", "0.95");
+  await expect(sidebarSurface).toHaveCSS("translate", "24px");
+  await expect(sidebarSurface).toHaveCSS("transition-duration", "0s");
+});
+
+test("sidebar rail resizes without toggling the sidebar", async ({ page }) => {
+  await page.goto("/");
+  const rail = page.getByRole("button", { name: "Resize sidebar" });
+  await rail.click();
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await expect(rail).toBeHidden();
 });
 
 test("resizes, persists, and snaps to the default sidebar width", async ({
