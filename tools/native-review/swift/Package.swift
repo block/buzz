@@ -5,5 +5,8 @@ let package = Package(
     name: "BuzzNativeDriver",
     platforms: [.macOS(.v13)],
     products: [.executable(name: "buzz-native-driver", targets: ["BuzzNativeDriver"])],
-    targets: [.executableTarget(name: "BuzzNativeDriver")]
+    targets: [
+        .executableTarget(name: "BuzzNativeDriver"),
+        .testTarget(name: "BuzzNativeDriverTests", dependencies: ["BuzzNativeDriver"]),
+    ]
 )

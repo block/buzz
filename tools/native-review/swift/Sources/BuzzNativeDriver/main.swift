@@ -447,11 +447,36 @@ func modifierFlags(_ names: [String]) throws -> CGEventFlags {
     }
 }
 
-func assertTargetFrontmost(pid: pid_t) throws {
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+func targetWindowContains(point: CGPoint, bounds: CGRect) -> Bool {
+    point.x.isFinite && point.y.isFinite
+        && bounds.width > 0 && bounds.height > 0
+        && point.x >= bounds.minX && point.x < bounds.maxX
+        && point.y >= bounds.minY && point.y < bounds.maxY
+}
+
+func safePointerAnimationStart(current: CGPoint, target: CGPoint, windowBounds: CGRect) -> CGPoint {
+    targetWindowContains(point: current, bounds: windowBounds) ? current : target
+}
+
+func validateTargetOwns(
+    point: CGPoint, frontmostPID: pid_t?, targetPID: pid_t, windowBounds: CGRect
+) throws {
+    guard frontmostPID == targetPID else {
         throw DriverError.message("refusing global input because target app is not frontmost")
     }
-    _ = try windowInfo(pid: pid)
+    guard targetWindowContains(point: point, bounds: windowBounds) else {
+        throw DriverError.message("refusing global input outside target app window")
+    }
+}
+
+func assertTargetOwns(point: CGPoint, pid: pid_t) throws {
+    let (_, bounds) = try windowInfo(pid: pid)
+    try validateTargetOwns(
+        point: point,
+        frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+        targetPID: pid,
+        windowBounds: bounds
+    )
 }
 
 func ensureTargetFrontmost(pid: pid_t) async throws {
@@ -464,7 +489,7 @@ func ensureTargetFrontmost(pid: pid_t) async throws {
     let deadline = ContinuousClock.now.advanced(by: .seconds(2))
     while ContinuousClock.now < deadline {
         if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
-            try assertTargetFrontmost(pid: pid)
+            _ = try windowInfo(pid: pid)
             return
         }
         try await Task.sleep(for: .milliseconds(25))
@@ -598,7 +623,7 @@ struct BuzzNativeDriver {
                             selected = (element, used)
                             try await ensureTargetFrontmost(pid: pid)
                             let point = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
-                            try assertTargetFrontmost(pid: pid)
+                            try assertTargetOwns(point: point, pid: pid)
                             CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
                                     mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             let deltaY = Int32(action["delta_y"] as? Int ?? 0)
@@ -606,7 +631,7 @@ struct BuzzNativeDriver {
                                                       wheel1: deltaY, wheel2: 0, wheel3: 0) else {
                                 throw DriverError.message("could not create scroll event")
                             }
-                            try assertTargetFrontmost(pid: pid)
+                            try assertTargetOwns(point: point, pid: pid)
                             event.post(tap: .cghidEventTap)
                         } else {
                             guard let (_, used) = selected else {
@@ -629,24 +654,30 @@ struct BuzzNativeDriver {
                             let duration = max(action["duration_ms"] as? Int ?? 0, 0)
                             if type == "move_pointer" && duration > 0 {
                                 let current = NSEvent.mouseLocation
-                                let start = CGPoint(x: current.x, y: NSScreen.screens.first.map { $0.frame.height - current.y } ?? current.y)
+                                let rawStart = CGPoint(x: current.x, y: NSScreen.screens.first.map { $0.frame.height - current.y } ?? current.y)
+                                let (_, currentWindowBounds) = try windowInfo(pid: pid)
+                                // Never animate across another app or system UI. If the pointer starts
+                                // outside the target window, post only the final in-window position.
+                                let start = safePointerAnimationStart(
+                                    current: rawStart, target: point, windowBounds: currentWindowBounds
+                                )
                                 let steps = max(duration / 8, 2)
                                 for index in 1...steps {
                                     let fraction = Double(index) / Double(steps)
                                     let next = CGPoint(x: start.x + (point.x - start.x) * fraction, y: start.y + (point.y - start.y) * fraction)
-                                    try assertTargetFrontmost(pid: pid)
+                                    try assertTargetOwns(point: next, pid: pid)
                                     CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: next, mouseButton: .left)?.post(tap: .cghidEventTap)
                                     try await Task.sleep(for: .milliseconds(duration / steps))
                                 }
                             } else if type == "move_pointer" {
-                                try assertTargetFrontmost(pid: pid)
+                                try assertTargetOwns(point: point, pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             } else if type == "click" {
-                                try assertTargetFrontmost(pid: pid)
+                                try assertTargetOwns(point: point, pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-                                try assertTargetFrontmost(pid: pid)
+                                try assertTargetOwns(point: point, pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-                                try assertTargetFrontmost(pid: pid)
+                                try assertTargetOwns(point: point, pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             } else { throw DriverError.message("unsupported action: \(type)") }
                         }

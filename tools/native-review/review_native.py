@@ -487,6 +487,13 @@ def valid_semantic_snapshot(value: Any) -> bool:
             if any(not isinstance(number, (int, float)) or isinstance(number, bool)
                    or not math.isfinite(number) for number in item.values()):
                 return False
+        frame = node["frame"]
+        viewport = node["viewport"]
+        if (frame["x"] < 0 or frame["y"] < 0 or frame["width"] <= 0 or frame["height"] <= 0
+                or viewport["width"] <= 0 or viewport["height"] <= 0
+                or frame["x"] + frame["width"] > viewport["width"]
+                or frame["y"] + frame["height"] > viewport["height"]):
+            return False
     return True
 
 
@@ -874,6 +881,15 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
                 or not re.fullmatch(r"[0-9a-f]{64}", machine.get("host_id_sha256", ""))
                 or any(not isinstance(value, str) or not value for value in machine.values())):
             raise HarnessError(f"{label} receipt has incomplete provenance: {path}")
+        artifact_path = pathlib.Path(provenance["artifact_path"])
+        if not artifact_path.is_file():
+            raise HarnessError(f"{label} receipt artifact is not a regular file: {artifact_path}")
+        try:
+            actual_artifact_sha = sha256(artifact_path)
+        except OSError as exc:
+            raise HarnessError(f"cannot hash {label} receipt artifact {artifact_path}: {exc}") from exc
+        if actual_artifact_sha != provenance["artifact_sha256"]:
+            raise HarnessError(f"{label} receipt artifact digest does not match: {artifact_path}")
         measurements = receipt.get("measurements")
         process_metrics = receipt.get("performance", {}).get("process")
         if not isinstance(measurements, dict) or not isinstance(process_metrics, dict):

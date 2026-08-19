@@ -143,18 +143,31 @@ class JourneyTests(unittest.TestCase):
                 with self.assertRaisesRegex(review_native.HarnessError, "cleanup requires"):
                     review_native.load_journey(path)
 
-    def test_native_driver_fences_input_to_the_target_process(self):
+    def test_native_driver_uses_pid_targeted_keyboard_delivery(self):
         source = (
             MODULE_PATH.parent
             / "swift/Sources/BuzzNativeDriver/main.swift"
         ).read_text()
-        self.assertIn("func ensureTargetFrontmost(pid: pid_t) async throws", source)
-        self.assertGreaterEqual(source.count("try await ensureTargetFrontmost(pid: pid)"), 4)
-        self.assertIn("func assertTargetFrontmost(pid: pid_t) throws", source)
-        self.assertGreaterEqual(source.count("try assertTargetFrontmost(pid: pid)"), 6)
         self.assertIn("event.postToPid(pid)", source)
         self.assertIn("down.postToPid(pid)", source)
         self.assertNotIn("down.post(tap: .cghidEventTap)", source)
+
+    def test_semantic_frames_must_stay_inside_their_viewport(self):
+        node = {
+            "id": "target", "role": "button", "scrollY": 0,
+            "enabled": True, "focused": False,
+            "frame": {"x": 10, "y": 20, "width": 30, "height": 40},
+            "viewport": {"width": 100, "height": 100},
+        }
+        self.assertTrue(review_native.valid_semantic_snapshot([node]))
+        for field, value in (
+            ("x", -1), ("y", -1), ("width", 0), ("height", 0),
+            ("x", 80), ("y", 70),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = json.loads(json.dumps(node))
+                invalid["frame"][field] = value
+                self.assertFalse(review_native.valid_semantic_snapshot([invalid]))
 
     def test_production_and_remote_targets_are_rejected(self):
         with self.assertRaisesRegex(review_native.HarnessError, "non-loopback"):
@@ -294,14 +307,18 @@ class PerformanceTests(unittest.TestCase):
     MACHINE = {"host_id_sha256": "f" * 64, "system": "Darwin", "release": "test", "machine": "arm64", "cpu": "test"}
 
     def receipt(self, path, artifact, timing, cpu=10, memory=100, flow="tooltip_fresh_dwell"):
+        artifact_path = path.parent / "artifacts" / artifact / "buzz-desktop"
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        if not artifact_path.exists():
+            artifact_path.write_bytes(f"{artifact}-binary".encode())
         payload = {
             "schema_version": 1,
             "run_id": path.stem, "flow": flow, "status": "passed",
             "cleanup": {"status": "passed"},
             "provenance": {"dirty": False, "dirty_state_sha256": None, "status": [],
                            "head_sha": ("a" if artifact == "base" else "b") * 40,
-                           "artifact_path": f"/tmp/{artifact}/buzz-desktop",
-                           "artifact_sha256": ("c" if artifact == "base" else "d") * 64},
+                           "artifact_path": str(artifact_path),
+                           "artifact_sha256": review_native.sha256(artifact_path)},
             "measurements": {"tooltip_open_latency": {"value": timing, "unit": "ms", "step": "tooltip"}},
             "performance": {"machine": self.MACHINE, "process": {
                 "sample_count": 1, "interval_ms": 100,
@@ -377,6 +394,24 @@ metrics:
                     mutate(payload)
                     path.write_text(json.dumps(payload))
                     with self.assertRaises(review_native.HarnessError):
+                        review_native.load_receipts([path], "baseline")
+
+    def test_comparison_rejects_unverifiable_application_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name, mutate in (
+                ("absent", lambda artifact: artifact.unlink()),
+                ("mismatched", lambda artifact: artifact.write_bytes(b"mutated")),
+            ):
+                with self.subTest(name=name):
+                    path = self.receipt(root / f"{name}.json", f"base-{name}", 100)
+                    payload = json.loads(path.read_text())
+                    artifact = pathlib.Path(payload["provenance"]["artifact_path"])
+                    mutate(artifact)
+                    with self.assertRaisesRegex(
+                        review_native.HarnessError,
+                        "not a regular file|digest does not match",
+                    ):
                         review_native.load_receipts([path], "baseline")
 
     def test_receipt_schema_requires_nonnegative_comparison_metrics(self):
