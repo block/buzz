@@ -1,9 +1,11 @@
 use super::*;
 
-/// The onset cushion covers 20 ms at the production sample rate.
+/// The onset cushion rounds rodio's 512-sample bootstrap span up to 22 ms at
+/// the 24 kHz production sample rate (528 samples).
 #[test]
 fn chunk_lead_in_is_sane() {
-    assert_eq!(SENTENCE_LEAD_IN_SAMPLES, 480, "20 ms × 24 kHz");
+    assert_eq!(RODIO_ADD_BOOTSTRAP_SPAN_SAMPLES, 512);
+    assert_eq!(SENTENCE_LEAD_IN_SAMPLES, 528, "22 ms × 24 kHz");
 }
 
 /// Model-token splits remain contiguous: only the playback chunk as a whole

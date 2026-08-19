@@ -1,12 +1,11 @@
 use super::*;
 
 pub(super) struct TtsMonitorState {
-    pub(super) player: Arc<rodio::Player>,
+    pub(super) playback: Arc<PlaybackCoordinator>,
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) voice_cancel: Arc<AtomicBool>,
     pub(super) tts_active: Arc<AtomicBool>,
     pub(super) stop: Arc<AtomicBool>,
-    pub(super) player_ops: Arc<Mutex<()>>,
     pub(super) activity_frames: Arc<Mutex<VecDeque<TtsSpeakerActivityFrame>>>,
     pub(super) active_speaker: ActiveSpeaker,
     pub(super) speaker_cancel: SpeakerCancellation,
@@ -20,28 +19,24 @@ pub(super) fn spawn_tts_monitor(state: TtsMonitorState) -> std::io::Result<threa
             let mut last_activity_pubkey: Option<String> = None;
             let mut next_activity_tick = Instant::now();
             while !state.stop.load(Ordering::Acquire) {
-                if state.cancel.load(Ordering::Acquire)
-                    || state.voice_cancel.load(Ordering::Acquire)
+                if (state.cancel.load(Ordering::Acquire)
+                    || state.voice_cancel.load(Ordering::Acquire))
+                    && state.playback.cancel_if_live(|| {
+                        state.cancel.load(Ordering::Acquire)
+                            || state.voice_cancel.load(Ordering::Acquire)
+                    })
                 {
-                    let _ops = lock_player_ops(&state.player_ops);
-                    if state.cancel.load(Ordering::Acquire)
-                        || state.voice_cancel.load(Ordering::Acquire)
-                    {
-                        state.player.clear();
-                        state.player.play();
-                        state
-                            .active_speaker
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .take();
-                        state.tts_active.store(false, Ordering::Release);
-                    }
+                    state
+                        .active_speaker
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .take();
+                    state.tts_active.store(false, Ordering::Release);
                 }
                 silence_cancelled_speaker(
                     &state.speaker_cancel,
                     &state.active_speaker,
-                    &state.player,
-                    &state.player_ops,
+                    &state.playback,
                     &state.tts_active,
                 );
                 if let Some(ref app) = state.activity_app {
@@ -94,8 +89,7 @@ pub(super) fn spawn_tts_monitor(state: TtsMonitorState) -> std::io::Result<threa
 pub(super) fn silence_cancelled_speaker(
     cancellation: &SpeakerCancellation,
     active_speaker: &ActiveSpeaker,
-    player: &rodio::Player,
-    player_ops: &Mutex<()>,
+    playback: &PlaybackCoordinator,
     tts_active: &AtomicBool,
 ) {
     let Some(cancelled) = cancellation
@@ -105,10 +99,7 @@ pub(super) fn silence_cancelled_speaker(
     else {
         return;
     };
-    let _ops = lock_player_ops(player_ops);
-    if take_cancelled_active_speaker(&cancelled, active_speaker) {
-        player.clear();
-        player.play();
+    if playback.cancel_if_live(|| take_cancelled_active_speaker(&cancelled, active_speaker)) {
         tts_active.store(false, Ordering::Release);
     }
 }
@@ -133,7 +124,7 @@ pub(super) fn consume_speaker_cancel(
     generations: &SpeakerGenerations,
     tts_active: &AtomicBool,
     text_state: CancelTextState<'_>,
-    player: Option<(&rodio::Player, &Mutex<()>)>,
+    playback: Option<&PlaybackCoordinator>,
 ) -> bool {
     let Some(cancelled) = cancellation
         .lock()
@@ -145,11 +136,8 @@ pub(super) fn consume_speaker_cancel(
     let (text_rx, deferred_text, current_text) = text_state;
     retain_current_speaker_text(generations, deferred_text, current_text, text_rx);
     let mut cleared_player = false;
-    if let Some((player, player_ops)) = player {
-        let _ops = lock_player_ops(player_ops);
-        if take_cancelled_active_speaker(&cancelled, active_speaker) {
-            player.clear();
-            player.play();
+    if let Some(playback) = playback {
+        if playback.cancel_if_live(|| take_cancelled_active_speaker(&cancelled, active_speaker)) {
             tts_active.store(false, Ordering::Release);
             cleared_player = true;
         }
