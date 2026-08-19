@@ -65,8 +65,9 @@ const forbiddenInRegisteredAgentFiles = [
 function walk(dir) {
   return readdirSync(dir).flatMap((entry) => {
     const path = join(dir, entry);
+    if (entry === "node_modules" || entry === "dist") return [];
     if (statSync(path).isDirectory()) return walk(path);
-    return /\.(ts|tsx)$/.test(path) ? [path] : [];
+    return /\.(ts|tsx|mjs)$/.test(path) ? [path] : [];
   });
 }
 
@@ -82,7 +83,11 @@ for (const path of walk(src)) {
       `${rel}: registered-reference data (${dataHits.join(", ")})`,
     );
   }
-  if (dataHits.length > 0 && registeredAgentDataFiles.has(rel)) {
+  if (
+    dataHits.length > 0 &&
+    registeredAgentDataFiles.has(rel) &&
+    rel !== "src/features/agents/registeredAgentBoundary.test.mjs"
+  ) {
     const trustHits = forbiddenTrustMarkers.filter((needle) =>
       text.includes(needle),
     );

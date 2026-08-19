@@ -5,6 +5,10 @@ import test from "node:test";
 
 const ROOT = new URL("../../..", import.meta.url).pathname;
 const SRC = join(ROOT, "src");
+const boundaryScript = readFileSync(
+  join(ROOT, "scripts/check-registered-agent-boundary.mjs"),
+  "utf8",
+);
 const REGISTERED_AGENT_DATA_FILES = new Set([
   "src/features/agents/hooks.ts",
   "src/features/agents/hooksRegistered.test.mjs",
@@ -100,4 +104,12 @@ test("registered-agent data stays inside the reviewed display/navigation integra
     if (forbidden.length > 0) offenders.push(`${rel}: ${forbidden.join(", ")}`);
   }
   assert.deepEqual(offenders, []);
+});
+
+test("standalone boundary scan includes mjs consumers and skips generated trees", () => {
+  assert.match(
+    boundaryScript,
+    /entry === "node_modules" \|\| entry === "dist"/,
+  );
+  assert.match(boundaryScript, /\\\.\(ts\|tsx\|mjs\)\$/);
 });
