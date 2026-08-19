@@ -827,7 +827,6 @@ export function useMentions(
     ownerOnly: agentAccessOwnerOnlyQuery.data,
     ownerPolicyError: agentAccessOwnerOnlyQuery.error,
     refetchManagedAgents: managedAgentsQuery.refetch,
-    refetchRelayAgents: relayAgentsQuery.refetch,
   });
 
   const extractMentionPersonas = React.useCallback(

@@ -298,6 +298,22 @@ export function personaManagedAgentUpdate(
     hasChanges = true;
   }
 
+  // Definition edits expose the access policy in the same dialog as identity
+  // and runtime settings. Keep the exact linked instance in sync when the
+  // definition carries an explicit policy; otherwise the dialog reopens with
+  // the new value while the running agent and sidebar retain the old one.
+  if (persona.respondTo != null && persona.respondTo !== agent.respondTo) {
+    input.respondTo = persona.respondTo;
+    hasChanges = true;
+  }
+  if (
+    persona.respondTo === "allowlist" &&
+    !stringArrayEqual(persona.respondToAllowlist, agent.respondToAllowlist)
+  ) {
+    input.respondToAllowlist = [...persona.respondToAllowlist];
+    hasChanges = true;
+  }
+
   const runtimeChanged =
     options.previousPersona !== undefined &&
     options.previousPersona.runtime !== persona.runtime;

@@ -45,7 +45,7 @@ fn merge_personas_adds_missing_built_ins() {
         .iter()
         .map(|record| record.display_name.as_str())
         .collect();
-    assert_eq!(display_names, vec!["Fizz", "Honey", "Bumble"]);
+    assert_eq!(display_names, vec!["Fizz", "Honey", "Pollen"]);
     let active_ids: Vec<&str> = records
         .iter()
         .filter(|record| record.is_active)

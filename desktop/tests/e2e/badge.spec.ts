@@ -105,6 +105,40 @@ test("selected Inbox and Agents rows keep their highlight without bold text", as
   await expect(agents).toHaveCSS("font-weight", "400");
 });
 
+test("primary navigation rows share the same inactive emphasis", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const primaryMenu = page.getByTestId("sidebar-primary-menu");
+  const inactiveRows = [
+    primaryMenu.getByRole("button", { name: "Inbox", exact: true }),
+    page.getByTestId("open-pulse-view"),
+    page.getByTestId("open-projects-view"),
+    page.getByTestId("open-agents-view"),
+    page.getByTestId("open-workflows-view"),
+  ];
+
+  for (const row of inactiveRows) {
+    await expect(row).toHaveAttribute("data-active", "false");
+    await expect(row.locator("[data-sidebar=menu-label]")).toHaveCSS(
+      "opacity",
+      "0.8",
+    );
+    await expect(row.locator("svg")).toHaveCSS("opacity", "0.8");
+  }
+
+  const pulse = page.getByTestId("open-pulse-view");
+  await pulse.click();
+  await expect(pulse).toHaveAttribute("data-active", "true");
+  await expect(pulse.locator("[data-sidebar=menu-label]")).toHaveCSS(
+    "opacity",
+    "1",
+  );
+  await expect(pulse.locator("svg")).toHaveCSS("opacity", "1");
+});
+
 test("hovering a channel keeps its text color", async ({ page }) => {
   await page.goto("/");
   const channel = page.getByTestId("channel-engineering");

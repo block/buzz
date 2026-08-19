@@ -31,6 +31,7 @@ pub(super) fn sample_record() -> ManagedAgentRecord {
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -58,6 +59,7 @@ pub(super) fn sample_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 

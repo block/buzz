@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -43,6 +45,12 @@ part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
+part 'thread_detail_page/avatar.dart';
+
+const _landingHighlightDuration = Duration(seconds: 3);
+const _landingHighlightDelay = Duration(milliseconds: 50);
+const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
+const _landingHighlightOpacity = 0.12;
 
 /// Full-screen thread detail page.
 ///
@@ -72,21 +80,28 @@ class ThreadDetailPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
+    final composerFocusNode = useFocusNode();
+    final restoreComposerFocus = useRef<VoidCallback?>(null);
     final settledImeBottomInset = useState(
       usesFixedAndroidImeViewport
           ? appView.viewInsets.bottom / appView.devicePixelRatio
           : 0.0,
     );
+    useEffect(() {
+      final session = ref.read(relaySessionProvider.notifier);
+      return session.registerVisibleChannel(channelId);
+    }, [channelId]);
     final sendMessage = ref.read(sendMessageProvider);
     // Relay thread queries are keyed by the outermost root, even when this
     // page displays a nested branch. Query that root, then select this head's
     // direct children from the returned subtree below.
     final queryRootId = threadHead.rootId ?? threadHead.id;
-    final repliesState = ref.watch(
-      threadRepliesWithLocalProvider(
-        ThreadRepliesArgs(channelId: channelId, rootId: queryRootId),
-      ),
+    final repliesArgs = ThreadRepliesArgs(
+      channelId: channelId,
+      rootId: queryRootId,
     );
+    final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
+    final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
     // The thread query is one-shot and asks only for content kinds, so a
     // reaction, edit, or deletion that lands while the thread is open never
     // reaches it — a new pill (and its burst) only showed up after leaving and
@@ -103,6 +118,12 @@ class ThreadDetailPage extends HookConsumerWidget {
     });
 
     final fetchedReplies = replyMessages.value;
+    // A terminal query error cannot produce a more authoritative list. Keep
+    // loading states provisional, but let the hydrated route snapshot drive
+    // the one-shot target jump when the relay query has definitively failed.
+    final canUseMessagesForInitialTarget =
+        relayReplyState.value != null ||
+        (relayReplyState.hasError && !relayReplyState.retrying);
     final liveDeletionHidesHead = _isDeletedBy(
       liveChannelEvents,
       threadHead.id,
@@ -119,6 +140,68 @@ class ThreadDetailPage extends HookConsumerWidget {
               threadHead,
             ...fetchedReplies,
           ];
+    final routeAnimation = ModalRoute.of(context)?.animation;
+    final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(
+      context,
+    );
+    final highlightedMessageId = useState<String?>(null);
+    final initialTargetReadyForHighlight = useState(false);
+    useEffect(
+      () {
+        final messageId = initialMessageId;
+        if (messageId == null || !initialTargetReadyForHighlight.value) {
+          return null;
+        }
+        var disposed = false;
+        Timer? revealTimer;
+        Timer? dismissTimer;
+
+        void revealHighlight() {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (disposed) return;
+            revealTimer = Timer(_landingHighlightDelay, () {
+              if (disposed) return;
+              highlightedMessageId.value = messageId;
+              dismissTimer = Timer(
+                _landingHighlightDuration +
+                    (reducedLandingHighlightMotion
+                        ? Duration.zero
+                        : _landingHighlightTransitionDuration),
+                () {
+                  if (!disposed) highlightedMessageId.value = null;
+                },
+              );
+            });
+          });
+        }
+
+        void handleRouteStatus(AnimationStatus status) {
+          if (status != AnimationStatus.completed) return;
+          routeAnimation?.removeStatusListener(handleRouteStatus);
+          revealHighlight();
+        }
+
+        if (routeAnimation == null ||
+            routeAnimation.status == AnimationStatus.completed) {
+          revealHighlight();
+        } else {
+          routeAnimation.addStatusListener(handleRouteStatus);
+        }
+
+        return () {
+          disposed = true;
+          routeAnimation?.removeStatusListener(handleRouteStatus);
+          revealTimer?.cancel();
+          dismissTimer?.cancel();
+        };
+      },
+      [
+        initialMessageId,
+        initialTargetReadyForHighlight.value,
+        reducedLandingHighlightMotion,
+        routeAnimation,
+      ],
+    );
 
     // Index all messages by parentId so we can find direct children of any
     // message and compute thread summaries for nested threads.
@@ -135,6 +218,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final listViewport = useMemoized(LaidOutViewport.new);
     useEffect(() => listViewport.dispose, [listViewport]);
     final didJumpToInitialMessage = useRef(false);
+    final initialHighlightTargetIndex = useState<int?>(null);
     final followsThreadTail = useRef(false);
     final userOptedOutOfTailFollow = useRef(false);
     final userDragDetachedTailFollow = useRef(false);
@@ -268,42 +352,84 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
     }
 
-    useEffect(() {
-      final messageId = initialMessageId;
-      // Wait for the authoritative thread query before consuming the one-shot
-      // jump; the fallback main-timeline list can contain only the linked reply.
-      if (messageId == null || fetchedReplies == null) return null;
-      final chronologicalIndex = replies.indexWhere(
-        (reply) => reply.id == messageId,
-      );
-      final targetIndex = messageId == threadHead.id
-          ? headIndex
-          : chronologicalIndex < 0
-          ? null
-          : indexForReply(chronologicalIndex);
-      if (targetIndex == null || didJumpToInitialMessage.value) return null;
-      didJumpToInitialMessage.value = true;
-      initialTailSettle.abandon();
-      userOptedOutOfTailFollow.value = true;
-      userDragDetachedTailFollow.value = false;
-      tailIntent.schedule(
-        allowed: true,
-        revalidate: () =>
-            context.mounted &&
-            itemScrollController.isAttached &&
-            !tailIntent.isDragging,
-        action: () {
-          // The provisional route snapshot can make the linked reply look like
-          // the tail. This authoritative deep-link jump intentionally leaves
-          // the user at an older item, so it must opt out of follow-tail first.
-          tailIntent.detach();
-          followsThreadTail.value = false;
-          isAtThreadTail.value = false;
-          itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
-        },
-      );
-      return null;
-    }, [initialMessageId, fetchedReplies, replies.length]);
+    useEffect(
+      () {
+        final messageId = initialMessageId;
+        // Wait for either the authoritative thread query or a terminal query
+        // error before consuming the one-shot jump. During loading, the fallback
+        // main-timeline list can contain only the linked reply; after an error,
+        // that hydrated snapshot is the best available target list.
+        if (messageId == null || !canUseMessagesForInitialTarget) return null;
+        final chronologicalIndex = replies.indexWhere(
+          (reply) => reply.id == messageId,
+        );
+        final targetIndex = messageId == threadHead.id
+            ? headIndex
+            : chronologicalIndex < 0
+            ? null
+            : indexForReply(chronologicalIndex);
+        if (targetIndex == null || didJumpToInitialMessage.value) return null;
+        didJumpToInitialMessage.value = true;
+        initialTailSettle.abandon();
+        userOptedOutOfTailFollow.value = true;
+        userDragDetachedTailFollow.value = false;
+        tailIntent.schedule(
+          allowed: true,
+          revalidate: () =>
+              context.mounted &&
+              itemScrollController.isAttached &&
+              !tailIntent.isDragging,
+          action: () {
+            // The provisional route snapshot can make the linked reply look like
+            // the tail. This authoritative deep-link jump intentionally leaves
+            // the user at an older item, so it must opt out of follow-tail first.
+            tailIntent.detach();
+            followsThreadTail.value = false;
+            isAtThreadTail.value = false;
+            itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
+            initialHighlightTargetIndex.value = targetIndex;
+          },
+        );
+        return null;
+      },
+      [
+        initialMessageId,
+        canUseMessagesForInitialTarget,
+        fetchedReplies,
+        replies.length,
+      ],
+    );
+
+    useEffect(
+      () {
+        final targetIndex = initialHighlightTargetIndex.value;
+        if (targetIndex == null || initialTargetReadyForHighlight.value) {
+          return null;
+        }
+        var completionScheduled = false;
+        void markReadyAfterTargetLayout() {
+          if (completionScheduled ||
+              !itemPositionsListener.itemPositions.value.any(
+                (position) => position.index == targetIndex,
+              )) {
+            return;
+          }
+          completionScheduled = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (context.mounted) initialTargetReadyForHighlight.value = true;
+          });
+        }
+
+        itemPositionsListener.itemPositions.addListener(
+          markReadyAfterTargetLayout,
+        );
+        markReadyAfterTargetLayout();
+        return () => itemPositionsListener.itemPositions.removeListener(
+          markReadyAfterTargetLayout,
+        );
+      },
+      [initialHighlightTargetIndex.value, initialTargetReadyForHighlight.value],
+    );
 
     // A top-anchored list doesn't stick to the newest item the way the old
     // reversed one did, so follow the tail explicitly: when a reply arrives
@@ -630,11 +756,14 @@ class ThreadDetailPage extends HookConsumerWidget {
                                   currentPubkey: currentPubkey,
                                   showAuthor: true,
                                   isHighlighted:
-                                      liveHead.id == initialMessageId,
+                                      liveHead.id == highlightedMessageId.value,
                                   allMessages: allMsgs,
                                   isMember: isMember,
                                   isArchived: isArchived,
                                   isThreadHead: true,
+                                  composerFocusNode: composerFocusNode,
+                                  restoreComposerFocus: () =>
+                                      restoreComposerFocus.value?.call(),
                                 ),
                                 Padding(
                                   padding: const EdgeInsets.symmetric(
@@ -710,10 +839,14 @@ class ThreadDetailPage extends HookConsumerWidget {
                                 channelId: channelId,
                                 currentPubkey: currentPubkey,
                                 showAuthor: showAuthor,
-                                isHighlighted: reply.id == initialMessageId,
+                                isHighlighted:
+                                    reply.id == highlightedMessageId.value,
                                 allMessages: allMsgs,
                                 isMember: isMember,
                                 isArchived: isArchived,
+                                composerFocusNode: composerFocusNode,
+                                restoreComposerFocus: () =>
+                                    restoreComposerFocus.value?.call(),
                               ),
                               if (nestedSummary != null)
                                 _NestedThreadSummaryRow(
@@ -750,6 +883,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                       _ThreadTypingIndicator(entries: threadTyping),
                       ComposeBar(
                         channelId: channelId,
+                        focusNode: composerFocusNode,
+                        onFocusRestorerChanged: (restoreFocus) =>
+                            restoreComposerFocus.value = restoreFocus,
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
