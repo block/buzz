@@ -34,7 +34,7 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-test("agent rows offer an Always address switch", async () => {
+test("agent rows offer an Always address pin", async () => {
   const React = await import("react");
   const { fireEvent, render } = await import("@testing-library/react");
   const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
@@ -65,11 +65,11 @@ test("agent rows offer an Always address switch", async () => {
     view.queryByText("Hover an agent avatar to keep it addressed"),
     null,
   );
-  const action = view.getByRole("switch", {
+  const action = view.getByRole("button", {
     name: "Always address Agent Ada",
   });
-  assert.equal(action.getAttribute("aria-checked"), "false");
-  assert.equal(action.getAttribute("data-state"), "unchecked");
+  assert.equal(action.getAttribute("aria-pressed"), "false");
+  assert.equal(action.getAttribute("data-state"), "off");
   fireEvent.click(action);
   assert.deepEqual(toggled, [suggestion]);
   assert.deepEqual(selected, []);
@@ -80,11 +80,11 @@ test("agent rows offer an Always address switch", async () => {
       lockedAgentPubkeys: new Set(["agent-pubkey"]),
     }),
   );
-  const selectedAction = view.getByRole("switch", {
+  const selectedAction = view.getByRole("button", {
     name: "Always address Agent Ada",
   });
-  assert.equal(selectedAction.getAttribute("aria-checked"), "true");
-  assert.equal(selectedAction.getAttribute("data-state"), "checked");
+  assert.equal(selectedAction.getAttribute("aria-pressed"), "true");
+  assert.equal(selectedAction.getAttribute("data-state"), "on");
   fireEvent.click(selectedAction);
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });
@@ -134,6 +134,6 @@ test("Tab from the editor focuses the selected agent action", async () => {
 
   assert.equal(
     document.activeElement,
-    view.getByRole("switch", { name: "Always address Agent Bea" }),
+    view.getByRole("button", { name: "Always address Agent Bea" }),
   );
 });

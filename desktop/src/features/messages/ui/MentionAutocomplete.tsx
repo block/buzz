@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Bot, Users } from "lucide-react";
+import { Bot, Pin, Users } from "lucide-react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
 import { Badge } from "@/shared/ui/badge";
@@ -10,7 +10,7 @@ import {
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { Switch } from "@/shared/ui/switch";
+import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
@@ -281,12 +281,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <span className="inline-flex shrink-0">
-                      <Switch
+                      <Toggle
                         aria-label={`Always address ${suggestion.displayName}`}
-                        checked={isAlwaysAddressed}
+                        className="h-6 w-6 p-0 data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
                         data-always-address-pubkey={suggestion.pubkey?.toLowerCase()}
                         data-testid={`mention-always-address-${suggestion.pubkey}`}
-                        onCheckedChange={() =>
+                        onPressedChange={() =>
                           onToggleAlwaysAddressAgent?.(suggestion)
                         }
                         onClick={(event) => event.stopPropagation()}
@@ -294,7 +294,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           event.preventDefault();
                           event.stopPropagation();
                         }}
-                      />
+                        pressed={isAlwaysAddressed}
+                        size="xs"
+                        type="button"
+                      >
+                        <Pin aria-hidden="true" />
+                      </Toggle>
                     </span>
                   </TooltipTrigger>
                   <TooltipContent side="top">Always address</TooltipContent>

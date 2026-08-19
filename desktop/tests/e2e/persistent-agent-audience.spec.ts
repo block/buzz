@@ -131,13 +131,13 @@ test("always addresses multiple agents without closing the mention picker", asyn
 
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
-  const morgaritaSwitch = menu.getByRole("switch", {
+  const morgaritaPin = menu.getByRole("button", {
     name: "Always address Morgarita",
   });
-  await morgaritaSwitch.hover();
+  await morgaritaPin.hover();
   await expect(page.getByRole("tooltip")).toHaveText("Always address");
-  await morgaritaSwitch.click();
-  await expect(morgaritaSwitch).toBeChecked();
+  await morgaritaPin.click();
+  await expect(morgaritaPin).toHaveAttribute("aria-pressed", "true");
   await expect(menu).toBeVisible();
   await expect(input).toHaveText("@Mor");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
@@ -148,11 +148,11 @@ test("always addresses multiple agents without closing the mention picker", asyn
   ).toHaveCount(1);
 
   await input.fill("@Vog");
-  const vogueSwitch = menu.getByRole("switch", {
+  const voguePin = menu.getByRole("button", {
     name: "Always address Vogue",
   });
-  await vogueSwitch.click();
-  await expect(vogueSwitch).toBeChecked();
+  await voguePin.click();
+  await expect(voguePin).toHaveAttribute("aria-pressed", "true");
   await expect(menu).toBeVisible();
   await expect(input).toHaveText("@Vog");
   await expect(
