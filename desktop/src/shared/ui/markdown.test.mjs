@@ -1294,9 +1294,9 @@ test("renderEntityLinkAnchor renders Buzz entity links as chips", () => {
   assert.match(html, /role="button"/);
   assert.match(html, /tabindex="0"/);
   assert.match(html, /data-buzz-link-kind="pr"/);
-  assert.match(html, /max-w-64/);
-  assert.match(html, /\btruncate\b/);
-  assert.doesNotMatch(html, /wrapping-inline-chip/);
+  assert.match(html, /wrapping-inline-chip/);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>buzz-</);
+  assert.doesNotMatch(html, /\btruncate\b/);
   assert.doesNotMatch(html, /<a/);
   assert.doesNotMatch(html, /<button/);
 });

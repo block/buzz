@@ -25,6 +25,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
+import { truncateInlineChipLabel } from "@/shared/ui/mentionChip";
 
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
 import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
@@ -318,20 +319,20 @@ export function renderEntityLinkAnchor({
       (parsed.value.type === "issue" || parsed.value.type === "pr")
         ? `${parsed.value.dtag} · ${resolvedContext}`
         : presentation.label;
+    const chipLabel =
+      parsed.value.type === "issue" ? truncateInlineChipLabel(label) : label;
     return (
       <BuzzLinkChip
         data-buzz-link-kind={parsed.value.type}
         href={href}
         icon={presentation.icon}
         aria-label={presentation.ariaLabel}
-        className={cn(
-          "max-w-64 overflow-hidden",
-          metadata === null && "buzz-link-unavailable",
-        )}
+        className={cn(metadata === null && "buzz-link-unavailable")}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
+        wrapping
       >
-        <span className="min-w-0 truncate">{label}</span>
+        {chipLabel}
       </BuzzLinkChip>
     );
   };

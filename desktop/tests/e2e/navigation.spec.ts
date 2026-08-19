@@ -457,7 +457,8 @@ test("message links to visible root messages open the thread panel", async ({
   });
   await expect(rootThreadLink).toHaveText("general · Welcome to general");
   await expect(rootThreadLink).toHaveClass(/mention-chip/);
-  await expect(rootThreadLink).toHaveClass(/max-w-64/);
+  await expect(rootThreadLink).toHaveClass(/wrapping-inline-chip/);
+  await expect(rootThreadLink).toHaveCSS("display", "inline");
   await expect(rootThreadLink).not.toHaveAttribute("title");
   await expect
     .poll(() =>
@@ -480,7 +481,7 @@ test("message links to visible root messages open the thread panel", async ({
   ).toHaveText("Welcome to general");
   await expect(
     messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
-  ).toHaveClass(/line-clamp-2/);
+  ).toHaveClass(/line-clamp-3/);
   const messageFooter = messageTooltip.locator(
     '[data-buzz-tooltip-metadata-type=""]',
   );

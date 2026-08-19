@@ -83,7 +83,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
           "PR is up — review when you can:",
           "",
           `- Pull request: <buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools>`,
-          `- Issue: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
+          `- Issue with enough leading context to wrap: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
           `- Repository: <buzz://repo?owner=${alicePubkey}&d=relay-tools>`,
           `- Missing repo: <buzz://repo?owner=${alicePubkey}&d=missing-repo>`,
         ].join("\n"),
@@ -150,28 +150,29 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const issueChip = row.getByRole("button", {
     name: /Open issue .* in repository relay-tools/,
   });
-  await expect(issueChip).toContainText(`relay-tools · ${ISSUE_SUBJECT}`);
-  await expect(issueChip).toHaveCSS("max-width", "256px");
-  await expect(issueChip.locator(".truncate")).toHaveCSS(
-    "text-overflow",
-    "ellipsis",
+  await expect(issueChip).toContainText("relay-tools · Smoke test");
+  await expect(issueChip).not.toContainText(ISSUE_SUBJECT);
+  const issueChipText = await issueChip.textContent();
+  expect(Array.from(issueChipText ?? "")).toHaveLength(48);
+  expect(issueChipText).toMatch(/…$/u);
+  await expect(issueChip).toHaveClass(/wrapping-inline-chip/);
+  await expect(issueChip).toHaveCSS("display", "inline");
+  await expect(issueChip.locator(".truncate")).toHaveCount(0);
+  const issueChipFragments = await issueChip.evaluate((element) =>
+    Array.from(element.getClientRects()).map((rect) => ({
+      height: rect.height,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+    })),
   );
-  await expect
-    .poll(() =>
-      issueChip
-        .locator(".truncate")
-        .evaluate((element) => element.scrollWidth > element.clientWidth),
-    )
-    .toBe(true);
-  await expect
-    .poll(() =>
-      issueChip.evaluate((element) => {
-        const maxWidth = Number.parseFloat(getComputedStyle(element).maxWidth);
-        return element.getBoundingClientRect().width <= maxWidth + 1;
-      }),
-    )
-    .toBe(true);
-  await issueChip.hover();
+  expect(issueChipFragments.length).toBeGreaterThan(1);
+  const hoveredFragment = issueChipFragments.at(-1);
+  if (!hoveredFragment) throw new Error("Expected a wrapped issue chip");
+  await page.mouse.move(
+    hoveredFragment.left + hoveredFragment.width / 2,
+    hoveredFragment.top + hoveredFragment.height / 2,
+  );
   const issueTooltip = page.getByRole("tooltip");
   const issueContext = issueTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
@@ -213,16 +214,6 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const repoChip = row.getByRole("button", {
     name: "Open repository relay-tools",
   });
-  const [issueChipBox, repoChipBox] = await Promise.all([
-    issueChip.boundingBox(),
-    repoChip.boundingBox(),
-  ]);
-  if (!issueChipBox || !repoChipBox) {
-    throw new Error("Expected visible issue and repository chips");
-  }
-  expect(
-    Math.abs(issueChipBox.height - repoChipBox.height),
-  ).toBeLessThanOrEqual(1);
   await repoChip.hover();
   const repoTooltip = page.getByRole("tooltip");
   await expect(

@@ -8,6 +8,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
+import { truncateInlineChipLabel } from "@/shared/ui/mentionChip";
 
 import { BuzzLinkChip } from "./BuzzLinkChip";
 import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
@@ -101,7 +102,7 @@ function MessageLinkMetadataTooltip({
           className="w-72 max-w-[min(18rem,calc(100vw-2rem))] px-3 py-2 text-left"
           side="top"
         >
-          <span className="line-clamp-2" data-buzz-tooltip-metadata-content="">
+          <span className="line-clamp-3" data-buzz-tooltip-metadata-content="">
             {content}
           </span>
           <span
@@ -163,6 +164,9 @@ export function MessageLinkPill({
   });
 
   if (!isSentFromThread) {
+    const chipLabel = truncateInlineChipLabel(
+      `${channelLabel}${inlineContext ? ` · ${inlineContext}` : ""}`,
+    );
     const chip = (
       <BuzzLinkChip
         data-message-link=""
@@ -170,16 +174,13 @@ export function MessageLinkPill({
         icon="message"
         aria-label={`Open message in channel ${channelLabel}`}
         className={cn(
-          "max-w-64 overflow-hidden",
           metadata.state.kind === "unavailable" && "buzz-link-unavailable",
         )}
         interactive={interactive}
         onOpenLink={() => onOpenMessageLink(link)}
+        wrapping
       >
-        <span className="min-w-0 truncate">
-          {channelLabel}
-          {inlineContext ? ` · ${inlineContext}` : null}
-        </span>
+        {chipLabel}
       </BuzzLinkChip>
     );
     return interactive ? (
