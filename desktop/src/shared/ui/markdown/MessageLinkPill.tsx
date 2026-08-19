@@ -68,6 +68,16 @@ function MessageLinkMetadataTooltip({
   footer: string;
   metadata: ReturnType<typeof useMessageLinkMetadata>;
 }) {
+  if (metadata.state.kind === "unavailable") {
+    return (
+      <TooltipProvider delayDuration={500} skipDelayDuration={0}>
+        <Tooltip>
+          <TooltipTrigger asChild>{children}</TooltipTrigger>
+          <TooltipContent side="top">Message unavailable</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
   if (metadata.state.kind !== "ready" || !metadata.state.snippet.trim()) {
     return children;
   }

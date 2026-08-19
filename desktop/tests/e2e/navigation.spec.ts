@@ -630,7 +630,7 @@ test("direct-message tooltip metadata stays on one physical line", async ({
     .toEqual({ fitsOneLine: true, heightIsClipped: true });
 });
 
-test("message links omit tooltips when preview metadata is unavailable", async ({
+test("message links explain when preview metadata is unavailable", async ({
   page,
 }) => {
   await page.goto("/");
@@ -648,12 +648,13 @@ test("message links omit tooltips when preview metadata is unavailable", async (
     .getByTestId("message-row")
     .filter({ hasText: "Missing preview" })
     .last();
-  const missingMessageLink = linkMessage.getByRole("button", {
-    name: "Open message in channel general",
-  });
+  const missingMessageLink = linkMessage.locator("button[data-message-link]");
+  await expect(missingMessageLink).toHaveAccessibleName(
+    "Open message in channel general",
+  );
   await expect(missingMessageLink).toHaveText("general");
   await missingMessageLink.hover();
-  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByRole("tooltip")).toHaveText("Message unavailable");
 });
 
 test("message links reopen a closed thread when the same messageId is already in the URL", async ({
