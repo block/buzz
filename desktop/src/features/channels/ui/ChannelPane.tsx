@@ -148,6 +148,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   profilePanelView,
   targetMessageId,
   threadAllMessages,
+  threadExpandedReplyIds,
   threadHeadMessage,
   threadMessages,
   threadMessagesPending = false,
@@ -826,6 +827,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
                 threadHead={threadHeadMessage}
+                expandedReplyIds={threadExpandedReplyIds}
                 videoReviewPresentation={threadVideoReviewPresentation}
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}

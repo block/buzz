@@ -38,10 +38,9 @@ import { Separator } from "@/shared/ui/separator";
 import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
-import {
-  MessageThreadPanelHeader,
-  ThreadMessageSkeleton,
-} from "./MessageThreadPanelSkeleton";
+import { MessageThreadPanelHeader } from "./MessageThreadPanelHeader";
+import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
+import { ThreadScrollToLatestButton } from "./ThreadScrollToLatestButton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
@@ -49,6 +48,7 @@ import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useStableSendToChannel } from "./useStableSendToChannel";
 import { useAnchoredScroll } from "./useAnchoredScroll";
+import { usePinnedThreadAnchorTracking } from "./usePinnedThreadAnchorTracking";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
 type MessageThreadPanelProps = ThreadPanelLayoutProps & {
@@ -57,6 +57,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channelName: string;
   currentPubkey?: string;
   disabled?: boolean;
+  expandedReplyIds: ReadonlySet<string>;
   firstUnreadReplyId?: string | null;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
@@ -192,6 +193,7 @@ export function MessageThreadPanel({
   columnMaxWidthPx,
   currentPubkey,
   disabled = false,
+  expandedReplyIds,
   firstUnreadReplyId,
   huddleMemberPubkeys,
   huddleMemberPubkeysPending = false,
@@ -261,6 +263,16 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
+  const handleSelectReplyTarget = usePinnedThreadAnchorTracking({
+    channelId,
+    onSelectReplyTarget,
+    threadHeadId,
+  });
+  const handleExpandReplies = usePinnedThreadAnchorTracking({
+    channelId,
+    onSelectReplyTarget: onExpandReplies,
+    threadHeadId,
+  });
   useEscapeKey(
     onClose,
     !isHuddleTranscript && (isOverlay || isSinglePanelView || isFocusMode),
@@ -315,9 +327,9 @@ export function MessageThreadPanel({
         return;
       }
 
-      onExpandReplies(message);
+      handleExpandReplies(message);
     },
-    [collapseThreadHeadReplies, onExpandReplies, threadHeadId],
+    [collapseThreadHeadReplies, handleExpandReplies, threadHeadId],
   );
 
   const composerReplyTarget =
@@ -564,6 +576,15 @@ export function MessageThreadPanel({
   if (!threadHead) {
     return null;
   }
+  const pinReturnAnchorId = (() => {
+    const candidateId = scrollTargetId ?? replyTargetMessage?.id;
+    if (!candidateId || candidateId === threadHead.id) return undefined;
+    const candidate =
+      deferredThreadReplies.find((entry) => entry.message.id === candidateId)
+        ?.message ??
+      (replyTargetMessage?.id === candidateId ? replyTargetMessage : null);
+    return candidate ? candidate.id : undefined;
+  })();
   const threadScrollRegion = (
     <AuxiliaryPanelBody
       className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
@@ -763,7 +784,7 @@ export function MessageThreadPanel({
                           shouldShowThreadBranchGuides &&
                           connectsToVisibleChild &&
                           !entry.summary
-                            ? onExpandReplies
+                            ? handleExpandReplies
                             : undefined
                         }
                         onCollapseDescendantsHoverChange={
@@ -791,7 +812,7 @@ export function MessageThreadPanel({
                         }
                         onMarkUnread={onMarkUnread}
                         onMarkRead={onMarkRead}
-                        onReply={onSelectReplyTarget}
+                        onReply={handleSelectReplyTarget}
                         onSendToChannel={stableSendToChannel}
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}
@@ -818,7 +839,7 @@ export function MessageThreadPanel({
                           onCollapseDepthGuideHoverChange={
                             handleCollapseBranchHoverChange
                           }
-                          onOpenThread={onExpandReplies}
+                          onOpenThread={handleExpandReplies}
                           summary={entry.summary}
                           summaryIndentOffsetRem={
                             THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM
@@ -857,23 +878,11 @@ export function MessageThreadPanel({
 
   const threadFooter = (
     <>
-      {!isAtBottom ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-36 z-50 flex justify-center px-4">
-          <Button
-            className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
-            data-testid="thread-scroll-to-latest"
-            onClick={() => scrollToBottom("smooth")}
-            size="sm"
-            type="button"
-            variant="outline"
-          >
-            <ArrowDown aria-hidden />
-            {newMessageCount > 0
-              ? `${newMessageCount} new message${newMessageCount === 1 ? "" : "s"}`
-              : "Jump to latest"}
-          </Button>
-        </div>
-      ) : null}
+      <ThreadScrollToLatestButton
+        isAtBottom={isAtBottom}
+        newMessageCount={newMessageCount}
+        onScrollToBottom={() => scrollToBottom("smooth")}
+      />
 
       <div
         className="pointer-events-none absolute inset-x-0 bottom-0 z-40 isolate before:absolute before:inset-x-0 before:bottom-0 before:-z-10 before:h-24 before:bg-gradient-to-b before:from-transparent before:to-background before:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:-z-10 after:h-12 after:bg-background after:content-['']"
@@ -970,6 +979,9 @@ export function MessageThreadPanel({
         header={
           isHuddleTranscript ? undefined : (
             <MessageThreadPanelHeader
+              channelId={channelId}
+              channelName={channelName}
+              expandedReplyIds={expandedReplyIds}
               headerLeading={headerLeading}
               headerTitle={headerTitle}
               headerTitleAriaLabel={headerTitleAriaLabel}
@@ -977,7 +989,9 @@ export function MessageThreadPanel({
               isSinglePanelView={isSinglePanelView}
               onClose={onClose}
               onHeaderTitleClick={onHeaderTitleClick}
+              returnAnchorId={pinReturnAnchorId}
               showBackButton={showBackButton}
+              threadHead={threadHead}
             />
           )
         }

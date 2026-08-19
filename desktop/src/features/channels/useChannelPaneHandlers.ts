@@ -28,6 +28,7 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
   markRevealedRepliesRead,
+  onExpandedThreadReplyIdsChange,
   profiles,
   recordThreadInteraction,
   onOptimisticOpenThreadHeadIdChange,
@@ -49,6 +50,9 @@ export function useChannelPaneHandlers({
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
   markRevealedRepliesRead: (messageId: string) => void;
+  onExpandedThreadReplyIdsChange?: (
+    expandedReplyIds: ReadonlySet<string>,
+  ) => void;
   profiles: UserProfileLookup | undefined;
   recordThreadInteraction: (rootId: string) => void;
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
@@ -77,6 +81,11 @@ export function useChannelPaneHandlers({
 
   const expandedThreadReplyIdsRef = React.useRef(expandedThreadReplyIds);
   expandedThreadReplyIdsRef.current = expandedThreadReplyIds;
+
+  const onExpandedThreadReplyIdsChangeRef = React.useRef(
+    onExpandedThreadReplyIdsChange,
+  );
+  onExpandedThreadReplyIdsChangeRef.current = onExpandedThreadReplyIdsChange;
 
   const profilesRef = React.useRef(profiles);
   profilesRef.current = profiles;
@@ -244,25 +253,24 @@ export function useChannelPaneHandlers({
 
   const handleExpandThreadReplies = React.useCallback(
     (message: { id: string }) => {
-      if (expandedThreadReplyIdsRef.current.has(message.id)) {
+      const next = new Set(expandedThreadReplyIdsRef.current);
+      if (next.has(message.id)) {
         const descendantIds = getReplyDescendantIdsRef.current(message.id);
-        setExpandedThreadReplyIds((current) => {
-          const next = new Set(current);
-          next.delete(message.id);
-          for (const descendantId of descendantIds) {
-            next.delete(descendantId);
-          }
-          return next;
-        });
+        next.delete(message.id);
+        for (const descendantId of descendantIds) {
+          next.delete(descendantId);
+        }
+      } else {
+        next.add(message.id);
+      }
+      setExpandedThreadReplyIds(next);
+      onExpandedThreadReplyIdsChangeRef.current?.(next);
+
+      if (!next.has(message.id)) {
         return;
       }
 
       const firstReplyId = getFirstReplyIdRef.current(message.id);
-      setExpandedThreadReplyIds((current) => {
-        const next = new Set(current);
-        next.add(message.id);
-        return next;
-      });
 
       // Drilling into a branch reveals only its direct replies (LP4 v3
       // open-at-level): mark exactly those read, never the whole subtree. A

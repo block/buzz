@@ -168,6 +168,7 @@ export type ChannelPaneProps = {
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadAllMessages: TimelineMessage[];
+  threadExpandedReplyIds: ReadonlySet<string>;
   threadMessages: MainTimelineEntry[];
   threadMessagesPending?: boolean;
   threadPanelWidthPx: number;

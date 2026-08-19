@@ -22,4 +22,5 @@ export type ChannelScreenProps = {
   targetForumReplyId: string | null;
   targetMessageEvents: RelayEvent[];
   targetMessageId: string | null;
+  targetMessageLoadSettled: boolean;
 };

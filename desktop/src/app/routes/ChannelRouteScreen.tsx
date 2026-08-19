@@ -118,6 +118,14 @@ export function ChannelRouteScreen({
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
     return cachedTarget ? [cachedTarget] : [];
   });
+  const routeTargetKey = `${targetMessageId ?? ""}\u0000${targetThreadRootId ?? ""}`;
+  const [routeLoadState, setRouteLoadState] = React.useState(() => ({
+    key: routeTargetKey,
+    settled:
+      (!targetMessageId && !targetThreadRootId) || Boolean(selectedPostId),
+  }));
+  const targetMessageLoadSettled =
+    routeLoadState.key === routeTargetKey && routeLoadState.settled;
 
   // Reset spliced target events when the channel context changes (channel
   // switch or entering/leaving a forum post). Tied to channel identity rather
@@ -138,6 +146,9 @@ export function ChannelRouteScreen({
 
   React.useEffect(() => {
     let isCancelled = false;
+    const shouldFetchTarget =
+      Boolean(targetMessageId || targetThreadRootId) && !selectedPostId;
+    setRouteLoadState({ key: routeTargetKey, settled: !shouldFetchTarget });
 
     // Don't wipe already-spliced target events just because the route target
     // cleared (e.g. `onTargetReached` clears the `messageId` URL param once the
@@ -145,7 +156,7 @@ export function ChannelRouteScreen({
     // deep-linked message, the spliced event is the only copy — dropping it on
     // param-clear blanks the timeline. Resetting on channel / forum-post change
     // is handled by the effect below; here we only fetch when there's a target.
-    if ((!targetMessageId && !targetThreadRootId) || selectedPostId) {
+    if (!shouldFetchTarget) {
       return () => {
         isCancelled = true;
       };
@@ -167,26 +178,28 @@ export function ChannelRouteScreen({
         : null,
     ].filter((eventId): eventId is string => eventId !== null);
 
-    void fetchRouteTargetEvents(
-      eventIds,
-      targetMessageId,
-      targetThreadRootId,
-    ).then((events) => {
-      if (!isCancelled) {
-        setTargetMessageEvents((currentEvents) => {
-          const eventsById = new Map<string, RelayEvent>();
-          for (const event of [...currentEvents, ...events]) {
-            eventsById.set(event.id, event);
-          }
-          return Array.from(eventsById.values());
-        });
-      }
-    });
+    void fetchRouteTargetEvents(eventIds, targetMessageId, targetThreadRootId)
+      .then((events) => {
+        if (!isCancelled) {
+          setTargetMessageEvents((currentEvents) => {
+            const eventsById = new Map<string, RelayEvent>();
+            for (const event of [...currentEvents, ...events]) {
+              eventsById.set(event.id, event);
+            }
+            return Array.from(eventsById.values());
+          });
+        }
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setRouteLoadState({ key: routeTargetKey, settled: true });
+        }
+      });
 
     return () => {
       isCancelled = true;
     };
-  }, [selectedPostId, targetMessageId, targetThreadRootId]);
+  }, [routeTargetKey, selectedPostId, targetMessageId, targetThreadRootId]);
 
   if (channelsQuery.isPending && !activeChannel) {
     if (isHuddleTranscript) {
@@ -216,6 +229,7 @@ export function ChannelRouteScreen({
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
+      targetMessageLoadSettled={targetMessageLoadSettled}
     />
   );
 }

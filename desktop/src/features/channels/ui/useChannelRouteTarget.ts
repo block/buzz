@@ -5,7 +5,7 @@ import { isBroadcastReply } from "@/features/messages/lib/threading";
 import type { Channel } from "@/shared/api/types";
 import type { PanelValueSetter } from "./useChannelPanelHistoryState";
 
-function getThreadRouteTarget(
+export function getThreadRouteTarget(
   targetMessage: TimelineMessage,
   messageById: ReadonlyMap<string, TimelineMessage>,
 ): { expandedReplyIds: Set<string>; threadHeadId: string } | null {
@@ -35,6 +35,19 @@ function getThreadRouteTarget(
   }
 
   return { expandedReplyIds, threadHeadId };
+}
+
+export function isThreadRouteTargetReady(
+  targetMessageId: string | null,
+  targetMessage: TimelineMessage | null,
+  messageById: ReadonlyMap<string, TimelineMessage>,
+): boolean {
+  if (!targetMessageId) return true;
+  if (!targetMessage) return false;
+  if (!targetMessage.parentId || isBroadcastReply(targetMessage.tags ?? [])) {
+    return true;
+  }
+  return getThreadRouteTarget(targetMessage, messageById) !== null;
 }
 
 function getRouteMainTimelineTargetId(
@@ -84,6 +97,11 @@ export function useChannelRouteTarget({
   const targetTimelineMessage = targetMessageId
     ? (timelineMessageById.get(targetMessageId) ?? null)
     : null;
+  const threadRouteTargetReady = isThreadRouteTargetReady(
+    targetMessageId,
+    targetTimelineMessage,
+    timelineMessageById,
+  );
   const mainTimelineTargetMessageId = getRouteMainTimelineTargetId(
     targetMessageId,
     targetTimelineMessage,
@@ -166,5 +184,8 @@ export function useChannelRouteTarget({
     timelineMessageById,
   ]);
 
-  return mainTimelineTargetMessageId;
+  return {
+    mainTimelineTargetMessageId,
+    routeTargetReady: threadRouteTargetReady,
+  };
 }
