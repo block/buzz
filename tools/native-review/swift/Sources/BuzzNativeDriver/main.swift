@@ -447,7 +447,32 @@ func modifierFlags(_ names: [String]) throws -> CGEventFlags {
     }
 }
 
-func postKey(_ key: String, modifiers: [String] = []) throws {
+func assertTargetFrontmost(pid: pid_t) throws {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+        throw DriverError.message("refusing global input because target app is not frontmost")
+    }
+    _ = try windowInfo(pid: pid)
+}
+
+func ensureTargetFrontmost(pid: pid_t) async throws {
+    guard let running = NSRunningApplication(processIdentifier: pid), !running.isTerminated else {
+        throw DriverError.message("target app is no longer running")
+    }
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+        running.activate(options: [.activateIgnoringOtherApps])
+    }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while ContinuousClock.now < deadline {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+            try assertTargetFrontmost(pid: pid)
+            return
+        }
+        try await Task.sleep(for: .milliseconds(25))
+    }
+    throw DriverError.message("refusing global input because target app is not frontmost")
+}
+
+func postKey(_ key: String, pid: pid_t, modifiers: [String] = []) throws {
     let code = try keyCode(key)
     let flags = try modifierFlags(modifiers)
     for keyDown in [true, false] {
@@ -455,11 +480,11 @@ func postKey(_ key: String, modifiers: [String] = []) throws {
             throw DriverError.message("could not create keyboard event")
         }
         event.flags = flags
-        event.post(tap: .cghidEventTap)
+        event.postToPid(pid)
     }
 }
 
-func postUnicodeScalar(_ scalar: Unicode.Scalar) throws {
+func postUnicodeScalar(_ scalar: Unicode.Scalar, pid: pid_t) throws {
     guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
           let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
         throw DriverError.message("could not create text event")
@@ -471,18 +496,18 @@ func postUnicodeScalar(_ scalar: Unicode.Scalar) throws {
     }
     down.flags = []
     up.flags = []
-    down.post(tap: .cghidEventTap)
-    up.post(tap: .cghidEventTap)
+    down.postToPid(pid)
+    up.postToPid(pid)
 }
 
-func postText(_ text: String) throws {
+func postText(_ text: String, pid: pid_t) throws {
     for scalar in text.unicodeScalars {
         if scalar == "\n" {
             // Buzz submits the composer on plain Enter. A newline in typed text
             // therefore has to follow the same native path as a user: Shift+Enter.
-            try postKey("return", modifiers: ["shift"])
+            try postKey("return", pid: pid, modifiers: ["shift"])
         } else if scalar != "\r" {
-            try postUnicodeScalar(scalar)
+            try postUnicodeScalar(scalar, pid: pid)
         }
     }
 }
@@ -550,9 +575,11 @@ struct BuzzNativeDriver {
                         } else if type == "wait" {
                             try await Task.sleep(for: .milliseconds(action["duration_ms"] as? Int ?? 0))
                         } else if type == "press" {
-                            try postKey(action["key"] as? String ?? "", modifiers: action["modifiers"] as? [String] ?? [])
+                            try await ensureTargetFrontmost(pid: pid)
+                            try postKey(action["key"] as? String ?? "", pid: pid, modifiers: action["modifiers"] as? [String] ?? [])
                         } else if type == "type_text" {
-                            try postText(action["text"] as? String ?? "")
+                            try await ensureTargetFrontmost(pid: pid)
+                            try postText(action["text"] as? String ?? "", pid: pid)
                         } else if type == "scroll" {
                             guard let (_, used) = selected else {
                                 throw DriverError.message("scroll requires a freshly selected target")
@@ -569,7 +596,9 @@ struct BuzzNativeDriver {
                                 throw DriverError.message("scroll requires a freshly selected target with current bounds")
                             }
                             selected = (element, used)
+                            try await ensureTargetFrontmost(pid: pid)
                             let point = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
+                            try assertTargetFrontmost(pid: pid)
                             CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
                                     mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             let deltaY = Int32(action["delta_y"] as? Int ?? 0)
@@ -577,6 +606,7 @@ struct BuzzNativeDriver {
                                                       wheel1: deltaY, wheel2: 0, wheel3: 0) else {
                                 throw DriverError.message("could not create scroll event")
                             }
+                            try assertTargetFrontmost(pid: pid)
                             event.post(tap: .cghidEventTap)
                         } else {
                             guard let (_, used) = selected else {
@@ -594,6 +624,7 @@ struct BuzzNativeDriver {
                                 throw DriverError.message("action requires a freshly selected element with current bounds")
                             }
                             selected = (element, used)
+                            try await ensureTargetFrontmost(pid: pid)
                             let point = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
                             let duration = max(action["duration_ms"] as? Int ?? 0, 0)
                             if type == "move_pointer" && duration > 0 {
@@ -603,14 +634,19 @@ struct BuzzNativeDriver {
                                 for index in 1...steps {
                                     let fraction = Double(index) / Double(steps)
                                     let next = CGPoint(x: start.x + (point.x - start.x) * fraction, y: start.y + (point.y - start.y) * fraction)
+                                    try assertTargetFrontmost(pid: pid)
                                     CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: next, mouseButton: .left)?.post(tap: .cghidEventTap)
                                     try await Task.sleep(for: .milliseconds(duration / steps))
                                 }
                             } else if type == "move_pointer" {
+                                try assertTargetFrontmost(pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             } else if type == "click" {
+                                try assertTargetFrontmost(pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                try assertTargetFrontmost(pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                try assertTargetFrontmost(pid: pid)
                                 CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             } else { throw DriverError.message("unsupported action: \(type)") }
                         }

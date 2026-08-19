@@ -45,7 +45,7 @@
     "cleanup": {
       "type": "object", "additionalProperties": false,
       "required": ["terminate_app", "remove_state"],
-      "properties": {"terminate_app": {"type": "boolean"}, "remove_state": {"type": "boolean"}}
+      "properties": {"terminate_app": {"const": true}, "remove_state": {"const": true}}
     }
   },
   "$defs": {

@@ -259,8 +259,12 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
                 raise HarnessError(f"duplicate measurement name: {measurement}")
             measurement_names.add(measurement)
     cleanup = journey["cleanup"]
-    if not isinstance(cleanup, dict) or set(cleanup) != {"terminate_app", "remove_state"} or not all(isinstance(v, bool) for v in cleanup.values()):
-        raise HarnessError("cleanup requires boolean terminate_app and remove_state")
+    if (not isinstance(cleanup, dict)
+            or set(cleanup) != {"terminate_app", "remove_state"}
+            or cleanup != {"terminate_app": True, "remove_state": True}):
+        raise HarnessError(
+            "cleanup requires terminate_app: true and remove_state: true for pass-eligible journeys"
+        )
     return journey
 
 
@@ -843,7 +847,12 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
             receipt = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise HarnessError(f"cannot read {label} receipt {path}: {exc}") from exc
-        if receipt.get("status") != "passed" or receipt.get("cleanup", {}).get("status") != "passed":
+        if not isinstance(receipt, dict):
+            raise HarnessError(f"{label} receipt root must be an object: {path}")
+        cleanup = receipt.get("cleanup")
+        if (receipt.get("status") != "passed" or not isinstance(cleanup, dict)
+                or set(cleanup) - {"status", "errors"} or cleanup.get("status") != "passed"
+                or ("errors" in cleanup and cleanup["errors"] != [])):
             raise HarnessError(f"{label} receipt is not a clean pass: {path}")
         provenance = receipt.get("provenance")
         if (not isinstance(provenance, dict) or provenance.get("dirty") is not False
@@ -856,6 +865,8 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
                 or not isinstance(provenance, dict)
                 or not isinstance(provenance.get("head_sha"), str)
                 or not re.fullmatch(r"[0-9a-f]{40}", provenance["head_sha"])
+                or not isinstance(provenance.get("artifact_path"), str)
+                or not provenance["artifact_path"]
                 or not isinstance(provenance.get("artifact_sha256"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", provenance["artifact_sha256"])
                 or not isinstance(machine, dict)
@@ -863,6 +874,32 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
                 or not re.fullmatch(r"[0-9a-f]{64}", machine.get("host_id_sha256", ""))
                 or any(not isinstance(value, str) or not value for value in machine.values())):
             raise HarnessError(f"{label} receipt has incomplete provenance: {path}")
+        measurements = receipt.get("measurements")
+        process_metrics = receipt.get("performance", {}).get("process")
+        if not isinstance(measurements, dict) or not isinstance(process_metrics, dict):
+            raise HarnessError(f"{label} receipt has invalid performance data: {path}")
+        for name, measurement in measurements.items():
+            if (not isinstance(name, str) or not name or not isinstance(measurement, dict)
+                    or set(measurement) != {"value", "unit", "step"}
+                    or measurement.get("unit") != "ms"
+                    or not isinstance(measurement.get("step"), str) or not measurement["step"]
+                    or not numeric(measurement.get("value")) or measurement["value"] < 0):
+                raise HarnessError(f"{label} receipt has invalid measurement {name}: {path}")
+        allowed_process = {
+            "sample_count", "interval_ms", "cpu_percent_median", "cpu_percent_peak",
+            "resident_mb_median", "resident_mb_peak",
+        }
+        if (set(process_metrics) - allowed_process
+                or not isinstance(process_metrics.get("sample_count"), int)
+                or isinstance(process_metrics.get("sample_count"), bool)
+                or process_metrics["sample_count"] < 0):
+            raise HarnessError(f"{label} receipt has invalid process metrics: {path}")
+        for name, value in process_metrics.items():
+            if name == "sample_count":
+                continue
+            if (not numeric(value) or value < 0
+                    or (name == "interval_ms" and value <= 0)):
+                raise HarnessError(f"{label} receipt has invalid process metric {name}: {path}")
         receipts.append(receipt)
     if len({receipt["run_id"] for receipt in receipts}) != len(receipts):
         raise HarnessError(f"{label} cohort contains duplicate run identities")

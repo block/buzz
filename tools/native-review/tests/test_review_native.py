@@ -134,6 +134,28 @@ class JourneyTests(unittest.TestCase):
             with self.assertRaisesRegex(review_native.HarnessError, "exactly one"):
                 review_native.load_journey(path)
 
+    def test_cleanup_cannot_be_disabled_for_pass_eligible_journeys(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        for key in ("terminate_app", "remove_state"):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "invalid.yaml"
+                path.write_text(source.replace(f"{key}: true", f"{key}: false", 1))
+                with self.assertRaisesRegex(review_native.HarnessError, "cleanup requires"):
+                    review_native.load_journey(path)
+
+    def test_native_driver_fences_input_to_the_target_process(self):
+        source = (
+            MODULE_PATH.parent
+            / "swift/Sources/BuzzNativeDriver/main.swift"
+        ).read_text()
+        self.assertIn("func ensureTargetFrontmost(pid: pid_t) async throws", source)
+        self.assertGreaterEqual(source.count("try await ensureTargetFrontmost(pid: pid)"), 4)
+        self.assertIn("func assertTargetFrontmost(pid: pid_t) throws", source)
+        self.assertGreaterEqual(source.count("try assertTargetFrontmost(pid: pid)"), 6)
+        self.assertIn("event.postToPid(pid)", source)
+        self.assertIn("down.postToPid(pid)", source)
+        self.assertNotIn("down.post(tap: .cghidEventTap)", source)
+
     def test_production_and_remote_targets_are_rejected(self):
         with self.assertRaisesRegex(review_native.HarnessError, "non-loopback"):
             review_native.isolation_manifest("run", "wss://buzz.block.builderlab.xyz")
@@ -278,9 +300,11 @@ class PerformanceTests(unittest.TestCase):
             "cleanup": {"status": "passed"},
             "provenance": {"dirty": False, "dirty_state_sha256": None, "status": [],
                            "head_sha": ("a" if artifact == "base" else "b") * 40,
+                           "artifact_path": f"/tmp/{artifact}/buzz-desktop",
                            "artifact_sha256": ("c" if artifact == "base" else "d") * 64},
             "measurements": {"tooltip_open_latency": {"value": timing, "unit": "ms", "step": "tooltip"}},
             "performance": {"machine": self.MACHINE, "process": {
+                "sample_count": 1, "interval_ms": 100,
                 "cpu_percent_median": cpu, "resident_mb_peak": memory,
             }},
         }
@@ -332,11 +356,28 @@ metrics:
                     ]
                     with self.assertRaisesRegex(
                         review_native.HarnessError,
-                        f"nonnegative finite numeric metric {re.escape(metric)}",
+                        r"invalid (measurement|process metric)",
                     ):
                         review_native.compare_performance(
                             baseline, candidate, self.budget(root / f"{metric}-budget.yaml")
                         )
+
+    def test_comparison_rejects_receipts_outside_the_comparison_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            cases = (
+                ("wrong-unit", lambda payload: payload["measurements"]["tooltip_open_latency"].update(unit="seconds")),
+                ("missing-artifact", lambda payload: payload["provenance"].pop("artifact_path")),
+                ("zero-samples", lambda payload: payload["performance"]["process"].update(sample_count=-1)),
+            )
+            for name, mutate in cases:
+                with self.subTest(name=name):
+                    path = self.receipt(root / f"{name}.json", "base", 100)
+                    payload = json.loads(path.read_text())
+                    mutate(payload)
+                    path.write_text(json.dumps(payload))
+                    with self.assertRaises(review_native.HarnessError):
+                        review_native.load_receipts([path], "baseline")
 
     def test_receipt_schema_requires_nonnegative_comparison_metrics(self):
         schema = json.loads(
@@ -402,7 +443,7 @@ metrics:
             payload = json.loads(candidate[0].read_text())
             payload["measurements"]["tooltip_open_latency"]["value"] = float("nan")
             candidate[0].write_text(json.dumps(payload))
-            with self.assertRaisesRegex(review_native.HarnessError, "finite numeric"):
+            with self.assertRaisesRegex(review_native.HarnessError, "invalid measurement"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
 
             candidate = [self.receipt(root / f"d{i}.json", "base", 100) for i in range(3)]
