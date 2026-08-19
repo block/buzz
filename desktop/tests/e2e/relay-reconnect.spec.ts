@@ -80,10 +80,7 @@ async function getMockWebsocketConnectAttempts(
 ) {
   return page.evaluate(() => {
     const getAttempts = window.__BUZZ_E2E_GET_WEBSOCKET_CONNECT_ATTEMPTS__;
-    if (!getAttempts) {
-      throw new Error("E2E websocket attempt seam is not installed.");
-    }
-    return getAttempts();
+    return getAttempts?.() ?? [];
   });
 }
 
@@ -166,6 +163,52 @@ async function driveConnectionDegraded(
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
+});
+
+test("stalled early AUTH signing times out and starts a replacement dial", async ({
+  page,
+}) => {
+  test.setTimeout(40_000);
+  await installMockBridge(page, {
+    websocketAuthBeforeConnectResolves: true,
+    stallFirstAuthSigning: true,
+  });
+  await page.goto("/");
+
+  await expect
+    .poll(() => getMockWebsocketConnectAttempts(page), { timeout: 32_000 })
+    .toHaveLength(2);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 5_000 },
+    )
+    .toBe("connected");
+});
+
+test("AUTH arriving before connect resolves does not lose the first send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    websocketAuthBeforeConnectResolves: true,
+  });
+  await page.goto("/");
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 5_000 },
+    )
+    .toBe("connected");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const message = `first send after early auth ${Date.now()}`;
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
 });
 
 test("failed initial relay dial retries automatically", async ({ page }) => {

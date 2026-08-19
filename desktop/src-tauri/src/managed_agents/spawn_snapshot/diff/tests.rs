@@ -28,6 +28,7 @@ fn base() -> SpawnConfigSnapshot {
         idle_timeout_seconds: Some(600),
         max_turn_duration_seconds: Some(7200),
         parallelism: 1,
+        effort_level: Some("high".into()),
     }
 }
 
@@ -70,6 +71,7 @@ fn mutations() -> Vec<Mutation> {
             s.max_turn_duration_seconds = None
         }),
         ("parallelism", |s| s.parallelism = 8),
+        ("effort_level", |s| s.effort_level = None),
     ]
 }
 
@@ -569,4 +571,38 @@ fn unstamped_agent_yields_no_badge_and_no_entries() {
             "unstamped agent (orphaned={orphaned}) must not light the badge"
         );
     }
+}
+
+// ── B5 effort lifecycle: restart-diff and re-stamp ───────────────────────
+
+#[test]
+fn tracked_running_old_effort_edited_to_new_yields_effort_level_diff() {
+    // A process was stamped at effort `high`; the record's canonical effort is
+    // later edited to `low`. Until a restart re-stamps, the tracked pair must
+    // light the badge and name exactly `effort_level`.
+    let stamped = base(); // effort_level = high
+    let mut current = base();
+    current.effort_level = Some("low".into());
+    let (needs_restart, entries) = eligible(false, &stamped, &current, None, None);
+    assert!(needs_restart);
+    assert_eq!(fields(&entries), vec!["effort_level"]);
+    assert_eq!(
+        change_at(&entries, "effort_level"),
+        &RestartChange::Value {
+            before: Value::String("high".into()),
+            after: Value::String("low".into()),
+        }
+    );
+}
+
+#[test]
+fn restart_restamps_effort_and_clears_the_badge() {
+    // After the edit above, a restart stamps the new effort, so stamped and
+    // current agree again: the badge clears and no entry remains.
+    let mut restamped = base();
+    restamped.effort_level = Some("low".into());
+    let current = restamped.clone();
+    let (needs_restart, entries) = eligible(false, &restamped, &current, None, None);
+    assert!(!needs_restart);
+    assert!(entries.is_empty());
 }

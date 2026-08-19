@@ -684,6 +684,10 @@ void main() {
     expect(page.channel.id, 'ch1');
     expect(page.initialThreadRootId, 'parent-reply');
     expect(page.initialMessageId, 'reply-event');
+    expect(
+      page.initialThreadRouteBehavior,
+      InitialThreadRouteBehavior.replaceCurrentRoute,
+    );
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {
