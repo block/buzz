@@ -42,6 +42,24 @@ final class BuzzNativeDriverTests: XCTestCase {
     XCTAssertEqual(posts, 1)
   }
 
+  func testPointerPathStartsAndStaysInsideWindowWhenGlobalCursorIsOutside() {
+    let bounds = CGRect(x: 100, y: 100, width: 400, height: 300)
+    let target = CGPoint(x: 300, y: 250)
+    let path = pointerPath(
+      from: CGPoint(x: -500, y: -500), to: target, within: bounds, steps: 10
+    )
+    XCTAssertEqual(path.count, 10)
+    XCTAssertTrue(path.allSatisfy(bounds.contains))
+    XCTAssertEqual(path.last, target)
+  }
+
+  func testRecorderLoopRoutesWriterReadinessThroughCaptureTick() throws {
+    let source = try String(contentsOfFile: #filePath
+      .replacingOccurrences(of: "/Tests/BuzzNativeDriverTests/BuzzNativeDriverTests.swift",
+                            with: "/Sources/BuzzNativeDriver/main.swift"))
+    XCTAssertTrue(source.contains("isReady: writerInput.isReadyForMoreMediaData"))
+  }
+
   func testCaptureTickAdvancesAcrossBackpressureSkipThenUsesAdvancedPTS() {
     var cadence = CaptureCadence()
     var appended = [CMTime]()

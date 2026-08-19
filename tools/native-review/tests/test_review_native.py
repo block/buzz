@@ -361,10 +361,16 @@ class JourneyTests(unittest.TestCase):
                     driver, expectation, start_ns=0, lower_bound_ms=400, timeout_ms=250)
 
     def test_lower_bound_samples_observation_after_driver_query(self):
+        clock = {"now": 640_000_000}
         driver = mock.Mock()
         expectation = {"exists": {"id": "tooltip"}}
-        driver.request.return_value = {"ok": True, "element": {"locator": {"id": "tooltip"}}}
-        with mock.patch.object(review_native.time, "monotonic_ns", return_value=660_000_000):
+
+        def complete_query(*_args, **_kwargs):
+            clock["now"] = 660_000_000
+            return {"ok": True, "element": {"locator": {"id": "tooltip"}}}
+
+        driver.request.side_effect = complete_query
+        with mock.patch.object(review_native.time, "monotonic_ns", side_effect=lambda: clock["now"]):
             with self.assertRaisesRegex(review_native.HarnessError, "not met within 650ms"):
                 review_native.wait_expectation_not_before(
                     driver, expectation, start_ns=0, lower_bound_ms=400, timeout_ms=250)

@@ -103,6 +103,21 @@ func postGlobalEvent(_ event: CGEvent?, pid: pid_t, frontmostPID: () -> pid_t? =
     post(event)
 }
 
+func pointerPath(from start: CGPoint, to target: CGPoint, within bounds: CGRect, steps: Int) -> [CGPoint] {
+    let insetBounds = bounds.insetBy(dx: min(1, bounds.width / 4), dy: min(1, bounds.height / 4))
+    let safeStart = CGPoint(
+        x: min(max(start.x, insetBounds.minX), insetBounds.maxX),
+        y: min(max(start.y, insetBounds.minY), insetBounds.maxY)
+    )
+    return (1...max(steps, 1)).map { index in
+        let fraction = Double(index) / Double(max(steps, 1))
+        return CGPoint(
+            x: safeStart.x + (target.x - safeStart.x) * fraction,
+            y: safeStart.y + (target.y - safeStart.y) * fraction
+        )
+    }
+}
+
 func requirePointInTargetWindow(
     _ point: CGPoint,
     pid: pid_t,
@@ -397,36 +412,27 @@ final class WindowRecorder: @unchecked Sendable {
                 try? await Task.sleep(until: target)
                 if Task.isCancelled { break }
                 autoreleasepool {
-                    guard writerInput.isReadyForMoreMediaData else {
-                        captureTick(cadence: &cadence, isReady: false) { _ in true }
-                        return
-                    }
-                    guard let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
-                          let pool = pixelAdaptor.pixelBufferPool else {
-                        captureTick(cadence: &cadence, isReady: false) { _ in true }
-                        return
-                    }
-                    var optionalBuffer: CVPixelBuffer?
-                    guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &optionalBuffer) == kCVReturnSuccess,
-                          let buffer = optionalBuffer else {
-                        captureTick(cadence: &cadence, isReady: false) { _ in true }
-                        return
-                    }
-                    CVPixelBufferLockBaseAddress(buffer, [])
-                    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-                    guard let base = CVPixelBufferGetBaseAddress(buffer),
-                          let context = CGContext(data: base, width: width, height: height,
-                                                  bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-                                                  space: CGColorSpaceCreateDeviceRGB(),
-                                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else {
-                        captureTick(cadence: &cadence, isReady: false) { _ in true }
-                        return
-                    }
-                    context.interpolationQuality = .high
-                    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-                    if !captureTick(cadence: &cadence, isReady: true, append: { presentationTime in
-                        pixelAdaptor.append(buffer, withPresentationTime: presentationTime)
-                    }) {
+                    if !captureTick(
+                        cadence: &cadence,
+                        isReady: writerInput.isReadyForMoreMediaData,
+                        append: { presentationTime in
+                            guard let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
+                                  let pool = pixelAdaptor.pixelBufferPool else { return true }
+                            var optionalBuffer: CVPixelBuffer?
+                            guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &optionalBuffer) == kCVReturnSuccess,
+                                  let buffer = optionalBuffer else { return true }
+                            CVPixelBufferLockBaseAddress(buffer, [])
+                            defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+                            guard let base = CVPixelBufferGetBaseAddress(buffer),
+                                  let context = CGContext(data: base, width: width, height: height,
+                                                          bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                                                          space: CGColorSpaceCreateDeviceRGB(),
+                                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return true }
+                            context.interpolationQuality = .high
+                            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+                            return pixelAdaptor.append(buffer, withPresentationTime: presentationTime)
+                        }
+                    ) {
                         self.captureError = assetWriter.error ?? DriverError.message("failed to append window video frame")
                     }
                 }
@@ -577,9 +583,8 @@ struct BuzzNativeDriver {
                                 let current = NSEvent.mouseLocation
                                 let start = CGPoint(x: current.x, y: NSScreen.screens.first.map { $0.frame.height - current.y } ?? current.y)
                                 let steps = max(duration / 8, 2)
-                                for index in 1...steps {
-                                    let fraction = Double(index) / Double(steps)
-                                    let next = CGPoint(x: start.x + (point.x - start.x) * fraction, y: start.y + (point.y - start.y) * fraction)
+                                let bounds = try windowInfo(pid: pid).1
+                                for next in pointerPath(from: start, to: point, within: bounds, steps: steps) {
                                     try postGlobalPointerEvent(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: next, mouseButton: .left), at: next, pid: pid)
                                     try await Task.sleep(for: .milliseconds(duration / steps))
                                 }
