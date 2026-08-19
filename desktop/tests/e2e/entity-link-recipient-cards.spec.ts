@@ -82,8 +82,8 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
         content: [
           "PR is up — review when you can:",
           "",
-          `- Pull request: <buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools>`,
-          `- Issue with enough leading context to wrap: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
+          `- Pull request with enough leading context to wrap: <buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools>`,
+          `- Issue: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
           `- Repository: <buzz://repo?owner=${alicePubkey}&d=relay-tools>`,
           `- Missing repo: <buzz://repo?owner=${alicePubkey}&d=missing-repo>`,
         ].join("\n"),
@@ -118,7 +118,27 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     name: /Open pull request .* in repository relay-tools/,
   });
   await expect(prChip).not.toHaveAttribute("title");
-  await prChip.hover();
+  await expect(prChip).toHaveClass(/wrapping-inline-chip/);
+  await expect(prChip).toHaveCSS("display", "inline");
+  await expect(prChip.locator(".truncate")).toHaveCount(0);
+  // Pull-request chips still absorb their subject, so they are the chips that
+  // fragment across lines — hover the last fragment, since the bounding box of
+  // a wrapped inline element has dead space the pointer would land in.
+  const prChipFragments = await prChip.evaluate((element) =>
+    Array.from(element.getClientRects()).map((rect) => ({
+      height: rect.height,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+    })),
+  );
+  expect(prChipFragments.length).toBeGreaterThan(1);
+  const hoveredFragment = prChipFragments.at(-1);
+  if (!hoveredFragment) throw new Error("Expected a wrapped pull-request chip");
+  await page.mouse.move(
+    hoveredFragment.left + hoveredFragment.width / 2,
+    hoveredFragment.top + hoveredFragment.height / 2,
+  );
   const prTooltip = page.getByRole("tooltip");
   const prContext = prTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
@@ -150,29 +170,16 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const issueChip = row.getByRole("button", {
     name: /Open issue .* in repository relay-tools/,
   });
-  await expect(issueChip).toContainText("relay-tools · Smoke test");
+  // The issue chip is the repository name alone — resolved metadata never
+  // reaches the inline label, so it neither absorbs the title nor falls back
+  // to the event hash.
+  await expect(issueChip).toHaveText("relay-tools");
   await expect(issueChip).not.toContainText(ISSUE_SUBJECT);
-  const issueChipText = await issueChip.textContent();
-  expect(Array.from(issueChipText ?? "")).toHaveLength(48);
-  expect(issueChipText).toMatch(/…$/u);
+  await expect(issueChip).not.toContainText(ISSUE_ID.slice(0, 8));
   await expect(issueChip).toHaveClass(/wrapping-inline-chip/);
   await expect(issueChip).toHaveCSS("display", "inline");
   await expect(issueChip.locator(".truncate")).toHaveCount(0);
-  const issueChipFragments = await issueChip.evaluate((element) =>
-    Array.from(element.getClientRects()).map((rect) => ({
-      height: rect.height,
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-    })),
-  );
-  expect(issueChipFragments.length).toBeGreaterThan(1);
-  const hoveredFragment = issueChipFragments.at(-1);
-  if (!hoveredFragment) throw new Error("Expected a wrapped issue chip");
-  await page.mouse.move(
-    hoveredFragment.left + hoveredFragment.width / 2,
-    hoveredFragment.top + hoveredFragment.height / 2,
-  );
+  await issueChip.hover();
   const issueTooltip = page.getByRole("tooltip");
   const issueContext = issueTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
@@ -262,6 +269,87 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     animations: "disabled",
     path: `${SHOTS}/01-recipient-entity-cards.png`,
   });
+});
+
+test("issue chip width is metadata-independent while the title loads", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    ({ repoAddress, issueId, alicePubkey, issueSubject }) => {
+      window.__BUZZ_E2E_EXTRA_PROJECT_EVENTS__ = [
+        {
+          id: issueId,
+          kind: 1621, // KIND_GIT_ISSUE
+          pubkey: alicePubkey,
+          created_at: Math.floor(Date.now() / 1000) - 60,
+          content: "Issue body",
+          tags: [
+            ["a", repoAddress],
+            ["subject", issueSubject],
+          ],
+        },
+      ];
+    },
+    {
+      repoAddress: REPO_ADDRESS,
+      issueId: ISSUE_ID,
+      alicePubkey: ALICE_PUBKEY,
+      issueSubject: ISSUE_SUBJECT,
+    },
+  );
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+  // No relay rate limit here: a rate-limited entity fetch caches a negative
+  // result and never recovers, which would hide the resolved-title half of
+  // this invariant. Natural relay latency supplies the pending window.
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(
+    ({ issueId, alicePubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        pubkey: alicePubkey,
+        content: `Issue link: buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools`,
+      });
+    },
+    { issueId: ISSUE_ID, alicePubkey: ALICE_PUBKEY },
+  );
+
+  const issueChip = page.getByRole("button", {
+    name: /Open issue .* in repository relay-tools/,
+  });
+  await expect(issueChip).toHaveText("relay-tools");
+  await issueChip.hover();
+
+  const tooltipContent = page
+    .getByRole("tooltip")
+    .locator('[data-buzz-tooltip-metadata-content=""]');
+  const widths = new Set<number>();
+  const tooltipSamples: string[] = [];
+  await expect
+    .poll(
+      async () => {
+        const box = await issueChip.boundingBox();
+        if (box) widths.add(Math.round(box.width));
+        const text = (await tooltipContent.count())
+          ? ((await tooltipContent.textContent()) ?? "")
+          : "";
+        tooltipSamples.push(text);
+        return text;
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(ISSUE_SUBJECT);
+
+  // At least one sample predates the resolved title, so the widths below span
+  // the load transition rather than only its settled end.
+  expect(tooltipSamples.length).toBeGreaterThan(1);
+  expect(tooltipSamples[0]).not.toBe(ISSUE_SUBJECT);
+  // One width the whole way, and the label never left the repository name.
+  expect(Array.from(widths)).toHaveLength(1);
+  await expect(issueChip).toHaveText("relay-tools");
 });
 
 test("entity tooltip uses project context while relay metadata is delayed", async ({

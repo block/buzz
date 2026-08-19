@@ -25,7 +25,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
-import { truncateInlineChipLabel } from "@/shared/ui/mentionChip";
 
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
 import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
@@ -153,6 +152,8 @@ function entityLinkPresentation(link: ParsedEntityLink) {
       return {
         ariaLabel: `Open issue ${link.id.slice(0, 8)} in repository ${link.dtag}`,
         icon: "issue" as const,
+        // Tooltip fallback only — the inline chip renders the repository name
+        // alone (see `chip` below).
         label: `${link.dtag} · ${link.id.slice(0, 8)}`,
         tooltipFooter: `Issue · ${link.dtag}`,
       };
@@ -316,13 +317,15 @@ export function renderEntityLinkAnchor({
 
   const chip = (metadata?: LinkPreviewMetadata | null) => {
     const resolvedContext = metadata?.title.trim();
-    const label =
-      resolvedContext &&
-      (parsed.value.type === "issue" || parsed.value.type === "pr")
-        ? `${parsed.value.dtag} · ${resolvedContext}`
-        : presentation.label;
+    // Issue chips stay at the repository name — no event hash while the fetch
+    // is in flight, no fetched title once it lands — so the inline label keeps
+    // one width across the whole lifecycle. The title lives in the tooltip.
     const chipLabel =
-      parsed.value.type === "issue" ? truncateInlineChipLabel(label) : label;
+      parsed.value.type === "issue"
+        ? parsed.value.dtag
+        : resolvedContext && parsed.value.type === "pr"
+          ? `${parsed.value.dtag} · ${resolvedContext}`
+          : presentation.label;
     return (
       <BuzzLinkChip
         data-buzz-link-kind={parsed.value.type}

@@ -278,10 +278,12 @@ function composerLinkPresentation(
     channelName: "",
     dataAttributes: { "data-buzz-link-kind": entity.value.type },
     icon: entity.value.type,
+    // Only pull requests carry their short id inline; issue chips match the
+    // rendered message chip, which shows the repository name alone.
     label:
-      entity.value.type === "repo" || entity.value.type === "project"
-        ? entity.value.dtag
-        : `${entity.value.dtag} · ${shortId}`,
+      entity.value.type === "pr"
+        ? `${entity.value.dtag} · ${shortId}`
+        : entity.value.dtag,
   };
 }
 

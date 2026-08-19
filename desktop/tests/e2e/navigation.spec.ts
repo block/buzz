@@ -395,7 +395,8 @@ test("mixed Buzz permalinks render as chips in the composer", async ({
   await expect(chips.nth(1)).toHaveText("general");
   await expect(chips.nth(2)).toHaveText("buzz-world");
   await expect(chips.nth(3)).toHaveText("buzz-world · cccccccc");
-  await expect(chips.nth(4)).toHaveText("buzz-world · bbbbbbbb");
+  // Issue chips are the repository name alone, matching the rendered chip.
+  await expect(chips.nth(4)).toHaveText("buzz-world");
   await expect(chips.nth(1)).toHaveClass(/inline-chip-icon-channel/);
   await expect(chips.nth(2)).toHaveClass(/inline-chip-icon-repo/);
   await expect(chips.nth(3)).toHaveClass(/inline-chip-icon-pr/);
