@@ -5529,7 +5529,7 @@ mod tests {
         let tags = || {
             vec![
                 Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
-                Tag::parse(["p", member.as_str(), "", "member"]).expect("p tag"),
+                Tag::parse(["p", member.as_str(), "", "owner"]).expect("p tag"),
             ]
         };
         let base = Timestamp::now().as_secs();
@@ -5620,14 +5620,13 @@ mod tests {
         seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
 
         // This is the old pod's unlocked capture A. It remains in process memory
-        // while canonical membership advances and the new pod publishes B.
+        // while a role-only canonical mutation advances and the new pod publishes B.
         let base = Timestamp::now().as_secs();
-        let roster = |members: &[&[u8]], timestamp| {
+        let roster = |members: &[(&[u8], &str)], timestamp| {
             let tags =
                 std::iter::once(Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"))
-                    .chain(members.iter().map(|member| {
-                        Tag::parse(["p", hex::encode(member).as_str(), "", "member"])
-                            .expect("p tag")
+                    .chain(members.iter().map(|(member, role)| {
+                        Tag::parse(["p", hex::encode(member).as_str(), "", *role]).expect("p tag")
                     }))
                     .collect::<Vec<_>>();
             EventBuilder::new(Kind::Custom(39002), "")
@@ -5636,7 +5635,6 @@ mod tests {
                 .sign_with_keys(&relay_keys)
                 .expect("sign roster")
         };
-        let stale_a = roster(&[owner.as_slice()], base + 2);
 
         let newcomer = Keys::generate().public_key().to_bytes();
         sqlx::query(
@@ -5649,14 +5647,32 @@ mod tests {
         .bind(owner.as_slice())
         .execute(&pool)
         .await
-        .expect("commit newer canonical membership");
+        .expect("seed member before legacy capture");
+        let stale_a = roster(
+            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "member")],
+            base + 2,
+        );
+
+        sqlx::query(
+            "UPDATE channel_members SET role = 'admin' \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(newcomer.as_slice())
+        .execute(&pool)
+        .await
+        .expect("commit newer canonical role");
 
         let relay_pubkey = relay_keys.public_key().to_bytes();
         let mut snapshot = db
             .lock_member_snapshot(community, channel, &relay_pubkey)
             .await
             .expect("new writer captures locked roster B");
-        let fresh_b = roster(&[owner.as_slice(), newcomer.as_slice()], base + 1);
+        let fresh_b = roster(
+            &[(owner.as_slice(), "owner"), (newcomer.as_slice(), "admin")],
+            base + 1,
+        );
         assert!(
             snapshot
                 .replace_member_event(community, channel, &fresh_b)

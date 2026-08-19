@@ -1039,13 +1039,16 @@ mod tests {
 
         // Mixed-version channel-roster fence: old canonical replacement writers
         // acquire their replacement key before INSERT; this trigger then takes
-        // the membership key and validates the exact active p-tag set.
+        // the membership key and validates the exact active pubkey/role p-tag set.
         assert_eq!(migrations[31].version, 32);
         let roster_fence = migrations[31].sql.as_str();
         assert!(roster_fence.contains("CREATE TRIGGER trg_events_guard_channel_roster_snapshot"));
         assert!(roster_fence.contains("NEW.kind <> 39002"));
         assert!(roster_fence.contains("'buzz_channel_membership:'"));
         assert!(roster_fence.contains("cm.removed_at IS NULL"));
+        assert!(roster_fence.contains("cm.role::text"));
+        assert!(roster_fence.contains("jsonb_array_length(roster_tag.tag_json) <> 4"));
+        assert!(roster_fence.contains("roster_tag.tag_json->>3"));
         assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
         assert!(roster_fence.contains("ERRCODE = '23514'"));
     }
