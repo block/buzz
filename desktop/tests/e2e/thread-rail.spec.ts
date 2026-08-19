@@ -83,10 +83,10 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
   });
   expect(paneGeometry).toMatchObject({
     railTop: paneGeometry.contentTop,
-    railBottom: paneGeometry.contentBottom,
     railRadius: paneGeometry.contentRadius,
     railBackground: paneGeometry.contentBackground,
   });
+  expect(paneGeometry.railBottom).toBeLessThan(paneGeometry.contentBottom);
   expect(paneGeometry.railClipPath).toBe("none");
   const entry = rail.getByTestId(`thread-rail-entry-${root.id}`);
   await expect(entry).toHaveAttribute("aria-current", "page");

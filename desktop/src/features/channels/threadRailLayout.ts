@@ -2,7 +2,7 @@ export const THREAD_RAIL_DESKTOP_BREAKPOINT_PX = 600;
 
 export function threadRailShellClassName(_collapsed: boolean): string {
   return [
-    "hidden mb-2 mr-2 mt-px h-[calc(100%-0.5625rem)] min-h-0 shrink-0 self-start overflow-hidden rounded-2xl bg-background shadow-content-edge ring-1 ring-border/30 ring-inset",
+    "hidden mb-2 mr-2 mt-px max-h-[calc(100%-0.5625rem)] min-h-0 shrink-0 self-start overflow-hidden rounded-2xl bg-background shadow-content-edge ring-1 ring-border/30 ring-inset",
     "min-[601px]:flex min-[601px]:flex-col",
   ].join(" ");
 }
