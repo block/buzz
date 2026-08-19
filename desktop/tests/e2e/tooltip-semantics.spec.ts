@@ -79,6 +79,12 @@ for (const theme of THEMES) {
     await expect(richTooltip.getByText("Tooltip Reviewer")).toHaveClass(
       /text-secondary-foreground/,
     );
+    await expect(
+      richTooltip.getByTestId("team-tooltip-persona-chip"),
+    ).toHaveClass(/bg-secondary-foreground\/10/);
+    await expect(
+      richTooltip.getByTestId("team-tooltip-persona-avatar"),
+    ).toHaveClass(/bg-secondary-foreground\/20.*text-secondary-foreground/);
 
     await waitForAnimations(page);
     await dialog.screenshot({
