@@ -12,6 +12,32 @@ use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
 };
 
+fn validate_multiline_encoding(content: &str) -> Result<(), CliError> {
+    // Do not rewrite arbitrary `\\n`: it is legitimate in code samples and prose.
+    // Fail closed only when escape text outside Markdown code regions appears in
+    // the structural positions produced by a JSON-escaped multiline message.
+    let prose = strip_code_regions(content);
+    let has_escaped_boundary = [r"\n\n", r"\n- ", r"\n* ", r"\n# "]
+        .iter()
+        .any(|marker| prose.contains(marker))
+        || prose.split(r"\n").skip(1).any(|line| {
+            let Some((number, rest)) = line.split_once(". ") else {
+                return false;
+            };
+            !number.is_empty()
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && !rest.is_empty()
+        });
+
+    if has_escaped_boundary {
+        return Err(CliError::Usage(
+            "message contains literal \\n escapes at Markdown paragraph/list boundaries; stream real LF bytes with `buzz messages send ... --content -` instead"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Extract the thread root event ID from a Nostr tag array.
 ///
 /// Parses `"e"` tags with NIP-10 markers:
@@ -580,6 +606,7 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
+    validate_multiline_encoding(&p.content)?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -995,7 +1022,7 @@ mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        resolve_names_to_pubkeys, validate_multiline_encoding,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1011,6 +1038,34 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn multiline_markdown_keeps_real_lf_bytes() {
+        use nostr::{EventBuilder, Keys};
+
+        let content = "First paragraph.\n\n- first item\n- second item";
+        validate_multiline_encoding(content).unwrap();
+        let event = EventBuilder::text_note(content)
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(event.content.as_bytes().contains(&0x0a));
+        assert!(!event.content.contains(r"\n\n"));
+        assert_eq!(event.content, content);
+    }
+
+    #[test]
+    fn json_escaped_markdown_boundaries_fail_before_signing() {
+        let content = r"First paragraph.\n\n- first item\n- second item";
+        let error = validate_multiline_encoding(content).unwrap_err();
+        assert!(error.to_string().contains("stream real LF bytes"));
+    }
+
+    #[test]
+    fn intentional_backslash_n_in_code_is_preserved() {
+        let content = r"Use `printf 'first\n\n- literal'` in this code sample.";
+        validate_multiline_encoding(content).unwrap();
+        assert!(content.contains(r"\n\n"));
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
