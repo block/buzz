@@ -386,16 +386,22 @@ pub fn build_diff_message(
 }
 
 /// Build an edit event targeting an existing message (kind 40003).
+///
+/// - `media_tags`: raw imeta tag vectors — the FULL replacement attachment
+///   set for the edited message (clients treat an edit's imeta tags as
+///   authoritative; an edit with none clears attachments).
 pub fn build_edit(
     channel_id: Uuid,
     target_event_id: nostr::EventId,
     new_content: &str,
+    media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(new_content, 64 * 1024)?;
-    let tags = vec![
+    let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&["e", &target_event_id.to_hex()])?,
     ];
+    imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), new_content).tags(tags))
 }
 
@@ -2722,7 +2728,7 @@ mod tests {
     fn edit_happy_path() {
         let cid = uuid();
         let eid = event_id();
-        let ev = sign(build_edit(cid, eid, "new content").unwrap());
+        let ev = sign(build_edit(cid, eid, "new content", &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 40003);
         assert!(has_tag(&ev, "e", &eid.to_hex()));
     }
@@ -2733,9 +2739,60 @@ mod tests {
         let eid = event_id();
         let big = "x".repeat(64 * 1024 + 1);
         assert!(matches!(
-            build_edit(cid, eid, &big),
+            build_edit(cid, eid, &big, &[]),
             Err(SdkError::ContentTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn edit_with_media() {
+        let cid = uuid();
+        let eid = event_id();
+        let media_tags = vec![vec![
+            "imeta".to_string(),
+            "url https://example.com/image.png".to_string(),
+            "m image/png".to_string(),
+        ]];
+        let ev = sign(build_edit(cid, eid, "new content", &media_tags).unwrap());
+        assert_eq!(ev.kind.as_u16(), 40003);
+        assert!(has_tag(&ev, "e", &eid.to_hex()));
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        // Verify the imeta tag is present
+        let imeta_tags: Vec<_> = ev
+            .tags
+            .iter()
+            .filter(|t| {
+                let s = t.as_slice();
+                s.first().map(|v| v.as_str()) == Some("imeta")
+            })
+            .collect();
+        assert_eq!(imeta_tags.len(), 1);
+    }
+
+    #[test]
+    fn edit_without_media_has_no_imeta() {
+        let cid = uuid();
+        let eid = event_id();
+        let ev = sign(build_edit(cid, eid, "new content", &[]).unwrap());
+        assert_eq!(ev.kind.as_u16(), 40003);
+        let imeta_tags: Vec<_> = ev
+            .tags
+            .iter()
+            .filter(|t| {
+                let s = t.as_slice();
+                s.first().map(|v| v.as_str()) == Some("imeta")
+            })
+            .collect();
+        assert_eq!(imeta_tags.len(), 0);
+    }
+
+    #[test]
+    fn edit_rejects_malformed_media_tag() {
+        let cid = uuid();
+        let eid = event_id();
+        let malformed_tags = vec![vec![]];
+        let result = build_edit(cid, eid, "new content", &malformed_tags);
+        assert!(result.is_err());
     }
 
     #[test]

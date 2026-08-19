@@ -443,6 +443,12 @@ pub enum MessagesCmd {
         /// New message content
         #[arg(long)]
         content: String,
+        /// Replace attachments: upload file(s) and include as imeta tags. Conflicts with --no-media.
+        #[arg(long = "file", conflicts_with = "no_media")]
+        files: Vec<String>,
+        /// Remove all attachments from the message.
+        #[arg(long, default_value_t = false)]
+        no_media: bool,
     },
     /// Delete a message by event ID
     Delete {
@@ -2435,7 +2441,7 @@ mod tests {
         );
     }
 
-    // ── projects update mutation group ────────────────────────────────────────
+// ── projects update mutation group ────────────────────────────────────────
 
     /// Multiple independent fields must be accepted in the same invocation.
     #[test]
@@ -2540,5 +2546,64 @@ mod tests {
             .is_err(),
             "--visibility chartreuse on update must be rejected at parse time"
         );
+    }
+
+    #[test]
+    fn messages_edit_file_conflicts_with_no_media() {
+        use clap::Parser;
+
+        // Should error: both --file and --no-media provided
+        let result = Cli::try_parse_from(vec![
+            "buzz",
+            "messages",
+            "edit",
+            "--event",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--content",
+            "test",
+            "--file",
+            "a.png",
+            "--no-media",
+        ]);
+        assert!(result.is_err());
+
+        // Should succeed: only --file
+        let result = Cli::try_parse_from(vec![
+            "buzz",
+            "messages",
+            "edit",
+            "--event",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--content",
+            "test",
+            "--file",
+            "a.png",
+        ]);
+        assert!(result.is_ok());
+
+        // Should succeed: only --no-media
+        let result = Cli::try_parse_from(vec![
+            "buzz",
+            "messages",
+            "edit",
+            "--event",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--content",
+            "test",
+            "--no-media",
+        ]);
+        assert!(result.is_ok());
+
+        // Should succeed: neither flag
+        let result = Cli::try_parse_from(vec![
+            "buzz",
+            "messages",
+            "edit",
+            "--event",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--content",
+            "test",
+        ]);
+        assert!(result.is_ok());
     }
 }
