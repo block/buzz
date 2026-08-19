@@ -6,10 +6,10 @@ use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
 use crate::{
     managed_agents::{
-        append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        append_log_marker, append_resolved_launch_marker, known_acp_runtime, login_shell_path,
+        managed_agent_log_path, missing_command_message, normalize_agent_args, open_log_file,
+        resolve_command, spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime,
+        ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -494,16 +494,8 @@ pub fn spawn_agent_child(
         }
     };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(effective_command)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| effective_command.clone());
-    append_log_marker(
-        &log_path,
-        &format!(
-            "resolved launch: agent_command={:?} args={:?}",
-            resolved_agent_command, agent_args
-        ),
-    )?;
+    let resolved_agent_command =
+        append_resolved_launch_marker(&log_path, effective_command, agent_args)?;
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.

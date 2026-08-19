@@ -830,3 +830,54 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+
+// ── runtime logs ─────────────────────────────────────────────────────────────
+
+/// Agent stdout/stderr (what runtime logs capture) can echo credentials from
+/// installers and CLIs, so `0o600` must come from the create itself — a
+/// post-write `chmod` would leave a window where the umask decides and the log
+/// is briefly readable to other local users.
+#[cfg(unix)]
+#[test]
+fn open_log_file_creates_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("agent.log");
+
+    super::open_log_file(&path).expect("open runtime log");
+
+    let mode = std::fs::metadata(&path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "runtime logs must be owner-only");
+}
+
+#[test]
+fn append_resolved_launch_marker_never_writes_argument_values() {
+    // `agent_args` is user-controlled and may legally carry credentials
+    // (`--token=...`), and the runtime log is retrievable end-to-end via
+    // `get_managed_agent_log`, so the marker may carry only the command and
+    // the argument count. The command is a nonexistent absolute path so
+    // `acp` can only reach the log through an argument value.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("agent.log");
+
+    let resolved = super::append_resolved_launch_marker(
+        &path,
+        "/nonexistent/zuzu-agent-cli",
+        &["acp".to_string(), "--token=supersecret-value".to_string()],
+    )
+    .expect("append marker");
+
+    // Unresolvable commands fall through verbatim for the spawn env.
+    assert_eq!(resolved, "/nonexistent/zuzu-agent-cli");
+    let logged = std::fs::read_to_string(&path).expect("read log");
+    assert!(logged.contains("args_count=2"));
+    assert!(logged.contains("/nonexistent/zuzu-agent-cli"));
+    assert!(!logged.contains("supersecret-value"));
+    assert!(!logged.contains("--token"));
+    assert!(!logged.contains("acp"));
+}
