@@ -94,7 +94,7 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
     railRadius: paneGeometry.contentRadius,
     railBackground: paneGeometry.contentBackground,
   });
-  expect(paneGeometry.railBottom).toBeLessThan(paneGeometry.contentBottom);
+  expect(paneGeometry.railBottom).toBe(paneGeometry.contentBottom);
   expect(paneGeometry.railColumnRadius).toBe("0px");
   expect(paneGeometry.railColumnBackgroundImage).toContain("linear-gradient");
   expect(paneGeometry.railClipPath).toBe("none");

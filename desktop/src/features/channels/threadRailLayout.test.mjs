@@ -30,13 +30,13 @@ test("Thread Rail column replaces exposed sidebar paint without adding corners",
   assert.doesNotMatch(className, /ring/);
 });
 
-test("Thread Rail paints a compact rounded card capped at the content bounds", () => {
+test("Thread Rail paints one full-height rounded panel inside the unframed column", () => {
   for (const collapsed of [false, true]) {
     const className = threadRailShellClassName(collapsed);
 
     assert.match(className, /mt-px/);
     assert.match(className, /mb-2/);
-    assert.match(className, /max-h-\[calc\(100%-0\.5625rem\)\]/);
+    assert.match(className, /(?<!max-)h-\[calc\(100%-0\.5625rem\)\]/);
     assert.match(className, /self-start/);
     assert.match(className, /rounded-2xl/);
     assert.match(className, /overflow-hidden/);
@@ -44,7 +44,7 @@ test("Thread Rail paints a compact rounded card capped at the content bounds", (
     assert.match(className, /shadow-content-edge/);
     assert.match(className, /ring-border\/30/);
     assert.match(className, /ring-inset/);
-    assert.doesNotMatch(className, /(?<!max-)h-\[calc\(100%-0\.5625rem\)\]/);
+    assert.doesNotMatch(className, /max-h-\[calc\(100%-0\.5625rem\)\]/);
     assert.doesNotMatch(className, /clip-path/);
     assert.doesNotMatch(className, /self-stretch/);
     assert.doesNotMatch(className, /\bmy-2\b/);
