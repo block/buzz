@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
@@ -334,6 +335,7 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
 List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
+  String? relaySelfPubkey,
 }) {
   // 1. Collect deletion targets. Both kind:5 (NIP-09) and kind:9005
   // (Buzz-native) are deletion markers; mirror desktop's behavior.
@@ -484,7 +486,7 @@ List<TimelineMessage> formatTimeline(
       result.add(
         TimelineMessage(
           id: event.id,
-          pubkey: event.pubkey,
+          pubkey: _resolveEventAuthorPubkey(event, relaySelfPubkey),
           createdAt: event.createdAt,
           content: edit?.content ?? event.content,
           tags: effectiveTags,
@@ -500,6 +502,52 @@ List<TimelineMessage> formatTimeline(
 
   return result;
 }
+
+String _resolveEventAuthorPubkey(NostrEvent event, String? relaySelfPubkey) {
+  final signerPubkey = event.pubkey.toLowerCase();
+  final relaySelf = relaySelfPubkey?.toLowerCase();
+  if (relaySelf == null ||
+      !_hexPubkey.hasMatch(relaySelf) ||
+      signerPubkey != relaySelf) {
+    return signerPubkey;
+  }
+
+  String? attributedPubkey;
+  for (final tag in event.tags) {
+    if (tag.length >= 2 && tag[0] == 'actor' && _hexPubkey.hasMatch(tag[1])) {
+      attributedPubkey = tag[1].toLowerCase();
+      break;
+    }
+  }
+
+  final firstTag = event.tags.firstOrNull;
+  if (attributedPubkey == null &&
+      event.tags.any((tag) => tag.isNotEmpty && tag[0] == 'h') &&
+      firstTag != null &&
+      firstTag.length >= 2 &&
+      firstTag[0] == 'p' &&
+      _hexPubkey.hasMatch(firstTag[1])) {
+    attributedPubkey = firstTag[1].toLowerCase();
+  }
+
+  if (attributedPubkey == null) return signerPubkey;
+  try {
+    nostr.Event(
+      event.id,
+      event.pubkey,
+      event.createdAt,
+      event.kind,
+      event.tags,
+      event.content,
+      event.sig,
+    );
+    return attributedPubkey;
+  } catch (_) {
+    return signerPubkey;
+  }
+}
+
+final _hexPubkey = RegExp(r'^[0-9a-fA-F]{64}$');
 
 /// Build main-timeline entries: only root messages (parentId == null),
 /// each with an optional [ThreadSummary] when replies exist.

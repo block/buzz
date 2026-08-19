@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 NostrEvent _textMsg({
   required String id,
@@ -401,6 +402,28 @@ void main() {
       expect(result[1].content, 'world');
       expect(result[0].isSystem, false);
       expect(result[0].edited, false);
+    });
+
+    test('displays a relay-signed workflow message as its actor', () {
+      const actorPubkey =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final event = nostr.Event.from(
+        kind: EventKind.streamMessage,
+        content: 'workflow result',
+        secretKey:
+            '1111111111111111111111111111111111111111111111111111111111111111',
+        createdAt: 1700000000,
+        tags: const [
+          ['h', 'ch1'],
+          ['actor', actorPubkey],
+        ],
+      );
+
+      final result = formatTimeline([
+        NostrEvent.fromJson(event.toMap()),
+      ], relaySelfPubkey: event.pubkey);
+
+      expect(result.single.pubkey, actorPubkey);
     });
 
     test('filters deleted messages', () {

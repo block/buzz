@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community_provider.dart';
@@ -113,6 +116,32 @@ final myPubkeyProvider = Provider<String?>((ref) {
   final config = ref.watch(relayConfigProvider);
   return pubkeyFromNsec(config.nsec);
 });
+
+final relaySelfProvider = FutureProvider<String?>((ref) async {
+  final config = ref.watch(relayConfigProvider);
+  final client = http.Client();
+  try {
+    final response = await client
+        .get(
+          Uri.parse(config.baseUrl),
+          headers: const {'Accept': 'application/nostr+json'},
+        )
+        .timeout(const Duration(seconds: 5));
+    if (response.statusCode < 200 || response.statusCode >= 300) return null;
+
+    final document = jsonDecode(response.body);
+    if (document is! Map<String, dynamic>) {
+      throw const FormatException('relay returned malformed NIP-11 document');
+    }
+    final relaySelf = document['self'];
+    if (relaySelf is! String || !_hexPubkey.hasMatch(relaySelf)) return null;
+    return relaySelf.toLowerCase();
+  } finally {
+    client.close();
+  }
+});
+
+final _hexPubkey = RegExp(r'^[0-9a-fA-F]{64}$');
 
 /// Provides a [RelayClient] that reacts to config changes.
 ///

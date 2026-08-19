@@ -209,6 +209,7 @@ class ChannelDetailPage extends HookConsumerWidget {
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
         .value;
+    final relaySelfPubkey = ref.watch(relaySelfProvider).value;
     // Only show channel-level typing (exclude thread-scoped entries and self).
     final typingEntries = ref
         .watch(channelTypingProvider(channel.id))
@@ -440,6 +441,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                             final messages = formatTimeline(
                               events,
                               currentPubkey: currentPubkey,
+                              relaySelfPubkey: relaySelfPubkey,
                             );
                             final summaries = ref
                                 .read(
