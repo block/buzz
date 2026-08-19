@@ -18,7 +18,7 @@
 use crate::classify::Fence;
 use crate::reconcile::{CreateOutcome, DeleteOutcome, Substrate};
 use chrono::{DateTime, Utc};
-use k8s_openapi::api::core::v1::{Namespace, Pod, Secret};
+use k8s_openapi::api::core::v1::{Namespace, PersistentVolumeClaim, Pod, Secret};
 use kube::api::{Api, DeleteParams, GetParams, ListParams, PostParams, Preconditions};
 use kube::core::ErrorResponse;
 use kube::{Client, Resource};
@@ -73,6 +73,10 @@ impl Cluster {
     }
 
     fn secrets(&self) -> Api<Secret> {
+        Api::namespaced(self.client.clone(), &self.namespace)
+    }
+
+    fn workspace_claims(&self) -> Api<PersistentVolumeClaim> {
         Api::namespaced(self.client.clone(), &self.namespace)
     }
 
@@ -170,6 +174,40 @@ impl Substrate for Cluster {
         }
     }
 
+    async fn ensure_workspace_claim(
+        &self,
+        claim: Option<&PersistentVolumeClaim>,
+    ) -> Result<(), String> {
+        let Some(desired) = claim else {
+            return Ok(());
+        };
+        let name = desired.metadata.name.as_deref().ok_or_else(|| {
+            "persistent workspace claim is missing its deterministic name".to_string()
+        })?;
+        let api = self.workspace_claims();
+
+        match api.get_opt(name).await {
+            Ok(Some(existing)) => verify_workspace_claim(&existing, desired),
+            Ok(None) => match api.create(&PostParams::default(), desired).await {
+                Ok(created) => verify_workspace_claim(&created, desired),
+                Err(error) if reason_is(&error, REASON_ALREADY_EXISTS) => {
+                    let existing = api.get(name).await.map_err(|read_error| {
+                        format!(
+                            "workspace claim {name} won a create race but could not be read: {read_error}"
+                        )
+                    })?;
+                    verify_workspace_claim(&existing, desired)
+                }
+                Err(error) => Err(format!(
+                    "could not create persistent workspace claim {name}: {error}"
+                )),
+            },
+            Err(error) => Err(format!(
+                "could not check persistent workspace claim {name}: {error}"
+            )),
+        }
+    }
+
     async fn list_pods(&self, selector: &str) -> Result<(Vec<Pod>, Option<DateTime<Utc>>), String> {
         self.list_with_date::<Pod>(selector).await
     }
@@ -255,6 +293,81 @@ impl Substrate for Cluster {
     fn elapsed(&self) -> Duration {
         self.started.elapsed()
     }
+}
+
+fn verify_workspace_claim(
+    existing: &PersistentVolumeClaim,
+    desired: &PersistentVolumeClaim,
+) -> Result<(), String> {
+    let name = desired.metadata.name.as_deref().unwrap_or("<unnamed>");
+    let desired_labels = desired
+        .metadata
+        .labels
+        .as_ref()
+        .ok_or_else(|| format!("persistent workspace claim {name} has no ownership labels"))?;
+    let existing_labels = existing.metadata.labels.as_ref();
+    if desired_labels
+        .iter()
+        .any(|(key, value)| existing_labels.and_then(|labels| labels.get(key)) != Some(value))
+    {
+        return Err(format!(
+            "persistent workspace claim {name} already exists but is not owned by this Buzz agent"
+        ));
+    }
+
+    let desired_annotations =
+        desired.metadata.annotations.as_ref().ok_or_else(|| {
+            format!("persistent workspace claim {name} has no identity annotation")
+        })?;
+    let existing_annotations = existing.metadata.annotations.as_ref();
+    if desired_annotations.iter().any(|(key, value)| {
+        existing_annotations.and_then(|annotations| annotations.get(key)) != Some(value)
+    }) {
+        return Err(format!(
+            "persistent workspace claim {name} belongs to a different agent identity"
+        ));
+    }
+
+    let desired_spec = desired.spec.as_ref().ok_or_else(|| {
+        format!("persistent workspace claim {name} is missing its requested shape")
+    })?;
+    let existing_spec = existing
+        .spec
+        .as_ref()
+        .ok_or_else(|| format!("persistent workspace claim {name} exists without a spec"))?;
+    let existing_storage = existing_spec
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.requests.as_ref())
+        .and_then(|requests| requests.get("storage"));
+    let desired_storage = desired_spec
+        .resources
+        .as_ref()
+        .and_then(|resources| resources.requests.as_ref())
+        .and_then(|requests| requests.get("storage"));
+    if existing_storage != desired_storage {
+        return Err(format!(
+            "persistent workspace claim {name} already exists with a different storage request; resize or replace it with cluster tools before retrying"
+        ));
+    }
+    if let Some(desired_class) = desired_spec.storage_class_name.as_ref() {
+        if existing_spec.storage_class_name.as_ref() != Some(desired_class) {
+            return Err(format!(
+                "persistent workspace claim {name} already exists with a different storage class"
+            ));
+        }
+    }
+    if !existing_spec
+        .access_modes
+        .as_ref()
+        .is_some_and(|modes| modes.iter().any(|mode| mode == "ReadWriteOnce"))
+    {
+        return Err(format!(
+            "persistent workspace claim {name} does not allow ReadWriteOnce access"
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -423,5 +536,74 @@ mod tests {
         assert_eq!(REASON_CONFLICT, "Conflict");
         assert_eq!(REASON_NOT_FOUND, "NotFound");
         assert_eq!(REASON_FORBIDDEN, "Forbidden");
+    }
+
+    fn workspace_claim() -> PersistentVolumeClaim {
+        use nostr::nips::nip19::ToBech32;
+        let keys = nostr::Keys::generate();
+        let identity =
+            crate::naming::AgentIdentity::from_nsec(&keys.secret_key().to_bech32().unwrap())
+                .unwrap();
+        let cfg = crate::config::parse(&serde_json::json!({
+            "namespace": "buzz-agents-test",
+            "image": format!(
+                "ghcr.io/block/buzz-sprig@sha256:{}",
+                "a".repeat(64)
+            ),
+            "workspace_storage": "20Gi",
+            "workspace_storage_class": "fast-ssd"
+        }))
+        .unwrap();
+        crate::pod::build_workspace_claim(&identity, &cfg).unwrap()
+    }
+
+    #[test]
+    fn workspace_claim_verification_accepts_the_same_identity_and_shape() {
+        let desired = workspace_claim();
+        assert_eq!(verify_workspace_claim(&desired, &desired), Ok(()));
+    }
+
+    #[test]
+    fn workspace_claim_verification_rejects_foreign_or_different_claims() {
+        let desired = workspace_claim();
+
+        let mut legacy = desired.clone();
+        legacy.metadata.labels.as_mut().unwrap().insert(
+            crate::naming::LABEL_BINDING_VERSION.into(),
+            crate::naming::LEGACY_BINDING_VERSION.into(),
+        );
+        assert!(verify_workspace_claim(&legacy, &desired)
+            .unwrap_err()
+            .contains("not owned by this Buzz agent"));
+
+        let mut foreign = desired.clone();
+        foreign
+            .metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(crate::naming::ANNOTATION_PUBKEY_FULL.into(), "0".repeat(64));
+        assert!(verify_workspace_claim(&foreign, &desired)
+            .unwrap_err()
+            .contains("different agent identity"));
+
+        let mut resized = desired.clone();
+        resized
+            .spec
+            .as_mut()
+            .unwrap()
+            .resources
+            .as_mut()
+            .unwrap()
+            .requests
+            .as_mut()
+            .unwrap()
+            .insert(
+                "storage".into(),
+                k8s_openapi::apimachinery::pkg::api::resource::Quantity("30Gi".into()),
+            );
+        assert!(verify_workspace_claim(&resized, &desired)
+            .unwrap_err()
+            .contains("different storage request"));
     }
 }

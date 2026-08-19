@@ -2,23 +2,29 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  isManagedAgentActive,
+  isManagedAgentLifecycleActionReady,
+  isManagedAgentLive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type { PresenceStatus } from "@/shared/api/types";
 
 export function useAgentLifecycleActions({
   channels,
   managedAgent,
+  presenceLoaded,
+  presenceStatus,
   relayAgents,
   startManagedAgent,
   stopManagedAgent,
 }: {
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
+  presenceLoaded: boolean;
+  presenceStatus?: PresenceStatus;
   relayAgents: readonly RelayAgent[] | undefined;
   startManagedAgent: (pubkey: string) => Promise<unknown>;
   stopManagedAgent: (pubkey: string) => Promise<unknown>;
@@ -27,7 +33,11 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
-      if (isManagedAgentActive(managedAgent)) {
+      if (!isManagedAgentLifecycleActionReady(managedAgent, presenceLoaded)) {
+        throw new Error("Agent status is still loading. Try again shortly.");
+      }
+
+      if (isManagedAgentLive(managedAgent, presenceStatus)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
           channels: channels ?? [],
@@ -58,6 +68,8 @@ export function useAgentLifecycleActions({
   }, [
     channels,
     managedAgent,
+    presenceLoaded,
+    presenceStatus,
     relayAgents,
     startManagedAgent,
     stopManagedAgent,

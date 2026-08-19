@@ -455,6 +455,8 @@ export function UserProfilePanel({
     useAgentLifecycleActions({
       channels: channelsQuery.data,
       managedAgent,
+      presenceLoaded: presenceQuery.isSuccess,
+      presenceStatus,
       relayAgents: relayAgentsQuery.data,
       startManagedAgent: startAgentMutation.mutateAsync,
       stopManagedAgent: stopAgentMutation.mutateAsync,
@@ -838,6 +840,7 @@ export function UserProfilePanel({
           onOpenDiagnostics={() => setView("diagnostics")}
           onStickyChromeChange={handleStickyChromeChange}
           onTabChange={setTab}
+          presenceLoaded={presenceQuery.isSuccess}
           presenceStatus={presenceStatus}
           profile={profile}
           pubkey={effectivePubkey}
@@ -932,45 +935,43 @@ export function UserProfilePanel({
     />
   ) : null;
   const personaDialogs = (
-    <>
-      <UserProfilePersonaDialogs
-        cardMintTarget={cardMint.target}
-        createError={
-          createPersonaMutation.error instanceof Error
-            ? createPersonaMutation.error
-            : null
-        }
-        instanceCount={personaDeleteInstanceCount}
-        isPending={
-          createPersonaMutation.isPending ||
-          updatePersonaMutation.isPending ||
-          updateManagedAgentMutation.isPending ||
-          createAgentMutation.isPending
-        }
-        linkedAgentPubkey={managedAgent?.pubkey ?? null}
-        personaDialogState={personaDialogState}
-        personaToDelete={personaToDelete}
-        personaToExportSnapshot={personaToExportSnapshot}
-        resolvedPersona={resolvedPersona}
-        runtimes={acpRuntimesQuery.data ?? []}
-        runtimesError={acpRuntimesQuery.isError}
-        runtimesLoading={acpRuntimesQuery.isLoading}
-        updateError={
-          updatePersonaMutation.error instanceof Error
-            ? updatePersonaMutation.error
-            : null
-        }
-        onCloseCardMint={cardMint.close}
-        onCloseDelete={() => setPersonaToDelete(null)}
-        onCloseDialog={() => setPersonaDialogState(null)}
-        onCloseExportSnapshot={() => setPersonaToExportSnapshot(null)}
-        onConfirmDelete={(selectedPersona) => {
-          void handleConfirmDeletePersona(selectedPersona);
-        }}
-        onExportSnapshot={setPersonaToExportSnapshot}
-        onSubmit={handleSubmitPersona}
-      />
-    </>
+    <UserProfilePersonaDialogs
+      cardMintTarget={cardMint.target}
+      createError={
+        createPersonaMutation.error instanceof Error
+          ? createPersonaMutation.error
+          : null
+      }
+      instanceCount={personaDeleteInstanceCount}
+      isPending={
+        createPersonaMutation.isPending ||
+        updatePersonaMutation.isPending ||
+        updateManagedAgentMutation.isPending ||
+        createAgentMutation.isPending
+      }
+      linkedAgentPubkey={managedAgent?.pubkey ?? null}
+      personaDialogState={personaDialogState}
+      personaToDelete={personaToDelete}
+      personaToExportSnapshot={personaToExportSnapshot}
+      resolvedPersona={resolvedPersona}
+      runtimes={acpRuntimesQuery.data ?? []}
+      runtimesError={acpRuntimesQuery.isError}
+      runtimesLoading={acpRuntimesQuery.isLoading}
+      updateError={
+        updatePersonaMutation.error instanceof Error
+          ? updatePersonaMutation.error
+          : null
+      }
+      onCloseCardMint={cardMint.close}
+      onCloseDelete={() => setPersonaToDelete(null)}
+      onCloseDialog={() => setPersonaDialogState(null)}
+      onCloseExportSnapshot={() => setPersonaToExportSnapshot(null)}
+      onConfirmDelete={(selectedPersona) => {
+        void handleConfirmDeletePersona(selectedPersona);
+      }}
+      onExportSnapshot={setPersonaToExportSnapshot}
+      onSubmit={handleSubmitPersona}
+    />
   );
   return (
     <UserProfilePanelFrame

@@ -29,7 +29,10 @@ export function AgentStatusBadge({
     return () => clearTimeout(timer);
   }, []);
 
-  const isActive = status === "running" || status === "deployed";
+  const isRemote = status === "deployed" || status === "not_deployed";
+  const isActive = isRemote
+    ? presenceStatus === "online" || presenceStatus === "away"
+    : status === "running";
   const isStarting =
     !inGracePeriod &&
     presenceLoaded &&
@@ -44,11 +47,19 @@ export function AgentStatusBadge({
         ? "default"
         : "secondary";
 
+  const remoteLabel =
+    status === "not_deployed"
+      ? "not deployed"
+      : !presenceLoaded
+        ? "checking…"
+        : (presenceStatus ?? "offline");
   const rawLabel = isWorking
     ? "Working"
     : isStarting
       ? "Starting\u2026"
-      : status.replace(/_/g, " ");
+      : isRemote
+        ? remoteLabel
+        : status.replace(/_/g, " ");
   const label = sentenceCase
     ? `${rawLabel.charAt(0).toUpperCase()}${rawLabel.slice(1)}`
     : rawLabel;

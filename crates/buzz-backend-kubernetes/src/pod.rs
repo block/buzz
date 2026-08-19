@@ -12,9 +12,10 @@ use crate::naming::{
     AgentIdentity, ANNOTATION_CREATE_INTENT, ANNOTATION_IMAGE, ANNOTATION_PUBKEY_FULL,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvFromSource, Pod, PodSecurityContext, PodSpec,
+    Capabilities, Container, EmptyDirVolumeSource, EnvFromSource, PersistentVolumeClaim,
+    PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource, Pod, PodSecurityContext, PodSpec,
     ResourceRequirements, SeccompProfile, Secret, SecretEnvSource, SecurityContext, Volume,
-    VolumeMount,
+    VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -25,6 +26,46 @@ const WORKSPACE_VOLUME: &str = "workspace";
 
 /// The container name. Fixed: log and exec tooling addresses it by name.
 const CONTAINER_NAME: &str = "agent";
+
+/// Build the identity-owned persistent workspace claim requested by this
+/// configuration. The deterministic name is intentionally generation-free:
+/// pods are disposable, the workspace is not.
+pub fn build_workspace_claim(
+    identity: &AgentIdentity,
+    cfg: &ProviderConfig,
+) -> Option<PersistentVolumeClaim> {
+    let storage = cfg.workspace_storage.as_ref()?;
+    let requests = [("storage".to_string(), Quantity(storage.clone()))]
+        .into_iter()
+        .collect();
+
+    Some(PersistentVolumeClaim {
+        metadata: ObjectMeta {
+            name: Some(identity.workspace_claim_name()),
+            namespace: Some(cfg.namespace.clone()),
+            labels: Some(identity.labels()),
+            annotations: Some(
+                [(
+                    ANNOTATION_PUBKEY_FULL.to_string(),
+                    identity.pubkey_hex().to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        },
+        spec: Some(PersistentVolumeClaimSpec {
+            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            resources: Some(VolumeResourceRequirements {
+                requests: Some(requests),
+                ..Default::default()
+            }),
+            storage_class_name: cfg.workspace_storage_class.clone(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
 
 /// Build the per-attempt Secret holding the resolved environment.
 ///
@@ -171,14 +212,29 @@ pub fn build_pod(
                 }),
                 ..Default::default()
             }),
-            volumes: Some(vec![Volume {
-                name: WORKSPACE_VOLUME.to_string(),
-                empty_dir: Some(EmptyDirVolumeSource::default()),
-                ..Default::default()
-            }]),
+            volumes: Some(vec![workspace_volume(identity, cfg)]),
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+fn workspace_volume(identity: &AgentIdentity, cfg: &ProviderConfig) -> Volume {
+    if cfg.workspace_storage.is_some() {
+        Volume {
+            name: WORKSPACE_VOLUME.to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: identity.workspace_claim_name(),
+                read_only: Some(false),
+            }),
+            ..Default::default()
+        }
+    } else {
+        Volume {
+            name: WORKSPACE_VOLUME.to_string(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        }
     }
 }
 
@@ -192,6 +248,8 @@ pub fn intent_template(
         &cfg.image,
         &cfg.resources,
         cfg.service_account.as_deref(),
+        cfg.workspace_storage.as_deref(),
+        cfg.workspace_storage_class.as_deref(),
         env_keys,
     )
 }
@@ -307,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_is_an_emptydir_mounted_at_home() {
+    fn workspace_defaults_to_an_emptydir_mounted_at_home() {
         let pod = pod();
         let spec = spec(&pod);
         let volume = &spec.volumes.as_ref().unwrap()[0];
@@ -316,6 +374,57 @@ mod tests {
         let mount = &spec.containers[0].volume_mounts.as_ref().unwrap()[0];
         assert_eq!(mount.name, volume.name);
         assert_eq!(mount.mount_path, WORKSPACE_PATH);
+    }
+
+    #[test]
+    fn persistent_workspace_claim_and_pod_share_the_identity_stable_name() {
+        let id = identity();
+        let mut cfg = provider_config();
+        cfg.workspace_storage = Some("20Gi".into());
+        cfg.workspace_storage_class = Some("fast-ssd".into());
+
+        let claim = build_workspace_claim(&id, &cfg).expect("persistent claim");
+        assert_eq!(
+            claim.metadata.name.as_deref(),
+            Some(id.workspace_claim_name().as_str())
+        );
+        assert_eq!(claim.metadata.labels.as_ref(), Some(&id.labels()));
+        assert_eq!(
+            claim.metadata.annotations.as_ref().unwrap()[ANNOTATION_PUBKEY_FULL],
+            id.pubkey_hex()
+        );
+        let claim_spec = claim.spec.as_ref().unwrap();
+        assert_eq!(
+            claim_spec.access_modes.as_deref(),
+            Some(["ReadWriteOnce".to_string()].as_slice())
+        );
+        assert_eq!(
+            claim_spec
+                .resources
+                .as_ref()
+                .unwrap()
+                .requests
+                .as_ref()
+                .unwrap()["storage"],
+            Quantity("20Gi".into())
+        );
+        assert_eq!(claim_spec.storage_class_name.as_deref(), Some("fast-ssd"));
+
+        let pod = build_pod(&id, &cfg, "g", &Fingerprint::from_annotation("f"));
+        let volume = &spec(&pod).volumes.as_ref().unwrap()[0];
+        assert!(volume.empty_dir.is_none());
+        let source = volume
+            .persistent_volume_claim
+            .as_ref()
+            .expect("persistent workspace volume");
+        assert_eq!(source.claim_name, id.workspace_claim_name());
+        assert_eq!(source.read_only, Some(false));
+    }
+
+    #[test]
+    fn ephemeral_workspace_does_not_create_a_claim() {
+        let id = identity();
+        assert!(build_workspace_claim(&id, &provider_config()).is_none());
     }
 
     #[test]

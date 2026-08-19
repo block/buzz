@@ -4,7 +4,8 @@ import { ChevronDown, ChevronUp, Pencil } from "lucide-react";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
   getManagedAgentPrimaryActionLabel,
-  isManagedAgentActive,
+  isManagedAgentLifecycleActionReady,
+  isManagedAgentLive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
@@ -105,6 +106,7 @@ export type ProfileSummaryViewProps = {
   onOpenDiagnostics: () => void;
   onStickyChromeChange: (state: { active: boolean; height: number }) => void;
   onTabChange: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
+  presenceLoaded: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
@@ -180,6 +182,7 @@ export function ProfileSummaryView({
   onOpenDiagnostics,
   onStickyChromeChange,
   onTabChange,
+  presenceLoaded,
   presenceStatus,
   profile,
   pubkey,
@@ -189,11 +192,16 @@ export function ProfileSummaryView({
   userStatus,
 }: ProfileSummaryViewProps) {
   const activeTurns = useAgentWorking(isBot ? pubkey : null).channels;
+  const lifecycleActionReady = managedAgent
+    ? isManagedAgentLifecycleActionReady(managedAgent, presenceLoaded)
+    : true;
   const avatarStatus = isBot
     ? managedAgent
-      ? isManagedAgentActive(managedAgent)
-        ? "online"
-        : "offline"
+      ? !lifecycleActionReady
+        ? undefined
+        : isManagedAgentLive(managedAgent, presenceStatus)
+          ? "online"
+          : "offline"
       : (presenceStatus ?? "offline")
     : presenceStatus;
   const stickyLayoutRef = React.useRef<HTMLDivElement>(null);
@@ -426,15 +434,16 @@ export function ProfileSummaryView({
           className={primaryActionsMotionClassName}
           concealed={primaryActionsConcealed}
           followMutation={followMutation}
-          agentActionDisabled={isAgentActionPending}
+          agentActionDisabled={isAgentActionPending || !lifecycleActionReady}
           agentActionLabel={
             isOwner === true && managedAgent
-              ? getManagedAgentPrimaryActionLabel(managedAgent)
+              ? getManagedAgentPrimaryActionLabel(managedAgent, presenceStatus)
               : undefined
           }
           agentActionLive={
-            managedAgent?.status === "running" ||
-            managedAgent?.status === "deployed"
+            managedAgent
+              ? isManagedAgentLive(managedAgent, presenceStatus)
+              : false
           }
           onAgentPrimaryAction={
             isOwner === true && managedAgent

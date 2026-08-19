@@ -1016,6 +1016,12 @@ namespace does not exist the provider attempts to create it; on RBAC denial
 it MUST fail with the literal `kubectl create namespace <name>` command to
 run — it MUST NOT fall back to `default`.
 
+Persistent workspaces add one ambient permission boundary: the provider's
+cluster identity needs `get` and `create` on `persistentvolumeclaims` in the
+selected namespace, in addition to its existing namespace, Pod, and Secret
+permissions. Claim verification happens before any per-attempt Secret is
+written, so an RBAC refusal cannot leave a new identity Secret behind.
+
 ### Image
 
 `ghcr.io/block/buzz-sprig`: Alpine base + `bash` (required by the dev-MCP
@@ -1111,9 +1117,10 @@ paths. This is a harness interface limitation the binding inherits and
 matches, not one it introduces; a provider MUST NOT invent a private
 escaping scheme the harness would not decode.
 
-**Working directory.** `HOME` is set to a writable path backed by the
-workspace `emptyDir` (e.g. `/home/agent`), and the harness runs with cwd =
-`HOME` — mirroring the local spawn's agent-workdir convention. The baked
+**Working directory.** `HOME` is set to a writable workspace path (e.g.
+`/home/agent`) backed by `emptyDir` by default or by the identity-owned PVC
+when `provider_config.workspace_storage` is set, and the harness runs with
+cwd = `HOME` — mirroring the local spawn's agent-workdir convention. The baked
 system gitconfig references the nostr helpers by absolute path so it works
 regardless of `HOME`.
 
@@ -1161,6 +1168,9 @@ regardless of `HOME`.
   pubkey is 64 chars, one over):
   - pod name: `buzz-agent-<first-12-hex-of-pubkey>` — also the returned
     `agent_id`
+  - persistent workspace claim, when enabled:
+    `buzz-agent-<first-12-hex-of-pubkey>-workspace` — generation-free by
+    design so every replacement pod for the identity reattaches it
   - label `buzz.block.xyz/agent-pubkey: <first-32-hex>` — the selector key
     for reconciliation and GC. 128 bits is collision-*resistant*, not
     collision-free, which is why the annotation check below is normative,
@@ -1172,6 +1182,12 @@ regardless of `HOME`.
     destructive repair or GC action**. Identity labels/annotations prove
     identity; the marker asserts protocol ownership — without it, an object
     that merely matches our schema fails closed to the operator
+    - the current writer emits binding `2`. Its reader accepts legacy binding
+      `1` only for Pods and Secrets, allowing an in-place upgrade to observe
+      and collect old generations. PersistentVolumeClaims require binding `2`
+      plus the exact full-pubkey annotation; a v1 claim is never adopted. A v1
+      provider, in turn, refuses a v2 deterministic-name collision instead of
+      recreating the body with its old `emptyDir` pod shape
   - annotation `buzz.block.xyz/agent-pubkey-full: <full-64-hex>` —
     **load-bearing**: per §Deploy State Machine step 1, every label-selected
     object's annotation MUST equal the derived pubkey before the provider
@@ -1238,9 +1254,18 @@ regardless of `HOME`.
 - **Resources**: requests 1 cpu / 2Gi, limits 2 cpu / 4Gi, all four
   configurable (`cargo build` in an agent workspace makes 500m/1Gi requests
   unrealistic).
-- **Workspace**: `emptyDir`. Checkouts and scratch die with the pod; agent
-  memory is relay-persisted (NIP-AE) and unaffected. PVC support is a
-  deferred knob. [DECISION A — how remote pods get the nest workspace
+- **Workspace**: `emptyDir` by default. When `workspace_storage` is set, the
+  provider creates or verifies one deterministic `ReadWriteOnce` PVC per
+  agent identity and mounts it at `HOME`; pod/Secret GC never deletes that
+  claim. The claim carries the same management labels and full-pubkey
+  annotation as the pod, and a same-named foreign claim is a hard refusal.
+  Capacity or StorageClass drift is also refused rather than silently
+  pointing a new body at a different workspace. The PVC has no Pod
+  owner-reference and is never deleted by provider GC: it survives clean exit,
+  crash, Pod deletion, and redeploy, and it continues to consume billable
+  storage until an operator explicitly deletes the PVC or its namespace.
+  Agent memory remains
+  relay-persisted (NIP-AE) either way. [DECISION A — how remote pods get the nest workspace
   (AGENTS.md etc.) that local agents get from the desktop's `ensure_nest`;
   current recommendation is a desktop-stated protocol field, not
   image-side scaffolding — §Open Decisions.]
@@ -1393,12 +1418,15 @@ also self-heals the missing
 residue is one Completed pod that never restarts (I5) plus one Secret,
 removable with `kubectl delete`.
 
-### `provider_config` v1 fields
+### `provider_config` fields
 
 `context`, `namespace`, `image`, `cpu_request`, `memory_request`,
-`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account` —
-9 of the 20-field validation cap. Node selectors, tolerations, and PVCs are
-deliberately baked out of v1 to preserve budget.
+`cpu_limit`, `memory_limit`, `inactivity_seconds`, `service_account`,
+`workspace_storage`, `workspace_storage_class` — 11 of the 20-field
+validation cap. `workspace_storage` is a Kubernetes quantity such as `20Gi`;
+`workspace_storage_class` is optional and invalid without a storage request.
+Node selectors and tolerations remain deliberately baked out to preserve
+budget.
 
 ### Distribution
 

@@ -54,6 +54,7 @@ function agent(overrides = {}) {
     name: "Instance",
     personaId: "persona-1",
     status: "stopped",
+    backend: { type: "local" },
     model: null,
     modelSource: "global",
     lastError: null,
@@ -85,6 +86,7 @@ function baseProps(overrides = {}) {
     agentsError: null,
     isActionPending: false,
     isAgentsLoading: false,
+    presenceLoaded: true,
     restartingAgentPubkey: null,
     startingAgentPubkey: null,
     startingPersonaIds: new Set(),
@@ -225,6 +227,27 @@ test("persona card main click records a persona target, never an explicit pubkey
 
   assert.ok(recordedPersona, "the click must record a persona target");
   assert.equal(recordedPersona.id, "persona-1");
+});
+
+test("provider start action stays disabled until presence is known", async () => {
+  installFailOpenIpc();
+  const remote = agent({
+    backend: { type: "provider", id: "kubernetes", config: {} },
+    personaId: null,
+  });
+
+  await act(async () => {
+    renderSection(
+      baseProps({
+        agents: [remote],
+        presenceLoaded: false,
+      }),
+    );
+  });
+
+  const action = screen.getByTestId(`agent-runtime-start-${remote.pubkey}`);
+  assert.equal(action.disabled, true);
+  assert.equal(action.getAttribute("aria-label"), "Checking Agent Status");
 });
 
 test("persona card main click records a persona target even for a stopped errored agent", async () => {

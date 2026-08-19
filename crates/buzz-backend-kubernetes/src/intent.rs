@@ -81,12 +81,16 @@ pub struct IntentTemplate {
     /// Fixed placeholder for the per-attempt Secret in `envFrom`.
     pub env_from_secret: &'static str,
     pub workspace_mount_path: String,
+    /// `None` means the v1 ephemeral `emptyDir`; `Some` selects the
+    /// identity-owned persistent claim and records its requested capacity.
+    pub workspace_storage: Option<String>,
+    pub workspace_storage_class: Option<String>,
     pub run_as_user: i64,
     pub run_as_group: i64,
 }
 
 /// Current template schema version.
-pub const TEMPLATE_VERSION: u32 = 1;
+pub const TEMPLATE_VERSION: u32 = 2;
 
 impl IntentTemplate {
     /// Compute the fingerprint. `serde_json` on a struct with declared field
@@ -110,6 +114,8 @@ impl IntentTemplate {
         image: &ImageRef,
         resources: &crate::config::Resources,
         service_account: Option<&str>,
+        workspace_storage: Option<&str>,
+        workspace_storage_class: Option<&str>,
         env_keys: impl IntoIterator<Item = String>,
     ) -> Self {
         let mut env_keys: Vec<String> = env_keys.into_iter().collect();
@@ -128,6 +134,8 @@ impl IntentTemplate {
             env_keys,
             env_from_secret: SECRET_PLACEHOLDER,
             workspace_mount_path: crate::config::WORKSPACE_PATH.to_string(),
+            workspace_storage: workspace_storage.map(str::to_string),
+            workspace_storage_class: workspace_storage_class.map(str::to_string),
             run_as_user: crate::config::RUN_AS_UID,
             run_as_group: crate::config::RUN_AS_GID,
         }
@@ -152,6 +160,8 @@ mod tests {
             "buzz-agents",
             &image('a'),
             &Resources::default(),
+            None,
+            None,
             None,
             ["BUZZ_RELAY_URL".to_string(), "GOOSE_MODE".to_string()],
         )
@@ -178,12 +188,16 @@ mod tests {
             &image('a'),
             &Resources::default(),
             None,
+            None,
+            None,
             ["A".to_string(), "B".to_string(), "C".to_string()],
         );
         let b = IntentTemplate::new(
             "ns",
             &image('a'),
             &Resources::default(),
+            None,
+            None,
             None,
             ["C".to_string(), "A".to_string(), "B".to_string()],
         );
@@ -250,6 +264,16 @@ mod tests {
             (
                 "workspace_mount_path",
                 Box::new(|t: &mut IntentTemplate| t.workspace_mount_path = "/w".into()),
+            ),
+            (
+                "workspace_storage",
+                Box::new(|t: &mut IntentTemplate| t.workspace_storage = Some("20Gi".into())),
+            ),
+            (
+                "workspace_storage_class",
+                Box::new(|t: &mut IntentTemplate| {
+                    t.workspace_storage_class = Some("fast-ssd".into())
+                }),
             ),
             (
                 "run_as_user",

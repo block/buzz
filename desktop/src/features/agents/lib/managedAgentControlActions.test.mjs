@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getManagedAgentPrimaryActionLabel,
+  isManagedAgentLifecycleActionReady,
+  isManagedAgentLive,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
 } from "./managedAgentControlActions.ts";
@@ -79,6 +82,44 @@ test("ordinary local agents still start normally", async () => {
     },
   });
   assert.equal(calledWith, "deadbeef".repeat(8));
+});
+
+test("provider liveness and primary action follow relay presence", () => {
+  const remote = agent({
+    backend: { type: "provider", id: "kubernetes", config: {} },
+    backendAgentId: "buzz-agent-deadbeef",
+    status: "deployed",
+  });
+
+  assert.equal(isManagedAgentLive(remote, undefined), false);
+  assert.equal(isManagedAgentLive(remote, "offline"), false);
+  assert.equal(getManagedAgentPrimaryActionLabel(remote, "offline"), "Deploy");
+  assert.equal(isManagedAgentLive(remote, "online"), true);
+  assert.equal(getManagedAgentPrimaryActionLabel(remote, "online"), "Shutdown");
+  assert.equal(isManagedAgentLive(remote, "away"), true);
+});
+
+test("local liveness stays process-status based", () => {
+  assert.equal(
+    isManagedAgentLive(agent({ status: "running" }), "offline"),
+    true,
+  );
+  assert.equal(
+    isManagedAgentLive(agent({ status: "stopped" }), "online"),
+    false,
+  );
+});
+
+test("provider lifecycle actions wait for presence while local actions do not", () => {
+  const remote = agent({
+    backend: { type: "provider", id: "kubernetes", config: {} },
+    backendAgentId: "buzz-agent-deadbeef",
+    status: "deployed",
+  });
+
+  assert.equal(isManagedAgentLifecycleActionReady(remote, false), false);
+  assert.equal(isManagedAgentLifecycleActionReady(remote, true), true);
+  assert.equal(isManagedAgentLifecycleActionReady(agent(), false), true);
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------

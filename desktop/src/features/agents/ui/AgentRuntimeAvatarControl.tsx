@@ -12,6 +12,7 @@ import { Spinner } from "@/shared/ui/spinner";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
 
 type AgentRuntimeAvatarControlProps = {
+  actionDisabled?: boolean;
   activeTestId: string;
   avatarUrl?: string | null;
   errorLabel?: string | null;
@@ -126,6 +127,7 @@ const MASK_TRANSITION = {
 } as const;
 
 export function AgentRuntimeAvatarControl({
+  actionDisabled = false,
   activeTestId,
   avatarUrl,
   errorLabel,
@@ -142,14 +144,20 @@ export function AgentRuntimeAvatarControl({
   const shouldReduceMotion = useReducedMotion();
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
   const isRestartAction = requiresRestart || isRestarting;
-  const actionLabel = isRestarting
-    ? "Restarting Agent"
-    : isStarting
-      ? "Starting Agent"
-      : isRestartAction
-        ? "Restart Agent"
-        : "Start Agent";
-  const actionText = isRestartAction ? "Restart" : "Start";
+  const actionLabel = actionDisabled
+    ? "Checking Agent Status"
+    : isRestarting
+      ? "Restarting Agent"
+      : isStarting
+        ? "Starting Agent"
+        : isRestartAction
+          ? "Restart Agent"
+          : "Start Agent";
+  const actionText = actionDisabled
+    ? "Wait"
+    : isRestartAction
+      ? "Restart"
+      : "Start";
   const isPending = isStarting || isRestarting;
   const showRunningDot = isActive && !isRestartAction;
   const hasError = !isActive && !isPending && Boolean(errorLabel);
@@ -190,7 +198,7 @@ export function AgentRuntimeAvatarControl({
                     : "bg-primary text-primary-foreground hover:bg-primary/90",
               )}
               data-testid={hasError ? errorTestId : startTestId}
-              disabled={isPending}
+              disabled={isPending || (actionDisabled && !hasError)}
               onClick={(event) => {
                 event.stopPropagation();
                 if (hasError) {

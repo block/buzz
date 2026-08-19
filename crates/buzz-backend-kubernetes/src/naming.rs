@@ -15,9 +15,18 @@ pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 /// Label key carrying [`BINDING_VERSION`] — the marker's schema half.
 pub const LABEL_BINDING_VERSION: &str = "buzz.block.xyz/binding-version";
 
-/// Schema version of the object layout this provider writes. Bumped when the
-/// pod/Secret shape changes in a way a older provider would mis-handle.
-pub const BINDING_VERSION: &str = "1";
+/// Legacy pod/Secret binding that the v2 reader still understands during an
+/// upgrade. It is never written by this provider.
+pub const LEGACY_BINDING_VERSION: &str = "1";
+
+/// Schema version of the object layout this provider writes. Bumped because a
+/// v1 provider would replace a terminal persistent generation with `emptyDir`.
+pub const BINDING_VERSION: &str = "2";
+
+/// Pod/Secret bindings this provider may safely observe, adopt, and collect.
+/// Persistent workspace claims are deliberately excluded from this legacy
+/// compatibility surface and must carry [`BINDING_VERSION`] exactly.
+pub const SUPPORTED_READ_BINDING_VERSIONS: &[&str] = &[LEGACY_BINDING_VERSION, BINDING_VERSION];
 
 /// Label key: truncated pubkey, the reconciliation and GC selector.
 pub const LABEL_AGENT_PUBKEY: &str = "buzz.block.xyz/agent-pubkey";
@@ -74,6 +83,12 @@ impl AgentIdentity {
     /// Deterministic pod name, also the returned `agent_id`.
     pub fn pod_name(&self) -> String {
         format!("buzz-agent-{}", &self.pubkey_hex[..12])
+    }
+
+    /// Deterministic persistent workspace claim. Unlike the per-attempt
+    /// Secret, this name deliberately survives every pod generation.
+    pub fn workspace_claim_name(&self) -> String {
+        format!("{}-workspace", self.pod_name())
     }
 
     /// Per-attempt Secret name. `generation` is a fresh random token per
@@ -186,6 +201,17 @@ mod tests {
             .pod_name()
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+    }
+
+    #[test]
+    fn workspace_claim_name_is_identity_stable_and_dns_safe() {
+        let id = identity();
+        assert_eq!(id.workspace_claim_name(), id.workspace_claim_name());
+        assert_eq!(
+            id.workspace_claim_name(),
+            format!("{}-workspace", id.pod_name())
+        );
+        assert!(id.workspace_claim_name().len() <= 253);
     }
 
     /// Two attempts must never share a Secret name — that uniqueness is what
