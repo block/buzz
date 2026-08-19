@@ -266,6 +266,20 @@ fn merge_message_mentions(
     Ok(mentions)
 }
 
+/// Add a DM's counterparty pubkeys to the outgoing mention set, excluding our
+/// own pubkey and anything already present. Pure helper, split out for testing.
+fn merge_dm_participants(
+    mention_pubkeys: &mut Vec<String>,
+    participants: &[String],
+    my_pubkey: &str,
+) {
+    for pk in participants {
+        if pk != my_pubkey && !mention_pubkeys.contains(pk) {
+            mention_pubkeys.push(pk.clone());
+        }
+    }
+}
+
 fn missing_members(mentions: &[String], members: &[String]) -> Vec<String> {
     let members: std::collections::HashSet<&str> = members.iter().map(String::as_str).collect();
     mentions
@@ -299,7 +313,8 @@ async fn fetch_events(
     parsed.as_array().cloned()
 }
 
-/// Extract member pubkeys (the `p` tag values) from a single 39002 event.
+/// Extract `p` tag values from the first event matching `filter` — used for
+/// both 39002 channel-membership snapshots and 41001 DM participant records.
 async fn fetch_member_pubkeys(
     client: &BuzzClient,
     filter: &serde_json::Value,
@@ -308,7 +323,8 @@ async fn fetch_member_pubkeys(
     Some(parse_member_pubkeys(events.first()?))
 }
 
-/// Parse member pubkeys from a kind 39002 event JSON value.
+/// Parse `p` tag pubkeys from an event JSON value (39002 membership snapshot
+/// or 41001 DM participant record — both use the same `p`-tag-per-member shape).
 ///
 /// Filters and canonicalizes via `nostr::PublicKey::from_hex` — matching
 /// MCP's typed-Nostr behavior so both surfaces accept exactly the same
@@ -596,7 +612,8 @@ pub async fn cmd_send_message(
     let has_explicit_mentions = !explicit_mentions.is_empty() || !uri_pubkeys.is_empty();
     let (member_pubkeys, auto_resolved) =
         resolve_content_mentions(client, &p.channel_id, &p.content, has_explicit_mentions).await?;
-    let mention_pubkeys = merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
+    let mut mention_pubkeys =
+        merge_message_mentions(&explicit_mentions, &uri_pubkeys, &auto_resolved)?;
 
     let missing = missing_members(&mention_pubkeys, &member_pubkeys);
     if !missing.is_empty() {
@@ -608,6 +625,25 @@ pub async fn cmd_send_message(
             })
             .to_string(),
         ));
+    }
+
+    // Auto-tag DM counterparties. Unlike group channels, a DM's `dms list`
+    // visibility and p-tag-based classification (agent gateways, etc.) depend
+    // on every message carrying a `p` tag for the other participant(s) —
+    // matching Desktop, which p-tags DM sends regardless of @mention content.
+    // Only kind 9 / default messages can target a DM channel (forum posts and
+    // comments go to forum channels, never DMs), so the lookup is skipped for
+    // those kinds to avoid a needless relay round-trip.
+    if matches!(p.kind, None | Some(9)) {
+        let my_pubkey = client.keys().public_key().to_hex();
+        let dm_filter = serde_json::json!({
+            "kinds": [41001],
+            "#d": [p.channel_id],
+            "limit": 1,
+        });
+        if let Some(participants) = fetch_member_pubkeys(client, &dm_filter).await {
+            merge_dm_participants(&mut mention_pubkeys, &participants, &my_pubkey);
+        }
     }
 
     // Upload files and build imeta tags
@@ -993,8 +1029,8 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_dm_participants,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1298,6 +1334,24 @@ mod tests {
                 &[PK_VALID_A.into()]
             ),
             vec![PK_VALID_B]
+        );
+    }
+
+    #[test]
+    fn dm_participants_are_added_excluding_self_and_duplicates() {
+        let mut mentions = vec![PK_VALID_A.to_string()];
+        merge_dm_participants(
+            &mut mentions,
+            &[
+                PK_VALID_A.to_string(), // already present — no duplicate
+                PK_VALID_B.to_string(), // new — gets added
+                PK_VALID_C.to_string(), // "self" in this test — excluded
+            ],
+            PK_VALID_C,
+        );
+        assert_eq!(
+            mentions,
+            vec![PK_VALID_A.to_string(), PK_VALID_B.to_string()]
         );
     }
 
