@@ -21,6 +21,7 @@ import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
+import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -1381,6 +1382,75 @@ void main() {
       expect(blurPath.contains(messageCenter - backgroundOrigin), isFalse);
       expect(blurPath.contains(reactionPillTop - backgroundOrigin), isTrue);
       expect(blurPath.contains(reactionCenter - backgroundOrigin), isTrue);
+    });
+
+    testWidgets('reaction-only and full actions share the stronger backdrop', (
+      tester,
+    ) async {
+      addTearDown(() => messageActionBackdropActive.value = false);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'reaction-only-blur',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'alice',
+              },
+            ),
+            _textMsg(
+              id: 'full-action-blur',
+              pubkey: 'alice',
+              content: 'Full action target',
+              createdAt: 1100,
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(
+        find.byKey(const ValueKey('system-message-row-reaction-only-blur')),
+      );
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isTrue);
+      final reactionBackdrop = tester.widget<BackdropFilter>(
+        find.byKey(const ValueKey('reaction-popover-backdrop-filter')),
+      );
+      final reactionTint = tester.widget<ColoredBox>(
+        find.byKey(const ValueKey('reaction-popover-background-tint')),
+      );
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
+
+      await tester.longPress(
+        find.byKey(const ValueKey('message-row-full-action-blur')),
+      );
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isTrue);
+      final fullBackdrop = tester.widget<BackdropFilter>(
+        find.byKey(const ValueKey('message-actions-backdrop-filter')),
+      );
+      final fullTint = tester.widget<ColoredBox>(
+        find.byKey(const ValueKey('message-actions-background')),
+      );
+
+      expect(fullBackdrop.filter, same(reactionBackdrop.filter));
+      expect(fullTint.color, reactionTint.color);
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('message-action-surface'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
     });
 
     testWidgets('reaction popover grows right from a fixed left edge', (
@@ -4640,7 +4710,12 @@ void main() {
       );
 
       replyCompleter.complete(replies);
-      await tester.pumpAndSettle();
+      // Flush hydration, target placement, and the paint gate without
+      // advancing the 50 ms highlight delay through the Latest control's own
+      // entrance animation.
+      for (var frame = 0; frame < 8; frame += 1) {
+        await tester.pump();
+      }
 
       final target = find.byKey(const ValueKey('thread-message-reply-30'));
       expect(target, findsOneWidget);
@@ -4745,7 +4820,11 @@ void main() {
       expect(expiredJumpDecoration.color, Colors.transparent);
 
       await tester.pump(const Duration(seconds: 30));
-      await tester.pumpAndSettle();
+      // Settle the retry's microtasks without advancing the shared Latest
+      // control's entrance animation past the highlight's 50 ms delay.
+      for (var frame = 0; frame < 8; frame += 1) {
+        await tester.pump();
+      }
 
       expect(attempts, 2);
       expect(
@@ -5206,8 +5285,20 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(DayDivider), findsNWidgets(2));
-      expect(find.text(formatDayHeading(rootCreatedAt)), findsOneWidget);
-      expect(find.text(formatDayHeading(nextDayCreatedAt)), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(DayDivider),
+          matching: find.text(formatDayHeading(rootCreatedAt)),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byType(DayDivider),
+          matching: find.text(formatDayHeading(nextDayCreatedAt)),
+        ),
+        findsOneWidget,
+      );
       // The list runs top-down (head first), so tail spacing lives on the list
       // and reply groups carry none.
       final threadList = tester.widget<ScrollablePositionedList>(
@@ -5255,6 +5346,97 @@ void main() {
           matching: find.text('·'),
         ),
         findsNothing,
+      );
+    });
+
+    testWidgets('thread pins and updates the active date while scrolling', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      int timestampForDay(int day, int minute) =>
+          DateTime(2025, 1, day, 12, minute).toUtc().millisecondsSinceEpoch ~/
+          1000;
+      final rootEvent = _textMsg(
+        id: 'sticky-thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: timestampForDay(1, 0),
+      );
+      final replies = [
+        for (var i = 0; i < 90; i++)
+          _textMsg(
+            id: 'sticky-reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: timestampForDay(1 + (i ~/ 30), i % 30),
+            extraTags: const [
+              ['e', 'sticky-thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'sticky-thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final listFinder = find.byKey(const ValueKey('thread-message-list'));
+      final list = tester.widget<ScrollablePositionedList>(listFinder);
+      list.itemScrollController!.jumpTo(index: 40);
+      await tester.pumpAndSettle();
+
+      final stickyHeader = find.byKey(
+        const ValueKey('thread-sticky-date-header'),
+      );
+      expect(
+        find.descendant(
+          of: stickyHeader,
+          matching: find.text(formatDayHeading(timestampForDay(2, 0))),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: stickyHeader,
+          matching: find.byType(BackdropFilter),
+        ),
+        findsOneWidget,
+      );
+
+      list.itemScrollController!.jumpTo(index: 70);
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(
+          of: stickyHeader,
+          matching: find.text(formatDayHeading(timestampForDay(3, 0))),
+        ),
+        findsOneWidget,
       );
     });
 
@@ -7394,6 +7576,174 @@ void main() {
       );
     }
 
+    testWidgets('thread hides initial tail placement until it is settled', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: formatTimeline([rootEvent]).single,
+            allMessages: formatTimeline([rootEvent, ...replies]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final gate = find.byKey(const ValueKey('thread-initial-viewport-gate'));
+      expect(tester.widget<Opacity>(gate).opacity, 0);
+
+      final list = find.byKey(const ValueKey('thread-message-list'));
+      final scrollable = tester.state<ScrollableState>(
+        find.descendant(of: list, matching: find.byType(Scrollable)).first,
+      );
+      expect(scrollable.position.isScrollingNotifier.value, isFalse);
+
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Opacity>(gate).opacity, 1);
+      final latestReply = find.byKey(
+        const ValueKey('thread-message-group-reply-39'),
+      );
+      expect(
+        tester.getTopLeft(latestReply).dy,
+        greaterThanOrEqualTo(frostedAppBarHeight(tester.element(latestReply))),
+      );
+      expect(
+        tester.getTopLeft(latestReply).dy,
+        lessThan(
+          tester.getTopLeft(find.byKey(const ValueKey('composer-surface'))).dy,
+        ),
+      );
+    });
+
+    testWidgets('thread Latest reaches the tail after inbox hydration', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+      final authoritativeReplies = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          pendingThreadReplies: {'thread-root': authoritativeReplies.future},
+          localThreadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: ThreadDetailPage(
+            threadHead: formatTimeline([rootEvent]).single,
+            allMessages: formatTimeline([rootEvent, replies[5]]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'reply-5',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest')),
+        findsNothing,
+        reason:
+            'The thread must not expose navigation before its authoritative '
+            'Inbox target is placed.',
+      );
+
+      authoritativeReplies.complete(replies);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-39')),
+        findsOneWidget,
+      );
+      final composerTop = tester
+          .getTopLeft(find.byKey(const ValueKey('composer-surface')))
+          .dy;
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('thread-tail-anchor'))).dy,
+        lessThanOrEqualTo(composerTop),
+        reason: 'Latest must place the actual thread tail above the composer.',
+      );
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('thread-tail-anchor'))).dy,
+        lessThanOrEqualTo(composerTop),
+        reason: 'The hydrated Inbox thread must remain at its actual tail.',
+      );
+      expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
+    });
+
     testWidgets(
       'thread shows Latest after browsing history and returns to tail',
       (tester) async {
@@ -7465,18 +7815,61 @@ void main() {
           find.byKey(const ValueKey('thread-jump-to-latest')),
           findsOneWidget,
         );
+        expect(
+          tester.getSize(find.byKey(const ValueKey('thread-jump-to-latest'))),
+          const Size.square(Grid.xl),
+        );
+        expect(
+          tester.getSize(
+            find.byKey(const ValueKey('thread-jump-to-latest-surface')),
+          ),
+          const Size.square(Grid.lg),
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('thread-jump-to-latest')),
+            matching: find.byIcon(LucideIcons.arrowDown),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Latest'), findsNothing);
+        final threadLatestSwitcher = tester.widget<AnimatedSwitcher>(
+          find.byKey(const ValueKey('thread-jump-to-latest-switcher')),
+        );
+        expect(
+          threadLatestSwitcher.duration,
+          const Duration(milliseconds: 180),
+        );
+        expect(
+          threadLatestSwitcher.reverseDuration,
+          const Duration(milliseconds: 160),
+        );
 
         final threadScrollable = tester.state<ScrollableState>(
           find.descendant(of: list, matching: find.byType(Scrollable)).first,
         );
+        final startPixels = threadScrollable.position.pixels;
+        final targetPixels = threadScrollable.position.maxScrollExtent;
         await tester.tap(find.byKey(const ValueKey('thread-jump-to-latest')));
-        await tester.pump(const Duration(milliseconds: 50));
+        await tester.pump();
+
+        expect(
+          find.descendant(of: list, matching: find.byType(Scrollable)),
+          findsOneWidget,
+          reason:
+              'Latest must move the active thread scroll position directly; '
+              'a second transitional list produces the visible bounce.',
+        );
 
         expect(
           threadScrollable.position.isScrollingNotifier.value,
           isTrue,
-          reason: 'An explicit Latest tap should retain its navigation motion.',
+          reason: 'Latest should use the same visible glide as the channel.',
         );
+        await tester.pump(const Duration(milliseconds: 110));
+        expect(threadScrollable.position.pixels, greaterThan(startPixels));
+        expect(threadScrollable.position.pixels, lessThan(targetPixels));
+        expect(threadScrollable.position.isScrollingNotifier.value, isTrue);
         await tester.pumpAndSettle();
 
         expect(
