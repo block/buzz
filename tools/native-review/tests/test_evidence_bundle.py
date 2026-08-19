@@ -90,6 +90,10 @@ class EvidenceBundleTests(unittest.TestCase):
                 'Authorization: [REDACTED]',
             'Proxy-Authorization: Custom opaque credential with spaces':
                 'Proxy-Authorization: [REDACTED]',
+            '  Authorization: token ghp_indented':
+                '  Authorization: [REDACTED]',
+            '{"message":"Authorization: token ghp_embedded", "safe":"visible"}':
+                '{"message":"Authorization: [REDACTED], "safe":"visible"}',
             '{"authorization": "Bearer supersecret"}':
                 '{"authorization": "[REDACTED]"}',
             "{'authorization': 'Bearer supersecret'}":

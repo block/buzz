@@ -12,8 +12,12 @@ from typing import Any
 
 MAX_VIDEO_EDGE = 2160
 SECRET_KEY = re.compile(r"(?i)(?:auth(?:orization)?|token|secret|password|private[_-]?key|cookie|api[_-]?key)")
-SECRET_HEADER = re.compile(
-    r"(?im)(?P<prefix>^(?:authorization|proxy-authorization)\s*:\s*)[^\r\n]*"
+SECRET_LINE_HEADER = re.compile(
+    r"(?im)(?P<prefix>^[ \t]*(?:authorization|proxy-authorization)\s*:\s*)[^\r\n]*"
+)
+SECRET_EMBEDDED_HEADER = re.compile(
+    r"(?i)(?P<prefix>\b(?:authorization|proxy-authorization)\s*:\s*)"
+    r"(?:bearer|basic|token)\s+[^\s,;\"'}]+"
 )
 SECRET_VALUE = re.compile(
     r"(?i)(?P<name>[\"']?(?:auth|token|secret|password|private[_-]?key|cookie|api[_-]?key)[A-Z0-9_.-]*[\"']?)"
@@ -76,7 +80,8 @@ def redact_log(text: str) -> str:
         value = match.group("value")
         quote = value[0] if value and value[0] in {"\"", "'"} else ""
         return f"{match.group('name')}{match.group('sep')}{quote}[REDACTED]{quote}"
-    text = SECRET_HEADER.sub(lambda match: f"{match.group('prefix')}[REDACTED]", text)
+    text = SECRET_LINE_HEADER.sub(lambda match: f"{match.group('prefix')}[REDACTED]", text)
+    text = SECRET_EMBEDDED_HEADER.sub(lambda match: f"{match.group('prefix')}[REDACTED]", text)
     return SECRET_VALUE.sub(replacement, text)
 
 
