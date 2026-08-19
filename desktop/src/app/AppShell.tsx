@@ -42,7 +42,7 @@ import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
-import { getThreadReference } from "@/features/messages/lib/threading";
+
 import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
@@ -379,6 +379,7 @@ export function AppShell() {
     markChannelUnread,
     clearChannelUnreadSource,
     unreadChannelIds,
+    unreadThreadRootIds,
     topLevelUnreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
@@ -434,16 +435,7 @@ export function AppShell() {
     threadActivityItems,
     mutedRootIds,
   });
-  const unreadThreadRootIds = React.useMemo(
-    () =>
-      new Set(
-        unreadThreadFeedItems.flatMap((item) => {
-          const rootId = getThreadReference(item.tags).rootId;
-          return rootId ? [rootId] : [];
-        }),
-      ) as ReadonlySet<string>,
-    [unreadThreadFeedItems],
-  );
+
   const markAllChannelsRead = React.useCallback(() => {
     markAllReadSources({
       activeChannelId: activeChannel?.id ?? null,
