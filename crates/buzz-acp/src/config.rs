@@ -415,6 +415,20 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
+    /// Directory for harness state that must outlive the process — today the
+    /// channel → ACP session map (`sessions-<pubkey>.json`) that lets a restart
+    /// `session/load` each channel's session instead of opening a new one.
+    /// Defaults to `.buzz-acp/` under the working directory. Point it at a
+    /// persistent location when the working directory is not (a hosted
+    /// harness in a container, for example).
+    #[arg(long, env = "BUZZ_ACP_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+
+    /// Do not remember channel sessions across restarts: every restart opens a
+    /// fresh `session/new` per channel, as before the session store existed.
+    #[arg(long, env = "BUZZ_ACP_NO_RESUME_SESSIONS")]
+    pub no_resume_sessions: bool,
+
     /// Path to a custom base prompt file. Overrides the compiled-in default.
     /// Mutually exclusive with --no-base-prompt.
     #[arg(
@@ -552,6 +566,10 @@ pub struct Config {
     /// `[Agent Memory — core]` section. On by default; disabled via the
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY` opt-out.
     pub memory_enabled: bool,
+    /// Where the channel → session map lives across restarts. `None` disables
+    /// resumption (`--no-resume-sessions`); otherwise resolved from
+    /// `--state-dir` / `BUZZ_ACP_STATE_DIR`, defaulting to `<cwd>/.buzz-acp`.
+    pub state_dir: Option<PathBuf>,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
     /// Persisted effort level value (e.g. "high", "medium", "low"). Held as a
@@ -1124,6 +1142,15 @@ impl Config {
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
             memory_enabled: args.memory && !args.no_memory,
+            state_dir: if args.no_resume_sessions {
+                None
+            } else {
+                Some(args.state_dir.clone().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(".buzz-acp")
+                }))
+            },
             model,
             effort_level: args.effort_level,
             session_title: args
@@ -1500,6 +1527,7 @@ mod tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: true,
+            state_dir: None,
             model: None,
             effort_level: None,
             session_title: None,
@@ -2225,6 +2253,37 @@ channels = "ALL"
             "120",
         ]);
         assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
+    fn state_dir_defaults_under_cwd_and_no_resume_disables_it() {
+        let key = nostr::Keys::generate().secret_key().to_secret_hex();
+        let default = Config::from_args(CliArgs::parse_from(["buzz-acp", "--private-key", &key]))
+            .expect("default config should build");
+        let dir = default.state_dir.expect("resumption is on by default");
+        assert!(dir.ends_with(".buzz-acp"), "got {}", dir.display());
+
+        let explicit = Config::from_args(CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--state-dir",
+            "/var/lib/buzz-acp",
+        ]))
+        .expect("config should build");
+        assert_eq!(
+            explicit.state_dir.as_deref(),
+            Some(std::path::Path::new("/var/lib/buzz-acp"))
+        );
+
+        let off = Config::from_args(CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--no-resume-sessions",
+        ]))
+        .expect("config should build");
+        assert!(off.state_dir.is_none());
     }
 
     #[test]

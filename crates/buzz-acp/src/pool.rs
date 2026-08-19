@@ -21,6 +21,9 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+
+use crate::acp::SessionOrigin;
+use crate::session_store::SessionStore;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -641,6 +644,12 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Channel → session map that outlives the process. Consulted before
+    /// `session/new` for a channel this agent has no live session for: a
+    /// remembered session is `session/load`ed instead (when the agent
+    /// advertises `loadSession`), so a restart continues each channel's
+    /// conversation rather than starting over. See `session_store`.
+    pub session_store: Arc<SessionStore>,
 }
 
 impl AgentPool {
@@ -991,6 +1000,57 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel, Some(info.channel_type))
 }
 
+/// Resume the session the store remembers for `channel_id`, if there is one and
+/// the agent can. Returns the live session id on success.
+///
+/// Every failure path returns `None` and forgets the remembered id, so the
+/// caller opens a fresh session and the same dead id is not retried on every
+/// mention: an agent that did not advertise `loadSession`, a `session/load`
+/// error (the agent no longer has it — a sandbox reclaimed, a machine change),
+/// or an agent that exited (surfaced separately by the create path).
+async fn resume_remembered_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    channel_id: Uuid,
+) -> Option<String> {
+    let remembered = ctx.session_store.get(channel_id)?;
+    if !agent.acp.load_session_supported() {
+        tracing::info!(
+            target: "pool::session",
+            "channel {channel_id} remembers session {remembered} but the agent does not support session/load; starting fresh"
+        );
+        ctx.session_store.remove(channel_id);
+        return None;
+    }
+    let mcp_servers = mcp_servers_with_git_origin(
+        &ctx.mcp_servers,
+        Some(channel_id),
+        None,
+        ctx.session_title.as_deref(),
+    );
+    match agent
+        .acp
+        .session_load(&remembered, &ctx.cwd, mcp_servers)
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                target: "pool::session",
+                "resumed session {remembered} for channel {channel_id} after restart"
+            );
+            Some(remembered)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "pool::session",
+                "could not resume session {remembered} for channel {channel_id} ({e}); starting fresh"
+            );
+            ctx.session_store.remove(channel_id);
+            None
+        }
+    }
+}
+
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
 ///
@@ -1045,7 +1105,7 @@ async fn create_session_and_apply_model(
 
     let resp = agent
         .acp
-        .session_new_full(
+        .session_new_with_origin(
             &ctx.cwd,
             mcp_servers,
             session_new_system_prompt(
@@ -1055,6 +1115,12 @@ async fn create_session_and_apply_model(
                 combined_system_prompt.as_deref(),
             ),
             session_title.as_deref(),
+            channel.id.map(|channel_id| SessionOrigin {
+                channel_id,
+                channel_type: channel.channel_type,
+                // Consumed here, on the one session/new that follows a !rotate.
+                fresh: ctx.session_store.take_fresh(channel_id),
+            }),
         )
         .await?;
 
@@ -1981,6 +2047,20 @@ pub async fn run_prompt_task(
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
+            } else if let Some(sid) = resume_remembered_session(&mut agent, &ctx, *cid).await {
+                // A session this harness opened before it last restarted, live
+                // again under the same id. Delivery state starts fresh — it is
+                // per-process bookkeeping — and no usage baseline is seeded,
+                // because a resumed session's prior usage is not zero.
+                agent.state.sessions.insert(*cid, sid.clone());
+                agent
+                    .state
+                    .deliveries
+                    .insert(*cid, ChannelDeliveryState::default());
+                if let Some((pending_cid, section)) = pending_canvas.take() {
+                    agent.state.canvas_sections.insert(pending_cid, section);
+                }
+                (sid, false)
             } else {
                 // The title is channel-qualified (`Agent · #channel`) so one
                 // agent in several channels doesn't produce identical session
@@ -2006,6 +2086,7 @@ pub async fn run_prompt_task(
                             "created session {sid} for channel {cid}"
                         );
                         agent.state.sessions.insert(*cid, sid.clone());
+                        ctx.session_store.put(*cid, &sid);
                         agent
                             .state
                             .deliveries
@@ -7959,6 +8040,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            session_store: Arc::new(SessionStore::disabled()),
         }
     }
 

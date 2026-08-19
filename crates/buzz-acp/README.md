@@ -129,6 +129,17 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `--heartbeat-prompt` | `BUZZ_ACP_HEARTBEAT_PROMPT` | (built-in) | Custom heartbeat prompt text. Conflicts with `--heartbeat-prompt-file`. |
 | `--heartbeat-prompt-file` | `BUZZ_ACP_HEARTBEAT_PROMPT_FILE` | — | Read heartbeat prompt from a file. Conflicts with `--heartbeat-prompt`. |
 
+### Session Persistence
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--state-dir` | `BUZZ_ACP_STATE_DIR` | `<cwd>/.buzz-acp` | Directory for harness state that must outlive the process — today the channel → ACP session map (`sessions-<pubkey>.json`). On restart the harness issues `session/load` for each remembered channel instead of opening a fresh session, so the agent keeps its context. |
+| `--no-resume-sessions` | `BUZZ_ACP_NO_RESUME_SESSIONS` | `false` | Do not remember channel sessions across restarts: every restart opens a fresh `session/new` per channel, as before the session store existed. |
+
+A resume that cannot happen never costs the turn: if the file is missing, the entry is stale, the agent does not advertise `loadSession`, or the agent rejects `session/load`, the harness forgets the mapping and falls back to `session/new` for that channel.
+
+> **Operators running in containers:** the default state directory lives under the working directory, which is ephemeral in most container and pod filesystems — it silently vanishes on every deploy, so every restart starts every channel from scratch. Set `BUZZ_ACP_STATE_DIR` to a path on mounted persistent storage (a volume, PVC, or bind mount, e.g. `/var/lib/buzz-acp`) when the harness does not live on a laptop. Gateways that supervise hosted harnesses can additionally key sessions by `(agent pubkey, channelId)` in their own store — the harness sends the channel on `session/new` as `_meta.channelId` — to resume across a node move even when the file did not survive. Such a gateway must honour `_meta.freshSession: true` (sent on the first `session/new` after an owner `!rotate`) by opening a new conversation instead of resuming, otherwise `!rotate` becomes a no-op behind it.
+
 ### Inbound Author Gate
 
 Controls which authors' events the harness forwards to the agent. Events from disallowed authors are silently dropped before reaching subscription rules.
@@ -153,11 +164,11 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 |---------|--------|
 | `!shutdown` | Gracefully exits the harness. |
 | `!cancel` | Cancels the current in-flight turn for that channel, if any. |
-| `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
+| `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session, and that `session/new` carries `_meta.freshSession: true` so an agent (or gateway) that keys its own state by `_meta.channelId` knows to start over rather than resume. |
 
 Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
 
-Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
+Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent. A control command created before the harness process started is ignored (and still not forwarded): the first subscription replays a few seconds of backlog, and a command from that window was addressed to the previous incarnation of the harness — re-honouring a `!shutdown` there would loop under a supervisor that restarts on clean exit. Send them the way you would any mention — `@Fountain Maintainer !rotate` — the harness ignores the mention text the client renders into the body (`@Name …` or `nostr:npub…`, before or after the command) and matches on the command alone. Content that does not begin with the mention, or that continues past the command ("please !rotate", "!rotate now"), is an ordinary message and is forwarded to the agent.
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 
@@ -256,6 +267,7 @@ Forum event kinds:
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
+7. **Restart** — The channel → session map is written to the state dir (see [Session Persistence](#session-persistence)); a restarted harness `session/load`s each remembered session and falls back to `session/new` when it cannot.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
 

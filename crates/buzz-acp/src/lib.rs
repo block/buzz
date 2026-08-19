@@ -9,6 +9,7 @@ mod pool;
 mod pool_lifecycle;
 mod queue;
 mod relay;
+mod session_store;
 mod setup_mode;
 mod usage;
 
@@ -2220,7 +2221,20 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        session_store: Arc::new(match &config.state_dir {
+            Some(dir) => {
+                session_store::SessionStore::open(dir.join(format!("sessions-{pubkey_hex}.json")))
+            }
+            None => session_store::SessionStore::disabled(),
+        }),
     });
+
+    if !ctx.session_store.is_enabled() {
+        tracing::info!(
+            target: "session_store",
+            "channel session resumption disabled (--no-resume-sessions / BUZZ_ACP_NO_RESUME_SESSIONS): every restart opens fresh sessions"
+        );
+    }
 
     if !config.memory_enabled {
         tracing::info!(
@@ -2709,6 +2723,8 @@ async fn tokio_main() -> Result<()> {
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
+                                    // A channel we left must not be resumed after a restart.
+                                    ctx.session_store.remove(ch);
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2747,6 +2763,31 @@ async fn tokio_main() -> Result<()> {
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
+                                continue;
+                            }
+
+                            // A control command created before this process
+                            // started was addressed to a previous incarnation of
+                            // this harness, which already honoured it. The first
+                            // REQ replays a few seconds of backlog (since =
+                            // watermark - 5s), so under a supervisor that restarts
+                            // on clean exit a !shutdown would otherwise loop:
+                            // exit → restart → replay → exit (seen on a hosted
+                            // harness: five restarts per !shutdown). Consume it —
+                            // never forward it to the agent as a prompt.
+                            if is_stale_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                &pubkey_hex,
+                                owner_cache.get(),
+                                startup_watermark,
+                            ) {
+                                tracing::warn!(
+                                    channel_id = %buzz_event.channel_id,
+                                    created_at = buzz_event.event.created_at.as_secs(),
+                                    startup_watermark,
+                                    "ignoring owner control command from before this harness started"
+                                );
                                 continue;
                             }
 
@@ -2829,6 +2870,13 @@ async fn tokio_main() -> Result<()> {
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
+                                        // The owner asked for a fresh session. Whether the
+                                        // channel is idle or mid-turn: do not bring the old
+                                        // session back after a restart, and tell the agent
+                                        // on the next session/new not to resume its own
+                                        // channel-keyed state either (`_meta.freshSession`).
+                                        ctx.session_store.remove(buzz_event.channel_id);
+                                        ctx.session_store.request_fresh(buzz_event.channel_id);
                                         let fired = signal_in_flight_task(
                                             &mut pool,
                                             buzz_event.channel_id,
@@ -3654,6 +3702,46 @@ fn workflow_attributed_author(event: &nostr::Event, relay_self: Option<&str>) ->
     Some(owner.to_hex())
 }
 
+/// Does `content` carry exactly one owner control `command`, allowing for the
+/// mention text a client renders into the message body?
+///
+/// Clients that mention an agent (desktop, mobile) insert the mention into the
+/// content as literal text — `@Fountain Maintainer !rotate` — alongside the
+/// `p` tag. The `p` tag is what proves the mention; the text is decoration. So
+/// a command matches when the trimmed content is:
+///
+/// - the bare command (`!rotate`), or
+/// - mention text followed by whitespace and the command
+///   (`@Fountain Maintainer !rotate`, `nostr:npub1… !rotate`), or
+/// - the command followed by whitespace and mention text
+///   (`!rotate @Fountain Maintainer`).
+///
+/// Mention text must start with `@` or `nostr:` and may contain spaces (display
+/// names are multi-word, and the harness does not know its own rendered name,
+/// so `@Fountain Maintainer please !rotate` also matches). Content that does
+/// not start with a mention, or that continues past the command — "please
+/// !rotate", "!rotate now" — is a normal message and is forwarded to the agent.
+fn control_command_content_matches(content: &str, command: &str) -> bool {
+    let content = content.trim();
+    if content == command {
+        return true;
+    }
+    let is_mention_text = |s: &str| s.starts_with('@') || s.starts_with("nostr:");
+    if let Some(prefix) = content.strip_suffix(command) {
+        let trimmed = prefix.trim_end();
+        if trimmed.len() < prefix.len() && is_mention_text(trimmed) {
+            return true;
+        }
+    }
+    if let Some(suffix) = content.strip_prefix(command) {
+        let trimmed = suffix.trim_start();
+        if trimmed.len() < suffix.len() && is_mention_text(trimmed) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -3661,8 +3749,39 @@ fn is_owner_control_command(
     agent_pubkey_hex: &str,
 ) -> bool {
     kind_u32 == KIND_STREAM_MESSAGE
-        && event.content.trim() == command
+        && control_command_content_matches(&event.content, command)
         && event_mentions_agent(event, agent_pubkey_hex)
+}
+
+/// The owner control commands the harness consumes instead of forwarding.
+const OWNER_CONTROL_COMMANDS: [&str; 3] = ["!shutdown", "!cancel", "!rotate"];
+
+/// Is `event` an owner control command that predates this process?
+///
+/// True only when the event is a control command ([`is_owner_control_command`]
+/// for any of [`OWNER_CONTROL_COMMANDS`]), is from the resolved owner, and was
+/// created before `startup_watermark` (unix seconds, captured before the relay
+/// connect). Such an event was addressed to an earlier incarnation of this
+/// harness — one that already acted on it — and is replayed only because the
+/// first REQ opens a few seconds before the watermark. Honouring it again is
+/// wrong for every command and loops for `!shutdown` under a supervisor that
+/// restarts on clean exit.
+///
+/// `created_at` is stamped by the owner's client, so a client clock that lags
+/// the harness by more than the time since startup makes a genuine command
+/// look stale; the window is seconds and the command can be re-sent.
+fn is_stale_owner_control_command(
+    event: &nostr::Event,
+    kind_u32: u32,
+    agent_pubkey_hex: &str,
+    owner_pubkey_hex: Option<&str>,
+    startup_watermark: u64,
+) -> bool {
+    event.created_at.as_secs() < startup_watermark
+        && owner_pubkey_hex.is_some_and(|owner| event.pubkey.to_hex() == owner)
+        && OWNER_CONTROL_COMMANDS
+            .iter()
+            .any(|command| is_owner_control_command(event, kind_u32, command, agent_pubkey_hex))
 }
 
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
@@ -5282,6 +5401,92 @@ mod owner_control_command_tests {
             "!rotate",
             &agent
         ));
+    }
+
+    #[test]
+    fn stale_owner_control_command_is_only_a_pre_startup_owner_command() {
+        let agent = "ab".repeat(32);
+        let event = make_event(KIND_STREAM_MESSAGE, "!shutdown", Some(&agent));
+        let owner = event.pubkey.to_hex();
+        let created = event.created_at.as_secs();
+
+        // Created before startup, from the owner: stale.
+        assert!(is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&owner),
+            created + 10,
+        ));
+        // Created at/after startup: live.
+        assert!(!is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&owner),
+            created,
+        ));
+        // Not from the owner (or owner unresolved): not ours to swallow.
+        assert!(!is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&"cd".repeat(32)),
+            created + 10,
+        ));
+        assert!(!is_stale_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            None,
+            created + 10,
+        ));
+        // Not a control command at all: an old ordinary mention is a prompt.
+        let prompt = make_event(KIND_STREAM_MESSAGE, "@fm hello", Some(&agent));
+        assert!(!is_stale_owner_control_command(
+            &prompt,
+            KIND_STREAM_MESSAGE,
+            &agent,
+            Some(&prompt.pubkey.to_hex()),
+            prompt.created_at.as_secs() + 10,
+        ));
+    }
+
+    #[test]
+    fn owner_control_command_tolerates_rendered_mention_text() {
+        // Desktop/mobile insert the mention as literal text next to the p tag.
+        for content in [
+            "@Fountain Maintainer !rotate",
+            "@Fountain Maintainer  !rotate ",
+            "!rotate @Fountain Maintainer",
+            "nostr:npub1abc !rotate",
+            "@fm !rotate",
+            // Display names are multi-word and unknown to the harness, so
+            // words between the mention and the command are treated as part
+            // of the mention text.
+            "@Fountain Maintainer please !rotate",
+        ] {
+            assert!(
+                control_command_content_matches(content, "!rotate"),
+                "{content:?} should match"
+            );
+        }
+        // Anything that is not just mention text around the command is a
+        // normal message for the agent.
+        for content in [
+            "please !rotate",
+            "!rotate now",
+            "@Fountain Maintainer!rotate",
+            "@Fountain Maintainer !rotate now",
+            "!rotate !cancel",
+            "@Fountain Maintainer !rotates",
+            "",
+        ] {
+            assert!(
+                !control_command_content_matches(content, "!rotate"),
+                "{content:?} should not match"
+            );
+        }
     }
 
     #[test]
@@ -7159,6 +7364,7 @@ mod build_mcp_servers_tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
+            state_dir: None,
             model: None,
             effort_level: None,
             session_title: None,
@@ -7383,6 +7589,7 @@ mod error_outcome_emission_tests {
             presence_enabled: true,
             typing_enabled: true,
             memory_enabled: false,
+            state_dir: None,
             model: None,
             effort_level: None,
             session_title: None,

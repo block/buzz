@@ -406,7 +406,8 @@ That splits the problem in half in one run:
 ## 5. Backlog
 
 **`!cancel` / `!shutdown` / `!rotate` are unreachable from every product
-surface.** `is_owner_control_command` (`lib.rs:2476`) requires *all* of: kind:9,
+surface.** *(Fixed: `is_owner_control_command` now tolerates the rendered
+`@Name` / `nostr:` mention text around the command.)* `is_owner_control_command` (`lib.rs:2476`) requires *all* of: kind:9,
 `content.trim() == "!cancel"` (**exact**), and a `p` tag naming the agent. But
 every surface derives the `p` tag *from `@Name` text in the content* (Desktop:
 `hasMention.ts:143`; CLI: `resolve_content_mentions`, `messages.rs:128` —
