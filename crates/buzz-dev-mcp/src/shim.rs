@@ -16,8 +16,13 @@ use zeroize::Zeroize;
 /// the keyfile is written — git helpers read from the keyfile only.
 /// Cleaned up on drop (TempDir) in the common case; if this process is
 /// killed before `Drop` runs, a future buzz-dev-mcp startup's orphan sweep
-/// (`crate::sweep`) removes it once this process's pid is confirmed dead.
+/// (`crate::sweep`) removes it once this process's pid is confirmed dead AND
+/// no command spawned from it still holds the directory lease.
 pub struct Shim {
+    /// Declared before `_dir`, and it has to stay that way: fields drop in
+    /// declaration order, and on Windows the lease file must be closed before
+    /// `TempDir` can remove the directory holding it.
+    _claim: Option<crate::sweep::DirClaim>,
     _dir: TempDir,
     pub path_env: String,
     pub git_env: Vec<(String, String)>,
@@ -27,9 +32,9 @@ impl Shim {
     pub fn install() -> std::io::Result<Self> {
         let dir = tempfile::Builder::new().prefix("buzz-dev-mcp-").tempdir()?;
         set_owner_only(dir.path())?;
-        // Ownership marker for the startup orphan sweep (#6025) — best-effort,
-        // see crate::sweep docs for why a write failure here is non-fatal.
-        crate::sweep::write_owner_marker(dir.path());
+        // Ownership claim for the startup orphan sweep (#6025) — best-effort,
+        // see crate::sweep docs for why a failure here is non-fatal.
+        let claim = crate::sweep::claim_dir(dir.path());
 
         let self_exe = std::env::current_exe()?;
 
@@ -73,10 +78,18 @@ impl Shim {
         }
 
         Ok(Self {
+            _claim: claim,
             _dir: dir,
             path_env,
             git_env,
         })
+    }
+
+    /// Path of the shim directory. Used by the shell tool to surrender the
+    /// ownership claim when a spawned command's lifetime stops being
+    /// observable (see `sweep::surrender_claim`).
+    pub fn dir(&self) -> &Path {
+        self._dir.path()
     }
 }
 
