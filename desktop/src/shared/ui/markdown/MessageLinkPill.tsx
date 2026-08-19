@@ -137,15 +137,6 @@ export function MessageLinkPill({
   const shouldLoadMetadata =
     channelReadable && interactive && variant === "default";
   const metadata = useMessageLinkMetadata(link, shouldLoadMetadata);
-  const metadataPending =
-    shouldLoadMetadata &&
-    (metadata.state.kind === "idle" || metadata.state.kind === "loading");
-  const inlineContext =
-    metadata.state.kind === "ready"
-      ? metadata.state.snippet
-      : metadataPending
-        ? link.messageId.slice(0, 8)
-        : null;
   const isSentFromThread = variant === "sent-from-thread";
   const permalink = href ?? buildMessageLink(link);
   const destination =
@@ -164,9 +155,10 @@ export function MessageLinkPill({
   });
 
   if (!isSentFromThread) {
-    const chipLabel = truncateInlineChipLabel(
-      `${channelLabel}${inlineContext ? ` · ${inlineContext}` : ""}`,
-    );
+    // Inline message chips stay at the channel label only: fetched metadata and
+    // the event-hash fallback both live in the tooltip, so the chip keeps the
+    // same width before, during, and after metadata resolution.
+    const chipLabel = truncateInlineChipLabel(channelLabel);
     const chip = (
       <BuzzLinkChip
         data-message-link=""

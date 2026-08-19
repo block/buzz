@@ -232,7 +232,9 @@ function composerLinkPresentation(
         "data-message-link": "",
       },
       icon: "message",
-      label: `${resolvedChannelName} · ${message.value.messageId.slice(0, 8)}`,
+      // Matches the rendered inline message chip, which never shows the event
+      // hash — the label must not change when the draft is sent.
+      label: resolvedChannelName,
     };
   }
 

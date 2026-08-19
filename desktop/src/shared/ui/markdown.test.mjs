@@ -1122,6 +1122,49 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
   assert.match(visibleText, /buzz-world/);
 });
 
+test("inline message chips omit fetched metadata and the event hash", () => {
+  const channelId = "580ca78b-9dae-46f3-8854-bd671853ba32";
+  const markdown = renderCachedMarkdown({
+    components: createMarkdownComponents(true, false),
+    content: `buzz://message?channel=${channelId}&id=${EVENT_HEX}`,
+    variant: "inline-message-chip-metadata-test",
+  });
+  // A readable channel is the case that used to swap the chip label from the
+  // truncated event hash to the fetched snippet once metadata resolved.
+  const html = renderToStaticMarkup(
+    React.createElement(
+      QueryClientProvider,
+      { client: new QueryClient() },
+      React.createElement(
+        MarkdownRuntimeContext.Provider,
+        {
+          value: {
+            channels: [
+              {
+                id: channelId,
+                isMember: true,
+                name: "engineering",
+                visibility: "open",
+              },
+            ],
+            onOpenChannel: () => {},
+            onOpenEntityLink: () => {},
+            onOpenMessageLink: () => {},
+            relayOrigin: null,
+          },
+        },
+        markdown,
+      ),
+    ),
+  );
+
+  const visibleText = html.replace(/<[^>]+>/g, "");
+  assert.equal((html.match(/data-message-link=""/g) ?? []).length, 1);
+  assert.equal(visibleText.trim(), "engineering");
+  assert.doesNotMatch(visibleText, /c3b589fa/);
+  assert.doesNotMatch(visibleText, /·/);
+});
+
 test("authored Buzz permalink labels remain ordinary links", () => {
   const channelId = "580ca78b-9dae-46f3-8854-bd671853ba32";
   const links = [

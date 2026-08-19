@@ -12,6 +12,27 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+/**
+ * Inline message chips no longer change their label when metadata resolves, so
+ * a single hover can land while the chip is still the plain (untriggered) span.
+ * Re-arm the pointer until the metadata tooltip is mounted.
+ */
+async function hoverUntilMetadataTooltip(
+  page: import("@playwright/test").Page,
+  chip: import("@playwright/test").Locator,
+) {
+  await expect
+    .poll(async () => {
+      await page.getByTestId("chat-title").hover();
+      await chip.hover();
+      return page
+        .getByRole("tooltip")
+        .locator('[data-buzz-tooltip-metadata-content=""]')
+        .count();
+    })
+    .toBeGreaterThan(0);
+}
+
 async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-workflows-view").click();
@@ -370,7 +391,7 @@ test("mixed Buzz permalinks render as chips in the composer", async ({
 
   const chips = composerInput.locator('[data-composer-buzz-link=""]');
   await expect(chips).toHaveCount(5);
-  await expect(chips.nth(0)).toHaveText("general · mock-gen");
+  await expect(chips.nth(0)).toHaveText("general");
   await expect(chips.nth(1)).toHaveText("general");
   await expect(chips.nth(2)).toHaveText("buzz-world");
   await expect(chips.nth(3)).toHaveText("buzz-world · cccccccc");
@@ -424,7 +445,7 @@ test("message links to visible root messages open the thread panel", async ({
     );
   }, link);
   const composerLink = composerInput.locator('[data-composer-message-link=""]');
-  await expect(composerLink).toHaveText("general · mock-gen");
+  await expect(composerLink).toHaveText("general");
   await expect(composerLink).toHaveClass(/mention-chip/);
   await expect(composerLink).toHaveClass(/inline-chip-icon-message/);
   await expect(composerLink).toHaveAttribute("data-buzz-link", "");
@@ -440,7 +461,8 @@ test("message links to visible root messages open the thread panel", async ({
   const rootThreadLink = linkMessage.getByRole("button", {
     name: "Open message in channel general",
   });
-  await expect(rootThreadLink).toHaveText("general · mock-gen");
+  await expect(rootThreadLink).toHaveText("general");
+  const pendingChipBox = await rootThreadLink.boundingBox();
   await expect
     .poll(() =>
       page.evaluate(
@@ -455,7 +477,7 @@ test("message links to visible root messages open the thread panel", async ({
       window as Window & { __BUZZ_E2E_RELEASE_GET_EVENT__?: () => number }
     ).__BUZZ_E2E_RELEASE_GET_EVENT__?.();
   });
-  await expect(rootThreadLink).toHaveText("general · Welcome to general");
+  await expect(rootThreadLink).toHaveText("general");
   await expect(rootThreadLink).toHaveClass(/mention-chip/);
   await expect(rootThreadLink).toHaveClass(/wrapping-inline-chip/);
   await expect(rootThreadLink).toHaveCSS("display", "inline");
@@ -474,11 +496,18 @@ test("message links to visible root messages open the thread panel", async ({
       ),
     )
     .toBe(1);
-  await rootThreadLink.hover();
+  await hoverUntilMetadataTooltip(page, rootThreadLink);
   const messageTooltip = page.getByRole("tooltip");
   await expect(
     messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
   ).toHaveText("Welcome to general");
+  // The tooltip proves metadata resolved; the inline chip must still carry the
+  // channel label at the exact width it had while the fetch was in flight, and
+  // never the fetched snippet or the truncated event hash.
+  await expect(rootThreadLink).toHaveText("general");
+  expect((await rootThreadLink.boundingBox())?.width).toBe(
+    pendingChipBox?.width,
+  );
   await expect(
     messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
   ).toHaveClass(/line-clamp-3/);
@@ -615,8 +644,8 @@ test("direct-message tooltip metadata stays on one physical line", async ({
     .filter({ hasText: "DM link" })
     .last()
     .getByRole("button", { name: "Open message in channel alice-tyler" });
-  await expect(dmLink).toHaveText("alice-tyler · DM source message");
-  await dmLink.hover();
+  await expect(dmLink).toHaveText("alice-tyler");
+  await hoverUntilMetadataTooltip(page, dmLink);
 
   const footer = page
     .getByRole("tooltip")
@@ -665,6 +694,9 @@ test("message links explain when preview metadata is unavailable", async ({
     "Open message in channel general",
   );
   await expect(missingMessageLink).toHaveText("general");
+  // The label is metadata-independent now, so gate the hover on the state the
+  // failed lookup does change: the unavailable styling.
+  await expect(missingMessageLink).toHaveClass(/buzz-link-unavailable/);
   await missingMessageLink.hover();
   const unavailableTooltip = page.getByRole("tooltip");
   await expect(unavailableTooltip).toHaveText("Message unavailable");
@@ -711,7 +743,7 @@ test("message links reopen a closed thread when the same messageId is already in
   const rootThreadLink = linkMessage.getByRole("button", {
     name: "Open message in channel general",
   });
-  await expect(rootThreadLink).toHaveText("general · Welcome to general");
+  await expect(rootThreadLink).toHaveText("general");
   await rootThreadLink.click();
 
   await expect(threadPanel).toBeVisible();

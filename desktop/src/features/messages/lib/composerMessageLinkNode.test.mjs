@@ -205,7 +205,9 @@ test("composer node uses the sent-message chip presentation", () => {
   assert.match(rendered[1].class, /inline-chip-with-icon/);
   assert.match(rendered[1].class, /inline-chip-icon-message/);
   assert.equal(rendered[1]["data-buzz-link"], "");
-  assert.equal(rendered[2], "general · root-eve");
+  // Channel label only — no event hash, so the chip does not change width when
+  // the draft is sent and the rendered chip resolves its metadata.
+  assert.equal(rendered[2], "general");
 });
 
 test("composer node renders channel and entity chip presentations", () => {
