@@ -227,6 +227,34 @@ fn cleanup_stale_backup_removes_only_on_identity_change() {
     );
 }
 
+/// Split a generated passphrase into its words without splitting inside a
+/// hyphenated wordlist word. The EFF short wordlist 2.0 contains exactly one
+/// hyphenated word, `yo-yo` (and `yo` alone is not a word), so a split
+/// fragment that is not itself a wordlist word joins with its neighbour via
+/// the separator to form a wordlist word — unambiguous for `yo-yo`.
+fn split_passphrase_words(
+    phrase: &str,
+    separator: &str,
+    words: &std::collections::HashSet<&str>,
+) -> Vec<String> {
+    let fragments: Vec<&str> = phrase.split(separator).collect();
+    let mut result: Vec<String> = Vec::with_capacity(fragments.len());
+    let mut i = 0;
+    while i < fragments.len() {
+        // A fragment that is itself a wordlist word stands alone (the common
+        // case). Otherwise the fragment is the first half of a hyphenated
+        // word (e.g. `yo` from `yo-yo`); join it with the next fragment.
+        if words.contains(fragments[i]) {
+            result.push(fragments[i].to_string());
+            i += 1;
+        } else {
+            result.push(format!("{a}{separator}{b}", a = fragments[i], b = fragments[i + 1]));
+            i += 2;
+        }
+    }
+    result
+}
+
 #[test]
 fn generated_passphrase_respects_word_count_and_separator() {
     let words: std::collections::HashSet<&str> =
@@ -238,14 +266,37 @@ fn generated_passphrase_respects_word_count_and_separator() {
         if separator.is_empty() {
             // No separator to split on; length gate below still applies.
         } else {
-            let parts: Vec<&str> = phrase.split(separator).collect();
+            let parts = split_passphrase_words(&phrase, separator, &words);
             assert_eq!(parts.len(), count);
             for w in &parts {
-                assert!(words.contains(w), "unknown word {w:?}");
+                assert!(words.contains(w.as_str()), "unknown word {w:?}");
             }
         }
         assert!(phrase.chars().count() >= MIN_PASSPHRASE_LEN);
     }
+}
+
+#[test]
+fn generated_passphrase_handles_hyphenated_word() {
+    // The EFF short wordlist 2.0 contains `yo-yo`. When the `-` separator is
+    // used, a draw containing `yo-yo` must still count as one word, not two.
+    // Exercise the word-aware split deterministically (independent of the
+    // random draw) with a literal phrase made of wordlist words.
+    let words: std::collections::HashSet<&str> =
+        WORDLIST.lines().filter(|l| !l.is_empty()).collect();
+
+    // `yo-yo` + two other single words joined with `-` = 3 words.
+    let phrase = "yo-yo-aardvark-fanfare";
+    let parts = split_passphrase_words(phrase, "-", &words);
+    assert_eq!(parts.len(), 3, "hyphenated word must count as one word");
+    for w in &parts {
+        assert!(words.contains(w.as_str()), "unknown word {w:?}");
+    }
+    // The reconstructed word list contains `yo-yo` itself.
+    assert!(
+        parts.iter().any(|w| w == "yo-yo"),
+        "reconstructed words: {parts:?}"
+    );
 }
 
 #[test]
