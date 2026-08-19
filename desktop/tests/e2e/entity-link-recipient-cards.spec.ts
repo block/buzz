@@ -133,8 +133,8 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const tooltipSemanticColors = await prTooltip.evaluate((element) => {
     const styles = getComputedStyle(element);
     const probe = document.createElement("span");
-    probe.style.backgroundColor = "hsl(var(--primary))";
-    probe.style.color = "hsl(var(--primary-foreground))";
+    probe.style.backgroundColor = "hsl(var(--secondary))";
+    probe.style.color = "hsl(var(--secondary-foreground))";
     document.body.append(probe);
     const semanticStyles = getComputedStyle(probe);
     const result = {
@@ -241,13 +241,13 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     return result;
   });
   expect(missingRepoColors.actual).toEqual(missingRepoColors.expected);
-  // Failed metadata falls back to the chip's stable identity instead of
-  // removing the tooltip or leaving a type-only footer.
+  // Definitive metadata misses keep the tooltip's byline without repeating
+  // the chip's stable identity.
   await missingRepoChip.hover();
   const missingRepoTooltip = page.getByRole("tooltip");
   await expect(
     missingRepoTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
-  ).toHaveText("missing-repo");
+  ).toHaveCount(0);
   await expect(
     missingRepoTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Repository");

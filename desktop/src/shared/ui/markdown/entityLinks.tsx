@@ -82,15 +82,17 @@ function EntityMetadataTooltip({
       : projectName
     : null;
   const context =
-    link.type === "issue" && resolvedTitle
-      ? resolvedTitle
-      : projectContext
-        ? projectContext
-        : chipRepeatsTitle
-          ? metadata?.description
-          : [resolvedTitle || fallback, metadata?.description]
-              .filter((value): value is string => Boolean(value))
-              .join(" · ");
+    metadata === null
+      ? null
+      : link.type === "issue" && resolvedTitle
+        ? resolvedTitle
+        : projectContext
+          ? projectContext
+          : chipRepeatsTitle
+            ? metadata?.description
+            : [resolvedTitle || fallback, metadata?.description]
+                .filter((value): value is string => Boolean(value))
+                .join(" · ");
   const chip = children(metadata);
   return (
     <TooltipProvider delayDuration={500} skipDelayDuration={0}>
