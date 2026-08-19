@@ -84,6 +84,16 @@ fn load_from_path(path: &Path) -> Result<Vec<RegisteredAgentReference>, String> 
             format!("failed to parse registered agent references (preserved as .invalid): {error}")
         })?;
     refs.sort_by(|left, right| left.pubkey.cmp(&right.pubkey));
+    if let Some(duplicate) = refs
+        .windows(2)
+        .find(|pair| pair[0].pubkey == pair[1].pubkey)
+    {
+        backup_invalid_store(path);
+        return Err(format!(
+            "duplicate registered agent pubkey {} (preserved as .invalid)",
+            duplicate[0].pubkey
+        ));
+    }
     Ok(refs)
 }
 
@@ -291,6 +301,39 @@ mod tests {
         let error = load_from_path(&path).unwrap_err();
 
         assert!(error.contains("failed to parse registered agent references"));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            fs::read(path.with_extension("json.invalid")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn duplicate_pubkeys_fail_closed_and_preserve_invalid_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(STORE_FILENAME);
+        let refs = vec![
+            RegisteredAgentReference {
+                pubkey: PUBKEY_A.to_string(),
+                label: Some("first".to_string()),
+                role_summary: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            RegisteredAgentReference {
+                pubkey: PUBKEY_A.to_string(),
+                label: Some("duplicate".to_string()),
+                role_summary: None,
+                created_at: "2026-01-02T00:00:00Z".to_string(),
+                updated_at: "2026-01-02T00:00:00Z".to_string(),
+            },
+        ];
+        let bytes = serde_json::to_vec_pretty(&refs).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let error = load_from_path(&path).unwrap_err();
+
+        assert!(error.contains("duplicate registered agent pubkey"));
         assert_eq!(fs::read(&path).unwrap(), bytes);
         assert_eq!(
             fs::read(path.with_extension("json.invalid")).unwrap(),
