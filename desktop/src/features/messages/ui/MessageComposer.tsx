@@ -298,7 +298,8 @@ function MessageComposerImpl({
     drafts,
     emojiAutocomplete,
     mentions,
-    onAddressedAgentsSent: addressPulse.pulseMany,
+    onAddressedAgentsSendStarted: addressPulse.pulseMany,
+    onAddressedAgentsSendFailed: addressPulse.shakeMany,
     onPrepareSendChannel,
     onSendRef,
     richText,
@@ -391,10 +392,10 @@ function MessageComposerImpl({
     [richText.replacePlainTextRange],
   );
   const {
-    alwaysMentionAgent,
     lockedAgents,
     lockedAgentPubkeys,
     selectMentionSuggestion,
+    toggleAlwaysAddressAgent,
   } = useAgentAddressLockPicker({
     applyAutocompleteEdit,
     audience: persistentAudience,
@@ -893,9 +894,9 @@ function MessageComposerImpl({
             />
             <MentionAutocomplete
               lockedAgentPubkeys={lockedAgentPubkeys}
-              onAlwaysMentionAgent={
+              onToggleAlwaysAddressAgent={
                 audienceScope && editTarget == null
-                  ? alwaysMentionAgent
+                  ? toggleAlwaysAddressAgent
                   : undefined
               }
               onFetchMore={mentions.fetchMoreSuggestions}
@@ -927,6 +928,7 @@ function MessageComposerImpl({
                     agents={lockedAgents}
                     onRemove={persistentAudience.removePubkey}
                     pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
+                    shakeVersionByPubkey={addressPulse.shakeVersionByPubkey}
                   />
                 ) : null}
                 {media.pendingImeta.length > 0 ||
@@ -970,7 +972,7 @@ function MessageComposerImpl({
               formattingDisabled={composerDisabled}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
-              isSending={isSending}
+              isSending={isSending || mentionSendFlow.isPreparingMentionSend}
               isUploading={media.isUploading}
               onCaptureSelection={handleCaptureSelection}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}

@@ -20,13 +20,16 @@ export type ComposerAddressLock = {
 function AddressMentionBadge({
   pubkey,
   pulseVersion,
+  shakeVersion,
 }: {
   pubkey: string;
   pulseVersion: number;
+  shakeVersion: number;
 }) {
   const controls = useAnimationControls();
   const shouldReduceMotion = useReducedMotion();
   const previousPulseVersionRef = React.useRef(0);
+  const previousShakeVersionRef = React.useRef(0);
 
   React.useEffect(() => {
     if (pulseVersion <= previousPulseVersionRef.current) return;
@@ -40,12 +43,26 @@ function AddressMentionBadge({
     });
   }, [controls, pulseVersion, shouldReduceMotion]);
 
+  React.useEffect(() => {
+    if (shakeVersion <= previousShakeVersionRef.current) return;
+    previousShakeVersionRef.current = shakeVersion;
+    if (shouldReduceMotion) return;
+
+    controls.stop();
+    controls.set({ scale: 1, x: 0, y: 0 });
+    void controls.start({
+      x: [0, -4, 4, -3, 3, -1.5, 1.5, 0],
+      transition: { duration: 0.42, ease: "easeOut" },
+    });
+  }, [controls, shakeVersion, shouldReduceMotion]);
+
   return (
     <motion.span
       animate={controls}
       aria-hidden="true"
       className="absolute -bottom-0.5 -left-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm ring-2 ring-background"
       data-pulse-version={pulseVersion}
+      data-shake-version={shakeVersion}
       data-testid={`composer-address-lock-mention-badge-${pubkey}`}
       initial={false}
     >
@@ -58,10 +75,12 @@ export function ComposerAddressLocks({
   agents,
   onRemove,
   pulseVersionByPubkey = {},
+  shakeVersionByPubkey = {},
 }: {
   agents: readonly ComposerAddressLock[];
   onRemove: (pubkey: string) => void;
   pulseVersionByPubkey?: Readonly<Record<string, number>>;
+  shakeVersionByPubkey?: Readonly<Record<string, number>>;
 }) {
   const { openProfilePanel } = useProfilePanel();
 
@@ -98,6 +117,7 @@ export function ComposerAddressLocks({
               <AddressMentionBadge
                 pubkey={agent.pubkey}
                 pulseVersion={pulseVersionByPubkey[agent.pubkey] ?? 0}
+                shakeVersion={shakeVersionByPubkey[agent.pubkey] ?? 0}
               />
             </button>
             <Tooltip disableHoverableContent>

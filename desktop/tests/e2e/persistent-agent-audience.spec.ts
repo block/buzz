@@ -94,7 +94,11 @@ async function readOutgoingMentionPubkeys(page: Page, content: string) {
 
 async function installAudienceFixtures(
   page: Page,
-  options: { sendMessageDelayMs?: number } = {},
+  options: {
+    sendMessageDelayMs?: number;
+    sendMessageErrors?: string[];
+    usersBatchDelayMs?: number;
+  } = {},
 ) {
   await installMockBridge(page, {
     ...options,
@@ -242,7 +246,10 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
-  await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
+  await installAudienceFixtures(page, {
+    sendMessageDelayMs: 1_500,
+    usersBatchDelayMs: 1_500,
+  });
   await openThread(page);
 
   const composer = threadComposer(page);
@@ -256,6 +263,9 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   await input.press("Enter");
 
   await expect(input).toHaveText("", { timeout: 500 });
+  await expect(badge).toHaveAttribute("data-pulse-version", "1", {
+    timeout: 500,
+  });
   await expect(
     composer.getByRole("button", {
       name: "Stop always mentioning Morgarita",
@@ -268,7 +278,6 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "hello"))
     .toContain(AGENT_A);
-  await expect(badge).toHaveAttribute("data-pulse-version", "1");
 
   const sentRow = page
     .getByTestId("message-row")
@@ -280,6 +289,34 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   );
   await expect(addressPrefix).toBeVisible();
   await expect(addressPrefix).toHaveText("Morgarita");
+});
+
+test("a failed always-mentioned send shakes the composer badge", async ({
+  page,
+}) => {
+  await seedAudience(page, [AGENT_A]);
+  await installAudienceFixtures(page, {
+    sendMessageDelayMs: 500,
+    sendMessageErrors: ["simulated send failure"],
+  });
+  await openThread(page);
+
+  const composer = threadComposer(page);
+  const input = composer.getByTestId("message-input");
+  const badge = composer.getByTestId(
+    `composer-address-lock-mention-badge-${AGENT_A}`,
+  );
+  await expect(badge).toHaveAttribute("data-pulse-version", "0");
+  await expect(badge).toHaveAttribute("data-shake-version", "0");
+
+  await input.fill("please retry");
+  await input.press("Enter");
+
+  await expect(badge).toHaveAttribute("data-pulse-version", "1", {
+    timeout: 500,
+  });
+  await expect(input).toHaveText("please retry");
+  await expect(badge).toHaveAttribute("data-shake-version", "1");
 });
 
 test("ordinary agent mentions remain one-shot and return to the placeholder", async ({

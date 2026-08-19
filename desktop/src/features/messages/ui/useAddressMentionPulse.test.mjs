@@ -41,4 +41,10 @@ test("pulse versions restart per addressed agent", async () => {
     "agent-a": 2,
     "agent-b": 1,
   });
+
+  act(() => result.current.shakeMany(["AGENT-A", "agent-a", "agent-b"]));
+  assert.deepEqual(result.current.shakeVersionByPubkey, {
+    "agent-a": 1,
+    "agent-b": 1,
+  });
 });

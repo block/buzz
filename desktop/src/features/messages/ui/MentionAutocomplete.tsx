@@ -10,6 +10,8 @@ import {
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { Switch } from "@/shared/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { safeNpub } from "@/shared/lib/nostrUtils";
 import { truncatePubkey } from "@/shared/lib/pubkey";
 
@@ -33,7 +35,7 @@ type MentionAutocompleteProps = {
   onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
-  onAlwaysMentionAgent?: (suggestion: MentionSuggestion) => void;
+  onToggleAlwaysAddressAgent?: (suggestion: MentionSuggestion) => void;
   position?: "above" | "below";
 };
 
@@ -43,10 +45,42 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   onFetchMore,
   onSelect,
   lockedAgentPubkeys,
-  onAlwaysMentionAgent,
+  onToggleAlwaysAddressAgent,
   position = "above",
 }: MentionAutocompleteProps) {
   const listRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    const list = listRef.current;
+    const form = list?.closest("form");
+    if (!list || !form) return;
+
+    const focusSelectedAgentAction = (event: KeyboardEvent) => {
+      if (
+        event.key !== "Tab" ||
+        event.shiftKey ||
+        list.contains(event.target as Node)
+      )
+        return;
+      const editor = form.querySelector('[data-testid="message-input-scroll"]');
+      if (!editor?.contains(event.target as Node)) return;
+
+      const selectedSuggestion = suggestions[selectedIndex];
+      if (!selectedSuggestion?.isAgent || !selectedSuggestion.pubkey) return;
+      const action = list.querySelector<HTMLButtonElement>(
+        `[data-always-address-pubkey="${selectedSuggestion.pubkey.toLowerCase()}"]`,
+      );
+      if (!action) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      action.focus();
+    };
+
+    form.addEventListener("keydown", focusSelectedAgentAction, true);
+    return () =>
+      form.removeEventListener("keydown", focusSelectedAgentAction, true);
+  }, [selectedIndex, suggestions]);
 
   React.useEffect(() => {
     const activeItem = listRef.current?.querySelector<HTMLElement>(
@@ -86,7 +120,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     >
       <div
         className={cn(
-          "max-h-48 overflow-y-auto rounded-xl p-1",
+          "max-h-48 w-full max-w-2xl overflow-y-auto rounded-xl p-1",
           POPOVER_CUSTOM_ENTER_MOTION_CLASS,
           position === "below"
             ? "origin-top slide-in-from-top-1"
@@ -111,10 +145,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             hasNameCollision && suggestion.pubkey
               ? safeNpub(suggestion.pubkey)
               : null;
-          const canAlwaysMention = Boolean(
-            onAlwaysMentionAgent && suggestion.isAgent && suggestion.pubkey,
+          const canAlwaysAddress = Boolean(
+            onToggleAlwaysAddressAgent &&
+              suggestion.isAgent &&
+              suggestion.pubkey,
           );
-          const isAlwaysMentioned = Boolean(
+          const isAlwaysAddressed = Boolean(
             suggestion.pubkey &&
               lockedAgentPubkeys?.has(suggestion.pubkey.toLowerCase()),
           );
@@ -241,32 +277,28 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   ) : null}
                 </span>
               </button>
-              {canAlwaysMention ? (
-                isAlwaysMentioned ? (
-                  <span
-                    className="shrink-0 whitespace-nowrap px-2 py-1 text-xs font-medium text-muted-foreground"
-                    data-testid={`mention-always-mentioned-${suggestion.pubkey}`}
-                  >
-                    Always mentioned
-                  </span>
-                ) : (
-                  <button
-                    aria-label={`Always mention ${suggestion.displayName}`}
-                    className="shrink-0 whitespace-nowrap rounded-md px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                    data-testid={`mention-always-mention-${suggestion.pubkey}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onAlwaysMentionAgent?.(suggestion);
-                    }}
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                    }}
-                    type="button"
-                  >
-                    Always mention
-                  </button>
-                )
+              {canAlwaysAddress ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex shrink-0">
+                      <Switch
+                        aria-label={`Always address ${suggestion.displayName}`}
+                        checked={isAlwaysAddressed}
+                        data-always-address-pubkey={suggestion.pubkey?.toLowerCase()}
+                        data-testid={`mention-always-address-${suggestion.pubkey}`}
+                        onCheckedChange={() =>
+                          onToggleAlwaysAddressAgent?.(suggestion)
+                        }
+                        onClick={(event) => event.stopPropagation()}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                      />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">Always address</TooltipContent>
+                </Tooltip>
               ) : null}
             </div>
           );
