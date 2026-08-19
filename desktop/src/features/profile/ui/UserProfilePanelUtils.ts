@@ -22,6 +22,7 @@ export type ProfilePanelView =
   | "instructions"
   | "info"
   | "configuration"
+  | "codex-history"
   | "diagnostics"
   | "memories"
   | "channels"
@@ -34,6 +35,7 @@ export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   instructions: "Agent instructions",
   info: "Agent info",
   configuration: "Runtime",
+  "codex-history": "Codex history",
   diagnostics: "Harness log",
   memories: "Memories",
   channels: "Channels",

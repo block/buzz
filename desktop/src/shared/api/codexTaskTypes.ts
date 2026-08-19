@@ -16,6 +16,20 @@ export type CodexTaskSummary = {
   model: string | null;
 };
 
+export type CodexTaskHistoryMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string | null;
+};
+
+export type CodexTaskHistory = {
+  taskId: string;
+  threadName: string;
+  messages: CodexTaskHistoryMessage[];
+  truncated: boolean;
+};
+
 export type CodexSharedRuntimeState =
   | "setup_required"
   | "ready"

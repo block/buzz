@@ -764,6 +764,7 @@ pub fn run() {
             list_relay_agents,
             list_managed_agents,
             list_codex_tasks,
+            get_codex_task_history,
             get_codex_shared_runtime_status,
             enable_codex_shared_runtime,
             launch_codex_desktop_shared,

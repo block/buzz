@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     net::{TcpStream, ToSocketAddrs},
@@ -20,6 +20,8 @@ use super::{
 const STORE_VERSION: u32 = 4;
 const MAX_TASKS: usize = 250;
 const MODEL_SCAN_BYTES: u64 = 1024 * 1024;
+const MAX_HISTORY_MESSAGES: usize = 200;
+const MAX_HISTORY_MESSAGE_CHARS: usize = 20_000;
 pub const DEFAULT_CODEX_SHARED_APP_SERVER_URL: &str = "ws://127.0.0.1:51919";
 const SHARED_RUNTIME_URL_ENV: &str = "BUZZ_CODEX_SHARED_APP_SERVER_URL";
 
@@ -44,6 +46,22 @@ pub struct CodexTaskSummary {
     pub updated_at: String,
     pub archived: bool,
     pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodexTaskHistoryMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodexTaskHistory {
+    pub task_id: String,
+    pub thread_name: String,
+    pub messages: Vec<CodexTaskHistoryMessage>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -437,6 +455,120 @@ pub fn list_codex_tasks() -> Result<Vec<CodexTaskSummary>, String> {
     Ok(tasks)
 }
 
+pub fn get_codex_task_history(
+    app: &AppHandle,
+    agent_pubkey: &str,
+) -> Result<CodexTaskHistory, String> {
+    let binding = load_codex_task_binding(app, agent_pubkey)?
+        .ok_or_else(|| "This agent is not bound to a Codex task".to_string())?;
+    let codex_home = codex_home_dir()?;
+    let mut locations = HashMap::new();
+    collect_session_locations(&codex_home.join("sessions"), false, &mut locations);
+    collect_session_locations(&codex_home.join("archived_sessions"), true, &mut locations);
+    let location = locations.get(&binding.task_id).ok_or_else(|| {
+        format!(
+            "Codex task {} was not found on this computer",
+            binding.task_id
+        )
+    })?;
+    let (messages, truncated) = read_codex_task_history(&location.path)?;
+    Ok(CodexTaskHistory {
+        task_id: binding.task_id,
+        thread_name: binding.thread_name,
+        messages,
+        truncated,
+    })
+}
+
+fn read_codex_task_history(path: &Path) -> Result<(Vec<CodexTaskHistoryMessage>, bool), String> {
+    let file =
+        File::open(path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let mut messages = VecDeque::with_capacity(MAX_HISTORY_MESSAGES);
+    let mut truncated = false;
+    for (line_index, line) in BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .enumerate()
+    {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(message) = parse_codex_history_message(&value, line_index) else {
+            continue;
+        };
+        if messages.len() == MAX_HISTORY_MESSAGES {
+            messages.pop_front();
+            truncated = true;
+        }
+        messages.push_back(message);
+    }
+    Ok((messages.into_iter().collect(), truncated))
+}
+
+fn parse_codex_history_message(
+    value: &serde_json::Value,
+    line_index: usize,
+) -> Option<CodexTaskHistoryMessage> {
+    let timestamp = value
+        .get("timestamp")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let payload = value.get("payload")?;
+    let (role, content) = match (
+        value.get("type").and_then(serde_json::Value::as_str),
+        payload.get("type").and_then(serde_json::Value::as_str),
+    ) {
+        (Some("event_msg"), Some("user_message")) => {
+            ("user", payload.get("message")?.as_str()?.to_string())
+        }
+        (Some("response_item"), Some("message"))
+            if payload.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                && payload.get("phase").and_then(serde_json::Value::as_str)
+                    == Some("final_answer") =>
+        {
+            let content = payload
+                .get("content")?
+                .as_array()?
+                .iter()
+                .filter(|item| {
+                    item.get("type").and_then(serde_json::Value::as_str) == Some("output_text")
+                })
+                .filter_map(|item| item.get("text").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            ("assistant", content)
+        }
+        _ => return None,
+    };
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    Some(CodexTaskHistoryMessage {
+        id: payload
+            .get("id")
+            .or_else(|| payload.get("client_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("line-{line_index}")),
+        role: role.to_string(),
+        content: truncate_history_content(content),
+        timestamp,
+    })
+}
+
+fn truncate_history_content(content: &str) -> String {
+    if content.chars().count() <= MAX_HISTORY_MESSAGE_CHARS {
+        return content.to_string();
+    }
+    let mut truncated = content
+        .chars()
+        .take(MAX_HISTORY_MESSAGE_CHARS)
+        .collect::<String>();
+    truncated.push_str("\n\n... [message truncated]");
+    truncated
+}
+
 fn collect_session_locations(
     root: &Path,
     archived: bool,
@@ -572,6 +704,75 @@ mod tests {
         assert_eq!(
             read_latest_codex_model(&path).as_deref(),
             Some("gpt-5.5[xhigh]")
+        );
+    }
+
+    #[test]
+    fn reads_only_user_messages_and_final_answers_from_codex_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let mut file = File::create(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-19T01:00:00Z","type":"event_msg","payload":{{"type":"user_message","message":"Hello"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-19T01:00:01Z","type":"event_msg","payload":{{"type":"agent_reasoning","text":"hidden"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-19T01:00:02Z","type":"response_item","payload":{{"type":"message","role":"assistant","phase":"commentary","content":[{{"type":"output_text","text":"working"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-08-19T01:00:03Z","type":"response_item","payload":{{"type":"message","role":"assistant","phase":"final_answer","content":[{{"type":"output_text","text":"Done"}}]}}}}"#
+        )
+        .unwrap();
+
+        let (messages, truncated) = read_codex_task_history(&path).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            messages,
+            vec![
+                CodexTaskHistoryMessage {
+                    id: "line-0".to_string(),
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                    timestamp: Some("2026-08-19T01:00:00Z".to_string()),
+                },
+                CodexTaskHistoryMessage {
+                    id: "line-3".to_string(),
+                    role: "assistant".to_string(),
+                    content: "Done".to_string(),
+                    timestamp: Some("2026-08-19T01:00:03Z".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_history_keeps_only_the_latest_message_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let mut file = File::create(&path).unwrap();
+        for index in 0..=MAX_HISTORY_MESSAGES {
+            writeln!(
+                file,
+                r#"{{"type":"event_msg","payload":{{"type":"user_message","message":"message-{index}"}}}}"#
+            )
+            .unwrap();
+        }
+
+        let (messages, truncated) = read_codex_task_history(&path).unwrap();
+        assert!(truncated);
+        assert_eq!(messages.len(), MAX_HISTORY_MESSAGES);
+        assert_eq!(
+            messages.first().map(|message| message.content.as_str()),
+            Some("message-1")
         );
     }
 

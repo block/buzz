@@ -88,6 +88,7 @@ export function useProfileFieldBuckets({
   isBot,
   isOwner,
   managedAgent,
+  onOpenCodexHistory,
   onOpenProfile,
   ownerDisplayName,
   ownerHandle,
@@ -103,6 +104,7 @@ export function useProfileFieldBuckets({
   isBot: boolean;
   isOwner: boolean | undefined;
   managedAgent: ManagedAgent | undefined;
+  onOpenCodexHistory?: () => void;
   onOpenProfile?: (pubkey: string) => void;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
@@ -122,6 +124,7 @@ export function useProfileFieldBuckets({
         ? buildOwnerFields({
             includeOperationalFields: isOwner === true,
             managedAgent,
+            onOpenCodexHistory,
             onOpenProfile,
             ownerDisplayName,
             ownerHandle,
@@ -139,6 +142,7 @@ export function useProfileFieldBuckets({
     isBot,
     isOwner,
     managedAgent,
+    onOpenCodexHistory,
     onOpenProfile,
     ownerDisplayName,
     ownerHandle,
@@ -229,6 +233,7 @@ export function buildPublicFields({
 export function buildOwnerFields({
   includeOperationalFields,
   managedAgent,
+  onOpenCodexHistory,
   onOpenProfile,
   ownerDisplayName,
   ownerHandle,
@@ -241,6 +246,7 @@ export function buildOwnerFields({
 }: {
   includeOperationalFields: boolean;
   managedAgent: ManagedAgent | undefined;
+  onOpenCodexHistory?: () => void;
   onOpenProfile?: (pubkey: string) => void;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
@@ -341,10 +347,13 @@ export function buildOwnerFields({
 
   if (managedAgent?.codexTaskBinding) {
     fields.push({
-      copyValue: managedAgent.codexTaskBinding.taskId,
+      copyValue: onOpenCodexHistory
+        ? undefined
+        : managedAgent.codexTaskBinding.taskId,
       displayValue: managedAgent.codexTaskBinding.threadName,
       icon: History,
       label: "Codex task",
+      onClick: onOpenCodexHistory,
       testId: "user-profile-codex-task",
     });
     fields.push({

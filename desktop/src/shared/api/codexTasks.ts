@@ -1,6 +1,7 @@
 import type {
   RawCodexSharedRuntimeStatus,
   CodexSharedRuntimeStatus,
+  CodexTaskHistory,
   CodexTaskSummary,
 } from "@/shared/api/codexTaskTypes";
 import { fromRawCodexSharedRuntimeStatus } from "@/shared/api/codexTaskTypes";
@@ -25,6 +26,38 @@ export async function listCodexTasks(): Promise<CodexTaskSummary[]> {
     archived: task.archived,
     model: task.model ?? null,
   }));
+}
+
+type RawCodexTaskHistory = {
+  task_id: string;
+  thread_name: string;
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    timestamp?: string | null;
+  }>;
+  truncated: boolean;
+};
+
+export async function getCodexTaskHistory(
+  agentPubkey: string,
+): Promise<CodexTaskHistory> {
+  const history = await invokeTauri<RawCodexTaskHistory>(
+    "get_codex_task_history",
+    { agentPubkey },
+  );
+  return {
+    taskId: history.task_id,
+    threadName: history.thread_name,
+    messages: history.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      timestamp: message.timestamp ?? null,
+    })),
+    truncated: history.truncated,
+  };
 }
 
 async function invokeCodexSharedRuntimeStatus(

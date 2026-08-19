@@ -1,4 +1,4 @@
-use crate::managed_agents::{CodexSharedRuntimeStatus, CodexTaskSummary};
+use crate::managed_agents::{CodexSharedRuntimeStatus, CodexTaskHistory, CodexTaskSummary};
 use tauri::AppHandle;
 
 #[tauri::command]
@@ -6,6 +6,18 @@ pub async fn list_codex_tasks() -> Result<Vec<CodexTaskSummary>, String> {
     tokio::task::spawn_blocking(crate::managed_agents::list_codex_tasks)
         .await
         .map_err(|error| format!("spawn_blocking failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn get_codex_task_history(
+    app: AppHandle,
+    agent_pubkey: String,
+) -> Result<CodexTaskHistory, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed_agents::get_codex_task_history(&app, &agent_pubkey)
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }
 
 #[tauri::command]

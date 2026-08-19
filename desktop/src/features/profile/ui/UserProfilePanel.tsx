@@ -60,6 +60,7 @@ import {
   MemoryFocusedView,
 } from "@/features/profile/ui/UserProfilePanelFocusedViews";
 import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+import { CodexTaskHistoryFocusedView } from "@/features/profile/ui/CodexTaskHistoryFocusedView";
 import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProfileAgentActions";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
@@ -739,6 +740,9 @@ export function UserProfilePanel({
       isBot,
       isOwner: viewerIsOwner,
       managedAgent,
+      onOpenCodexHistory: managedAgent?.codexTaskBinding
+        ? () => setView("codex-history")
+        : undefined,
       onOpenProfile,
       ownerDisplayName,
       ownerHandle,
@@ -855,6 +859,9 @@ export function UserProfilePanel({
       ) : null}
       {view === "configuration" ? (
         <AgentConfigurationFocusedView fields={agentSettingsFields} />
+      ) : null}
+      {view === "codex-history" && effectivePubkey ? (
+        <CodexTaskHistoryFocusedView agentPubkey={effectivePubkey} />
       ) : null}
       {view === "instructions" ? (
         <AgentInstructionsFocusedView instruction={agentInstruction} />

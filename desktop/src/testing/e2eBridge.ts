@@ -12391,6 +12391,39 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "list_managed_agents":
         return handleListManagedAgents(activeConfig);
+      case "get_codex_task_history": {
+        const agentPubkey = String(
+          (payload as { agentPubkey?: string } | null)?.agentPubkey ?? "",
+        ).toLowerCase();
+        const agent = mockManagedAgents.find(
+          (candidate) => candidate.pubkey.toLowerCase() === agentPubkey,
+        );
+        const binding = agent?.codex_task_binding;
+        if (!binding) {
+          throw new Error(
+            "mock get_codex_task_history: agent is not Codex-bound",
+          );
+        }
+        return {
+          task_id: binding.task_id,
+          thread_name: binding.thread_name,
+          truncated: false,
+          messages: [
+            {
+              id: "mock-codex-user-1",
+              role: "user",
+              content: "Mock Codex task request",
+              timestamp: "2026-01-01T00:00:00Z",
+            },
+            {
+              id: "mock-codex-assistant-1",
+              role: "assistant",
+              content: "Mock Codex task response",
+              timestamp: "2026-01-01T00:00:01Z",
+            },
+          ],
+        };
+      }
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},
