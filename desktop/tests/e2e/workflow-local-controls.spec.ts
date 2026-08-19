@@ -145,9 +145,7 @@ test("round-trips and reopens structured message-text conditions", async ({
   const expression = 'str_ends_with(trigger_text, "deploy \\"buzz\\"\\\\path")';
   const dialog = await openCreateWorkflow(page, name);
 
-  await dialog
-    .getByLabel("Text comparison", { exact: true })
-    .selectOption("ends_with");
+  await dialog.getByText("ends with", { exact: true }).click();
   await dialog.getByLabel("Text to match").fill(text);
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
@@ -156,23 +154,19 @@ test("round-trips and reopens structured message-text conditions", async ({
 
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog, "Message Posted");
-  await expect(
-    dialog.getByLabel("Text comparison", { exact: true }),
-  ).toHaveValue("ends_with");
+  await expect(dialog.getByText("ends with", { exact: true })).toBeVisible();
   await expect(dialog.getByLabel("Text to match")).toHaveValue(text);
   await dialog.getByRole("tab", { name: "Advanced" }).click();
-  await expect(dialog.getByLabel("Raw Evalexpr expression")).toHaveValue(
+  await expect(dialog.getByLabel("Advanced expression")).toHaveValue(
     expression,
   );
-  await dialog.getByRole("tab", { name: "Structured" }).click();
+  await dialog.getByRole("tab", { name: "Basic" }).click();
 
   await addMessageStep(page, dialog);
   await dialog.getByRole("button", { name: "Create" }).click();
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened, "Message Posted");
-  await expect(
-    reopened.getByLabel("Text comparison", { exact: true }),
-  ).toHaveValue("ends_with");
+  await expect(reopened.getByText("ends with", { exact: true })).toBeVisible();
   await expect(reopened.getByLabel("Text to match")).toHaveValue(text);
 });
 
@@ -195,12 +189,10 @@ test("keeps advanced and malformed definitions lossless", async ({ page }) => {
     "data-state",
     "active",
   );
-  await expect(dialog.getByLabel("Raw Evalexpr expression")).toHaveValue(
-    advanced,
-  );
-  await dialog.getByRole("tab", { name: "Structured" }).click();
+  await expect(dialog.getByLabel("Advanced expression")).toHaveValue(advanced);
+  await dialog.getByRole("tab", { name: "Basic" }).click();
   await expect(
-    dialog.getByText(/remains unchanged until you explicitly replace it/),
+    dialog.getByText(/advanced expression is active/i),
   ).toBeVisible();
 
   await dialog.getByRole("switch", { name: "Enable workflow" }).click();
