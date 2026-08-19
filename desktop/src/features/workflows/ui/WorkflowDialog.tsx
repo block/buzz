@@ -208,33 +208,36 @@ export function WorkflowDialog({
               }}
               yaml={yamlDefinition}
             />
+          </div>
 
+          <div className="flex-shrink-0 space-y-2 border-t border-border pt-4">
             {mutation.error instanceof Error ? (
               <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 {mutation.error.message}
               </p>
             ) : null}
-          </div>
-
-          <div className="flex flex-shrink-0 justify-end gap-2 border-t border-border pt-4">
-            <Button
-              onClick={() => handleOpenChange(false)}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={
-                !selectedChannelId ||
-                !yamlDefinition.trim() ||
-                mutation.isPending
-              }
-              onClick={handleSubmit}
-              type="button"
-            >
-              {mutation.isPending ? PENDING_LABELS[mode] : SUBMIT_LABELS[mode]}
-            </Button>
+            <div className="flex justify-end gap-2">
+              <Button
+                onClick={() => handleOpenChange(false)}
+                type="button"
+                variant="outline"
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={
+                  !selectedChannelId ||
+                  !yamlDefinition.trim() ||
+                  mutation.isPending
+                }
+                onClick={handleSubmit}
+                type="button"
+              >
+                {mutation.isPending
+                  ? PENDING_LABELS[mode]
+                  : SUBMIT_LABELS[mode]}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
