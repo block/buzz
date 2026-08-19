@@ -81,7 +81,7 @@ test("agent-style message with bare buzz:// links renders entity cards without s
         content: [
           "PR is up — review when you can:",
           `buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools`,
-          `Issue: buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools`,
+          `Issue with enough leading context to wrap the linked chip: buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools`,
           `Repo: buzz://repo?owner=${alicePubkey}&d=relay-tools`,
           `Missing repo: buzz://repo?owner=${alicePubkey}&d=missing-repo`,
         ].join("\n"),
@@ -156,7 +156,21 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(issueChip.locator(".inline-chip-leading-fragment")).toHaveText(
     "relay-",
   );
-  await issueChip.hover();
+  const issueChipFragments = await issueChip.evaluate((element) =>
+    Array.from(element.getClientRects()).map((rect) => ({
+      height: rect.height,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+    })),
+  );
+  expect(issueChipFragments.length).toBeGreaterThan(1);
+  const hoveredFragment = issueChipFragments.at(-1);
+  if (!hoveredFragment) throw new Error("Expected a wrapped issue chip");
+  await page.mouse.move(
+    hoveredFragment.left + hoveredFragment.width / 2,
+    hoveredFragment.top + hoveredFragment.height / 2,
+  );
   const issueTooltip = page.getByRole("tooltip");
   const issueContext = issueTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
@@ -168,6 +182,20 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   await expect(
     issueTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Issue · relay-tools");
+  const issueTooltipBox = await issueTooltip.boundingBox();
+  if (!issueTooltipBox) throw new Error("Expected a visible issue tooltip");
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("Expected a configured viewport");
+  const fragmentCenter = hoveredFragment.left + hoveredFragment.width / 2;
+  const expectedTooltipCenter = Math.min(
+    Math.max(fragmentCenter, 8 + issueTooltipBox.width / 2),
+    viewport.width - 8 - issueTooltipBox.width / 2,
+  );
+  expect(
+    Math.abs(
+      issueTooltipBox.x + issueTooltipBox.width / 2 - expectedTooltipCenter,
+    ),
+  ).toBeLessThanOrEqual(1);
 
   // The repository card uses its signed announcement metadata and remains
   // image-less.

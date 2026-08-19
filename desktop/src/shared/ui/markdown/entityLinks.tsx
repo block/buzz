@@ -27,6 +27,7 @@ import {
 } from "@/shared/ui/tooltip";
 
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
+import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
 
 function EntityMetadataTooltip({
   children,
@@ -45,6 +46,7 @@ function EntityMetadataTooltip({
   link: ParsedEntityLink;
   projects: Project[] | undefined;
 }) {
+  const { contentRef, onPointerMove } = useInlineTooltipPosition();
   const [resolved, setResolved] = React.useState<{
     href: string;
     metadata: LinkPreviewMetadata | null;
@@ -89,9 +91,11 @@ function EntityMetadataTooltip({
   return (
     <TooltipProvider delayDuration={500} skipDelayDuration={0}>
       <Tooltip>
-        <TooltipTrigger asChild>{chip}</TooltipTrigger>
+        <TooltipTrigger asChild onPointerMove={onPointerMove}>
+          {chip}
+        </TooltipTrigger>
         <TooltipContent
-          align="start"
+          ref={contentRef}
           className="max-w-72 p-2 text-left"
           side="top"
         >

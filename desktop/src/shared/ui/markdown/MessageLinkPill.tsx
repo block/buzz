@@ -10,6 +10,7 @@ import {
 } from "@/shared/ui/tooltip";
 
 import { BuzzLinkChip } from "./BuzzLinkChip";
+import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
 import { useMessageLinkMetadata } from "./useMessageLinkMetadata";
 import type { MessageLinkPillProps } from "./types";
 import { getMessageLinkLabel } from "@/features/messages/lib/messageLinkLabel";
@@ -68,12 +69,17 @@ function MessageLinkMetadataTooltip({
   footer: string;
   metadata: ReturnType<typeof useMessageLinkMetadata>;
 }) {
+  const { contentRef, onPointerMove } = useInlineTooltipPosition();
   if (metadata.state.kind === "unavailable") {
     return (
       <TooltipProvider delayDuration={500} skipDelayDuration={0}>
         <Tooltip>
-          <TooltipTrigger asChild>{children}</TooltipTrigger>
-          <TooltipContent side="top">Message unavailable</TooltipContent>
+          <TooltipTrigger asChild onPointerMove={onPointerMove}>
+            {children}
+          </TooltipTrigger>
+          <TooltipContent ref={contentRef} side="top">
+            Message unavailable
+          </TooltipContent>
         </Tooltip>
       </TooltipProvider>
     );
@@ -87,9 +93,11 @@ function MessageLinkMetadataTooltip({
   return (
     <TooltipProvider delayDuration={500} skipDelayDuration={0}>
       <Tooltip>
-        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipTrigger asChild onPointerMove={onPointerMove}>
+          {children}
+        </TooltipTrigger>
         <TooltipContent
-          align="start"
+          ref={contentRef}
           className="w-72 max-w-[min(18rem,calc(100vw-2rem))] px-3 py-2 text-left"
           side="top"
         >

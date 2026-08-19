@@ -17,6 +17,7 @@ import {
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
 import { MessageLinkPill } from "./MessageLinkPill";
 import { useMarkdownRuntime } from "./runtimeContext";
+import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
 import { getReactNodeText } from "./utils";
 
 function formatChannelActivity(timestamp: string): string | null {
@@ -52,14 +53,17 @@ function ChannelMetadataTooltip({
   channel: Channel | undefined;
   children: React.ReactElement;
 }) {
+  const { contentRef, onPointerMove } = useInlineTooltipPosition();
   const description = channel?.description?.trim();
   if (!channel) return children;
   return (
     <TooltipProvider delayDuration={500} skipDelayDuration={0}>
       <Tooltip>
-        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipTrigger asChild onPointerMove={onPointerMove}>
+          {children}
+        </TooltipTrigger>
         <TooltipContent
-          align="start"
+          ref={contentRef}
           className="max-w-72 p-2 text-left"
           side="top"
         >

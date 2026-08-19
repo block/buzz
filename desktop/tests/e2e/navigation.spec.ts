@@ -495,9 +495,13 @@ test("message links to visible root messages open the thread panel", async ({
   if (!messageChipBox || !messageTooltipBox) {
     throw new Error("Expected visible message chip and tooltip");
   }
-  expect(Math.abs(messageTooltipBox.x - messageChipBox.x)).toBeLessThanOrEqual(
-    1,
-  );
+  expect(
+    Math.abs(
+      messageTooltipBox.x +
+        messageTooltipBox.width / 2 -
+        (messageChipBox.x + messageChipBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
   await page.getByTestId("chat-title").hover();
   await rootThreadLink.hover();
   await expect(
