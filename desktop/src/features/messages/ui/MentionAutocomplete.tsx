@@ -22,7 +22,7 @@ export type MentionSuggestion = {
   displayName: string;
   avatarUrl?: string | null;
   isAgent?: boolean;
-  agentDevice?: "this" | "other";
+  agentProvenance?: "managed-here" | "managed-elsewhere";
   notInChannel?: boolean;
   ownerLabel?: string | null;
   role?: string | null;
@@ -40,10 +40,10 @@ export function mentionAgentLabel(
   suggestion: MentionSuggestion,
   hasNameCollision: boolean,
 ) {
-  if (!hasNameCollision || !suggestion.agentDevice) return "agent";
-  return suggestion.agentDevice === "this"
-    ? "agent · this device"
-    : "agent · other device";
+  if (!hasNameCollision || !suggestion.agentProvenance) return "agent";
+  return suggestion.agentProvenance === "managed-here"
+    ? "agent · managed here"
+    : "agent · managed elsewhere";
 }
 
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({

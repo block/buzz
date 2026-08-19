@@ -53,15 +53,15 @@ export function mapMentionCandidateToSuggestion(opts: {
         : null) ??
       null,
     isAgent: candidate.isAgent,
-    agentDevice:
+    agentProvenance:
       candidate.kind === "identity" && candidate.isAgent
         ? candidate.isManagedAgent
-          ? "this"
+          ? "managed-here"
           : candidate.ownerPubkey &&
               currentPubkey &&
               normalizePubkey(candidate.ownerPubkey) ===
                 normalizePubkey(currentPubkey)
-            ? "other"
+            ? "managed-elsewhere"
             : undefined
         : undefined,
     notInChannel:

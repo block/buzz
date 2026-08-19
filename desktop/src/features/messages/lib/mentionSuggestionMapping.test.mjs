@@ -24,25 +24,28 @@ function suggestion(overrides = {}) {
   });
 }
 
-test("labels locally managed agent identities as this device", () => {
-  assert.equal(suggestion({ isManagedAgent: true }).agentDevice, "this");
+test("labels Desktop-managed agent identities as managed here", () => {
+  assert.equal(
+    suggestion({ isManagedAgent: true }).agentProvenance,
+    "managed-here",
+  );
 });
 
-test("labels same-owner relay agent identities as another device", () => {
-  assert.equal(suggestion().agentDevice, "other");
+test("labels same-owner relay agent identities as managed elsewhere", () => {
+  assert.equal(suggestion().agentProvenance, "managed-elsewhere");
 });
 
 test("does not attribute another owner's agent to a device", () => {
   assert.equal(
-    suggestion({ ownerPubkey: "c".repeat(64) }).agentDevice,
+    suggestion({ ownerPubkey: "c".repeat(64) }).agentProvenance,
     undefined,
   );
 });
 
 test("does not attribute people or personas to a device", () => {
-  assert.equal(suggestion({ isAgent: false }).agentDevice, undefined);
+  assert.equal(suggestion({ isAgent: false }).agentProvenance, undefined);
   assert.equal(
-    suggestion({ kind: "persona", pubkey: undefined }).agentDevice,
+    suggestion({ kind: "persona", pubkey: undefined }).agentProvenance,
     undefined,
   );
 });
