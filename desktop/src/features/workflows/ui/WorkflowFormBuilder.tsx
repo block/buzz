@@ -126,11 +126,9 @@ function TriggerConfigFields({
 type WorkflowFormBuilderProps = {
   channels: Channel[];
   disabled?: boolean;
-  historyPanel?: React.ReactNode;
   nameLeadingContainer?: HTMLElement | null;
   mode: WorkflowEditorMode;
   onChange: (yaml: string) => void;
-  onHistoryClose?: () => void;
   onSelectedNodeChange: (pane: WorkflowEditorPane) => void;
   parseError: string | null;
   scopeField?: React.ReactNode;
@@ -360,11 +358,9 @@ export const WorkflowFormBuilder = React.forwardRef<
   {
     channels: _channels,
     disabled,
-    historyPanel,
     nameLeadingContainer,
     mode,
     onChange,
-    onHistoryClose,
     onSelectedNodeChange,
     parseError,
     scopeField,
@@ -656,7 +652,7 @@ export const WorkflowFormBuilder = React.forwardRef<
               </div>
 
               <AnimatePresence>
-                {selectedNode || historyPanel ? (
+                {selectedNode ? (
                   <motion.button
                     animate={{ opacity: 1 }}
                     aria-label="Close inspector overlay"
@@ -665,11 +661,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                     exit={{ opacity: 0 }}
                     initial={{ opacity: 0 }}
                     key="workflow-node-inspector-backdrop"
-                    onClick={() =>
-                      historyPanel
-                        ? onHistoryClose?.()
-                        : onSelectedNodeChange(null)
-                    }
+                    onClick={() => onSelectedNodeChange(null)}
                     transition={
                       shouldReduceMotion
                         ? { duration: 0 }
@@ -678,54 +670,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                     type="button"
                   />
                 ) : null}
-                {historyPanel ? (
-                  <FocusScope
-                    asChild
-                    loop={narrowInspector}
-                    trapped={narrowInspector}
-                  >
-                    <motion.aside
-                      animate={{ opacity: 1, width: "26rem", x: 0 }}
-                      aria-label="Run history"
-                      aria-modal={narrowInspector || undefined}
-                      className="flex flex-shrink-0 p-4 [@container(max-width:58rem)]:absolute [@container(max-width:58rem)]:inset-y-0 [@container(max-width:58rem)]:right-0 [@container(max-width:58rem)]:z-30 [@container(max-width:58rem)]:max-w-full"
-                      data-testid="workflow-history-inspector"
-                      exit={{ opacity: 0, width: 0, x: 24 }}
-                      initial={{ opacity: 0, width: 0, x: 24 }}
-                      key="workflow-history-inspector"
-                      role={narrowInspector ? "dialog" : "complementary"}
-                      transition={
-                        shouldReduceMotion
-                          ? { duration: 0 }
-                          : { duration: 0.24, ease: [0.22, 1, 0.36, 1] }
-                      }
-                    >
-                      <div className="relative flex w-96 min-w-96 flex-1 flex-col overflow-hidden rounded-xl bg-muted/40 [@container(max-width:58rem)]:bg-background [@container(max-width:58rem)]:shadow-2xl [@container(max-width:26rem)]:w-full [@container(max-width:26rem)]:min-w-0">
-                        <div className="flex items-center justify-between px-5 pb-3 pt-5">
-                          <div>
-                            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                              Workflow
-                            </p>
-                            <h3 className="text-base font-semibold">
-                              Run history
-                            </h3>
-                          </div>
-                          <Button
-                            aria-label="Close run history"
-                            className="h-8 w-8"
-                            onClick={onHistoryClose}
-                            size="icon"
-                            type="button"
-                            variant="ghost"
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </div>
-                        <div className="min-h-0 flex-1">{historyPanel}</div>
-                      </div>
-                    </motion.aside>
-                  </FocusScope>
-                ) : selectedNode ? (
+                {selectedNode ? (
                   <FocusScope
                     asChild
                     loop={narrowInspector}

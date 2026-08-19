@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Check, Code, History, Pencil, X } from "lucide-react";
+import { Check, Code, Pencil, X } from "lucide-react";
 import { useBlocker } from "@tanstack/react-router";
 import { isMap, parseDocument, stringify as yamlStringify } from "yaml";
 
@@ -31,6 +31,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { Popover, PopoverContent } from "@/shared/ui/popover";
 import { ChannelCombobox } from "./ChannelCombobox";
 import { WorkflowActionsMenu } from "./WorkflowActionsMenu";
 import { WorkflowDetailPanel } from "./WorkflowDetailPanel";
@@ -513,7 +514,6 @@ export function WorkflowDialog({
     yamlDefinitionRef.current = nextYaml;
     setYamlDefinition(nextYaml);
   }, [mutation.reset, workflowEnabled]);
-
   const showChannelSelector = mode !== "edit";
 
   return (
@@ -561,17 +561,44 @@ export function WorkflowDialog({
             <div className="flex items-center gap-2">
               {mode === "edit" && workflowSnapshot ? (
                 <>
-                  <Button
-                    aria-pressed={historyOpen}
-                    className="h-8 gap-1.5"
-                    onClick={() => setHistoryOpen((value) => !value)}
-                    size="sm"
-                    type="button"
-                    variant={historyOpen ? "secondary" : "outline"}
-                  >
-                    <History className="h-4 w-4" />
-                    Run history
-                  </Button>
+                  <Popover onOpenChange={setHistoryOpen} open={historyOpen}>
+                    {/* TODO(workflow-run-history-capability): Restore this
+                    icon-only entry point after Desktop gates it on the active
+                    relay's advertised NIP-11 capabilities.
+                    <PopoverTrigger asChild>
+                      <Button
+                        aria-label="Run history"
+                        className="h-8 w-8"
+                        size="icon"
+                        type="button"
+                        variant={historyOpen ? "secondary" : "outline"}
+                      >
+                        <History className="h-4 w-4" />
+                      </Button>
+                    </PopoverTrigger>
+                    */}
+                    <PopoverContent
+                      align="end"
+                      aria-label="Run history"
+                      className="flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-96 max-w-[calc(100vw-2rem)] flex-col overflow-hidden p-0"
+                      data-testid="workflow-history-dropdown"
+                      sideOffset={8}
+                    >
+                      <div className="flex-shrink-0 border-b px-5 py-3">
+                        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                          Workflow
+                        </p>
+                        <h3 className="text-base font-semibold">Run history</h3>
+                      </div>
+                      <div className="min-h-0 flex-1">
+                        <WorkflowDetailPanel
+                          showDefinition={false}
+                          showHeader={false}
+                          workflowId={workflowSnapshot.id}
+                        />
+                      </div>
+                    </PopoverContent>
+                  </Popover>
                   <WorkflowActionsMenu
                     isEnabled={workflowEnabled}
                     isTogglingEnabled={
@@ -603,15 +630,6 @@ export function WorkflowDialog({
             <WorkflowFormBuilder
               channels={channels}
               disabled={mutation.isPending}
-              historyPanel={
-                historyOpen && workflowSnapshot ? (
-                  <WorkflowDetailPanel
-                    showDefinition={false}
-                    showHeader={false}
-                    workflowId={workflowSnapshot.id}
-                  />
-                ) : null
-              }
               mode={editorMode}
               nameLeadingContainer={mode === "edit" ? null : nameLeadingElement}
               onChange={(yaml) => {
@@ -619,7 +637,6 @@ export function WorkflowDialog({
                 yamlDefinitionRef.current = yaml;
                 setYamlDefinition(yaml);
               }}
-              onHistoryClose={() => setHistoryOpen(false)}
               onSelectedNodeChange={onEditorPaneChange}
               parseError={editorParseError}
               ref={formBuilderRef}
