@@ -12741,7 +12741,9 @@ export function maybeInstallE2eTauriMocks() {
         if (activeConfig?.mock?.registeredAgentsError) {
           throw new Error(activeConfig.mock.registeredAgentsError);
         }
-        return structuredClone(mockRegisteredAgents);
+        return structuredClone(mockRegisteredAgents).sort((left, right) =>
+          left.pubkey.localeCompare(right.pubkey),
+        );
       case "register_existing_agent_reference": {
         const input = (payload as { input?: Record<string, unknown> } | null)
           ?.input;

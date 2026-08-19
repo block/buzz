@@ -9,6 +9,7 @@ const boundaryScript = readFileSync(
   join(ROOT, "scripts/check-registered-agent-boundary.mjs"),
   "utf8",
 );
+const e2eBridgeSource = readFileSync(join(SRC, "testing/e2eBridge.ts"), "utf8");
 const REGISTERED_AGENT_DATA_FILES = new Set([
   "src/features/agents/hooks.ts",
   "src/features/agents/hooksRegistered.test.mjs",
@@ -112,4 +113,11 @@ test("standalone boundary scan includes mjs consumers and skips generated trees"
     /entry === "node_modules" \|\| entry === "dist"/,
   );
   assert.match(boundaryScript, /\\\.\(ts\|tsx\|mjs\)\$/);
+});
+
+test("E2E registered-reference listing preserves production pubkey ordering", () => {
+  assert.match(
+    e2eBridgeSource,
+    /case "list_registered_agent_references":[\s\S]*structuredClone\(mockRegisteredAgents\)\.sort\(\(left, right\) =>[\s\S]*left\.pubkey\.localeCompare\(right\.pubkey\)/,
+  );
 });
