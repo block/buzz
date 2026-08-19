@@ -14,7 +14,7 @@ const ROLE_SUMMARY_LIMIT_BYTES: usize = 240;
 /// A keyless reference to an already-existing agent identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredAgentReference {
-    /// The referenced agent public key as normalized 64-byte lowercase hex.
+    /// The referenced agent public key as normalized 64-character lowercase hex.
     pub pubkey: String,
     /// Optional user-facing label for the reference.
     #[serde(skip_serializing_if = "Option::is_none")]
