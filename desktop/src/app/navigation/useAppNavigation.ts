@@ -11,6 +11,7 @@ import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDe
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
+  force?: boolean;
   replace?: boolean;
   resetScroll?: boolean;
 };
@@ -27,12 +28,13 @@ export function useAppNavigation() {
         to: string;
         params?: Record<string, string>;
         search?: Record<string, string | undefined>;
+        state?: Record<string, unknown>;
       },
       behavior: NavigationBehavior = {},
     ) => {
       const nextLocation = router.buildLocation(next as never);
 
-      if (location.href === nextLocation.href) {
+      if (location.href === nextLocation.href && !behavior.force) {
         return false;
       }
 
@@ -79,6 +81,18 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goProfile = React.useCallback(
+    (pubkey: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/pulse",
+          search: { profile: pubkey },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProjects = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -97,6 +111,12 @@ export function useAppNavigation() {
         commitHash?: string;
         pullRequestId?: string;
         issueId?: string;
+        repositoryId?: string;
+        /** Workspace tab requested by a share link (link vocabulary). */
+        tab?: string;
+        /** Unique per entity-link activation so repeating the same link can
+         * re-apply an unchanged tab selection. */
+        entityNavigationId?: string;
       },
     ) =>
       commitNavigation(
@@ -113,9 +133,19 @@ export function useAppNavigation() {
               ? { pullRequestId: behavior.pullRequestId }
               : {}),
             ...(behavior?.issueId ? { issueId: behavior.issueId } : {}),
+            ...(behavior?.repositoryId
+              ? { repositoryId: behavior.repositoryId }
+              : {}),
+            ...(behavior?.tab ? { tab: behavior.tab } : {}),
           },
+          state: behavior?.entityNavigationId
+            ? { entityNavigationId: behavior.entityNavigationId }
+            : undefined,
         },
-        behavior,
+        {
+          ...behavior,
+          force: Boolean(behavior?.entityNavigationId),
+        },
       ),
     [commitNavigation],
   );
@@ -159,6 +189,8 @@ export function useAppNavigation() {
         autoSend?: string;
         messageId?: string;
         replace?: boolean;
+        /** Open this thread panel directly without waiting for a timeline row. */
+        thread?: string;
         threadRootId?: string | null;
       },
     ) =>
@@ -178,6 +210,7 @@ export function useAppNavigation() {
             ...(options?.agentSession
               ? { agentSession: options.agentSession }
               : {}),
+            ...(options?.thread ? { thread: options.thread } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
         },
@@ -303,6 +336,7 @@ export function useAppNavigation() {
     goProject,
     goProjects,
     goPulse,
+    goProfile,
     goSettings,
     goWorkflow,
     goWorkflows,

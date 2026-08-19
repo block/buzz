@@ -7,26 +7,14 @@ use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
-    event_visible_to_reader, filter_can_match_persona_shared_kinds,
-    filter_can_match_result_gated_kinds, result_gated_count_safe_for_pushdown,
+    event_visible_to_reader, filter_can_match_result_gated_kinds,
+    filter_can_match_shared_gated_kinds, result_gated_count_safe_for_pushdown,
 };
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-/// Extract a channel UUID from a single filter's `#h` tag.
-fn extract_channel_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
-    filter.generic_tags.get(&h_tag).and_then(|vs| {
-        if vs.len() == 1 {
-            vs.iter().next()?.parse::<uuid::Uuid>().ok()
-        } else {
-            None
-        }
-    })
-}
-
 /// Handle a COUNT message: require auth, enforce channel access, execute filters,
-/// return aggregate count.
+/// and return the aggregate count.
 pub async fn handle_count(
     sub_id: String,
     filters: Vec<Filter>,
@@ -75,6 +63,23 @@ pub async fn handle_count(
         return;
     }
 
+    let requested_channel_sets =
+        match super::req::extract_channel_ids_from_filters_limited(&filters) {
+            Ok(_) => filters
+                .iter()
+                .map(|filter| {
+                    super::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+                })
+                .collect::<Vec<_>>(),
+            Err(()) => {
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: too many explicit channels",
+                ));
+                return;
+            }
+        };
+
     // Get channels this user can access — same enforcement as WS REQ handler.
     let mut accessible_channels = match state
         .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
@@ -98,16 +103,16 @@ pub async fn handle_count(
 
     // For each filter, count matching events with channel access enforcement.
     let mut total: u64 = 0;
-    for filter in &filters {
+    for (filter, requested_channels) in filters.iter().zip(requested_channel_sets) {
         // Determine if this filter can match author-only kinds — if so, the
         // fast-path count_events() cannot be used because it doesn't do
         // per-event author filtering.
         let needs_author_only_filtering = super::req::filter_can_match_author_only_kinds(filter);
-        // Determine if this filter can match kind 30175 (persona) — if so, the
-        // fast-path must be bypassed because it has no per-event shared-tag check.
-        // A fast count over 30175 would include foreign unshared persona events,
-        // leaking the existence of private agent activity.
-        let needs_persona_filtering = filter_can_match_persona_shared_kinds(filter);
+        // Determine if this filter can match a shared-gated kind (30175, 30178)
+        // — if so, the fast path must be bypassed because it has no per-event
+        // shared-tag check. A fast count over those kinds would include foreign
+        // unshared events, leaking the existence of private agent activity.
+        let needs_shared_gate_filtering = filter_can_match_shared_gated_kinds(filter);
         // Determine if this filter can match result-gated kinds (44200, 30622)
         // that require a per-event owner check. When the fast SQL path would
         // count matching rows without calling reader_authorized_for_event, a
@@ -117,38 +122,50 @@ pub async fn handle_count(
         let needs_result_gated_filtering = filter_can_match_result_gated_kinds(filter)
             && !result_gated_count_safe_for_pushdown(filter, &authed_pubkey_hex);
 
-        if let Some(ch_id) = extract_channel_from_filter(filter) {
-            // Filter targets a specific channel — verify access. Mirrors the WS
-            // REQ handler: a cache-negative may be a stale miss on a non-writer
-            // pod, so confirm uncached and repair the Vec request-locally via
-            // `super::req::resolve_request_local_access` (so a just-added channel
-            // is counted, and any later filter on the same channel sees it too).
-            let db_is_member = if accessible_channels.contains(&ch_id) {
-                None
-            } else {
-                match state
-                    .db
-                    .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
-                    .await
-                {
-                    Ok(member) => Some(member),
-                    Err(e) => {
-                        warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
-                        conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-                        return;
-                    }
+        if let Some(requested_channels) = requested_channels {
+            for &ch_id in &requested_channels {
+                if accessible_channels.contains(&ch_id) {
+                    continue;
                 }
-            };
-            if !super::req::resolve_request_local_access(
-                &mut accessible_channels,
-                ch_id,
-                token_channel_ids
+                let token_allows = token_channel_ids
                     .as_deref()
-                    .is_none_or(|allowed| allowed.contains(&ch_id)),
-                db_is_member,
-            ) {
-                continue; // Skip filters targeting inaccessible channels.
+                    .is_none_or(|allowed| allowed.contains(&ch_id));
+                let db_is_member = if token_allows {
+                    match state
+                        .db
+                        .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
+                        .await
+                    {
+                        Ok(member) => Some(member),
+                        Err(e) => {
+                            warn!(sub_id = %sub_id, "Channel membership confirmation failed: {e}");
+                            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                            return;
+                        }
+                    }
+                } else {
+                    None
+                };
+                super::req::resolve_request_local_access(
+                    &mut accessible_channels,
+                    ch_id,
+                    token_allows,
+                    db_is_member,
+                );
             }
+            let authorized_requested: Vec<_> = requested_channels
+                .iter()
+                .copied()
+                .filter(|channel_id| accessible_channels.contains(channel_id))
+                .collect();
+            if authorized_requested.is_empty() {
+                continue;
+            }
+            // Preserve the original explicit multi-channel shape even when
+            // authorization narrows it to one channel. The helper must write
+            // that intersection into `channel_ids`; synthesizing `Some(A)` here
+            // would leave a query built from multi-#h completely unscoped.
+            let ch_id = (requested_channels.len() == 1).then_some(authorized_requested[0]);
             // Channel is accessible — count with pushability check.
             let mut query = super::req::build_event_query_from_filter(
                 filter,
@@ -157,10 +174,16 @@ pub async fn handle_count(
                 conn.tenant.community(),
             )
             .await;
-            // Persona visibility pushdown: pre-filter the fallback query_events
-            // candidate page before ORDER/LIMIT.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            super::req::apply_channel_scope_to_query(
+                &mut query,
+                filter,
+                ch_id,
+                &accessible_channels,
+            );
+            // Shared-gated visibility pushdown: pre-filter the fallback
+            // query_events candidate page before ORDER/LIMIT.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
@@ -171,9 +194,9 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
@@ -184,7 +207,11 @@ pub async fn handle_count(
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
                 super::req::apply_count_fallback_limit(&mut q);
-                match state.db.query_events(&q).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("count_req_fallback", &q)
+                    .await
+                {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
@@ -226,9 +253,9 @@ pub async fn handle_count(
             )
             .await;
             query.channel_ids = Some(accessible_channels.to_vec());
-            // Persona visibility pushdown for the fallback query_events path.
-            if needs_persona_filtering {
-                query.persona_reader = Some(pubkey_bytes.clone());
+            // Shared-gated visibility pushdown for the fallback query_events path.
+            if needs_shared_gate_filtering {
+                query.shared_gated_reader = Some(pubkey_bytes.clone());
             }
 
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
@@ -240,10 +267,10 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
-                && !needs_persona_filtering
+                && !needs_shared_gate_filtering
             {
                 query.limit = None; // COUNT doesn't need a row limit
-                match state.db.count_events(&query).await {
+                match state.db.count_events_routed("count_req", &query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
                         conn.send(RelayMessage::closed(&sub_id, &format!("error: {e}")));
@@ -253,7 +280,11 @@ pub async fn handle_count(
             } else {
                 // Fallback: query a bounded candidate set + post-filter.
                 super::req::apply_count_fallback_limit(&mut query);
-                match state.db.query_events(&query).await {
+                match state
+                    .db
+                    .query_events_routed_bounded("count_req_fallback", &query)
+                    .await
+                {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);

@@ -59,9 +59,9 @@
         "maxConnections": { "type": "integer", "minimum": 1 },
         "maxConcurrentHandlers": { "type": "integer", "minimum": 1 },
         "sendBuffer": { "type": "integer", "minimum": 1 },
+        "drainJitterMs": { "type": "integer", "minimum": 0 },
         "requireAuthToken": { "type": "boolean" },
         "requireRelayMembership": { "type": "boolean" },
-        "requireMediaGetAuth": { "type": "boolean" },
         "allowNipOaAuth": { "type": "boolean" },
         "huddleAudioAvailable": {
           "type": ["boolean", "null"],
@@ -198,6 +198,16 @@
       "properties": {
         "endpoint": { "type": "string", "pattern": "^(https?://.+)?$" },
         "bucket": { "type": "string", "minLength": 1 },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "description": "S3 region used for SigV4 signing by the relay and deletion operator. Defaults to us-east-1 for bundled MinIO/local deployments; set the provider region explicitly when it differs."
+        },
+        "addressingStyle": {
+          "type": "string",
+          "enum": ["path", "virtual"],
+          "description": "S3 URL style shared by media and Git/CAS clients. Defaults to path for bundled MinIO compatibility."
+        },
         "accessKey": { "type": "string" },
         "secretKey": { "type": "string" }
       }

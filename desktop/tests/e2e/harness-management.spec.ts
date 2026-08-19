@@ -21,6 +21,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { passThroughBackupStep } from "../helpers/onboarding";
 
 // ── Shared catalog fixtures ───────────────────────────────────────────────────
 
@@ -668,12 +669,10 @@ test("onboarding setup More-harnesses click navigates to Settings → Agents", a
   });
   await page.goto("/");
 
-  // Reach the setup page: create a new identity key → skip backup step.
+  // Reach setup by creating a new identity key and continuing past the
+  // created-key page without opening the optional backup options.
   await page.getByRole("button", { name: "Create a new identity key" }).click();
-  await expect(page.getByTestId("onboarding-page-backup")).toBeVisible({
-    timeout: 10_000,
-  });
-  await page.getByTestId("onboarding-next").click();
+  await passThroughBackupStep(page);
 
   // Now on the setup page.
   await expect(

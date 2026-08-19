@@ -5,6 +5,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
+use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
 #[cfg(test)]
@@ -17,12 +18,12 @@ use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRoll
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
-        find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
-        load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
-        resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
-        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
-        DEFAULT_ACP_COMMAND,
+        current_instance_id, discovery_env_with_baked_floor, find_managed_agent_mut,
+        known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
+        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
+        AgentModelsResponse, ManagedAgentRecord, UpdateManagedAgentRequest,
+        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -99,6 +100,17 @@ pub async fn get_agent_models(
     // so a build-provided provider still gets live discovery.
     let effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
+    if let Some(models) = discover_openrouter_models(
+        &state.http_client,
+        &effective_provider,
+        &merged_env,
+        persisted_model.clone(),
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
         &effective_provider,
@@ -126,6 +138,7 @@ pub async fn get_agent_models(
         &effective_provider,
         &merged_env,
         persisted_model.clone(),
+        DatabricksAuthIntent::InteractiveModelPicker,
     )
     .await?
     {
@@ -154,69 +167,11 @@ fn model_discovery_error(pubkey: &str, error: &str) -> String {
     )
 }
 
-/// Everything `get_agent_models` needs from the record + context, resolved in
-/// one pure step so the linked-agent regression test can bind the exact values
-/// the command consumes.
-#[derive(Debug, PartialEq, Eq)]
-struct AgentModelDiscoveryConfig {
-    /// Effective harness command (descriptor-resolved), for `resolve_command`.
-    command: String,
-    /// Effective harness args (descriptor-resolved).
-    args: Vec<String>,
-    /// Model from the authoritative resolver spawn uses — linked instances
-    /// read their definition, never stale `record.model` bytes.
-    model: Option<String>,
-    /// Provider from the same authoritative resolver — never stale
-    /// `record.provider` bytes for linked instances.
-    provider: Option<String>,
-    /// The runtime's provider env var (e.g. `GOOSE_PROVIDER`), so discovery
-    /// can recover the provider from the env when the resolver yields none.
-    /// `None` for runtimes that do not take a provider, or an unknown command.
-    provider_env_var: Option<&'static str>,
-    /// The descriptor's fully layered env (definition/persona/global/agent).
-    env: BTreeMap<String, String>,
-}
-
-/// Resolve the model-discovery config for a saved agent — the descriptor-backed
-/// successor to the old `saved_agent_model_discovery_config`.
-///
-/// Command/args/env come from `resolve_effective_harness_descriptor` (the same
-/// resolver as `spawn_agent_child`); model/provider come from
-/// `resolve_effective_model_provider` (#1968's definition-authoritative
-/// contract) — linked instances read their definition, never a stale
-/// materialized `record.model`/`record.provider`, so discovery cannot query a
-/// provider this agent will not actually launch with. Definition-less
-/// instances keep their own record values, matching spawn's
-/// `resolve_definition_less` arm. When the resolver yields no provider,
-/// `effective_discovery_provider` recovers the provider the agent will
-/// actually launch with from the runtime's own provider env var, read out of
-/// the descriptor env (which already layers definition/persona/global values
-/// the same way spawn does).
-///
-/// Returns `Err("DANGLING_HARNESS_ID:<id>")` from the descriptor resolver when
-/// the harness id no longer exists; the caller routes it through
-/// `model_discovery_error`.
-fn agent_model_discovery_config(
-    record: &crate::managed_agents::ManagedAgentRecord,
-    personas: &[crate::managed_agents::AgentDefinition],
-    global: &crate::managed_agents::GlobalAgentConfig,
-) -> Result<AgentModelDiscoveryConfig, String> {
-    let descriptor =
-        crate::managed_agents::resolve_effective_harness_descriptor(record, personas, global)?;
-    let (model, provider) =
-        crate::managed_agents::resolve_effective_model_provider(record, personas, global);
-    let provider_env_var =
-        known_acp_runtime(&descriptor.command).and_then(|meta| meta.provider_env_var);
-
-    Ok(AgentModelDiscoveryConfig {
-        command: descriptor.command,
-        args: descriptor.args,
-        model,
-        provider,
-        provider_env_var,
-        env: descriptor.env,
-    })
-}
+#[path = "agent_models_discovery_config.rs"]
+mod discovery_config;
+use discovery_config::{
+    agent_model_discovery_config, draft_agent_model_discovery_env, AgentModelDiscoveryConfig,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -269,31 +224,12 @@ pub async fn discover_agent_models(
         .unwrap_or_else(|| agent_command.to_string());
 
     let runtime_meta = known_acp_runtime(agent_command);
-    let mut derived_env = BTreeMap::new();
-    if let Some(meta) = runtime_meta {
-        let provider = input
-            .provider
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if !meta.provider_locked {
-            if let (Some(env_key), Some(provider)) = (meta.provider_env_var, provider) {
-                derived_env.insert(env_key.to_string(), provider.to_string());
-            }
-        }
-    }
-    // Layer definition_env below user env_vars so user overrides always win.
-    // Reserved keys are stripped, matching the same filter applied at spawn.
-    let mut filtered_definition_env = BTreeMap::new();
-    for (key, value) in &input.definition_env {
-        if !crate::managed_agents::is_reserved_env_key(key) {
-            filtered_definition_env.insert(key.clone(), value.clone());
-        }
-    }
-    // Merge: derived (metadata) → definition env → user env_vars.
-    let merged_with_def =
-        crate::managed_agents::merged_user_env(&derived_env, &filtered_definition_env);
-    let merged_env = crate::managed_agents::merged_user_env(&merged_with_def, &input.env_vars);
+    let merged_env = draft_agent_model_discovery_env(
+        agent_command,
+        input.provider.as_deref(),
+        &input.definition_env,
+        &input.env_vars,
+    );
     let merged_env = discovery_env_with_baked_floor(merged_env);
     // Recover a build-provided provider when the form has none, so the create
     // dialog discovers live models instead of falling through to the subprocess.
@@ -348,6 +284,13 @@ pub async fn discover_agent_models(
         return Err("Buzz shared compute is not available in this build".to_string());
     }
 
+    if let Some(models) =
+        discover_openrouter_models(&state.http_client, &effective_provider, &merged_env, None)
+            .await?
+    {
+        return Ok(models);
+    }
+
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
         &effective_provider,
@@ -366,9 +309,14 @@ pub async fn discover_agent_models(
         return Ok(models);
     }
 
-    if let Some(models) =
-        discover_databricks_models(&state.http_client, &effective_provider, &merged_env, None)
-            .await?
+    if let Some(models) = discover_databricks_models(
+        &state.http_client,
+        &effective_provider,
+        &merged_env,
+        None,
+        DatabricksAuthIntent::PassiveDraftDiscovery,
+    )
+    .await?
     {
         return Ok(models);
     }
@@ -387,6 +335,15 @@ struct OpenAiModelListItem {
     #[serde(default)]
     created: Option<i64>,
 }
+
+#[path = "agent_models_openrouter.rs"]
+mod openrouter;
+use openrouter::discover_openrouter_models;
+#[cfg(test)]
+use openrouter::{
+    filter_openrouter_models, is_openrouter_provider, openrouter_models_url,
+    OpenRouterModelListItem, OpenRouterModelListResponse,
+};
 
 fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
     matches!(
@@ -731,338 +688,19 @@ async fn discover_anthropic_models(
     }))
 }
 
-// ---------------------------------------------------------------------------
-// Databricks model discovery (v1 + v2)
-// ---------------------------------------------------------------------------
-//
-// Delegates to buzz_agent_pkg::catalog::discover_databricks_models, which
-// acquires auth in-process via build_token_source:
-//   - Static bearer (DATABRICKS_TOKEN): returned immediately.
-//   - PKCE cache hit: returned from disk without a browser flow.
-//   - No token, no cache: returns Err(LlmAuth) → we return Ok(None) and fall
-//     through to run_agent_models_command. Never hangs, never opens a browser.
+#[path = "agent_models_databricks.rs"]
+mod databricks;
+#[cfg(test)]
+use databricks::{
+    databricks_sign_in_required_error, databricks_static_token_error, is_databricks_provider,
+    should_start_interactive_auth,
+};
+use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
-fn is_databricks_provider(provider: Option<&str>) -> bool {
-    matches!(
-        provider
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("databricks" | "databricks_v2" | "databricks-v2")
-    )
-}
-
-fn databricks_agent_provider(provider: &str) -> buzz_agent_pkg::config::Provider {
-    if provider.trim().eq_ignore_ascii_case("databricks_v2")
-        || provider.trim().eq_ignore_ascii_case("databricks-v2")
-    {
-        buzz_agent_pkg::config::Provider::DatabricksV2
-    } else {
-        buzz_agent_pkg::config::Provider::Databricks
-    }
-}
-
-async fn discover_databricks_models(
-    _client: &reqwest::Client,
-    provider: &DiscoveryProvider,
-    env: &BTreeMap<String, String>,
-    selected_model: Option<String>,
-) -> Result<Option<AgentModelsResponse>, String> {
-    let provider_str = match provider.as_deref() {
-        Some(p) if is_databricks_provider(Some(p)) => p,
-        _ => return Ok(None),
-    };
-
-    let host = match env_or_process_value(env, "DATABRICKS_HOST") {
-        Some(h) => h,
-        None => return Ok(None), // no host → fall through to subprocess
-    };
-
-    // api_key = DATABRICKS_TOKEN (empty string = use PKCE cache).
-    let api_key = env_or_process_value(env, "DATABRICKS_TOKEN").unwrap_or_default();
-
-    let agent_provider = databricks_agent_provider(provider_str);
-    let cfg = buzz_agent_pkg::config::Config::for_discovery(agent_provider, api_key, host);
-
-    // Build a redaction env so the token never appears in surfaced errors.
-    let token_for_redact = env_or_process_value(env, "DATABRICKS_TOKEN").unwrap_or_default();
-    let redaction_env = redaction_env_with_value(env, "DATABRICKS_TOKEN", &token_for_redact);
-
-    let entries = match buzz_agent_pkg::discover_databricks_models(&cfg).await {
-        Ok(e) => e,
-        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
-            // No token + no PKCE cache → fall through to subprocess.
-            return Ok(None);
-        }
-        Err(e) => {
-            let msg = crate::managed_agents::redact_env_values_in(&e.to_string(), &redaction_env);
-            return Err(format!("Databricks model discovery failed: {msg}"));
-        }
-    };
-
-    if entries.is_empty() {
-        return Err("Databricks model discovery returned no models".to_string());
-    }
-
-    let models = entries
-        .into_iter()
-        .map(|e| AgentModelInfo {
-            id: e.id,
-            name: Some(e.name),
-            description: None,
-        })
-        .collect();
-
-    Ok(Some(AgentModelsResponse {
-        agent_name: provider_str.trim().to_string(),
-        agent_version: "models-api".to_string(),
-        models,
-        agent_default_model: None,
-        selected_model,
-        supports_switching: true,
-    }))
-}
-
-/// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
-/// to `record`, enforcing the linked-instance write guard: a definition-linked
-/// record's model/provider/prompt are definition-authoritative (see
-/// `effective_config::resolve_linked`), so writes to these three fields are
-/// silently dropped for a linked instance rather than persisting a byte the
-/// resolver will never read. Definition-less instances accept the patch
-/// as-is. Extracted so the guard is exercised by both `update_managed_agent`
-/// and its regression tests — a test that reimplements this check instead of
-/// calling it can go green after the real guard is deleted.
-fn apply_model_provider_prompt_update(
-    record: &mut crate::managed_agents::ManagedAgentRecord,
-    model: Option<Option<String>>,
-    provider: Option<Option<String>>,
-    system_prompt: Option<Option<String>>,
-) {
-    if record.persona_id.is_some() {
-        return;
-    }
-    if let Some(model_update) = model {
-        record.model = model_update;
-    }
-    if let Some(provider_update) = provider {
-        record.provider = provider_update;
-    }
-    if let Some(prompt_update) = system_prompt {
-        record.system_prompt = prompt_update;
-    }
-}
-
-/// Update mutable fields on an existing managed agent record.
-///
-/// Does NOT auto-restart the agent. Runtime config changes (system prompt,
-/// parallelism, commands, toolsets) take effect on the next agent spawn.
-/// Name changes are synced to the relay immediately via a kind:0 re-publish.
-#[tauri::command]
-pub async fn update_managed_agent(
-    input: UpdateManagedAgentRequest,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<UpdateManagedAgentResponse, String> {
-    // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params, rollback) = {
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let mut records = load_managed_agents(&app)?;
-        let mut runtimes = state
-            .managed_agent_processes
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let (_, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
-        }
-
-        let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
-        let previous_record = record.clone();
-
-        let mut name_changed = false;
-        if let Some(name_update) = input.name {
-            let trimmed = name_update.trim().to_string();
-            if !trimmed.is_empty() && trimmed != record.name {
-                record.name = trimmed;
-                name_changed = true;
-            }
-        }
-        apply_model_provider_prompt_update(
-            record,
-            input.model,
-            input.provider,
-            input.system_prompt,
-        );
-        if let Some(parallelism) = input.parallelism {
-            record.parallelism = parallelism;
-        }
-        // turn_timeout_seconds is intentionally not applied here —
-        // BUZZ_ACP_TURN_TIMEOUT is deprecated and ignored by the harness.
-        // Use idle_timeout_seconds or max_turn_duration_seconds instead.
-        // Store the relay override exactly as supplied (trimmed). An explicit
-        // value pins the agent; empty falls back to the workspace relay at
-        // read-time. A name-only edit (relay_url == None) leaves the pin intact.
-        if let Some(relay_url) = input.relay_url {
-            record.relay_url = relay_url.trim().to_string();
-        }
-        if let Some(acp_command) = input.acp_command {
-            record.acp_command = acp_command;
-        }
-        // Harness edit: the persona's runtime is authoritative, so an explicit
-        // `agent_command_override` is persisted ONLY when the user picks a
-        // command that diverges from the persona, and the empty/whitespace
-        // "Inherit from persona" sentinel clears both the pin and the
-        // materialized record runtime. A name-only edit
-        // (`agent_command == None`) leaves the pin intact. `harness_override`
-        // threads the user's explicit intent — see `apply_agent_command_update`
-        // and `update_time_agent_command_override` for the full resolution
-        // rules.
-        if let Some(agent_command) = input.agent_command {
-            let personas = load_personas(&app).unwrap_or_default();
-            crate::managed_agents::apply_agent_command_update(
-                record,
-                &personas,
-                &agent_command,
-                input.harness_override,
-            );
-        }
-        if let Some(agent_args) = input.agent_args {
-            record.agent_args = agent_args;
-        }
-        // mcp_command is intentionally not applied here — the effective MCP
-        // command is always catalog-derived (known_acp_runtime at spawn time)
-        // and the per-record field is never read by the runtime.
-        if let Some(env_vars) = input.env_vars {
-            crate::managed_agents::validate_user_env_keys(&env_vars)?;
-            record.env_vars = env_vars;
-        }
-
-        // Native provider/model fields are authoritative. Keep the typed marker
-        // derived for new records while retaining legacy typed records for
-        // non-native providers.
-        if record.provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID) {
-            let model_ref = record
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID)
-                .to_string();
-            record.model = Some(model_ref.clone());
-            record.relay_mesh = Some(crate::managed_agents::RelayMeshConfig { model_ref });
-        }
-
-        // Inbound author gate: merge patch onto current values, then validate
-        // the merged state. This lets a single update switch to Allowlist AND
-        // supply pubkeys atomically.
-        let prospective_mode = input.respond_to.unwrap_or(record.respond_to);
-        let prospective_allowlist = match input.respond_to_allowlist.as_ref() {
-            Some(list) => crate::managed_agents::validate_respond_to_allowlist(list)?,
-            None => record.respond_to_allowlist.clone(),
-        };
-        if prospective_mode == crate::managed_agents::RespondTo::Allowlist
-            && prospective_allowlist.is_empty()
-        {
-            return Err(
-                "respond-to mode 'allowlist' requires at least one pubkey in the allowlist"
-                    .to_string(),
-            );
-        }
-        record.respond_to = prospective_mode;
-        // Preserve the persisted allowlist across mode toggles — only replace
-        // when the caller explicitly supplied a new list.
-        if input.respond_to_allowlist.is_some() {
-            record.respond_to_allowlist = prospective_allowlist;
-        }
-
-        record.updated_at = now_iso();
-
-        save_managed_agents(&app, &records)?;
-
-        let record = records
-            .iter()
-            .find(|r| r.pubkey == input.pubkey)
-            .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
-
-        // Publish the edit to the relay. After-save, inside the lock, before
-        // any .await. The retention upsert hashes the opt-IN projection, so an
-        // update that touched only runtime/local fields is a no-op publish.
-        super::agents::retain_managed_agent_pending(&app, &state, record);
-
-        let sync_params = if name_changed {
-            let agent_keys = Keys::parse(&record.private_key_nsec)
-                .map_err(|e| format!("failed to parse agent keys: {e}"))?;
-            // Re-publish the renamed profile to the agent's effective relay:
-            // an explicit per-agent relay wins; empty falls back to workspace.
-            let relay_url = crate::relay::effective_agent_relay_url(
-                &record.relay_url,
-                &relay_ws_url_with_override(&state),
-            );
-            let display_name = record.name.clone();
-            // Avatar fallback derives from the EFFECTIVE harness (persona-wins),
-            // not the frozen snapshot, so an inherited harness picks the right
-            // default avatar.
-            let personas = load_personas(&app).unwrap_or_default();
-            let effective_command = crate::managed_agents::record_agent_command(record, &personas);
-            let avatar_url = record
-                .avatar_url
-                .clone()
-                .or_else(|| managed_agent_avatar_url(&effective_command));
-            let auth_tag = record.auth_tag.clone();
-            Some((agent_keys, relay_url, display_name, avatar_url, auth_tag))
-        } else {
-            None
-        };
-
-        let summary = {
-            let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(
-                &app,
-                record,
-                &runtimes,
-                &personas,
-                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
-            )?
-        };
-        let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
-        (summary, sync_params, rollback)
-    }; // lock dropped here
-
-    try_regenerate_nest(&app);
-
-    // Phase 2: relay profile sync (async, outside lock). A rename is committed
-    // only when this succeeds; otherwise restore the complete pre-edit record
-    // so Desktop and the relay keep one authoritative name.
-    if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
-        if let Err(sync_error) = sync_managed_agent_profile(
-            &state,
-            &relay_url,
-            &agent_keys,
-            &display_name,
-            avatar_url.as_deref(),
-            auth_tag.as_deref(),
-        )
-        .await
-        {
-            let rollback = rollback.ok_or_else(|| {
-                "missing local rollback state after relay profile sync failure".to_string()
-            })?;
-            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
-            return Err(format!(
-                "Agent rename failed because its relay profile could not be updated. No changes were saved: {sync_error}"
-            ));
-        }
-    }
-
-    Ok(UpdateManagedAgentResponse {
-        agent: summary,
-        profile_sync_error: None,
-    })
-}
+#[path = "agent_models_update.rs"]
+mod update;
+pub use update::update_managed_agent;
+pub(super) use update::{flush_managed_agent_policy, managed_agent_access_policy_changed};
 
 // ── Model normalization ───────────────────────────────────────────────────────
 

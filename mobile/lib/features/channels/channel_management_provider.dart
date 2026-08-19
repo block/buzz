@@ -7,10 +7,41 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
+import 'channel_metadata_updates.dart';
 import 'channels_provider.dart';
+
+export 'channel_metadata_updates.dart';
+
+part 'channel_management_actions.dart';
+
+String _relayErrorMessage(Object error) =>
+    error.toString().replaceFirst('Exception: ', '');
+
+/// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
+///
+/// Callers surface [message] to the user — a relay rejection here (e.g. a plain
+/// member trying to add someone to a private channel) is a real outcome, not a
+/// crash to swallow.
+@immutable
+class AddMembersException implements Exception {
+  final Map<String, String> failures;
+
+  const AddMembersException(this.failures);
+
+  String get message => failures.entries
+      .map(
+        (entry) =>
+            '${entry.key.length > 8 ? '${entry.key.substring(0, 8)}…' : entry.key}: ${entry.value}',
+      )
+      .join('; ');
+
+  @override
+  String toString() => 'AddMembersException($message)';
+}
 
 @immutable
 class ChannelMember {
@@ -40,6 +71,68 @@ class ChannelMember {
     }
     return pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
   }
+}
+
+String _channelMemberSnapshotKey({
+  required String relayBaseUrl,
+  required String? pubkey,
+  required String channelId,
+}) =>
+    '${relayBaseUrl.toLowerCase()}::${pubkey?.toLowerCase() ?? 'anon'}::$channelId';
+
+class _ChannelMembersSnapshotCache {
+  final _membersByKey = <String, List<ChannelMember>>{};
+
+  List<ChannelMember>? read({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+  }) =>
+      _membersByKey[_channelMemberSnapshotKey(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+      )];
+
+  void write({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+    required List<ChannelMember> members,
+  }) {
+    _membersByKey[_channelMemberSnapshotKey(
+      relayBaseUrl: relayBaseUrl,
+      pubkey: pubkey,
+      channelId: channelId,
+    )] = List.unmodifiable(
+      members,
+    );
+  }
+}
+
+final _channelMembersSnapshotCacheProvider =
+    Provider<_ChannelMembersSnapshotCache>((ref) {
+      return _ChannelMembersSnapshotCache();
+    });
+
+/// Uses the relay-backed member list when connected, but keeps the channel
+/// snapshot visible while a reconnect temporarily interrupts the refresh.
+///
+/// The provider retains its current value while disconnected and also keeps a
+/// relay/account/channel-scoped snapshot for consumers that mount during the
+/// reconnect window. An empty member list is authoritative only after a
+/// connected fetch completes.
+List<ChannelMember> channelMembersForAutocomplete({
+  required AsyncValue<List<ChannelMember>> membersAsync,
+  required SessionStatus sessionStatus,
+  required List<ChannelMember> cachedMembers,
+}) {
+  final loadedMembers = membersAsync.asData?.value;
+  if (loadedMembers == null) return cachedMembers;
+  if (sessionStatus != SessionStatus.connected && loadedMembers.isEmpty) {
+    return cachedMembers;
+  }
+  return loadedMembers;
 }
 
 @immutable
@@ -392,19 +485,62 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
 });
 
 /// Channel members from kind:39002 NIP-29 members event.
-final channelMembersProvider =
-    FutureProvider.family<List<ChannelMember>, String>((ref, channelId) async {
-      final session = ref.watch(relaySessionProvider.notifier);
+final channelMembersProvider = FutureProvider.autoDispose
+    .family<List<ChannelMember>, String>((ref, channelId) async {
+      ref.watch(channelMembershipUpdateProvider(channelId));
+      final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
+      final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
+      final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
+      // Re-fetch only after reconnect completes. During the disconnected
+      // interval this provider has no session dependency, so its current value
+      // remains visible to every consumer rather than becoming AsyncData([]).
+      ref.listen(relaySessionProvider, (previous, next) {
+        if (next.status == SessionStatus.connected &&
+            previous?.status != SessionStatus.connected) {
+          ref.invalidateSelf();
+        }
+      });
+      final sessionState = ref.read(relaySessionProvider);
+      if (sessionState.status != SessionStatus.connected) {
+        final cachedMembers = snapshotCache.read(
+          relayBaseUrl: relayBaseUrl,
+          pubkey: pubkey,
+          channelId: channelId,
+        );
+        if (cachedMembers != null) return cachedMembers;
+        final channelListMembers = ref
+            .read(channelsProvider.notifier)
+            .cachedMembersForChannel(channelId);
+        if (channelListMembers.isNotEmpty) {
+          snapshotCache.write(
+            relayBaseUrl: relayBaseUrl,
+            pubkey: pubkey,
+            channelId: channelId,
+            members: channelListMembers,
+          );
+          return channelListMembers;
+        }
+        return const [];
+      }
+      final session = ref.read(relaySessionProvider.notifier);
       final events = await session.fetchHistory(
         NostrFilters.channelMembers(channelId),
       );
-      if (events.isEmpty) return const [];
+      if (events.isEmpty) {
+        snapshotCache.write(
+          relayBaseUrl: relayBaseUrl,
+          pubkey: pubkey,
+          channelId: channelId,
+          members: const [],
+        );
+        return const [];
+      }
       final event = events.first;
       final joinedAt = DateTime.fromMillisecondsSinceEpoch(
         event.createdAt * 1000,
         isUtc: true,
       );
-      return membersFromEvent(event)
+      final members = membersFromEvent(event)
           .map(
             (m) => ChannelMember(
               pubkey: m.pubkey,
@@ -413,6 +549,13 @@ final channelMembersProvider =
             ),
           )
           .toList();
+      snapshotCache.write(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+        members: members,
+      );
+      return members;
     });
 
 /// Channel canvas (kind:40100 for the channel).
@@ -476,275 +619,3 @@ List<List<String>> buildCreateChannelTags({
     if (ttlSeconds != null) ['ttl', ttlSeconds.toString()],
   ];
 }
-
-class ChannelActions {
-  final Ref _ref;
-  final RelaySessionNotifier _session;
-  final SignedEventRelay _signedEventRelay;
-  final String? _currentPubkey;
-
-  ChannelActions({
-    required Ref ref,
-    required RelaySessionNotifier session,
-    required SignedEventRelay signedEventRelay,
-    required String? currentPubkey,
-  }) : _ref = ref,
-       _session = session,
-       _signedEventRelay = signedEventRelay,
-       _currentPubkey = currentPubkey;
-
-  Future<Channel> createChannel({
-    required String name,
-    required String channelType,
-    required String visibility,
-    String? description,
-    int? ttlSeconds,
-  }) async {
-    final channelId = _newUuidV4();
-    final tags = buildCreateChannelTags(
-      channelId: channelId,
-      name: name,
-      channelType: channelType,
-      visibility: visibility,
-      description: description,
-      ttlSeconds: ttlSeconds,
-    );
-    await _signedEventRelay.submit(kind: 9007, content: '', tags: tags);
-    return _refreshChannelsAndRead(channelId);
-  }
-
-  /// Open (or create) a DM channel with the given pubkeys.
-  ///
-  /// This submits a kind:41010 command event; the relay responds with an OK
-  /// message whose content carries `response:{...}` containing the new
-  /// `channel_id`.
-  Future<Channel> openDm({required List<String> pubkeys}) async {
-    final result = await _signedEventRelay.submit(
-      kind: 41010,
-      content: '',
-      tags: pubkeys.map((pk) => ['p', pk]).toList(),
-    );
-    final response = parseCommandResponse(result.content);
-    final channelId = response?['channel_id'] as String?;
-    if (channelId == null || channelId.isEmpty) {
-      throw Exception('Relay did not return a DM channel id');
-    }
-    return _refreshChannelsAndRead(channelId);
-  }
-
-  Future<void> addMembers({
-    required String channelId,
-    required List<String> pubkeys,
-    String role = 'member',
-  }) async {
-    final normalizedRole = role.trim();
-    if (normalizedRole.isEmpty) {
-      throw ArgumentError.value(role, 'role', 'must not be empty');
-    }
-    final normalizedPubkeys = {
-      for (final pubkey in pubkeys)
-        if (pubkey.trim().isNotEmpty) pubkey.trim().toLowerCase(),
-    };
-    for (final pubkey in normalizedPubkeys) {
-      await _signedEventRelay.submit(
-        kind: 9000,
-        content: '',
-        tags: [
-          ['h', channelId],
-          ['p', pubkey],
-          ['role', normalizedRole],
-        ],
-      );
-    }
-    _ref.invalidate(channelMembersProvider(channelId));
-  }
-
-  Future<void> joinChannel(String channelId) async {
-    await _signedEventRelay.submit(
-      kind: 9021,
-      content: '',
-      tags: [
-        ['h', channelId],
-      ],
-    );
-    await _refreshChannelState(channelId);
-  }
-
-  Future<void> leaveChannel(String channelId) async {
-    await _signedEventRelay.submit(
-      kind: 9022,
-      content: '',
-      tags: [
-        ['h', channelId],
-      ],
-    );
-    await _refreshChannelState(channelId);
-  }
-
-  Future<void> setCanvas({
-    required String channelId,
-    required String content,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: 40100,
-      content: content,
-      tags: [
-        ['h', channelId],
-      ],
-    );
-    _ref.invalidate(channelCanvasProvider(channelId));
-  }
-
-  /// User search via NIP-50 over kind:0 profile events.
-  Future<List<DirectoryUser>> searchUsers(String query, {int limit = 8}) async {
-    final trimmed = query.trim();
-    if (trimmed.isEmpty) return const [];
-
-    final events = await _session.queryRelay([
-      NostrFilters.searchUsers(trimmed, limit: limit),
-    ]);
-    return directoryUsersFromProfileEvents(events)
-        .where(
-          (user) =>
-              _currentPubkey == null ||
-              user.pubkey.toLowerCase() != _currentPubkey,
-        )
-        .toList();
-  }
-
-  Future<Channel> _refreshChannelsAndRead(String channelId) async {
-    await _ref.read(channelsProvider.notifier).refresh();
-    final channels = await _ref.read(channelsProvider.future);
-    return channels.firstWhere(
-      (channel) => channel.id == channelId,
-      orElse: () =>
-          throw Exception('Channel was created but is not visible yet'),
-    );
-  }
-
-  Future<void> _refreshChannelState(String channelId) async {
-    await _ref.read(channelsProvider.notifier).refresh();
-    _ref.invalidate(channelDetailsProvider(channelId));
-    _ref.invalidate(channelMembersProvider(channelId));
-    _ref.invalidate(channelCanvasProvider(channelId));
-  }
-
-  String _newUuidV4() {
-    final bytes = List<int>.generate(16, (_) => _random.nextInt(256));
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    final hex = bytes
-        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-        .join();
-    return '${hex.substring(0, 8)}-'
-        '${hex.substring(8, 12)}-'
-        '${hex.substring(12, 16)}-'
-        '${hex.substring(16, 20)}-'
-        '${hex.substring(20, 32)}';
-  }
-
-  Future<void> changeMemberRole({
-    required String channelId,
-    required String pubkey,
-    required String role,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: 9000,
-      content: '',
-      tags: [
-        ['h', channelId],
-        ['p', pubkey.toLowerCase()],
-        ['role', role],
-      ],
-    );
-    _ref.invalidate(channelMembersProvider(channelId));
-  }
-
-  Future<void> removeMember({
-    required String channelId,
-    required String pubkey,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: 9001,
-      content: '',
-      tags: [
-        ['h', channelId],
-        ['p', pubkey.toLowerCase()],
-      ],
-    );
-    _ref.invalidate(channelMembersProvider(channelId));
-  }
-
-  Future<void> addReaction(String eventId, String emoji) async {
-    final shortcode = normalizeShortcode(emoji);
-    final emojiUrl = reactionEmojiUrl(
-      emoji,
-      _ref.read(customEmojiListProvider),
-    );
-    await _signedEventRelay.submit(
-      kind: EventKind.reaction,
-      content: emoji,
-      tags: [
-        ['e', eventId],
-        if (shortcode != null && emojiUrl != null)
-          ['emoji', shortcode, emojiUrl],
-      ],
-    );
-  }
-
-  Future<void> removeReaction(String reactionEventId, String emoji) async {
-    await _signedEventRelay.submit(
-      kind: EventKind.deletion,
-      content: '',
-      tags: [
-        ['e', reactionEventId],
-      ],
-    );
-  }
-
-  Future<void> editMessage({
-    required String channelId,
-    required String eventId,
-    required String content,
-    List<List<String>> mediaTags = const [],
-  }) async {
-    await _signedEventRelay.submit(
-      kind: EventKind.streamMessageEdit,
-      content: content,
-      tags: [
-        ['h', channelId],
-        ['e', eventId],
-        ...mediaTags,
-      ],
-    );
-  }
-
-  Future<void> deleteMessage({
-    required String channelId,
-    required String eventId,
-  }) async {
-    await _signedEventRelay.submit(
-      kind: EventKind.deletion,
-      content: '',
-      tags: buildDeleteMessageTags(channelId: channelId, eventId: eventId),
-    );
-  }
-
-  static final Random _random = Random.secure();
-}
-
-final channelActionsProvider = Provider<ChannelActions>((ref) {
-  final relayConfig = ref.watch(relayConfigProvider);
-  final currentPubkey = ref.watch(currentPubkeyProvider);
-  final session = ref.read(relaySessionProvider.notifier);
-  return ChannelActions(
-    ref: ref,
-    session: session,
-    signedEventRelay: SignedEventRelay(
-      session: session,
-      nsec: relayConfig.nsec,
-    ),
-    currentPubkey: currentPubkey,
-  );
-});

@@ -33,36 +33,45 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
-            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
-            value: "true"
+            name: BUZZ_S3_REGION
+            value: "us-east-1"
         template: templates/deployment.yaml
-      # Security default: media GET/HEAD reads must be auth-gated out of the
-      # box. A private attachment must never be publicly readable by URL/hash
-      # in an unmodified render. If this assertion fails, someone flipped the
-      # default — treat that as a security regression, not a config tweak.
       - contains:
           path: spec.template.spec.containers[0].env
           content:
-            name: BUZZ_REQUIRE_MEDIA_GET_AUTH
+            name: BUZZ_S3_ADDRESSING_STYLE
+            value: "path"
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
             value: "true"
         template: templates/deployment.yaml
-
-  - it: lets an explicit value opt out of media read auth for dev/public deployments
+  - it: renders virtual-hosted S3 addressing for providers that require it
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
       externalRedis.url: redis://h:6379
-      s3.endpoint: http://minio:9000
+      s3.endpoint: https://storage.railway.app
+      s3.bucket: buzz-media-example
+      s3.region: auto
+      s3.addressingStyle: virtual
       s3.accessKey: a
       s3.secretKey: s
-      relay.requireMediaGetAuth: false
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
-            name: BUZZ_REQUIRE_MEDIA_GET_AUTH
-            value: "false"
+            name: BUZZ_S3_REGION
+            value: "auto"
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ADDRESSING_STYLE
+            value: "virtual"
         template: templates/deployment.yaml
 
   - it: lets an explicit value disable huddle audio in a single-replica render

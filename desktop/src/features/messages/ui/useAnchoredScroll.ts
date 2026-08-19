@@ -714,6 +714,22 @@ export function useAnchoredScroll({
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       }
       if (newLatestArrived) setNewMessageCount(0);
+    } else if (
+      messagesArrived > 0 &&
+      !targetMessageId &&
+      !virtualizerOwnsPrependAnchoring &&
+      isAtBottomNow(container)
+    ) {
+      // A native scroll/layout callback may not have reconciled a stale
+      // message anchor before this append commits. If the rendered result is
+      // still physically at the floor (common in short threads), do not turn
+      // that stale anchor into a visible unread affordance. Active navigation
+      // targets own the viewport and must be preserved across presentation
+      // reflow even when the old geometry momentarily reads as the floor.
+      anchorRef.current = { kind: "at-bottom" };
+      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+      setIsAtBottom(true);
+      setNewMessageCount(0);
     } else if (messagesArrived > 0 && !virtualizerOwnsPrependAnchoring) {
       // Anchored mid-history. An older-history prepend grows the content above
       // the reading row; the browser's native scroll anchoring does NOT correct

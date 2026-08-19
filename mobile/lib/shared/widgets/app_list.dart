@@ -129,6 +129,7 @@ class AppListRowRaw extends StatelessWidget {
     this.subtitle,
     this.trailing,
     this.onTap,
+    this.verticalPadding = _rowVerticalPadding,
   });
 
   final Widget leading;
@@ -136,13 +137,14 @@ class AppListRowRaw extends StatelessWidget {
   final Widget? subtitle;
   final Widget? trailing;
   final VoidCallback? onTap;
+  final double verticalPadding;
 
   @override
   Widget build(BuildContext context) {
     final row = Padding(
       padding: EdgeInsets.symmetric(
         horizontal: AppListInset.of(context),
-        vertical: _rowVerticalPadding,
+        vertical: verticalPadding,
       ),
       child: Row(
         children: [

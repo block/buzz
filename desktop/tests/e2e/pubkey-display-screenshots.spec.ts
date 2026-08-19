@@ -14,7 +14,7 @@ const AGENT_PUBKEY = "cafef00d".repeat(8);
 // Screenshot evidence for the pubkey-display work: the canonical profile
 // surfaces, plus the new-DM recipient identity-hover states retained by it.
 
-test("profile panel Public key row opens the PubKey popover on hover", async ({
+test("profile panel Public key row reveals its copy action on hover", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -28,18 +28,15 @@ test("profile panel Public key row opens the PubKey popover on hover", async ({
   await messageRow.locator("button").first().click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 
-  const pubkeyTrigger = page.getByTestId("user-profile-copy-pubkey");
-  await expect(pubkeyTrigger).toBeVisible();
-  await pubkeyTrigger.hover();
-
-  // Hover-open fires after a 500ms intent delay.
-  await expect(page.getByText("hex", { exact: true })).toBeVisible({
-    timeout: 3_000,
-  });
-  await expect(page.getByText("npub", { exact: true })).toBeVisible();
+  const pubkeyRow = page.getByTestId("user-profile-public-key");
+  const copyIndicator = page.getByTestId("user-profile-public-key-copy-status");
+  await expect(page.getByTestId("user-profile-copy-pubkey")).toBeVisible();
+  await expect(copyIndicator).toHaveCSS("opacity", "0");
+  await pubkeyRow.hover();
+  await expect(copyIndicator).toHaveCSS("opacity", "1");
   await waitForAnimations(page);
   await page.screenshot({
-    path: `${SHOTS}/profile-panel-pubkey-hover-popover.png`,
+    path: `${SHOTS}/profile-panel-pubkey-hover-copy.png`,
   });
 });
 

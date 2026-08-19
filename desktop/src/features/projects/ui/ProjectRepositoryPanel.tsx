@@ -32,8 +32,13 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  PROJECT_DETAIL_PANEL_CLASS,
+  PROJECT_DETAIL_PANEL_MESSAGE_CLASS,
+} from "./projectPanelStyles";
 import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
@@ -146,7 +151,7 @@ function RepositoryCommitCell({
   if (!commit) return <span className="text-muted-foreground">—</span>;
 
   return (
-    <p className="truncate text-sm text-foreground">
+    <p className="truncate text-xs text-foreground">
       {commit.subject}
       <span className="text-muted-foreground">
         {" "}
@@ -419,9 +424,10 @@ function RepositoryEntryIcon({ entry }: { entry: RepositoryFileEntry }) {
   return (
     <span
       className={cn(
-        "flex h-6 w-6 shrink-0 items-center justify-center",
+        "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
         visual.containerClassName,
       )}
+      data-testid="project-repository-entry-icon"
     >
       <Icon className={cn("h-4 w-4", visual.className)} />
     </span>
@@ -550,8 +556,8 @@ function FileContentPanel({
   const directorySegments = pathSegments.slice(0, -1);
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-14 items-center gap-1 border-border/50 border-b bg-muted/20 px-3 py-3">
+    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
+      <div className="flex min-h-14 items-center gap-1 border-border/50 border-b bg-muted/20 px-4 py-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
         </BreadcrumbButton>
@@ -583,15 +589,15 @@ function FileContentPanel({
         Last changed {formatLastChangedAt(file.lastChangedAt)}
       </div>
       {file.previewContent ? (
-        <pre className="max-h-[36rem] overflow-auto bg-background/60 p-4">
+        <pre className="overflow-x-auto bg-background/60 p-4">
           {language ? (
             <SyntaxHighlightedCode
-              className="text-xs leading-relaxed"
+              className="whitespace-pre-wrap break-words text-xs leading-relaxed"
               code={file.previewContent}
               language={language}
             />
           ) : (
-            <code className="block min-w-full whitespace-pre font-mono text-xs leading-relaxed text-foreground">
+            <code className="block min-w-full whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
               {file.previewContent}
             </code>
           )}
@@ -613,7 +619,9 @@ export function RepositoryFilesPanel({
   error,
   profiles,
   fallbackAuthorPubkey,
+  onContextChange,
   sourceControls,
+  unavailableMessage,
 }: {
   files: ProjectRepoFile[];
   snapshot: ProjectRepoSnapshot | null | undefined;
@@ -621,12 +629,23 @@ export function RepositoryFilesPanel({
   error: unknown;
   profiles?: UserProfileLookup;
   fallbackAuthorPubkey?: string;
+  onContextChange?: (context: {
+    kind: "file" | "folder";
+    path: string;
+  }) => void;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
+  unavailableMessage?: string;
 }) {
   const [currentPath, setCurrentPath] = React.useState("");
   const [selectedFile, setSelectedFile] =
     React.useState<ProjectRepoFile | null>(null);
+  React.useEffect(() => {
+    onContextChange?.({
+      kind: selectedFile ? "file" : "folder",
+      path: selectedFile?.path ?? currentPath,
+    });
+  }, [currentPath, onContextChange, selectedFile]);
   const entries = React.useMemo(
     () => repositoryEntries(files, currentPath),
     [currentPath, files],
@@ -677,8 +696,38 @@ export function RepositoryFilesPanel({
 
   // Loading/error/empty states keep the header controls visible — the
   // remote/local toggle must stay reachable when one source fails to load.
-  const stateMessage = isLoading
-    ? "Loading repository files…"
+  if (isLoading) {
+    if (!sourceControls) {
+      return <BuzzLoadingState label="Loading repository files" />;
+    }
+    return (
+      <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-4 py-3">
+          <RepoSourceDropdown controls={sourceControls} />
+          <RepositoryBranchDropdown
+            branch={sourceControls.branch}
+            branchOptions={sourceControls.branchOptions}
+            createBranchDisabled={sourceControls.createBranchDisabled}
+            createBranchTitle={sourceControls.createBranchTitle}
+            deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+            deleteBranchTitle={sourceControls.deleteBranchTitle}
+            onBranchChange={sourceControls.onBranchChange}
+            onCreateBranch={sourceControls.onCreateBranch}
+            onDeleteBranch={sourceControls.onDeleteBranch}
+            onTagChange={sourceControls.onTagChange}
+            selectedTag={sourceControls.selectedTag}
+            tagOptions={sourceControls.tagOptions}
+          />
+          <div className="ml-auto flex shrink-0 items-center">
+            <RepoSyncActionButton controls={sourceControls} />
+          </div>
+        </div>
+        <BuzzLoadingState label="Loading repository files" />
+      </div>
+    );
+  }
+  const stateMessage = unavailableMessage
+    ? unavailableMessage
     : error
       ? "Could not load the repository file tree."
       : files.length === 0
@@ -687,19 +736,21 @@ export function RepositoryFilesPanel({
   if (stateMessage) {
     if (!sourceControls) {
       return (
-        <div className="rounded-xl border border-border/60 bg-card p-4 text-sm text-muted-foreground">
+        <div
+          className={PROJECT_DETAIL_PANEL_MESSAGE_CLASS}
+          data-project-detail-panel
+        >
           {stateMessage}
         </div>
       );
     }
     return (
-      <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
+      <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-4 py-3">
           <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
-            compact
             createBranchDisabled={sourceControls.createBranchDisabled}
             createBranchTitle={sourceControls.createBranchTitle}
             deleteBranchDisabled={sourceControls.deleteBranchDisabled}
@@ -733,60 +784,61 @@ export function RepositoryFilesPanel({
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
-        {sourceControls ? (
-          <>
-            <RepoSourceDropdown controls={sourceControls} />
-            <RepositoryBranchDropdown
-              branch={sourceControls.branch}
-              branchOptions={sourceControls.branchOptions}
-              compact
-              createBranchDisabled={sourceControls.createBranchDisabled}
-              createBranchTitle={sourceControls.createBranchTitle}
-              deleteBranchDisabled={sourceControls.deleteBranchDisabled}
-              deleteBranchTitle={sourceControls.deleteBranchTitle}
-              onBranchChange={sourceControls.onBranchChange}
-              onCreateBranch={sourceControls.onCreateBranch}
-              onDeleteBranch={sourceControls.onDeleteBranch}
-              onTagChange={sourceControls.onTagChange}
-              selectedTag={sourceControls.selectedTag}
-              tagOptions={sourceControls.tagOptions}
-            />
-          </>
-        ) : (
-          <BreadcrumbButton onClick={() => setCurrentPath("")}>
-            Files
-          </BreadcrumbButton>
-        )}
-        {sourceControls && pathSegments.length > 0 ? (
-          <>
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+    <div className={PROJECT_DETAIL_PANEL_CLASS} data-project-detail-panel>
+      {sourceControls || pathSegments.length > 0 ? (
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-4 py-3">
+          {sourceControls ? (
+            <>
+              <RepoSourceDropdown controls={sourceControls} />
+              <RepositoryBranchDropdown
+                branch={sourceControls.branch}
+                branchOptions={sourceControls.branchOptions}
+                createBranchDisabled={sourceControls.createBranchDisabled}
+                createBranchTitle={sourceControls.createBranchTitle}
+                deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+                deleteBranchTitle={sourceControls.deleteBranchTitle}
+                onBranchChange={sourceControls.onBranchChange}
+                onCreateBranch={sourceControls.onCreateBranch}
+                onDeleteBranch={sourceControls.onDeleteBranch}
+                onTagChange={sourceControls.onTagChange}
+                selectedTag={sourceControls.selectedTag}
+                tagOptions={sourceControls.tagOptions}
+              />
+            </>
+          ) : (
             <BreadcrumbButton onClick={() => setCurrentPath("")}>
               Files
             </BreadcrumbButton>
-          </>
-        ) : null}
-        {pathSegments.map((segment, index) => {
-          const nextPath = pathSegments.slice(0, index + 1).join("/");
-          return (
-            <React.Fragment key={nextPath}>
+          )}
+          {sourceControls && pathSegments.length > 0 ? (
+            <>
               <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-              <BreadcrumbButton onClick={() => setCurrentPath(nextPath)}>
-                {segment}
+              <BreadcrumbButton onClick={() => setCurrentPath("")}>
+                Files
               </BreadcrumbButton>
-            </React.Fragment>
-          );
-        })}
-        {sourceControls ? (
-          <div className="ml-auto flex shrink-0 items-center">
-            <RepoSyncActionButton controls={sourceControls} />
-          </div>
-        ) : null}
-      </div>
+            </>
+          ) : null}
+          {pathSegments.map((segment, index) => {
+            const nextPath = pathSegments.slice(0, index + 1).join("/");
+            return (
+              <React.Fragment key={nextPath}>
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+                <BreadcrumbButton onClick={() => setCurrentPath(nextPath)}>
+                  {segment}
+                </BreadcrumbButton>
+              </React.Fragment>
+            );
+          })}
+          {sourceControls ? (
+            <div className="ml-auto flex shrink-0 items-center">
+              <RepoSyncActionButton controls={sourceControls} />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
-      <div className="overflow-x-auto">
-        <table className="w-full caption-bottom text-sm">
+      <div className="overflow-x-auto px-2 pb-2">
+        <table className="w-full border-separate border-spacing-y-0.5 caption-bottom text-sm">
           <thead>
             <tr className="border-border/50 border-b bg-muted/20">
               <th className="px-4 py-3 text-left font-normal" colSpan={3}>
@@ -849,10 +901,7 @@ export function RepositoryFilesPanel({
               return (
                 <tr
                   aria-label={`Open ${entry.type} ${entry.name}`}
-                  className={cn(
-                    "cursor-pointer transition-colors hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden",
-                    !rowIsLast && "border-border/50 border-b",
-                  )}
+                  className="group/repository-entry cursor-pointer text-xs focus-visible:outline-hidden"
                   key={`${entry.type}:${entry.path}`}
                   onClick={openEntry}
                   onKeyDown={(event) =>
@@ -860,7 +909,12 @@ export function RepositoryFilesPanel({
                   }
                   tabIndex={0}
                 >
-                  <td className="min-w-52 p-3 align-middle">
+                  <td
+                    className={cn(
+                      "min-w-52 rounded-l-md px-3 py-2 align-middle transition-colors group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:bg-muted/35",
+                      !rowIsLast && "border-border/50 border-b",
+                    )}
+                  >
                     <div className="flex min-w-0 items-center gap-2">
                       <RepositoryEntryIcon entry={entry} />
                       <span className="truncate font-medium text-foreground">
@@ -868,13 +922,23 @@ export function RepositoryFilesPanel({
                       </span>
                     </div>
                   </td>
-                  <td className="max-w-96 p-3 align-middle">
+                  <td
+                    className={cn(
+                      "max-w-96 p-2 align-middle transition-colors group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:bg-muted/35",
+                      !rowIsLast && "border-border/50 border-b",
+                    )}
+                  >
                     <RepositoryCommitCell
                       commit={latestCommit}
                       profiles={profiles}
                     />
                   </td>
-                  <td className="w-36 whitespace-nowrap p-3 text-right align-middle text-muted-foreground">
+                  <td
+                    className={cn(
+                      "w-36 whitespace-nowrap rounded-r-md p-2 text-right align-middle text-muted-foreground transition-colors group-hover/repository-entry:bg-muted/35 group-focus-visible/repository-entry:bg-muted/35",
+                      !rowIsLast && "border-border/50 border-b",
+                    )}
+                  >
                     {latestCommit ? (
                       <time
                         dateTime={new Date(

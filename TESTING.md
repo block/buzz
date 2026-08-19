@@ -155,9 +155,49 @@ buzz messages thread --channel "$CHANNEL" --event "$EVENT_ID" | jq .
 
 A successful run prints `{"event_id":"…","accepted":true,"message":""}` for
 the send, and the message body in the `get` output. `thread` returns `[]`
-for a leaf message — populated only after a reply comes in (see §5).
+for a leaf message — populated only after a reply comes in (see §6).
 
-### 5. Going deeper
+### 5. Verify a roster beyond 1,000 members
+
+Use the focused live-relay script when changing channel membership, discovery,
+or reconciliation. It proves the three boundaries that DB-only tests cannot:
+the relay-served kind 39002 includes a member at roster position 1,501, that
+identity can publish a channel message, and targeted reconciliation preserves
+its discoverability.
+
+Run this only against an isolated local database. The script inserts fixture
+members directly, then drives discovery and messaging through the release CLI
+and relay. Keep the release relay from step 3 running and use its configured
+relay key for authoritative replacement:
+
+```bash
+export PATH="$PWD/target/release:$PATH"
+export DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz_roster_e2e"
+export BUZZ_RELAY_URL="http://localhost:3030"  # match the relay from step 3
+export RELAY_URL="ws://localhost:3030"
+export BUZZ_RELAY_PRIVATE_KEY="<same key used by buzz-relay>"
+
+scripts/e2e-large-channel-roster.sh
+```
+
+Success is directly observable as four `PASS` lines. The first and fourth
+include a member count greater than 1,000 and the same late-member pubkey; the
+second includes the accepted kind 9 event ID, and the third proves targeted
+repair left kind 39000/39001 IDs and tags unchanged:
+
+```text
+PASS discovery-before-republish channel=<uuid> members=1502 late_pubkey=<hex>
+PASS late-member-action event_id=<hex>
+PASS targeted-repair-preserves-metadata-and-admin-events channel=<uuid>
+PASS discovery-after-republish channel=<uuid> members=1502 late_pubkey=<hex>
+```
+
+The script refuses debug binaries and refuses a `buzz` or `buzz-admin` resolved
+outside this checkout's `target/release`. It also requires the targeted admin
+operation to use `BUZZ_RELAY_PRIVATE_KEY`; never substitute an ephemeral signer
+for an authoritative replacement.
+
+### 6. Going deeper
 
 For full coverage of every CLI command (54 subcommands across 12 groups),
 follow [`crates/buzz-cli/TESTING.md`](crates/buzz-cli/TESTING.md).
@@ -277,7 +317,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
-| `BUZZ_REQUIRE_MEDIA_GET_AUTH`   | `false`                     | When true, `GET`/`HEAD /media/*` require Blossom kind 24242 `t=get` auth plus relay membership. |
+| `BUZZ_DRAIN_JITTER_MS`          | `0` (off)                   | Per-connection upper bound, in ms, for the random delay before each live WebSocket gets its `1012 Service Restart` close on graceful shutdown. `0` closes every socket at once (the previous behavior). A positive value spreads closes uniformly over `[1, value]` ms to avoid a reconnect thundering herd on rolling deploys. Values above `20000` are capped to `20000` (`MAX_DRAIN_JITTER_MS`) to leave close-frame delivery headroom under the relay's 30s hard-drain timeout. Empty or whitespace-only is treated as unset (off); a non-integer fails startup loudly. |
 | `BUZZ_AUDIT_ENABLED`            | `true`                      | Tamper-evident event/media audit log. Set `false`/`0`/`off` to skip its DB pool and writes. Does not disable the separate moderation audit trail. |
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |
 | `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Check } from "lucide-react";
+import { Check, Info } from "lucide-react";
 
 import {
   useAcpAuthMethodsQuery,
@@ -8,6 +8,7 @@ import {
   useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
+import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -483,6 +484,7 @@ function RuntimeCard({
   const installMutation = useInstallAcpRuntimeMutation();
   const installError = installResults[runtime.id]?.error ?? null;
   const isInstalling = installMutation.isPending;
+  const installOutputLine = useInstallOutputLine(runtime.id, isInstalling);
   const isAvailable = runtime.availability === "available";
   const isReady = runtimeIsReadyForOnboarding(runtime);
 
@@ -499,7 +501,7 @@ function RuntimeCard({
           [runtime.id]: result.success
             ? { error: null, success: true }
             : {
-                error: getInstallErrorMessage(result.steps),
+                error: getInstallErrorMessage(result),
                 success: false,
               },
         }));
@@ -542,7 +544,18 @@ function RuntimeCard({
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {!isAvailable && runtimeDetailText(runtime) ? (
+        {isInstalling && installOutputLine ? (
+          // Takes the detail text's slot rather than adding a row: the card is
+          // fixed-height, and during an install the live line is the more
+          // useful of the two.
+          <p
+            aria-live="polite"
+            className="max-w-[13rem] truncate font-mono text-2xs leading-4 text-muted-foreground"
+            data-testid={`onboarding-runtime-install-output-${runtime.id}`}
+          >
+            {installOutputLine}
+          </p>
+        ) : !isAvailable && runtimeDetailText(runtime) ? (
           <p
             aria-hidden={installError ? "true" : undefined}
             className={cn(
@@ -589,10 +602,12 @@ function RuntimeProvidersLoadingState() {
 
 function RuntimeProvidersSection({
   installResults,
+  navigateToAgentSettings,
   onInstallResultsChange,
   runtimeProviders,
 }: {
   installResults: InstallResultsState;
+  navigateToAgentSettings?: () => void;
   onInstallResultsChange: React.Dispatch<
     React.SetStateAction<InstallResultsState>
   >;
@@ -642,6 +657,26 @@ function RuntimeProvidersSection({
             {errorMessage}
           </p>
         ) : null}
+
+        <p className="mx-auto flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
+          <Info aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            More harnesses (Cursor, Grok, Amp&hellip;){" "}
+            {navigateToAgentSettings ? (
+              <button
+                className="underline underline-offset-2 hover:text-foreground"
+                data-testid="onboarding-setup-more-harnesses"
+                onClick={navigateToAgentSettings}
+                type="button"
+              >
+                Settings → Agents
+              </button>
+            ) : (
+              <span>Settings → Agents</span>
+            )}{" "}
+            after setup.
+          </span>
+        </p>
       </div>
     </section>
   );
@@ -680,6 +715,7 @@ function SetupStepContent({
     >
       <RuntimeProvidersSection
         installResults={installResults}
+        navigateToAgentSettings={actions.navigateToAgentSettings}
         onInstallResultsChange={setInstallResults}
         runtimeProviders={runtimeProviders}
       />
@@ -694,9 +730,8 @@ function SetupStepContent({
         >
           Next
         </Button>
-
         <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
+          className="h-9 whitespace-nowrap rounded-full px-6 text-sm hover:bg-foreground/10"
           data-testid="onboarding-setup-skip"
           onClick={() => actions.next([])}
           type="button"
@@ -704,33 +739,6 @@ function SetupStepContent({
         >
           Skip for now
         </Button>
-
-        <Button
-          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
-          data-testid="onboarding-back"
-          onClick={actions.back}
-          type="button"
-          variant="ghost"
-        >
-          Back
-        </Button>
-
-        <p className="text-xs text-foreground/50">
-          More harnesses (Cursor, Grok, Amp&hellip;){" "}
-          {actions.navigateToAgentSettings ? (
-            <button
-              className="text-foreground/70 underline underline-offset-2 hover:text-foreground"
-              data-testid="onboarding-setup-more-harnesses"
-              onClick={actions.navigateToAgentSettings}
-              type="button"
-            >
-              Settings → Agents
-            </button>
-          ) : (
-            <span className="text-foreground/70">Settings → Agents</span>
-          )}{" "}
-          after setup.
-        </p>
       </OnboardingFooter>
     </OnboardingSlideTransition>
   );
@@ -742,7 +750,6 @@ export function SetupStep({
   onReadyRuntimeIdsChange,
 }: SetupStepProps) {
   const state = useSetupStepState();
-
   return (
     <SetupStepContent
       actions={actions}

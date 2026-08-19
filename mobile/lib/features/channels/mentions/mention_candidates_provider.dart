@@ -1,72 +1,15 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/crypto/nip_oa.dart';
+import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/relay/relay.dart';
-import '../../profile/user_cache_provider.dart';
-import '../../profile/user_profile.dart';
+import '../../../shared/profile/user_cache_provider.dart';
+import '../../../shared/profile/user_profile.dart';
 import '../channel.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 import 'mention_candidates.dart';
 import 'mention_ranking.dart';
-
-/// Relay agent directory from kind:10100 agent-profile events.
-///
-/// Watches the session and only fetches after the WebSocket connects.
-final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
-  ref,
-) async {
-  final sessionState = ref.watch(relaySessionProvider);
-  if (sessionState.status != SessionStatus.connected) return const [];
-  final session = ref.read(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(NostrFilters.agentProfiles());
-  return [for (final event in events) AgentDirectoryEntry.fromEvent(event)];
-});
-
-/// Verified NIP-OA owner pubkey per agent pubkey, from the agents' kind:0
-/// profiles. An entry exists only when the `auth` tag verifies — mirrors
-/// desktop's `profile_valid_oa_owner_pubkey`.
-final agentOwnersProvider = FutureProvider<Map<String, String>>((ref) async {
-  final agents = await ref.watch(agentDirectoryProvider.future);
-  if (agents.isEmpty) return const {};
-  final session = ref.read(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(
-    NostrFilters.profilesBatch([for (final agent in agents) agent.pubkey]),
-  );
-  final owners = <String, String>{};
-  for (final event in events) {
-    final owner = verifiedOaOwnerPubkey(event.tags, event.pubkey);
-    if (owner != null) owners[event.pubkey.toLowerCase()] = owner;
-  }
-  return owners;
-});
-
-/// Pubkeys currently known to represent agents for rendered mention chips.
-///
-/// Uses the same three identity sources as mention autocomplete: channel bot
-/// roles, relay agent-directory entries, and verified NIP-OA ownership.
-final mentionAgentPubkeysProvider = Provider.family<Set<String>, String>((
-  ref,
-  channelId,
-) {
-  final members =
-      ref.watch(channelMembersProvider(channelId)).asData?.value ??
-      const <ChannelMember>[];
-  final relayAgents =
-      ref.watch(agentDirectoryProvider).asData?.value ??
-      const <AgentDirectoryEntry>[];
-  final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
-  final userCache = ref.watch(userCacheProvider);
-
-  return {
-    for (final member in members)
-      if (member.isBot) member.pubkey.toLowerCase(),
-    for (final agent in relayAgents) agent.pubkey.toLowerCase(),
-    ...owners.keys.map((pubkey) => pubkey.toLowerCase()),
-    for (final profile in userCache.values)
-      if (profile.ownerPubkey != null) profile.pubkey.toLowerCase(),
-  };
-});
 
 /// Debounce before a mention query hits the relay search endpoint.
 const _mentionSearchDebounce = Duration(milliseconds: 250);
@@ -130,15 +73,24 @@ final mentionCandidatesProvider = Provider.family
       ref,
       args,
     ) {
-      final members =
-          ref.watch(channelMembersProvider(args.channelId)).asData?.value ??
-          const <ChannelMember>[];
+      final channelsAsync = ref.watch(channelsProvider);
+      final membersAsync = ref.watch(channelMembersProvider(args.channelId));
+      final sessionStatus = ref.watch(relaySessionProvider).status;
+      final cachedMembers = channelsAsync.asData == null
+          ? const <ChannelMember>[]
+          : ref
+                .read(channelsProvider.notifier)
+                .cachedMembersForChannel(args.channelId);
+      final members = channelMembersForAutocomplete(
+        membersAsync: membersAsync,
+        sessionStatus: sessionStatus,
+        cachedMembers: cachedMembers,
+      );
       final relayAgents =
           ref.watch(agentDirectoryProvider).asData?.value ??
           const <AgentDirectoryEntry>[];
       final owners = ref.watch(agentOwnersProvider).asData?.value ?? const {};
-      final channels =
-          ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
+      final channels = channelsAsync.asData?.value ?? const <Channel>[];
       final userCache = ref.watch(userCacheProvider);
       final currentPubkey = ref.watch(currentPubkeyProvider);
       final searchResults =
