@@ -489,9 +489,7 @@ class _CommunityAvatar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final trimmedName = name?.trim();
-    final initial = trimmedName != null && trimmedName.isNotEmpty
-        ? trimmedName.substring(0, 1).toUpperCase()
-        : '?';
+    final initial = avatarInitial(trimmedName ?? '');
     final relay = relayUrl;
     final iconUrl = relay == null
         ? null
