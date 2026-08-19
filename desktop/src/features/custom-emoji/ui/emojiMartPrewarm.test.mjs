@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+
+const pickerSource = await readFile(
+  new URL("./EmojiPicker.tsx", import.meta.url),
+  "utf8",
+);
 
 const entries = new Map([
   ["emoji-mart.frequently", "{}"],
@@ -21,6 +27,15 @@ globalThis.window = {
 globalThis.__BUZZ_TEST_EMOJI_MART_INIT__ = (...args) => initCalls.push(args);
 
 const { emojiMartData } = await import("./emojiMartPrewarm.ts");
+
+test("EmojiPicker consumes data through the prewarm module", () => {
+  assert.match(
+    pickerSource,
+    /import\s*{\s*emojiMartData\s*}\s*from\s*["']@\/features\/custom-emoji\/ui\/emojiMartPrewarm["'];/,
+  );
+  assert.match(pickerSource, /<Picker[\s\S]*?\bdata={emojiMartData}/);
+  assert.doesNotMatch(pickerSource, /from\s*["']@emoji-mart\/data["']/);
+});
 
 test("normalizes poisoned recents before scheduling the emoji index prewarm", () => {
   assert.equal(entries.has("emoji-mart.frequently"), false);
