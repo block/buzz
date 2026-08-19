@@ -89,6 +89,7 @@ fn agent_record() -> ManagedAgentRecord {
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -116,6 +117,7 @@ fn agent_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
@@ -181,6 +183,7 @@ fn linked_stale_record_model_never_outranks_persona_model() {
         Some(goose_runtime()),
         None,
         &Default::default(),
+        None,
     );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
@@ -205,7 +208,14 @@ fn linked_blank_definition_model_falls_through_to_global_default() {
         ..Default::default()
     };
 
-    let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None, &global);
+    let surface = resolve_config_surface(
+        record,
+        &personas,
+        Some(goose_runtime()),
+        None,
+        &global,
+        None,
+    );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
     assert_eq!(model.value.as_deref(), Some("global-model"));
@@ -228,6 +238,7 @@ fn definition_less_explicit_record_model_keeps_buzz_explicit_origin() {
         Some(goose_runtime()),
         None,
         &Default::default(),
+        None,
     );
 
     let model = surface.normalized.model.as_ref().expect("model resolved");
@@ -255,6 +266,7 @@ fn pending_pick_keeps_explicit_x_and_does_not_surface_live_y() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -283,6 +295,7 @@ fn genuine_explicit_live_switch_renders_y_over_x_buzz_explicit_secondary() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -318,6 +331,7 @@ fn genuine_explicit_live_switch_to_same_model_yields_clean_field() {
             Some(goose_runtime()),
             Some(&cache),
             &Default::default(),
+            None,
         )
     });
     let model = surface.normalized.model.expect("model resolved");
@@ -346,6 +360,7 @@ fn persona_linked_live_switch_keeps_persona_default_secondary() {
         Some(goose_runtime()),
         Some(&cache),
         &Default::default(),
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -381,6 +396,7 @@ fn global_default_live_switch_renders_global_model_as_secondary_global_default()
         Some(goose_runtime()),
         Some(&cache),
         &global,
+        None,
     );
     let model = surface.normalized.model.expect("model resolved");
 
@@ -664,4 +680,33 @@ fn baked_env_allowlist_is_case_insensitive() {
     assert!(!super::is_safe_to_reveal("PRIVATE_KEY"));
     // Unknown key → masked by default.
     assert!(!super::is_safe_to_reveal("SOME_UNKNOWN_KEY"));
+}
+
+/// F3 (Desktop-parsing half): the `models` block emitted by an applied live
+/// switch — taken from the post-switch snapshot in `pool.rs` — must parse to the
+/// target model as current. Pairs with the pool test
+/// `test_applied_switch_caches_target_model_not_pre_switch`, which proves the
+/// emitted block already carries `currentModelId=model-b`.
+#[test]
+fn live_switch_models_from_post_switch_snapshot_parses_target_current() {
+    let models = serde_json::json!({
+        "currentModelId": "model-b",
+        "availableModels": [{"modelId": "model-a"}, {"modelId": "model-b"}],
+    });
+    let (available, current) = parse_models(Some(&models));
+    assert_eq!(current.as_deref(), Some("model-b"));
+    assert_eq!(available.len(), 2);
+}
+
+/// F3 (Desktop-parsing half): a Null `models` block — emitted when a successful
+/// switch's target response omits `models` — must parse to no current model, so
+/// the pre-switch model is never revived in the cache.
+#[test]
+fn live_switch_null_models_parses_to_no_current_model() {
+    let (available, current) = parse_models(Some(&serde_json::Value::Null));
+    assert!(
+        current.is_none(),
+        "Null models must not surface any current model"
+    );
+    assert!(available.is_empty());
 }

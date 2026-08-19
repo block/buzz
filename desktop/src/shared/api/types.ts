@@ -50,10 +50,6 @@ export type CreateChannelInput = {
   ttlSeconds?: number;
 };
 
-export type OpenDmInput = {
-  pubkeys: string[];
-};
-
 export type UpdateChannelInput = {
   channelId: string;
   name?: string;
@@ -266,9 +262,9 @@ export type RelayMember = {
   addedBy: string | null;
   createdAt: string;
 };
-
 export type RelayAgent = {
   pubkey: string;
+  ownerPubkey: string | null;
   name: string;
   agentType: string;
   channels: string[];
@@ -339,18 +335,9 @@ export type ManagedAgent = {
   modelSource: "definition" | "global" | "instance_legacy" | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
-  /**
-   * `true` when the linked persona has been edited since this agent was
-   * created — the running agent uses the older pinned snapshot. Surface a
-   * "out of date" marker and prompt the user to delete + respawn to update.
-   * Always `false` for non-persona agents and for orphaned agents.
-   */
+  /** True when the linked persona has been edited since this agent was created. */
   personaOutOfDate: boolean;
-  /**
-   * `true` when the agent's linked persona no longer exists. Distinct from
-   * out-of-date: there is no current persona to respawn into, so do not prompt
-   * a respawn — the pinned snapshot is all the config that remains.
-   */
+  /** True when this agent's linked persona no longer exists. */
   personaOrphaned: boolean;
   /**
    * `true` when the running process was spawned with a config that no longer
@@ -461,23 +448,23 @@ export type CancelManagedAgentTurnResult = {
   status: "sent" | "no_active_turn";
 };
 
-/**
- * Outcome of a live `switch_model` control frame, surfaced asynchronously via
- * the agent's `control_result` observer frame. Busy path: `sent` (cancel +
- * requeue on the new model) or `turn_ending` (oneshot already consumed this
- * turn). Idle path: `switched`, `unsupported_model`, or `no_active_turn`.
- */
+/** Outcome of a live `switch_model` control frame; `failure` lands late. */
 export type SwitchManagedAgentModelStatus =
   | "sent"
   | "turn_ending"
   | "switched"
   | "unsupported_model"
-  | "no_active_turn";
+  | "no_active_turn"
+  | "failure";
 
 export type ControlResultFrame = {
   type: "cancel_turn" | "switch_model";
   status: string;
   modelId?: string;
+  /** Opaque per-pick id echoed from the request; correlates late frames. */
+  requestId?: string;
+  /** Buzz channel UUID from the observer envelope; disambiguates channels. */
+  channelId?: string | null;
 };
 
 export type GitBashPrerequisite = {
@@ -657,6 +644,9 @@ export type ConfigSourceReport = {
 
 export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
 
+/** B5/I-7: a single adapter-advertised value for an ACP config option. */
+export type AcpConfigOptionValue = { value: string; displayName?: string };
+
 export type NormalizedConfig = {
   model: NormalizedField | null;
   provider: NormalizedField | null;
@@ -675,6 +665,12 @@ export type RuntimeConfigSurface = {
   advanced: ConfigField[];
   extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
+  /** #3493: `true` when the surface was read from a user-set `CLAUDE_CONFIG_DIR` — drives the Keychain caveat note in the panel. */
+  claudeConfigDirCustom?: boolean;
+  /** B5: the adapter-advertised `thought_level` configId, discovered from the running session. Present only for claude after the first session. Drives the effort picker. */
+  effortConfigId?: string;
+  /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
+  effortOptions?: AcpConfigOptionValue[];
 };
 
 export type UpdateManagedAgentInput = {

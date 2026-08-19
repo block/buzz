@@ -69,6 +69,12 @@ export type MarkdownProps = {
   className?: string;
   content: string;
   customEmoji?: CustomEmoji[];
+  /**
+   * When true (default), single newlines become `<br>` — chat Enter behavior.
+   * Git commit bodies are hard-wrapped at ~72 columns; pass false so those
+   * wraps reflow with the panel instead of staying a narrow column.
+   */
+  hardLineBreaks?: boolean;
   imetaByUrl?: ImetaLookup;
   interactive?: boolean;
   agentMentionPubkeysByName?: Record<string, string>;
