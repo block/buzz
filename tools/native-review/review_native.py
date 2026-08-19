@@ -723,7 +723,8 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
         process, app_binary, app_pid = build_and_launch(
             run_dir, isolation, fixture, probe_url, probe_token, app_binary
         )
-        receipt["provenance"]["artifact_path"] = str(app_binary)
+        receipt_path = run_dir / "receipt.json"
+        receipt["provenance"]["artifact_path"] = os.path.relpath(app_binary, receipt_path.parent)
         receipt["provenance"]["artifact_sha256"] = sha256(app_binary)
         driver = Driver(build_driver(), app_pid, run_dir / "state" / "semantic.json")
         sampler = ProcessSampler(app_pid)
@@ -832,7 +833,9 @@ def benchmark(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
         ) / "receipt.json"
         receipt = json.loads(receipt_path.read_text())
         provenance = receipt.get("provenance", {})
-        if (provenance.get("artifact_path") != str(cohort_binary)
+        artifact_path = pathlib.Path(provenance.get("artifact_path", ""))
+        recorded_artifact = artifact_path if artifact_path.is_absolute() else receipt_path.parent / artifact_path
+        if (recorded_artifact.resolve() != cohort_binary.resolve()
                 or provenance.get("artifact_sha256") != built_sha
                 or sha256(cohort_binary) != built_sha):
             raise HarnessError("benchmark receipt does not identify the immutable cohort artifact")
@@ -882,6 +885,8 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
                 or any(not isinstance(value, str) or not value for value in machine.values())):
             raise HarnessError(f"{label} receipt has incomplete provenance: {path}")
         artifact_path = pathlib.Path(provenance["artifact_path"])
+        if not artifact_path.is_absolute():
+            artifact_path = path.parent / artifact_path
         if not artifact_path.is_file():
             raise HarnessError(f"{label} receipt artifact is not a regular file: {artifact_path}")
         try:

@@ -51,7 +51,10 @@ postcondition duration in the receipt. While the journey runs, the harness also
 samples the app process every 100 ms and records median/peak CPU percentage and
 resident memory. Capture a cohort rather than trusting one noisy laptop run. Each benchmark
 builds one immutable app artifact, then supplies run-specific fixture and probe
-coordinates at launch so every receipt in the cohort hashes the same binary:
+coordinates at launch so every receipt in the cohort hashes the same binary. The
+receipt stores that artifact path relative to `receipt.json`, so the evidence
+bundle remains verifiable after it is moved and regardless of the comparator's
+working directory. Keep the cohort `.cohorts` directory with its receipts:
 
 ```bash
 just native-review-benchmark tools/native-review/desktop/tooltip-fresh-dwell.yaml 5

@@ -479,6 +479,18 @@ func assertTargetOwns(point: CGPoint, pid: pid_t) throws {
     )
 }
 
+func postGlobalInput(
+    _ event: CGEvent?, at point: CGPoint, pid: pid_t,
+    authorize: (CGPoint, pid_t) throws -> Void = assertTargetOwns,
+    post: (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }
+) throws {
+    guard let event else {
+        throw DriverError.message("could not create global input event")
+    }
+    try authorize(point, pid)
+    post(event)
+}
+
 func ensureTargetFrontmost(pid: pid_t) async throws {
     guard let running = NSRunningApplication(processIdentifier: pid), !running.isTerminated else {
         throw DriverError.message("target app is no longer running")
@@ -623,16 +635,17 @@ struct BuzzNativeDriver {
                             selected = (element, used)
                             try await ensureTargetFrontmost(pid: pid)
                             let point = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
-                            try assertTargetOwns(point: point, pid: pid)
-                            CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
-                                    mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                            try postGlobalInput(
+                                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                                        mouseCursorPosition: point, mouseButton: .left),
+                                at: point, pid: pid
+                            )
                             let deltaY = Int32(action["delta_y"] as? Int ?? 0)
                             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                                       wheel1: deltaY, wheel2: 0, wheel3: 0) else {
                                 throw DriverError.message("could not create scroll event")
                             }
-                            try assertTargetOwns(point: point, pid: pid)
-                            event.post(tap: .cghidEventTap)
+                            try postGlobalInput(event, at: point, pid: pid)
                         } else {
                             guard let (_, used) = selected else {
                                 throw DriverError.message("action requires a freshly selected element with current bounds")
@@ -665,20 +678,30 @@ struct BuzzNativeDriver {
                                 for index in 1...steps {
                                     let fraction = Double(index) / Double(steps)
                                     let next = CGPoint(x: start.x + (point.x - start.x) * fraction, y: start.y + (point.y - start.y) * fraction)
-                                    try assertTargetOwns(point: next, pid: pid)
-                                    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: next, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                    try postGlobalInput(
+                                        CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: next, mouseButton: .left),
+                                        at: next, pid: pid
+                                    )
                                     try await Task.sleep(for: .milliseconds(duration / steps))
                                 }
                             } else if type == "move_pointer" {
-                                try assertTargetOwns(point: point, pid: pid)
-                                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                try postGlobalInput(
+                                    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left),
+                                    at: point, pid: pid
+                                )
                             } else if type == "click" {
-                                try assertTargetOwns(point: point, pid: pid)
-                                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-                                try assertTargetOwns(point: point, pid: pid)
-                                CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-                                try assertTargetOwns(point: point, pid: pid)
-                                CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                try postGlobalInput(
+                                    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left),
+                                    at: point, pid: pid
+                                )
+                                try postGlobalInput(
+                                    CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+                                    at: point, pid: pid
+                                )
+                                try postGlobalInput(
+                                    CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left),
+                                    at: point, pid: pid
+                                )
                             } else { throw DriverError.message("unsupported action: \(type)") }
                         }
                         response(["ok": true])

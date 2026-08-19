@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import tempfile
@@ -317,7 +318,7 @@ class PerformanceTests(unittest.TestCase):
             "cleanup": {"status": "passed"},
             "provenance": {"dirty": False, "dirty_state_sha256": None, "status": [],
                            "head_sha": ("a" if artifact == "base" else "b") * 40,
-                           "artifact_path": str(artifact_path),
+                           "artifact_path": str(artifact_path.relative_to(path.parent)),
                            "artifact_sha256": review_native.sha256(artifact_path)},
             "measurements": {"tooltip_open_latency": {"value": timing, "unit": "ms", "step": "tooltip"}},
             "performance": {"machine": self.MACHINE, "process": {
@@ -406,13 +407,26 @@ metrics:
                 with self.subTest(name=name):
                     path = self.receipt(root / f"{name}.json", f"base-{name}", 100)
                     payload = json.loads(path.read_text())
-                    artifact = pathlib.Path(payload["provenance"]["artifact_path"])
+                    artifact = path.parent / payload["provenance"]["artifact_path"]
                     mutate(artifact)
                     with self.assertRaisesRegex(
                         review_native.HarnessError,
                         "not a regular file|digest does not match",
                     ):
                         review_native.load_receipts([path], "baseline")
+
+
+    def test_receipt_artifact_is_resolved_relative_to_receipt_not_cwd(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
+            root = pathlib.Path(directory)
+            path = self.receipt(root / "portable" / "receipt.json", "base", 100)
+            previous = pathlib.Path.cwd()
+            try:
+                os.chdir(other)
+                receipts = review_native.load_receipts([path], "baseline")
+            finally:
+                os.chdir(previous)
+            self.assertEqual(len(receipts), 1)
 
     def test_receipt_schema_requires_nonnegative_comparison_metrics(self):
         schema = json.loads(
@@ -551,7 +565,8 @@ metrics:
             target.write_text("subsequent build output")
             for receipt_path in receipts:
                 provenance = json.loads(receipt_path.read_text())["provenance"]
-                self.assertEqual(provenance["artifact_path"], str(prepared))
+                recorded = receipt_path.parent / provenance["artifact_path"]
+                self.assertEqual(recorded.resolve(), prepared.resolve())
                 self.assertEqual(provenance["artifact_sha256"], review_native.sha256(prepared))
 
     def test_benchmark_rejects_cohort_artifact_mutation_before_next_launch(self):

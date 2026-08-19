@@ -1000,6 +1000,11 @@ benchmark *ARGS:
 benchmark-down:
     docker compose --project-name buzz-benchmark down
 
+# Run the native-review orchestrator and macOS driver unit tests.
+native-review-test:
+    python3 -m unittest discover -s tools/native-review/tests -p 'test_*.py'
+    swift test --package-path tools/native-review/swift
+
 # Validate macOS native-review tooling and report required OS permissions.
 native-review-doctor:
     ./tools/native-review/bin/review-native doctor

@@ -83,7 +83,8 @@
         },
         "artifact_path": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Application artifact path, resolved relative to the receipt file when not absolute"
         },
         "artifact_sha256": {
           "type": "string",
