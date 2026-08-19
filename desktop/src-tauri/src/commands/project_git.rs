@@ -2,12 +2,21 @@ use super::project_git_exec::{
     build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
     GitAuthConfig,
 };
+use super::project_git_file_content::{checkout_project_repo, read_preview_content};
 use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
 use crate::app_state::AppState;
 use serde::Serialize;
 use std::time::UNIX_EPOCH;
 use tauri::State;
+
+// Bound eager content without truncating the repository tree.
+const MAX_EAGER_FILE_PREVIEWS: usize = 250;
+
+#[cfg(test)]
+#[path = "project_git_tests.rs"]
+mod tests;
+
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
@@ -134,30 +143,6 @@ fn has_untracked_files(output: &str) -> bool {
     output.lines().any(|line| line.starts_with("??"))
 }
 
-fn read_preview_content(
-    repo_dir: &std::path::Path,
-    path: &str,
-    size: Option<u64>,
-) -> Option<String> {
-    const MAX_PREVIEW_BYTES: u64 = 64 * 1024;
-    if size.is_some_and(|value| value > MAX_PREVIEW_BYTES) {
-        return None;
-    }
-
-    let full_path = repo_dir.join(path);
-    let normalized = full_path.canonicalize().ok()?;
-    let repo_root = repo_dir.canonicalize().ok()?;
-    if !normalized.starts_with(repo_root) {
-        return None;
-    }
-
-    let bytes = std::fs::read(normalized).ok()?;
-    if bytes.contains(&0) {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
-}
-
 fn parse_commits(output: &str) -> Vec<ProjectRepoCommitInfo> {
     output
         .lines()
@@ -254,24 +239,26 @@ fn parse_worktree_files(
         .filter_map(|path| {
             let full_path = repo_dir.join(path);
             let metadata = std::fs::metadata(&full_path).ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
+            metadata.is_file().then_some((path, full_path, metadata))
+        })
+        .enumerate()
+        .map(|(index, (path, full_path, metadata))| {
             let size = Some(metadata.len());
             let latest_commit = latest_commit_by_path.get(path).cloned();
-            Some(ProjectRepoFileInfo {
+            ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind: "blob".to_string(),
                 size,
-                preview_content: read_preview_content(repo_dir, path, size),
+                preview_content: (index < MAX_EAGER_FILE_PREVIEWS)
+                    .then(|| read_preview_content(repo_dir, path, size))
+                    .flatten(),
                 last_changed_at: latest_commit
                     .as_ref()
                     .map(|commit| commit.timestamp)
                     .or_else(|| path_modified_at(&full_path)),
                 latest_commit,
-            })
+            }
         })
-        .take(250)
         .collect()
 }
 
@@ -314,6 +301,7 @@ fn parse_ls_tree(
     output: &str,
     latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
 ) -> Vec<ProjectRepoFileInfo> {
+    let mut blob_index = 0;
     output
         .lines()
         .filter_map(|line| {
@@ -323,11 +311,12 @@ fn parse_ls_tree(
             let kind = parts.next()?.to_string();
             let _object = parts.next()?;
             let size = parts.next().and_then(|value| value.parse::<u64>().ok());
-            let preview_content = if kind == "blob" {
-                read_preview_content(repo_dir, path, size)
-            } else {
-                None
-            };
+            if kind == "blob" {
+                blob_index += 1;
+            }
+            let preview_content = (kind == "blob" && blob_index <= MAX_EAGER_FILE_PREVIEWS)
+                .then(|| read_preview_content(repo_dir, path, size))
+                .flatten();
             Some(ProjectRepoFileInfo {
                 path: path.to_string(),
                 kind,
@@ -339,7 +328,6 @@ fn parse_ls_tree(
                 latest_commit: latest_commit_by_path.get(path).cloned(),
             })
         })
-        .take(250)
         .collect()
 }
 
@@ -727,61 +715,14 @@ pub async fn get_project_repo_snapshot(
     tauri::async_runtime::spawn_blocking(move || {
         let temp_dir = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
         let repo_dir = temp_dir.path().join("repo");
-        let repo_path = repo_dir
-            .to_str()
-            .ok_or_else(|| "temporary repository path is not UTF-8".to_string())?;
-
-        let explicit_target = target_ref.as_deref().or(target_commit.as_deref());
-        if let Some(fetch_ref) = explicit_target {
-            run_git(
-                &[
-                    "clone",
-                    "--filter=blob:none",
-                    "--no-checkout",
-                    clone_url.as_str(),
-                    repo_path,
-                ],
-                None,
-                &auth,
-            )?;
-            run_git(
-                &["fetch", "--depth=100", "origin", fetch_ref],
-                Some(&repo_dir),
-                &auth,
-            )?;
-            if let Some(expected_commit) = target_commit.as_deref() {
-                let fetched_commit = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
-                    .ok()
-                    .and_then(|output| first_output_line(&output))
-                    .map(|commit| commit.to_ascii_lowercase())
-                    .ok_or_else(|| "Could not resolve the requested repository ref.".to_string())?;
-                if fetched_commit != expected_commit {
-                    return Err(
-                        "The requested repository ref changed. Refresh and try again.".to_string(),
-                    );
-                }
-            }
-            run_git(
-                &["checkout", "--detach", "FETCH_HEAD"],
-                Some(&repo_dir),
-                &auth,
-            )?;
-        } else {
-            let mut clone_args = vec!["clone", "--filter=blob:none"];
-            if let Some(ref branch) = branch {
-                clone_args.push("--branch");
-                clone_args.push(branch.as_str());
-            }
-            clone_args.push(clone_url.as_str());
-            clone_args.push(repo_path);
-            if run_git(&clone_args, None, &auth).is_err() && branch.is_some() {
-                run_git(
-                    &["clone", "--filter=blob:none", clone_url.as_str(), repo_path],
-                    None,
-                    &auth,
-                )?;
-            }
-        }
+        checkout_project_repo(
+            &repo_dir,
+            &clone_url,
+            branch.as_deref(),
+            target_ref.as_deref(),
+            target_commit.as_deref(),
+            &auth,
+        )?;
 
         let snapshot =
             snapshot_from_repo(&repo_dir, &auth, branch.as_deref(), base_branch.as_deref());

@@ -5,6 +5,7 @@ import {
   isProjectAccessibleToViewer,
   isProjectMine,
   isRepositoryAccessibleToViewer,
+  nextRepositoryEntryLimit,
   relativeTime,
 } from "./projectsViewHelpers.ts";
 
@@ -218,4 +219,10 @@ test("relativeTime includes the year only across a year boundary", () => {
     relativeTime(crossYearCreatedAt, crossYearNow),
     crossYearExpected,
   );
+});
+
+test("repository entry pagination advances and clamps to the total", () => {
+  assert.equal(nextRepositoryEntryLimit(200, 450), 400);
+  assert.equal(nextRepositoryEntryLimit(400, 450), 450);
+  assert.equal(nextRepositoryEntryLimit(450, 450), 450);
 });

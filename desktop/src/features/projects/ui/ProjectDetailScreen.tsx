@@ -75,27 +75,15 @@ import { buildProjectDetailCrumbs } from "./useProjectDetailCrumbs";
 import { useProjectDetailPeople } from "./useProjectDetailPeople";
 import { useProjectProfilePanel } from "./useProjectProfilePanel";
 import { useProjectRepositoryPanel } from "./useProjectRepositoryPanel";
+import { useRepositoryFileContentSource } from "./useRepositoryFileContentSource";
 import { useProjectPanelWidths } from "./useProjectPanelWidths";
 import { useProjectRepositoryOpenActions } from "./useProjectRepositoryOpenActions";
-import { pushPullTitle, snapshotHasContent } from "./projectDetailHelpers";
-
-type ProjectDetailScreenProps = {
-  commitHash?: string;
-  entityNavigationId?: string;
-  projectId: string;
-  pullRequestId?: string;
-  issueId?: string;
-  repositoryId?: string;
-  /** Workspace tab requested by a share link (link vocabulary). */
-  tab?: EntityLinkTab;
-};
-
-const PROJECT_REPOSITORY_SEARCH_KEYS = [
-  "repositoryId",
-  "issueId",
-  "pullRequestId",
-  "commitHash",
-] as const;
+import {
+  PROJECT_REPOSITORY_SEARCH_KEYS,
+  type ProjectDetailScreenProps,
+  pushPullTitle,
+  snapshotHasContent,
+} from "./projectDetailHelpers";
 
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const {
@@ -468,6 +456,15 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     fetchTitle:
       repoSyncStatusQuery.data?.pullBlockReason ?? "Check for remote changes",
   };
+  const fileContentSource = useRepositoryFileContentSource({
+    activeBranch,
+    activeTag,
+    pullRequest: selectedBranchPullRequest,
+    repository,
+    reposDir: activeCommunity?.reposDir,
+    selectedTag,
+    source: repoSource,
+  });
   const projectPending = projectQuery.isPending;
   React.useEffect(() => {
     if (!repository) {
@@ -905,6 +902,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       : undefined
                   }
                   initialTabRequestKey={entityNavigationId}
+                  fileContentSource={fileContentSource}
                   commitDiff={commitDiffQuery.data}
                   commitDiffError={commitDiffQuery.error}
                   commitDiffLoading={commitDiffQuery.isLoading}

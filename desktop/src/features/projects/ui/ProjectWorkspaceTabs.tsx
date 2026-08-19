@@ -36,6 +36,7 @@ import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Tabs, TabsContent } from "@/shared/ui/tabs";
 import { findReadmeFile } from "./ProjectReadmePanel";
 import { RepositoryFilesPanel } from "./ProjectRepositoryPanel";
+import type { RepositoryFileContentSource } from "./useRepositoryFileContent";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 import { DiscussionChannelsPanel } from "./DiscussionChannels";
 import { ProjectCommitDetailPanel } from "./ProjectCommitDetailPanel";
@@ -94,6 +95,7 @@ export function WorkspaceTabs({
   updatePullRequestAction,
   initialTab,
   initialTabRequestKey,
+  fileContentSource,
   localSnapshot,
   localSnapshotError,
   localSnapshotLoading,
@@ -139,6 +141,7 @@ export function WorkspaceTabs({
   initialTab?: string;
   /** Changes for every entity-link activation, including repeated links. */
   initialTabRequestKey?: string;
+  fileContentSource?: RepositoryFileContentSource;
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
@@ -334,7 +337,7 @@ export function WorkspaceTabs({
     [selectedPullRequestId],
   );
   const sectionHeader =
-    selectedTab === "overview" && readmeFile?.previewContent ? (
+    selectedTab === "overview" && readmeFile ? (
       <ProjectSectionHeader icon={BookOpen} title="README" />
     ) : selectedTab === "files" && files.length > 0 ? (
       <ProjectSectionHeader icon={FilesIcon} title="Files" />
@@ -411,6 +414,7 @@ export function WorkspaceTabs({
             accessChannelId={project.channelId}
             externalHost={externalHost}
             externalUrl={externalHost ? sourceControls?.externalUrl : null}
+            fileContentSource={fileContentSource}
             gitDataState={gitDataState}
             hideReadmeHeader
             ownerAvatarUrl={ownerProfile?.avatarUrl}
@@ -541,6 +545,7 @@ export function WorkspaceTabs({
               <RepositoryFilesPanel
                 error={displayedSnapshotError}
                 fallbackAuthorPubkey={project.owner}
+                fileContentSource={fileContentSource}
                 files={files}
                 isLoading={displayedSnapshotLoading}
                 onContextChange={onFilesContextChange}
