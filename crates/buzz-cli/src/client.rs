@@ -1095,6 +1095,87 @@ impl BuzzClient {
         .to_string())
     }
 
+    /// Hold an authenticated WebSocket subscription open and hand every matching
+    /// event to `on_event` as the relay pushes it.
+    ///
+    /// This never returns `Ok`: a subscription that is working is a subscription
+    /// that has not finished. Every return is a reason the stream stopped, which
+    /// is the only thing a caller can act on — a reader that cannot tell "quiet
+    /// channel" from "dead socket" is worse than a poller, because it believes
+    /// it is listening.
+    ///
+    /// `idle_timeout_secs` is what makes that distinction possible. The relay
+    /// heartbeats every 30 s (`buzz_relay::connection::heartbeat_loop`) and
+    /// `NostrWsConnection` answers each Ping without surfacing it, so the read
+    /// deadline is only reached when nothing at all arrived — a half-dead socket,
+    /// not a quiet room. Keep the value a comfortable multiple of 30.
+    pub async fn subscribe_events<F>(
+        &self,
+        filter: serde_json::Value,
+        idle_timeout_secs: u64,
+        mut on_event: F,
+    ) -> Result<std::convert::Infallible, CliError>
+    where
+        F: FnMut(&nostr::Event) -> Result<(), CliError>,
+    {
+        use buzz_ws_client::{NostrWsConnection, RelayMessage, WsClientError};
+
+        let ws_url = to_ws_url(&self.relay_url);
+        let mut conn =
+            NostrWsConnection::connect_authenticated(&ws_url, &self.keys, self.auth_tag.as_ref())
+                .await
+                .map_err(|e| CliError::Other(format!("{ws_url}: {e}")))?;
+
+        let sub_id = format!("buzz-cli-{}", uuid::Uuid::new_v4());
+        conn.send_raw(&serde_json::json!(["REQ", sub_id, filter]))
+            .await
+            .map_err(|e| CliError::Other(format!("REQ failed: {e}")))?;
+
+        let idle = std::time::Duration::from_secs(idle_timeout_secs);
+        loop {
+            match conn.next_event(idle).await {
+                Ok(RelayMessage::Event {
+                    subscription_id,
+                    event,
+                }) => {
+                    if subscription_id == sub_id {
+                        on_event(&event)?;
+                    }
+                }
+                // EOSE means stored events are done and live delivery starts;
+                // COUNT and OK cannot arrive on this connection but are not worth
+                // tearing a working subscription down for.
+                Ok(RelayMessage::Eose { .. })
+                | Ok(RelayMessage::Count { .. })
+                | Ok(RelayMessage::Ok(_)) => {}
+                Ok(RelayMessage::Notice { message }) => {
+                    eprintln!("relay notice: {message}");
+                }
+                // A re-issued AUTH challenge means the relay stopped treating this
+                // connection as authenticated; the subscription is no longer
+                // delivering anything, so reconnecting is the only repair.
+                Ok(RelayMessage::Auth { .. }) => {
+                    return Err(CliError::Other(
+                        "relay re-issued an AUTH challenge — session no longer authenticated"
+                            .into(),
+                    ));
+                }
+                Ok(RelayMessage::Closed { message, .. }) => {
+                    return Err(CliError::Other(format!(
+                        "relay closed the subscription: {message}"
+                    )));
+                }
+                Err(WsClientError::Timeout) => {
+                    return Err(CliError::Other(format!(
+                        "no relay traffic for {idle_timeout_secs}s, not even a heartbeat — \
+                         treating the socket as dead"
+                    )));
+                }
+                Err(e) => return Err(CliError::Other(e.to_string())),
+            }
+        }
+    }
+
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
@@ -1302,22 +1383,27 @@ fn to_ws_url(http_url: &str) -> String {
         .replace("http://", "ws://")
 }
 
+/// Normalize one raw event JSON object into the shape every read path emits:
+/// `{id, pubkey, kind, content, created_at, tags}`.
+///
+/// Shared by the HTTP read path (`normalize_events`) and the WebSocket stream
+/// (`messages subscribe`) so a consumer can dedupe across both without knowing
+/// which one delivered a given event.
+pub fn normalize_event(e: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+        "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+        "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
+        "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+        "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+        "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
+    })
+}
+
 /// Normalize raw event JSON array into consistent shape.
 /// Each event becomes: {id, pubkey, kind, content, created_at, tags}
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
-    let normalized: Vec<serde_json::Value> = events
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
-                "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
-                "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-                "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
-        })
-        .collect();
+    let normalized: Vec<serde_json::Value> = events.iter().map(normalize_event).collect();
     serde_json::to_string(&normalized).unwrap_or_default()
 }
 

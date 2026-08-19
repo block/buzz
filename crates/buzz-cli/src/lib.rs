@@ -480,6 +480,28 @@ pub enum MessagesCmd {
         #[arg(long)]
         kinds: Option<String>,
     },
+    /// Stream new messages from a channel over a live WebSocket, one JSON object
+    /// per line, until the connection drops
+    #[command(
+        after_help = "Holds an authenticated NIP-42 connection open and prints each matching\nevent as it arrives — no polling, no interval.\n\nOutput is newline-delimited JSON on stdout, one event per line, in the same\nshape 'messages get' returns, flushed immediately so a reader blocked on a\nline wakes the moment the relay pushes one. Diagnostics go to stderr.\n\nIt never exits 0. Every exit is a reason the stream stopped, so a supervisor\ncan reconnect and backfill the gap with 'messages get --since' instead of\nsitting on a dead socket believing the channel is quiet.\n\nExamples:\n  buzz messages subscribe --channel <UUID>\n  buzz messages subscribe --channel <UUID> --kinds 9 --since 1783497600"
+    )]
+    Subscribe {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Comma-separated event kinds to stream [default: the same set 'messages get' reads]
+        #[arg(long)]
+        kinds: Option<String>,
+        /// Unix timestamp — only stream events at or after this time [default: now]
+        #[arg(long)]
+        since: Option<i64>,
+        /// Give up when the relay sends nothing at all, heartbeats included, for this many seconds
+        #[arg(long, default_value_t = 90)]
+        idle_timeout: u64,
+        /// Stop after this many seconds even while healthy, so a supervisor can backfill over HTTP and re-subscribe [0 disables]
+        #[arg(long, default_value_t = 300)]
+        reconnect_after: u64,
+    },
     /// Get a message thread (replies to a root message)
     Thread {
         /// Channel UUID
@@ -2228,6 +2250,7 @@ mod tests {
                 "search",
                 "send",
                 "send-diff",
+                "subscribe",
                 "thread",
                 "vote"
             ]
@@ -2362,7 +2385,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
