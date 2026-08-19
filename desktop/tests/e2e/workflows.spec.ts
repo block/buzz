@@ -100,7 +100,11 @@ async function createWorkflow(
   await page.getByRole("menuitem", { name: "Send Message" }).click();
   await dialog.getByLabel("Message text").fill("Workflow notification");
   if (options?.stepName) {
+    await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
+  }
+  if (options?.stepCondition || options?.stepTimeoutSecs) {
+    await dialog.getByRole("button", { name: "Run controls" }).click();
   }
   if (options?.stepCondition) {
     await dialog.getByLabel("Condition (optional)").fill(options.stepCondition);
@@ -198,6 +202,7 @@ test("disables autocapitalization in the workflow form", async ({ page }) => {
 
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
+  await dialog.getByRole("button", { name: "Step details" }).click();
   await expect(dialog.getByLabel("Name (optional)")).toHaveAttribute(
     "autocapitalize",
     "off",
@@ -520,16 +525,24 @@ test("captures the built editor at desktop and narrow widths", async ({
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
   await dialog.getByLabel("Message text").fill("Notify the workflow channel");
+  const inspector = dialog.getByTestId("workflow-node-inspector");
 
   for (const viewport of [
     { height: 900, name: "wide", width: 1440 },
     { height: 820, name: "narrow", width: 760 },
   ]) {
     await page.setViewportSize(viewport);
+    await inspector.getByRole("button", { name: "Run controls" }).click();
     await waitForAnimations(page);
     await page.screenshot({
-      path: `test-results/workflow-editor-${viewport.name}.png`,
+      path: `test-results/workflow-editor-${viewport.name}-run-controls.png`,
     });
+    await inspector.getByRole("button", { name: "Step details" }).click();
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: `test-results/workflow-editor-${viewport.name}-step-details.png`,
+    });
+    await inspector.getByRole("button", { name: "Step details" }).click();
   }
 });
 
@@ -544,6 +557,30 @@ test("preserves final sequence affordances and responsive inspector behavior", a
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
 
+  const inspector = dialog.getByTestId("workflow-node-inspector");
+  const runControls = inspector.getByRole("button", { name: "Run controls" });
+  const stepDetails = inspector.getByRole("button", { name: "Step details" });
+  await expect(runControls).toHaveAttribute("aria-expanded", "false");
+  await expect(stepDetails).toHaveAttribute("aria-expanded", "false");
+  await expect(inspector.getByLabel("Condition (optional)")).toHaveCount(0);
+  await expect(inspector.getByLabel("Name (optional)")).toHaveCount(0);
+
+  await runControls.click();
+  await expect(runControls).toHaveAttribute("aria-expanded", "true");
+  await inspector
+    .getByLabel("Condition (optional)")
+    .fill('str_contains(trigger_text, "deploy")');
+  await inspector.getByLabel("Timeout (seconds)").fill("45");
+  await expect(runControls).toContainText("Conditional · 45s");
+
+  await stepDetails.click();
+  await expect(runControls).toHaveAttribute("aria-expanded", "false");
+  await expect(stepDetails).toHaveAttribute("aria-expanded", "true");
+  await expect(inspector.getByLabel("Condition (optional)")).toHaveCount(0);
+  await inspector.getByLabel("Name (optional)").fill("Notify deployers");
+  await expect(stepDetails).toContainText("Notify deployers");
+  await expect(inspector.getByLabel("Step ID")).toHaveValue("step_1");
+
   await expect(dialog.getByText("End", { exact: true })).toHaveCount(0);
   const ingresses = dialog.getByTestId("workflow-node-ingress");
   await expect(ingresses).toHaveCount(2);
@@ -557,7 +594,7 @@ test("preserves final sequence affordances and responsive inspector behavior", a
     ingresses.last().getByRole("button", { name: "Add after Step 1" }),
   ).toBeVisible();
 
-  const stepNode = dialog.getByRole("button", { name: "Step 1: Send Message" });
+  const stepNode = dialog.getByRole("button", { name: /^Step 1:/ });
   const removeStep = dialog.getByRole("button", { name: "Remove Step 1" });
   await expect(removeStep).toHaveClass(/-right-8/);
   await stepNode.hover();

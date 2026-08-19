@@ -1,4 +1,5 @@
-import { Trash2 } from "lucide-react";
+import { ChevronRight, Trash2 } from "lucide-react";
+import { type ReactNode, useState } from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -7,6 +8,64 @@ import { Textarea } from "@/shared/ui/textarea";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
 import type { StepFormState, TriggerType } from "./workflowFormTypes";
+
+type StepSetting = "run-controls" | "details";
+
+function StepSettingAccordion({
+  children,
+  disabled,
+  expanded,
+  label,
+  onToggle,
+  summary,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  expanded: boolean;
+  label: string;
+  onToggle: () => void;
+  summary: string;
+}) {
+  return (
+    <div>
+      <button
+        aria-expanded={expanded}
+        className="flex min-h-12 w-full items-center gap-3 py-3 text-left transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={disabled}
+        onClick={onToggle}
+        type="button"
+      >
+        <span className="min-w-0 flex-1 truncate text-base font-medium">
+          {label}
+        </span>
+        <span className="max-w-40 truncate text-sm text-muted-foreground">
+          {summary}
+        </span>
+        <ChevronRight
+          className={cn(
+            "h-4 w-4 shrink-0 text-muted-foreground/70 transition-transform duration-150 motion-reduce:transition-none",
+            expanded && "rotate-90",
+          )}
+        />
+      </button>
+
+      {expanded ? (
+        <div className="animate-in pb-4 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none">
+          {children}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function runControlsSummary(step: StepFormState): string {
+  const hasCondition = Boolean(step.condition?.trim());
+  const timeout = step.timeoutSecs?.trim();
+  if (hasCondition && timeout) return `Conditional · ${timeout}s`;
+  if (hasCondition) return "Conditional";
+  if (timeout) return `${timeout}s`;
+  return "Default";
+}
 
 function BackendSupportHint({ action }: { action: StepFormState["action"] }) {
   switch (action) {
@@ -298,10 +357,6 @@ function StepConfigFields({
   }
 }
 
-function SectionHeading({ title }: { title: string }) {
-  return <h4 className="text-sm font-semibold text-foreground">{title}</h4>;
-}
-
 export function WorkflowStepCard({
   bare = false,
   showHeader = true,
@@ -324,6 +379,13 @@ export function WorkflowStepCard({
   workflowChannelId?: string | null;
 }) {
   const prefix = `wf-step-${index}`;
+  const [expandedSetting, setExpandedSetting] = useState<StepSetting | null>(
+    null,
+  );
+
+  const toggleSetting = (setting: StepSetting) => {
+    setExpandedSetting((current) => (current === setting ? null : setting));
+  };
 
   return (
     <div
@@ -362,73 +424,93 @@ export function WorkflowStepCard({
         />
       </section>
 
-      <section className="space-y-4 border-t border-border/50 py-5">
-        <SectionHeading title="Run controls" />
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-condition`}>
-            Condition (optional)
-          </FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id={`${prefix}-condition`}
-            onChange={(event) =>
-              onUpdate({ ...step, condition: event.target.value })
-            }
-            placeholder='e.g. str_contains(trigger_text, "deploy")'
-            value={step.condition ?? ""}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-timeout-secs`}>
-            Timeout (seconds)
-          </FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id={`${prefix}-timeout-secs`}
-            inputMode="numeric"
-            onChange={(event) =>
-              onUpdate({ ...step, timeoutSecs: event.target.value })
-            }
-            placeholder="e.g. 300"
-            value={step.timeoutSecs ?? ""}
-          />
-          <p className="text-xs text-muted-foreground">
-            Defaults to the workflow timeout.
-          </p>
-        </div>
-      </section>
+      <section className="divide-y divide-border/50 border-t border-border/50">
+        <StepSettingAccordion
+          disabled={disabled}
+          expanded={expandedSetting === "run-controls"}
+          label="Run controls"
+          onToggle={() => toggleSetting("run-controls")}
+          summary={runControlsSummary(step)}
+        >
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-condition`}>
+                Condition (optional)
+              </FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-condition`}
+                onChange={(event) =>
+                  onUpdate({ ...step, condition: event.target.value })
+                }
+                placeholder='e.g. str_contains(trigger_text, "deploy")'
+                value={step.condition ?? ""}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-timeout-secs`}>
+                Timeout (seconds)
+              </FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-timeout-secs`}
+                inputMode="numeric"
+                onChange={(event) =>
+                  onUpdate({ ...step, timeoutSecs: event.target.value })
+                }
+                placeholder="e.g. 300"
+                value={step.timeoutSecs ?? ""}
+              />
+              <p className="text-xs text-muted-foreground">
+                Defaults to the workflow timeout.
+              </p>
+            </div>
+          </div>
+        </StepSettingAccordion>
 
-      <section className="space-y-4 border-t border-border/50 pt-5">
-        <SectionHeading title="Step details" />
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-name`}>Name (optional)</FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id={`${prefix}-name`}
-            onChange={(event) =>
-              onUpdate({ ...step, name: event.target.value })
-            }
-            placeholder="e.g. Notify deployment channel"
-            value={step.name ?? ""}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor={`${prefix}-id`}>Step ID</FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id={`${prefix}-id`}
-            onChange={(event) => onUpdate({ ...step, id: event.target.value })}
-            placeholder="unique_step_id"
-            value={step.id}
-          />
-          <p className="text-xs text-muted-foreground">
-            Used in configuration and run history.
-          </p>
-        </div>
+        <StepSettingAccordion
+          disabled={disabled}
+          expanded={expandedSetting === "details"}
+          label="Step details"
+          onToggle={() => toggleSetting("details")}
+          summary={step.name?.trim() || step.id}
+        >
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-name`}>
+                Name (optional)
+              </FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-name`}
+                onChange={(event) =>
+                  onUpdate({ ...step, name: event.target.value })
+                }
+                placeholder="e.g. Notify deployment channel"
+                value={step.name ?? ""}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <FieldLabel htmlFor={`${prefix}-id`}>Step ID</FieldLabel>
+              <Input
+                autoCapitalize="off"
+                disabled={disabled}
+                id={`${prefix}-id`}
+                onChange={(event) =>
+                  onUpdate({ ...step, id: event.target.value })
+                }
+                placeholder="unique_step_id"
+                value={step.id}
+              />
+              <p className="text-xs text-muted-foreground">
+                Used in configuration and run history.
+              </p>
+            </div>
+          </div>
+        </StepSettingAccordion>
       </section>
     </div>
   );
