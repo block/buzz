@@ -16,6 +16,7 @@ import {
 
 import {
   getManagedAgentPrimaryActionLabel,
+  isManagedAgentLifecycleActionReady,
   isManagedAgentLive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -71,6 +72,7 @@ type MembersSidebarMemberCardProps = {
   onUnban: (member: ChannelMember) => void;
   onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
+  presenceLoaded: boolean;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
   viewerIsOwner: boolean;
@@ -139,12 +141,16 @@ export function MembersSidebarMemberCard({
   onUnban,
   onUntimeout,
   onViewActivity,
+  presenceLoaded,
   presenceStatus,
   profileAvatarUrl,
   viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
   const roleLabel = formatRoleLabel(member, memberIsBot);
   const disabled = isActionPending || isArchived;
+  const lifecycleActionReady = managedAgent
+    ? isManagedAgentLifecycleActionReady(managedAgent, presenceLoaded)
+    : true;
   const canViewActivity =
     memberIsBot &&
     (viewerIsOwner || managedAgent?.backend.type === "local") &&
@@ -223,10 +229,13 @@ export function MembersSidebarMemberCard({
             >
               {managedAgentRuntime
                 ? agentCommunityAvailability(managedAgentRuntime)
-                : managedAgent &&
-                    isManagedAgentLive(managedAgent, presenceStatus)
-                  ? "Running"
-                  : "Stopped"}
+                : managedAgent?.backend.type === "provider" &&
+                    !lifecycleActionReady
+                  ? "Checking…"
+                  : managedAgent &&
+                      isManagedAgentLive(managedAgent, presenceStatus)
+                    ? "Running"
+                    : "Stopped"}
             </Badge>
             {managedAgent ? (
               <Badge
@@ -284,6 +293,7 @@ export function MembersSidebarMemberCard({
           onUntimeout={onUntimeout}
           onViewActivity={onViewActivity}
           pairAction={pairAction}
+          presenceLoaded={presenceLoaded}
           presenceStatus={presenceStatus}
         />
       ) : null}
@@ -313,6 +323,7 @@ function MemberActionsMenu({
   onUntimeout,
   onViewActivity,
   pairAction,
+  presenceLoaded,
   presenceStatus,
 }: {
   canChangeRole: boolean;
@@ -334,8 +345,12 @@ function MemberActionsMenu({
   onUntimeout: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
   pairAction?: ManagedAgentPairAction;
+  presenceLoaded: boolean;
   presenceStatus?: PresenceStatus | null;
 }) {
+  const lifecycleActionReady = managedAgent
+    ? isManagedAgentLifecycleActionReady(managedAgent, presenceLoaded)
+    : true;
   const showChangeRole =
     canChangeRole && !memberIsBot && member.role !== "owner";
   const isBanned = moderationState?.banned ?? false;
@@ -370,7 +385,7 @@ function MemberActionsMenu({
             {canViewActivity ? <DropdownMenuSeparator /> : null}
             <DropdownMenuItem
               data-testid={`sidebar-agent-action-${member.pubkey}`}
-              disabled={disabled}
+              disabled={disabled || !lifecycleActionReady}
               onClick={() => onManagedAgentAction(managedAgent)}
             >
               {pairAction

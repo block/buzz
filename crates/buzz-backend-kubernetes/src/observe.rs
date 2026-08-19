@@ -13,8 +13,8 @@
 use crate::classify::{Fence, PullFailure, Startup, VerifiedPod};
 use crate::intent::Fingerprint;
 use crate::naming::{
-    AgentIdentity, ANNOTATION_CREATE_INTENT, ANNOTATION_PUBKEY_FULL, BINDING_VERSION,
-    LABEL_BINDING_VERSION, LABEL_MANAGED_BY, MANAGED_BY,
+    AgentIdentity, ANNOTATION_CREATE_INTENT, ANNOTATION_PUBKEY_FULL, LABEL_BINDING_VERSION,
+    LABEL_MANAGED_BY, MANAGED_BY, SUPPORTED_READ_BINDING_VERSIONS,
 };
 use k8s_openapi::api::core::v1::{Pod, Secret};
 
@@ -39,10 +39,22 @@ pub enum StartupObservation {
 ///
 /// Identity labels prove identity; the marker asserts protocol ownership.
 /// Without it an object that merely matches our schema fails closed.
-fn has_marker(labels: Option<&std::collections::BTreeMap<String, String>>) -> bool {
+fn has_marker_for_binding(
+    labels: Option<&std::collections::BTreeMap<String, String>>,
+    binding_version: &str,
+) -> bool {
     let Some(labels) = labels else { return false };
     labels.get(LABEL_MANAGED_BY).map(String::as_str) == Some(MANAGED_BY)
-        && labels.get(LABEL_BINDING_VERSION).map(String::as_str) == Some(BINDING_VERSION)
+        && labels.get(LABEL_BINDING_VERSION).map(String::as_str) == Some(binding_version)
+}
+
+/// New writers adopt v1 Pods and Secrets so an upgrade can converge them to a
+/// v2 generation on the next owner-driven replacement. Unknown and future
+/// bindings still fail closed.
+fn has_supported_marker(labels: Option<&std::collections::BTreeMap<String, String>>) -> bool {
+    SUPPORTED_READ_BINDING_VERSIONS
+        .iter()
+        .any(|version| has_marker_for_binding(labels, version))
 }
 
 /// Does the full-pubkey annotation equal the derived pubkey?
@@ -62,7 +74,7 @@ fn annotation_matches(
 /// Is this Secret ours and this identity's? The same fence GC applies before
 /// deleting anything.
 pub fn secret_is_ours(secret: &Secret, identity: &AgentIdentity) -> bool {
-    has_marker(secret.metadata.labels.as_ref())
+    has_supported_marker(secret.metadata.labels.as_ref())
         && annotation_matches(secret.metadata.annotations.as_ref(), identity)
 }
 
@@ -251,7 +263,7 @@ pub fn condition(pod: &Pod) -> Option<String> {
 /// `CreateContainerConfigError` needs a most-recent Secret read the pure layer
 /// must not perform.
 pub fn verify(pod: &Pod, identity: &AgentIdentity, startup: Startup) -> Option<VerifiedPod> {
-    if !has_marker(pod.metadata.labels.as_ref()) {
+    if !has_supported_marker(pod.metadata.labels.as_ref()) {
         return None;
     }
     if !annotation_matches(pod.metadata.annotations.as_ref(), identity) {
@@ -296,6 +308,24 @@ mod tests {
                 name: Some(id.pod_name()),
                 uid: Some("uid-1".into()),
                 resource_version: Some("100".into()),
+                labels: Some(id.labels()),
+                annotations: Some(
+                    [(
+                        ANNOTATION_PUBKEY_FULL.to_string(),
+                        id.pubkey_hex().to_string(),
+                    )]
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn base_secret(id: &AgentIdentity) -> Secret {
+        Secret {
+            metadata: ObjectMeta {
                 labels: Some(id.labels()),
                 annotations: Some(
                     [(
@@ -517,6 +547,38 @@ mod tests {
         assert!(
             verify(&base_pod(&id), &id, Startup::Started).is_some(),
             "own pod rejected"
+        );
+    }
+
+    #[test]
+    fn current_reader_accepts_legacy_v1_pods_and_secrets() {
+        let id = identity();
+        let mut pod = base_pod(&id);
+        pod.metadata.labels.as_mut().unwrap().insert(
+            LABEL_BINDING_VERSION.to_string(),
+            crate::naming::LEGACY_BINDING_VERSION.to_string(),
+        );
+        assert!(verify(&pod, &id, Startup::Started).is_some());
+
+        let mut secret = base_secret(&id);
+        secret.metadata.labels.as_mut().unwrap().insert(
+            LABEL_BINDING_VERSION.to_string(),
+            crate::naming::LEGACY_BINDING_VERSION.to_string(),
+        );
+        assert!(secret_is_ours(&secret, &id));
+    }
+
+    #[test]
+    fn legacy_v1_reader_would_refuse_current_v2_state() {
+        let id = identity();
+        let pod = base_pod(&id);
+        assert!(has_supported_marker(pod.metadata.labels.as_ref()));
+        assert!(
+            !has_marker_for_binding(
+                pod.metadata.labels.as_ref(),
+                crate::naming::LEGACY_BINDING_VERSION,
+            ),
+            "a v1 reader must fail closed on a v2 deterministic-name collision"
         );
     }
 

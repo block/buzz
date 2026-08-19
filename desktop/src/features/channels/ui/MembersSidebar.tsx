@@ -514,6 +514,7 @@ export function MembersSidebar({
     removableManagedBots,
     currentPubkey,
     onOpenChange,
+    presenceLoaded: memberPresenceQuery.isSuccess,
     presenceLookup: memberPresenceQuery.data ?? {},
     relayUrl,
   });
@@ -672,6 +673,7 @@ export function MembersSidebar({
               : undefined
           }
           pairAction={pairAction}
+          presenceLoaded={memberPresenceQuery.isSuccess}
           presenceStatus={
             memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
           }

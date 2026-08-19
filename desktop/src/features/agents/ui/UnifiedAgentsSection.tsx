@@ -7,7 +7,10 @@ import {
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
-import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
+import {
+  isManagedAgentLifecycleActionReady,
+  isManagedAgentLive,
+} from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -35,6 +38,7 @@ type UnifiedAgentsSectionProps = {
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
+  presenceLoaded: boolean;
   presenceLookup?: PresenceLookup;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
@@ -79,6 +83,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     agentsError,
     isActionPending,
     isAgentsLoading,
+    presenceLoaded,
     presenceLookup = {},
     restartingAgentPubkey,
     startingAgentPubkey,
@@ -162,6 +167,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   defaultModel={defaultModel}
                   key={group.persona.id}
                   persona={group.persona}
+                  presenceLoaded={presenceLoaded}
                   presenceLookup={presenceLookup}
                   restartingAgentPubkey={restartingAgentPubkey}
                   startingAgentPubkey={startingAgentPubkey}
@@ -183,6 +189,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               defaultModel={defaultModel}
               groupKey="__unknown__"
               label="Unknown agents"
+              presenceLoaded={presenceLoaded}
               presenceLookup={presenceLookup}
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
@@ -199,6 +206,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               defaultModel={defaultModel}
               groupKey="__ungrouped__"
               label="Custom agents"
+              presenceLoaded={presenceLoaded}
               presenceLookup={presenceLookup}
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
@@ -234,6 +242,7 @@ function AgentPersonaCard({
   agent,
   defaultModel,
   persona,
+  presenceLoaded,
   presenceLookup,
   restartingAgentPubkey,
   startingAgentPubkey,
@@ -251,6 +260,7 @@ function AgentPersonaCard({
   agent: ManagedAgent | undefined;
   defaultModel: string;
   persona: AgentPersona;
+  presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
@@ -292,6 +302,9 @@ function AgentPersonaCard({
       avatar={
         agent ? (
           <AgentRuntimeAvatarControl
+            actionDisabled={
+              !isManagedAgentLifecycleActionReady(agent, presenceLoaded)
+            }
             activeTestId={`agent-runtime-active-${agent.pubkey}`}
             avatarUrl={avatarUrl}
             errorLabel={friendlyError}
@@ -354,6 +367,7 @@ function AgentPersonaCard({
 function StandaloneAgentCard({
   agent,
   defaultModel,
+  presenceLoaded,
   presenceLookup,
   restartingAgentPubkey,
   startingAgentPubkey,
@@ -363,6 +377,7 @@ function StandaloneAgentCard({
 }: {
   agent: ManagedAgent;
   defaultModel: string;
+  presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
@@ -390,6 +405,9 @@ function StandaloneAgentCard({
       ariaLabel={`${title} agent profile`}
       avatar={
         <AgentRuntimeAvatarControl
+          actionDisabled={
+            !isManagedAgentLifecycleActionReady(agent, presenceLoaded)
+          }
           activeTestId={`agent-runtime-active-${agent.pubkey}`}
           avatarUrl={profileQuery.data?.avatarUrl}
           errorLabel={friendlyError}
@@ -462,6 +480,7 @@ function CollapsibleAgentGroup({
   agents,
   collapsed,
   defaultModel,
+  presenceLoaded,
   presenceLookup,
   restartingAgentPubkey,
   startingAgentPubkey,
@@ -475,6 +494,7 @@ function CollapsibleAgentGroup({
   agents: ManagedAgent[];
   collapsed: ReadonlySet<string>;
   defaultModel: string;
+  presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
@@ -508,6 +528,7 @@ function CollapsibleAgentGroup({
             <StandaloneAgentCard
               agent={agent}
               defaultModel={defaultModel}
+              presenceLoaded={presenceLoaded}
               presenceLookup={presenceLookup}
               key={agent.pubkey}
               restartingAgentPubkey={restartingAgentPubkey}

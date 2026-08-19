@@ -1016,6 +1016,12 @@ namespace does not exist the provider attempts to create it; on RBAC denial
 it MUST fail with the literal `kubectl create namespace <name>` command to
 run — it MUST NOT fall back to `default`.
 
+Persistent workspaces add one ambient permission boundary: the provider's
+cluster identity needs `get` and `create` on `persistentvolumeclaims` in the
+selected namespace, in addition to its existing namespace, Pod, and Secret
+permissions. Claim verification happens before any per-attempt Secret is
+written, so an RBAC refusal cannot leave a new identity Secret behind.
+
 ### Image
 
 `ghcr.io/block/buzz-sprig`: Alpine base + `bash` (required by the dev-MCP
@@ -1176,6 +1182,12 @@ regardless of `HOME`.
     destructive repair or GC action**. Identity labels/annotations prove
     identity; the marker asserts protocol ownership — without it, an object
     that merely matches our schema fails closed to the operator
+    - the current writer emits binding `2`. Its reader accepts legacy binding
+      `1` only for Pods and Secrets, allowing an in-place upgrade to observe
+      and collect old generations. PersistentVolumeClaims require binding `2`
+      plus the exact full-pubkey annotation; a v1 claim is never adopted. A v1
+      provider, in turn, refuses a v2 deterministic-name collision instead of
+      recreating the body with its old `emptyDir` pod shape
   - annotation `buzz.block.xyz/agent-pubkey-full: <full-64-hex>` —
     **load-bearing**: per §Deploy State Machine step 1, every label-selected
     object's annotation MUST equal the derived pubkey before the provider
@@ -1248,7 +1260,11 @@ regardless of `HOME`.
   claim. The claim carries the same management labels and full-pubkey
   annotation as the pod, and a same-named foreign claim is a hard refusal.
   Capacity or StorageClass drift is also refused rather than silently
-  pointing a new body at a different workspace. Agent memory remains
+  pointing a new body at a different workspace. The PVC has no Pod
+  owner-reference and is never deleted by provider GC: it survives clean exit,
+  crash, Pod deletion, and redeploy, and it continues to consume billable
+  storage until an operator explicitly deletes the PVC or its namespace.
+  Agent memory remains
   relay-persisted (NIP-AE) either way. [DECISION A — how remote pods get the nest workspace
   (AGENTS.md etc.) that local agents get from the desktop's `ensure_nest`;
   current recommendation is a desktop-stated protocol field, not

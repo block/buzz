@@ -50,6 +50,18 @@ export function isManagedAgentLive(
   return isManagedAgentActive(agent);
 }
 
+/**
+ * Provider lifecycle intent depends on relay presence. Until that query has
+ * settled, neither Deploy nor Shutdown is truthful enough to offer. Local
+ * agents continue to use their process status and do not need presence.
+ */
+export function isManagedAgentLifecycleActionReady(
+  agent: ManagedAgent,
+  presenceLoaded: boolean,
+) {
+  return agent.backend.type !== "provider" || presenceLoaded;
+}
+
 export function getManagedAgentPrimaryActionLabel(
   agent: ManagedAgent,
   presenceStatus?: PresenceStatus | null,

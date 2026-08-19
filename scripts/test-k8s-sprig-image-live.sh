@@ -22,7 +22,7 @@ case "$PULL_POLICY" in
 esac
 
 MANAGED_BY="buzz-backend-kubernetes"
-BINDING_VERSION="v1"
+BINDING_VERSION="2"
 NAMESPACE="buzz-k8s-sprig-$(date +%s)-$RANDOM"
 CREATED=0
 
@@ -38,7 +38,7 @@ cleanup() {
         return 1
     fi
     foreign="$(kubectl --context "$CONTEXT" --namespace "$NAMESPACE" get pods -o json \
-        | jq '[.items[] | select(.metadata.labels["app.kubernetes.io/managed-by"] != "buzz-backend-kubernetes" or .metadata.labels["buzz.block.xyz/binding-version"] != "v1")] | length')"
+        | jq '[.items[] | select(.metadata.labels["app.kubernetes.io/managed-by"] != "buzz-backend-kubernetes" or .metadata.labels["buzz.block.xyz/binding-version"] != "2")] | length')"
     if [[ "$foreign" != 0 ]]; then
         echo "REFUSING cleanup: namespace contains an unowned pod: $NAMESPACE" >&2
         return 1

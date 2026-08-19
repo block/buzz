@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getManagedAgentPrimaryActionLabel,
+  isManagedAgentLifecycleActionReady,
   isManagedAgentLive,
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
@@ -107,6 +108,18 @@ test("local liveness stays process-status based", () => {
     isManagedAgentLive(agent({ status: "stopped" }), "online"),
     false,
   );
+});
+
+test("provider lifecycle actions wait for presence while local actions do not", () => {
+  const remote = agent({
+    backend: { type: "provider", id: "kubernetes", config: {} },
+    backendAgentId: "buzz-agent-deadbeef",
+    status: "deployed",
+  });
+
+  assert.equal(isManagedAgentLifecycleActionReady(remote, false), false);
+  assert.equal(isManagedAgentLifecycleActionReady(remote, true), true);
+  assert.equal(isManagedAgentLifecycleActionReady(agent(), false), true);
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------

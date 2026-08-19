@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
+  isManagedAgentLifecycleActionReady,
   isManagedAgentLive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
@@ -14,6 +15,7 @@ import type { PresenceStatus } from "@/shared/api/types";
 export function useAgentLifecycleActions({
   channels,
   managedAgent,
+  presenceLoaded,
   presenceStatus,
   relayAgents,
   startManagedAgent,
@@ -21,6 +23,7 @@ export function useAgentLifecycleActions({
 }: {
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
+  presenceLoaded: boolean;
   presenceStatus?: PresenceStatus;
   relayAgents: readonly RelayAgent[] | undefined;
   startManagedAgent: (pubkey: string) => Promise<unknown>;
@@ -30,6 +33,10 @@ export function useAgentLifecycleActions({
     if (!managedAgent) return;
 
     try {
+      if (!isManagedAgentLifecycleActionReady(managedAgent, presenceLoaded)) {
+        throw new Error("Agent status is still loading. Try again shortly.");
+      }
+
       if (isManagedAgentLive(managedAgent, presenceStatus)) {
         const result = await stopManagedAgentWithRules({
           agent: managedAgent,
@@ -61,6 +68,7 @@ export function useAgentLifecycleActions({
   }, [
     channels,
     managedAgent,
+    presenceLoaded,
     presenceStatus,
     relayAgents,
     startManagedAgent,

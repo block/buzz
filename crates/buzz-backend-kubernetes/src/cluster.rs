@@ -567,6 +567,15 @@ mod tests {
     fn workspace_claim_verification_rejects_foreign_or_different_claims() {
         let desired = workspace_claim();
 
+        let mut legacy = desired.clone();
+        legacy.metadata.labels.as_mut().unwrap().insert(
+            crate::naming::LABEL_BINDING_VERSION.into(),
+            crate::naming::LEGACY_BINDING_VERSION.into(),
+        );
+        assert!(verify_workspace_claim(&legacy, &desired)
+            .unwrap_err()
+            .contains("not owned by this Buzz agent"));
+
         let mut foreign = desired.clone();
         foreign
             .metadata

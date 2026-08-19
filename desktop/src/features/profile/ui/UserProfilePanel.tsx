@@ -455,6 +455,7 @@ export function UserProfilePanel({
     useAgentLifecycleActions({
       channels: channelsQuery.data,
       managedAgent,
+      presenceLoaded: presenceQuery.isSuccess,
       presenceStatus,
       relayAgents: relayAgentsQuery.data,
       startManagedAgent: startAgentMutation.mutateAsync,
@@ -839,6 +840,7 @@ export function UserProfilePanel({
           onOpenDiagnostics={() => setView("diagnostics")}
           onStickyChromeChange={handleStickyChromeChange}
           onTabChange={setTab}
+          presenceLoaded={presenceQuery.isSuccess}
           presenceStatus={presenceStatus}
           profile={profile}
           pubkey={effectivePubkey}

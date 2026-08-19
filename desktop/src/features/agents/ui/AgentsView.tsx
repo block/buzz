@@ -223,6 +223,7 @@ export function AgentsView() {
               }
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
+              presenceLoaded={agents.managedPresenceQuery.isSuccess}
               presenceLookup={agents.managedPresenceQuery.data ?? {}}
               startingAgentPubkey={agents.startingAgentPubkey}
               restartingAgentPubkey={agents.restartingAgentPubkey}

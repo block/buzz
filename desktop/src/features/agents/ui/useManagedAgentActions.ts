@@ -21,6 +21,7 @@ import { removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   deleteManagedAgentWithRules,
+  isManagedAgentLifecycleActionReady,
   isManagedAgentLive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
@@ -161,6 +162,14 @@ export function useManagedAgentActions() {
     try {
       const agent = managedAgents.find((c) => c.pubkey === pubkey);
       if (!agent) return;
+      if (
+        !isManagedAgentLifecycleActionReady(
+          agent,
+          managedPresenceQuery.isSuccess,
+        )
+      ) {
+        throw new Error("Agent status is still loading. Try again shortly.");
+      }
       await startManagedAgentWithRules({
         agent,
         startManagedAgent: startMutation.mutateAsync,
@@ -181,6 +190,14 @@ export function useManagedAgentActions() {
         (candidate) => candidate.pubkey === pubkey,
       );
       if (!agent) return;
+      if (
+        !isManagedAgentLifecycleActionReady(
+          agent,
+          managedPresenceQuery.isSuccess,
+        )
+      ) {
+        throw new Error("Agent status is still loading. Try again shortly.");
+      }
       await respawnManagedAgentWithRules({
         agent,
         startManagedAgent: startMutation.mutateAsync,
