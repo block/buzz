@@ -4,8 +4,6 @@ const _huddleLifetime = Duration(hours: 1);
 const _huddleAvatarRadius = 52.0;
 const _huddleAvatarFrameSize = 128.0;
 const _huddleSpeakingRingSize = 112.0;
-const _huddleDenseAvatarFrameSize = 104.0;
-const _huddleMinimumAvatarFrameSize = 48.0;
 const _huddleParticipantLabelSpace = 28.0;
 const _huddleDenseParticipantThreshold = 6;
 
@@ -29,14 +27,12 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
           ephemeralChannelId: state.ephemeralChannelId,
           currentPubkey: state.currentPubkey,
           participantPubkeys: state.participantPubkeys,
-          wasAdmitted: state.wasAdmitted,
         ),
       ),
     );
-    final members = session.wasAdmitted
-        ? const <ChannelMember>[]
-        : ref.watch(channelMembersProvider(channelId)).value ??
-              const <ChannelMember>[];
+    final members =
+        ref.watch(channelMembersProvider(channelId)).value ??
+        const <ChannelMember>[];
     final relayState = ref.watch(relaySessionProvider);
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.ephemeralChannelId == channelId
@@ -551,7 +547,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.participantPubkeys,
       currentPubkey: localPubkey,
-      members: session.wasAdmitted ? const [] : backingMembers,
+      members: backingMembers,
     );
     final remotePubkeys = participantPubkeys
         .where((pubkey) => pubkey != localPubkey)
@@ -640,6 +636,26 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                               startedEventId: invite.startedEventId,
                             ),
                           ),
+                    onParticipantTap: (pubkey) {
+                      final isSelf = pubkey == localPubkey || pubkey.isEmpty;
+                      _showHuddleParticipantSpotlight(
+                        context: context,
+                        pubkey: pubkey,
+                        profile: profiles[pubkey],
+                        fallbackLabel: directoryDisplayNames[pubkey],
+                        active: session.activeSpeakerPubkeys.contains(pubkey),
+                        isSelf: isSelf,
+                      );
+                    },
+                    onOverflowTap: () => _showHuddleParticipantRoster(
+                      context: context,
+                      pubkeys: remotePubkeys
+                          .skip(_huddleClusterVisibleParticipantCount)
+                          .toList(growable: false),
+                      profiles: profiles,
+                      fallbackLabels: directoryDisplayNames,
+                      activeSpeakerPubkeys: session.activeSpeakerPubkeys,
+                    ),
                   ),
                 ),
                 if (connected)
@@ -726,7 +742,10 @@ class _HuddleCallHeader extends StatelessWidget {
           IconButton(
             key: const ValueKey('huddle-minimize'),
             tooltip: 'Minimize',
-            onPressed: onMinimize,
+            onPressed: () {
+              unawaited(HapticFeedback.selectionClick());
+              onMinimize();
+            },
             icon: const Icon(LucideIcons.chevronDown, size: 32),
           ),
           const Spacer(),
@@ -736,6 +755,7 @@ class _HuddleCallHeader extends StatelessWidget {
             icon: LucideIcons.phoneOff,
             foregroundColor: context.colors.error,
             backgroundColor: context.colors.surfaceContainerHighest,
+            useHapticFeedback: true,
             onPressed: isLeaving ? null : onLeave,
           ),
         ],

@@ -4357,6 +4357,22 @@ void main() {
         );
         final navigator = _RecordingNavigatorObserver();
         String? leftChannelId;
+        final hapticCalls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'HapticFeedback.vibrate') {
+              hapticCalls.add(call);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
 
         await tester.pumpWidget(
           _buildTestable(
@@ -4491,47 +4507,66 @@ void main() {
           find.byKey(const ValueKey('huddle-participant-avatar-desktop')),
         );
         await tester.pump();
-        final milesLabel = find.byKey(
-          const ValueKey('huddle-participant-label-desktop'),
-        );
-        final milesReveal = find
-            .ancestor(of: milesLabel, matching: find.byType(FadeTransition))
-            .first;
-        expect(tester.widget<FadeTransition>(milesReveal).opacity.value, 0);
-        await tester.pump(const Duration(milliseconds: 90));
+        expect(hapticCalls, hasLength(1));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
-          tester.widget<FadeTransition>(milesReveal).opacity.value,
-          allOf(greaterThan(0), lessThan(1)),
+          find.byKey(const ValueKey('huddle-participant-modal-backdrop')),
+          findsOneWidget,
         );
+        expect(
+          find.byKey(const ValueKey('huddle-participant-spotlight')),
+          findsOneWidget,
+        );
+        await tester.pumpAndSettle();
         expect(find.text('Miles'), findsOneWidget);
         expect(find.text('Pollen'), findsNothing);
         expect(find.byKey(const ValueKey('huddle-leave')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('huddle-participant-label-desktop')),
+          findsNothing,
+        );
+
+        await tester.tap(
+          find.byKey(const ValueKey('huddle-participant-spotlight')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('huddle-participant-spotlight')),
+          findsNothing,
+        );
 
         await tester.tap(
           find.byKey(const ValueKey('huddle-participant-avatar-agent')),
         );
-        await tester.pump();
+        await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(2));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.text('Pollen'), findsOneWidget);
+        await tester.tapAt(const Offset(8, 8));
+        await tester.pumpAndSettle();
+        expect(find.text('Pollen'), findsNothing);
 
         await tester.tap(
           find.byKey(const ValueKey('huddle-participant-avatar-self')),
         );
         await tester.pumpAndSettle();
-        expect(find.text('You'), findsOneWidget);
-        final selfLabel = find.byKey(
-          const ValueKey('huddle-participant-label-self'),
-        );
-        final selfAvatar = find.byKey(
-          const ValueKey('huddle-speaking-ring-self'),
-        );
+        expect(find.text('You'), findsNothing);
         expect(
-          tester.getCenter(selfLabel).dx,
-          closeTo(tester.getCenter(selfAvatar).dx, 0.01),
+          find.byKey(
+            const ValueKey('huddle-participant-spotlight-avatar-self'),
+          ),
+          findsNothing,
         );
-        expect(
-          tester.getTopLeft(selfLabel).dy,
-          greaterThanOrEqualTo(tester.getBottomLeft(selfAvatar).dy),
+        expect(hapticCalls, hasLength(2));
+        final selfSemantics = tester.widget<Semantics>(
+          find.byWidgetPredicate(
+            (widget) => widget is Semantics && widget.properties.label == 'You',
+          ),
         );
+        expect(selfSemantics.properties.button, isFalse);
+        expect(selfSemantics.properties.onTap, isNull);
+        expect(selfSemantics.properties.hint, isNull);
+        hapticCalls.clear();
         expect(find.text('Connected'), findsNothing);
         expect(find.text('Waiting for remote audio'), findsNothing);
         expect(find.text('Microphone muted'), findsNothing);
@@ -4638,6 +4673,8 @@ void main() {
             ?.resolve(const <WidgetState>{});
         await tester.tap(find.byKey(const ValueKey('huddle-speaker-toggle')));
         await tester.pump();
+        expect(hapticCalls, hasLength(1));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-speaker-toggle')),
@@ -4692,6 +4729,8 @@ void main() {
         );
         await tester.tap(find.byKey(const ValueKey('huddle-mute-toggle')));
         await tester.pump();
+        expect(hapticCalls, hasLength(2));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           find.descendant(
             of: find.byKey(const ValueKey('huddle-mute-toggle')),
@@ -4732,6 +4771,8 @@ void main() {
         );
         await tester.tap(find.byKey(const ValueKey('huddle-emoji-reactions')));
         await tester.pump(const Duration(milliseconds: 500));
+        expect(hapticCalls, hasLength(3));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.byType(EmojiPickerSheet), findsOneWidget);
         tester
             .widget<EmojiPickerSheet>(find.byType(EmojiPickerSheet))
@@ -4742,6 +4783,8 @@ void main() {
 
         await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
         await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(4));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.widgetWithText(FilledButton, 'Open'), findsOneWidget);
         expect(
           tester
@@ -4798,9 +4841,18 @@ void main() {
         expect(find.bySemanticsLabel('Unmute'), findsOneWidget);
 
         await tester.tap(
+          find.byKey(const ValueKey('huddle-drawer-speaker-toggle')),
+        );
+        await tester.pump();
+        expect(hapticCalls, hasLength(5));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
+
+        await tester.tap(
           find.byKey(const ValueKey('huddle-drawer-mute-toggle')),
         );
         await tester.pump();
+        expect(hapticCalls, hasLength(6));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           tester
               .widget<AnimatedPositioned>(
@@ -4844,6 +4896,8 @@ void main() {
         }
         await tester.tap(find.byKey(const ValueKey('huddle-drawer-expand')));
         await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(7));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(find.byKey(const ValueKey('huddle-minimize')), findsOneWidget);
         expect(
           tester
@@ -4858,8 +4912,12 @@ void main() {
 
         await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
         await tester.pumpAndSettle();
+        expect(hapticCalls, hasLength(8));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         await tester.tap(find.byKey(const ValueKey('huddle-drawer-leave')));
         await tester.pump();
+        expect(hapticCalls, hasLength(9));
+        expect(hapticCalls.last.arguments, 'HapticFeedbackType.selectionClick');
         expect(
           tester
               .widget<AnimatedPositioned>(
@@ -4883,7 +4941,7 @@ void main() {
     );
 
     testWidgets(
-      'fits a dense Huddle roster without scrolling and shrinks avatars',
+      'caps a dense Huddle roster at ten avatars with an overflow count',
       (tester) async {
         tester.view.physicalSize = const Size(390, 844);
         tester.view.devicePixelRatio = 1;
@@ -4953,12 +5011,60 @@ void main() {
           ),
           findsNothing,
         );
-        for (final pubkey in remotePubkeys) {
+        for (final pubkey in remotePubkeys.take(10)) {
           expect(
-            find.byKey(ValueKey('huddle-participant-entry-$pubkey')),
+            find.byKey(ValueKey('huddle-participant-avatar-$pubkey')),
             findsOneWidget,
           );
         }
+        for (final pubkey in remotePubkeys.skip(10)) {
+          expect(
+            find.byKey(ValueKey('huddle-participant-avatar-$pubkey')),
+            findsNothing,
+          );
+        }
+        expect(
+          find.byKey(const ValueKey('huddle-participant-overflow')),
+          findsOneWidget,
+        );
+        expect(find.text('+14'), findsOneWidget);
+
+        await tester.tap(
+          find.byKey(const ValueKey('huddle-participant-overflow')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster')),
+          findsOneWidget,
+        );
+        expect(find.text('14 more people'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-10')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-0')),
+          findsNothing,
+        );
+        await tester.scrollUntilVisible(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-23')),
+          200,
+          scrollable: find.descendant(
+            of: find.byKey(const ValueKey('huddle-participant-roster-list')),
+            matching: find.byType(Scrollable),
+          ),
+        );
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster-row-guest-23')),
+          findsOneWidget,
+        );
+        await tester.tapAt(const Offset(8, 8));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('huddle-participant-roster')),
+          findsNothing,
+        );
 
         final firstRemoteRing = find.byKey(
           const ValueKey('huddle-speaking-ring-guest-0'),
@@ -5106,10 +5212,10 @@ void main() {
       },
     );
 
-    testWidgets('does not add backing-channel members after relay admission', (
+    testWidgets('springs live backing-channel members in and out', (
       tester,
     ) async {
-      const staleMemberPubkey =
+      const addedMemberPubkey =
           'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       final membersNotifier = _MutableHuddleMembersNotifier(const []);
@@ -5127,9 +5233,9 @@ void main() {
           users: const {
             'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
             'self': UserProfile(pubkey: 'self', displayName: 'Self'),
-            staleMemberPubkey: UserProfile(
-              pubkey: staleMemberPubkey,
-              displayName: 'Stale member',
+            addedMemberPubkey: UserProfile(
+              pubkey: addedMemberPubkey,
+              displayName: 'Added member',
             ),
           },
           huddleMembersNotifier: membersNotifier,
@@ -5144,9 +5250,14 @@ void main() {
       await tester.tap(find.widgetWithText(FilledButton, 'Join'));
       await tester.pumpAndSettle();
 
+      final desktopAvatar = find.byKey(
+        const ValueKey('huddle-speaking-ring-desktop'),
+      );
+      final initialDesktopCenter = tester.getCenter(desktopAvatar);
+
       membersNotifier.replace([
         ChannelMember(
-          pubkey: staleMemberPubkey,
+          pubkey: addedMemberPubkey,
           role: 'member',
           joinedAt: DateTime(2025),
         ),
@@ -5154,15 +5265,74 @@ void main() {
       await tester.pump();
       await tester.pump();
 
+      final addedMemberScale = find.byKey(
+        const ValueKey('huddle-participant-entry-scale-$addedMemberPubkey'),
+      );
+      expect(
+        tester.widget<Transform>(addedMemberScale).transform.storage[0],
+        closeTo(0.72, 0.01),
+      );
+      await tester.pump(const Duration(milliseconds: 120));
+      final movingDesktopCenter = tester.getCenter(desktopAvatar);
+      expect(
+        tester.widget<Transform>(addedMemberScale).transform.storage[0],
+        greaterThan(0.72),
+      );
+      expect(
+        (movingDesktopCenter - initialDesktopCenter).distance,
+        greaterThan(1),
+      );
       expect(
         find.byKey(
-          const ValueKey('huddle-participant-avatar-$staleMemberPubkey'),
+          const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
         ),
-        findsNothing,
+        findsOneWidget,
       );
       expect(
         find.byKey(const ValueKey('huddle-participant-avatar-desktop')),
         findsOneWidget,
+      );
+
+      await tester.pumpAndSettle();
+      final settledDesktopCenter = tester.getCenter(desktopAvatar);
+      expect(
+        (settledDesktopCenter - movingDesktopCenter).distance,
+        greaterThan(1),
+      );
+      expect(
+        (settledDesktopCenter - initialDesktopCenter).distance,
+        greaterThan(1),
+      );
+      expect(
+        tester.widget<Transform>(addedMemberScale).transform.storage[0],
+        closeTo(1, 0.01),
+      );
+
+      membersNotifier.replace(const []);
+      await tester.pump();
+      await tester.pump();
+      expect(
+        find.byKey(
+          const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+        ),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(milliseconds: 54));
+      expect(
+        tester.widget<Transform>(addedMemberScale).transform.storage[0],
+        greaterThan(1.05),
+      );
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(
+        tester.widget<Transform>(addedMemberScale).transform.storage[0],
+        lessThan(1),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(
+          const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+        ),
+        findsNothing,
       );
     });
 
@@ -5173,6 +5343,22 @@ void main() {
       final media = _HuddleTestMedia();
       final transport = _HuddleTestTransport();
       String? leftChannelId;
+      final hapticCalls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'HapticFeedback.vibrate') {
+            hapticCalls.add(call);
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
 
       await tester.pumpWidget(
         _buildTestable(
@@ -5214,6 +5400,8 @@ void main() {
 
       await tester.tap(hangup);
       await tester.pump();
+      expect(hapticCalls, hasLength(1));
+      expect(hapticCalls.single.arguments, 'HapticFeedbackType.selectionClick');
       for (var attempt = 0; attempt < 100 && leftChannelId == null; attempt++) {
         await tester.pump();
       }
