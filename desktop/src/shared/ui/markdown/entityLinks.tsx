@@ -117,7 +117,7 @@ function EntityMetadataTooltip({
             </span>
           ) : null}
           <span
-            className={`${context ? "mt-1 " : ""}block max-w-full truncate whitespace-nowrap text-2xs text-primary-foreground/70`}
+            className={`${context ? "mt-1 " : ""}block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/70`}
             data-buzz-tooltip-metadata-type=""
           >
             {footer}
