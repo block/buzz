@@ -1175,14 +1175,16 @@ test("project overview presents collapsible context beside grouped activity", as
     "true",
   );
   const channelRows = page.getByTestId("project-channel-row");
-  await expect(channelRows).toHaveCount(3);
+  // One row per project or repository binding: buzz, buzz · relay-tools,
+  // design-system, and relay-tools all bind the shared mock channel.
+  await expect(channelRows).toHaveCount(4);
   await expect(channelRows.first()).toContainText("#general");
   const channelsList = page.getByTestId("projects-channels-list");
   await expect(channelsList).toContainText("buzz");
   await expect(channelsList).toContainText("relay-tools");
   await expect(channelsList).toContainText("design-system");
-  await expect(page.getByTestId("project-channel-project")).toHaveCount(3);
-  await expect(page.getByTestId("project-channel-repository")).toHaveCount(3);
+  await expect(page.getByTestId("project-channel-project")).toHaveCount(4);
+  await expect(page.getByTestId("project-channel-repository")).toHaveCount(4);
   await page.getByTestId("projects-section-projects").click();
   await expect(page.getByTestId("projects-page-header")).toContainText(
     "Projects",
@@ -1815,4 +1817,69 @@ test("project task can be created with a category from the tasks header", async 
     "Document the broken workflow",
   ]);
   expect(createdEvent?.tags).toContainEqual(["t", "change-request"]);
+});
+
+test("narrow layouts keep section context reachable through a sheet", async ({
+  page,
+}) => {
+  await page.setViewportSize({ height: 720, width: 900 });
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  // Below the detached breakpoint the docked rail never renders, but the
+  // context toggle stays available.
+  await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
+  await expect(page.getByTestId("projects-overview-context-panel")).toHaveCount(
+    0,
+  );
+  const contextToggle = page.getByTestId("projects-overview-context-toggle");
+  await expect(contextToggle).toBeVisible();
+  await expect(contextToggle).toHaveAttribute("aria-pressed", "false");
+
+  // Keyboard journey into the Tasks section: open the sheet from the toggle.
+  await page.getByTestId("projects-section-issues").click();
+  await expect(page.getByTestId("projects-page-header")).toContainText("Tasks");
+  await contextToggle.focus();
+  await page.keyboard.press("Enter");
+  const contextSheet = page.getByTestId("projects-overview-context-sheet");
+  await expect(contextSheet).toBeVisible();
+  await expect(
+    contextSheet.getByTestId("projects-overview-context-title"),
+  ).toHaveText("Tasks");
+  await expect(contextToggle).toHaveAttribute("aria-pressed", "true");
+
+  // Escape dismisses the sheet and returns focus to the toggle.
+  await page.keyboard.press("Escape");
+  await expect(contextSheet).toBeHidden();
+  await expect(contextToggle).toBeFocused();
+  await expect(contextToggle).toHaveAttribute("aria-pressed", "false");
+
+  // The same journey follows the Reviews section.
+  await page.getByTestId("projects-section-prs").click();
+  await expect(page.getByTestId("projects-page-header")).toContainText(
+    "Reviews",
+  );
+  await contextToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(contextSheet).toBeVisible();
+  await expect(
+    contextSheet.getByTestId("projects-overview-context-title"),
+  ).toHaveText("Reviews");
+  await page.keyboard.press("Escape");
+  await expect(contextSheet).toBeHidden();
+
+  // Selecting a section inside the sheet navigates and dismisses it: the
+  // Activity context lists every section as a stat row.
+  await page.getByTestId("projects-section-all").click();
+  await contextToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(contextSheet).toBeVisible();
+  await contextSheet
+    .getByTestId("projects-overview-stat")
+    .filter({ hasText: "Tasks" })
+    .click();
+  await expect(contextSheet).toBeHidden();
+  await expect(page.getByTestId("projects-page-header")).toContainText("Tasks");
 });

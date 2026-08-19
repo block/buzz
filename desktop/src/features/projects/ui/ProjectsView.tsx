@@ -29,6 +29,7 @@ import {
 } from "@/features/projects/lib/projectRepoHost";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import { ProjectsChannelsList } from "@/features/projects/ui/ProjectsChannelsList";
+import { ProjectsOverviewContextSheet } from "@/features/projects/ui/ProjectsOverviewContextSheet";
 import {
   ProjectsActivityIntro,
   ProjectsOverviewContextPanel,
@@ -158,6 +159,10 @@ export function ProjectsView() {
       : storedFilter;
   });
   const [overviewPanelOpen, setOverviewPanelOpen] = React.useState(true);
+  // Narrow layouts present the same context as a dismissible sheet instead of
+  // the docked rail; the sheet starts closed so resizing never pops a modal.
+  const [narrowContextOpen, setNarrowContextOpen] = React.useState(false);
+  const contextToggleRef = React.useRef<HTMLButtonElement | null>(null);
   const isNarrowProjectsLayout = useMediaBreakpoint(
     PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX,
   );
@@ -697,31 +702,51 @@ export function ProjectsView() {
     />
   );
 
+  const contextPanelProps = {
+    filter,
+    issues:
+      projectsWorkItemsQuery.data?.issues.items.map(({ issue }) => issue) ?? [],
+    onCreateIssue: () => setCreateIssueOpen(true),
+    onCreateProject: () => setCreateProjectOpen(true),
+    onCreatePullRequest: () => setCreatePullRequestOpen(true),
+    profiles,
+    projects,
+    pullRequests:
+      projectsWorkItemsQuery.data?.pullRequests.items.map(
+        ({ pullRequest }) => pullRequest,
+      ) ?? [],
+    summaries: activitySummariesQuery.data,
+  };
+
   const overviewDetached = overviewPanelOpen && !isNarrowProjectsLayout;
+  const contextOpen = isNarrowProjectsLayout
+    ? narrowContextOpen
+    : overviewPanelOpen;
   const chromeActions = (
     <>
-      {isNarrowProjectsLayout ? null : (
-        <Button
-          aria-label={
-            overviewPanelOpen ? "Hide project context" : "Show project context"
-          }
-          aria-pressed={overviewPanelOpen}
-          className="h-7 w-7 text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-          data-testid="projects-overview-context-toggle"
-          onClick={() => setOverviewPanelOpen((open) => !open)}
-          size="icon"
-          title={
-            overviewPanelOpen ? "Hide project context" : "Show project context"
-          }
-          type="button"
-          variant="ghost"
-        >
-          <DrawerPanelIcon
-            className="-scale-x-100"
-            side={overviewPanelOpen ? "left" : "right"}
-          />
-        </Button>
-      )}
+      <Button
+        aria-label={
+          contextOpen ? "Hide project context" : "Show project context"
+        }
+        aria-pressed={contextOpen}
+        className="h-7 w-7 text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+        data-testid="projects-overview-context-toggle"
+        onClick={() =>
+          isNarrowProjectsLayout
+            ? setNarrowContextOpen((open) => !open)
+            : setOverviewPanelOpen((open) => !open)
+        }
+        ref={contextToggleRef}
+        size="icon"
+        title={contextOpen ? "Hide project context" : "Show project context"}
+        type="button"
+        variant="ghost"
+      >
+        <DrawerPanelIcon
+          className="-scale-x-100"
+          side={contextOpen ? "left" : "right"}
+        />
+      </Button>
       {overviewDetached ? null : createMenu}
     </>
   );
@@ -924,29 +949,33 @@ export function ProjectsView() {
         >
           <div className="min-h-0 flex-1 overflow-y-auto">
             <ProjectsOverviewContextPanel
-              filter={filter}
-              issues={
-                projectsWorkItemsQuery.data?.issues.items.map(
-                  ({ issue }) => issue,
-                ) ?? []
-              }
-              onCreateIssue={() => setCreateIssueOpen(true)}
-              onCreateProject={() => setCreateProjectOpen(true)}
-              onCreatePullRequest={() => setCreatePullRequestOpen(true)}
+              {...contextPanelProps}
               onSelectSection={(section) => {
                 handleFilterChange(section);
               }}
-              profiles={profiles}
-              projects={projects}
-              pullRequests={
-                projectsWorkItemsQuery.data?.pullRequests.items.map(
-                  ({ pullRequest }) => pullRequest,
-                ) ?? []
-              }
-              summaries={activitySummariesQuery.data}
             />
           </div>
         </aside>
+      ) : null}
+      {isNarrowProjectsLayout ? (
+        <ProjectsOverviewContextSheet
+          onCloseAutoFocus={(event) => {
+            // Return focus to the chrome toggle so the keyboard journey can
+            // continue where it started.
+            event.preventDefault();
+            contextToggleRef.current?.focus();
+          }}
+          onOpenChange={setNarrowContextOpen}
+          open={narrowContextOpen}
+        >
+          <ProjectsOverviewContextPanel
+            {...contextPanelProps}
+            onSelectSection={(section) => {
+              handleFilterChange(section);
+              setNarrowContextOpen(false);
+            }}
+          />
+        </ProjectsOverviewContextSheet>
       ) : null}
     </div>
   );
