@@ -31,9 +31,9 @@ class ReviewError(RuntimeError):
 
 
 def run(command: list[str], *, cwd: pathlib.Path = ROOT, check: bool = True, capture: bool = True,
-        env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        env: dict[str, str] | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, cwd=cwd, check=check, text=True,
-                          env=subprocess_environment() if env is None else env,
+                          env=subprocess_environment() if env is None else env, timeout=timeout,
                           stdout=subprocess.PIPE if capture else None,
                           stderr=subprocess.PIPE if capture else None)
 
@@ -118,6 +118,35 @@ def wait_for_recording(recorder: subprocess.Popen[str], timeout_seconds: float =
         selector.close()
 
 
+def finalize_recording(recorder: subprocess.Popen[str], video: pathlib.Path) -> None:
+    if recorder.poll() is None:
+        recorder.send_signal(signal.SIGINT)
+    try:
+        returncode = recorder.wait(timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        recorder.kill()
+        recorder.wait(timeout=5)
+        raise ReviewError("simulator recorder required SIGKILL") from exc
+    if returncode:
+        diagnostic = recorder.stderr.read().strip() if recorder.stderr else ""
+        detail = f": {diagnostic}" if diagnostic else ""
+        raise ReviewError(f"simulator recorder failed with exit {returncode}{detail}")
+    if not video.is_file() or video.stat().st_size == 0:
+        raise ReviewError("simulator recorder produced no video")
+    probe = video.with_name("video-validation.mov")
+    try:
+        result = run(["/usr/bin/avconvert", "--source", str(video), "--preset", "PresetHighestQuality",
+                      "--output", str(probe), "--duration", "0.1", "--replace"], check=False, timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        raise ReviewError("timed out validating simulator video") from exc
+    finally:
+        probe.unlink(missing_ok=True)
+    if result.returncode:
+        diagnostic = (result.stderr or result.stdout).strip()
+        detail = f": {diagnostic}" if diagnostic else ""
+        raise ReviewError(f"simulator recorder produced an invalid video{detail}")
+
+
 def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) -> pathlib.Path:
     if sys.platform != "darwin" or not shutil.which("xcrun") or not shutil.which("flutter"):
         raise ReviewError("iOS native review requires macOS, Xcode simctl, and Flutter")
@@ -147,6 +176,7 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
     device: dict[str, Any] | None = None
     udid: str | None = None
     recorder: subprocess.Popen[str] | None = None
+    video: pathlib.Path | None = None
     try:
         device = create_review_device(device_name, run_id)
         udid = device["udid"]
@@ -174,17 +204,17 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
         time.sleep(0.5)
         if result.returncode:
             raise ReviewError(f"Flutter integration journey failed with exit {result.returncode}")
-        receipt["status"] = "passed"
     except Exception as exc:
         receipt["failure"] = str(exc)
     finally:
         errors = []
-        if recorder and recorder.poll() is None:
-            recorder.send_signal(signal.SIGINT)
+        if recorder:
             try:
-                recorder.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                recorder.kill(); errors.append("recorder required SIGKILL")
+                if video is None:
+                    raise ReviewError("simulator recorder video path was not initialized")
+                finalize_recording(recorder, video)
+            except Exception as exc:
+                errors.append(str(exc))
         if udid:
             try:
                 run(["xcrun", "simctl", "shutdown", udid], check=False)
@@ -197,6 +227,10 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
         receipt["cleanup"] = {"status": "failed" if errors else "passed", "errors": errors}
         if errors:
             receipt["status"] = "failed"
+            if receipt["failure"] is None:
+                receipt["failure"] = errors[0]
+        elif receipt["failure"] is None:
+            receipt["status"] = "passed"
         receipt["finished_at"] = utc_now()
         (run_dir / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(run_dir)

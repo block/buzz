@@ -548,7 +548,10 @@ struct BuzzNativeDriver {
                             let point = CGPoint(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
                             CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point,
                                     mouseButton: .left)?.post(tap: .cghidEventTap)
-                            let deltaY = Int32(action["delta_y"] as? Int ?? 0)
+                            guard let rawDeltaY = action["delta_y"] as? Int,
+                                  let deltaY = Int32(exactly: rawDeltaY) else {
+                                throw DriverError.message("scroll delta_y must fit in Int32")
+                            }
                             guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                                       wheel1: deltaY, wheel2: 0, wheel3: 0) else {
                                 throw DriverError.message("could not create scroll event")

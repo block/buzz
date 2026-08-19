@@ -59,8 +59,22 @@ class JourneyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "invalid.yaml"
             path.write_text(source)
-            with self.assertRaisesRegex(review_native.HarnessError, "scroll requires integer delta_y"):
+            with self.assertRaisesRegex(review_native.HarnessError, "scroll delta_y must be an integer"):
                 review_native.load_journey(path)
+
+    def test_scroll_delta_respects_schema_bounds(self):
+        source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
+        for value in (-10000, 10000):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "valid.yaml"
+                path.write_text(source.replace("delta_y: 240", f"delta_y: {value}", 1))
+                self.assertEqual(review_native.load_journey(path)["flow"], "composer_keyboard")
+        for value in (-10001, 10001, 9223372036854775807):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "invalid.yaml"
+                path.write_text(source.replace("delta_y: 240", f"delta_y: {value}", 1))
+                with self.assertRaisesRegex(review_native.HarnessError, "-10000..10000"):
+                    review_native.load_journey(path)
 
     def test_scroll_requires_locator(self):
         source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
@@ -350,6 +364,21 @@ metrics:
             candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
             baseline[1] = baseline[0]
             with self.assertRaisesRegex(review_native.HarnessError, "duplicate run_id"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_cross_cohort_run_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            receipts = [self.receipt(root / f"r{i}.json", "same", 100) for i in range(3)]
+            with self.assertRaisesRegex(review_native.HarnessError, "cohorts contain duplicate run_id"):
+                review_native.compare_performance(receipts, receipts, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_equal_cohort_revisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "same", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "same", 100) for i in range(3)]
+            with self.assertRaisesRegex(review_native.HarnessError, "different source revisions"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
 
     def test_comparison_rejects_boolean_minimum_and_non_finite_metrics(self):

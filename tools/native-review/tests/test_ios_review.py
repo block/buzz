@@ -110,6 +110,7 @@ class IosReviewTests(unittest.TestCase):
              }), \
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
              mock.patch.object(ios_review, "wait_for_recording"), \
+             mock.patch.object(ios_review, "finalize_recording") as finalize_recording, \
              mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
             with self.assertRaisesRegex(ios_review.ReviewError, "exit 1"):
                 ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))
@@ -117,7 +118,7 @@ class IosReviewTests(unittest.TestCase):
             self.assertEqual(len(receipts), 1)
             receipt = json.loads(receipts[0].read_text())
 
-        self.assertTrue(recorder.finalized)
+        finalize_recording.assert_called_once()
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["cleanup"], {"status": "passed", "errors": []})
         self.assertEqual(receipt["artifacts"], {
@@ -141,6 +142,81 @@ class IosReviewTests(unittest.TestCase):
         self.assertFalse(any("erase" in command for command in commands))
         self.assertTrue(all("pre-existing-device" not in command for command in commands))
 
+    def test_recorder_failure_after_start_fails_successful_journey_and_cleans_device(self):
+        recorder = FakeRecorder()
+        recorder.finalized = True
+        recorder.poll = mock.Mock(return_value=9)
+        recorder.wait = mock.Mock(return_value=9)
+        recorder.read = mock.Mock(return_value="encoder failed")
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if command[:2] == ["flutter", "drive"]:
+                return subprocess.CompletedProcess(command, 0, "journey passed", "")
+            if "screenshot" in command:
+                pathlib.Path(command[-1]).write_bytes(b"png")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(ios_review.sys, "platform", "darwin"), \
+             mock.patch.object(ios_review.shutil, "which", return_value="/tool"), \
+             mock.patch.object(ios_review, "provenance", return_value={"head_sha": "a" * 40, "dirty": False, "status": []}), \
+             mock.patch.object(ios_review, "git", return_value="a" * 12), \
+             mock.patch.object(ios_review, "create_review_device", return_value={
+                 "name": "Buzz Native Review failed-recorder", "udid": "owned-device",
+                 "runtimeIdentifier": "runtime", "deviceType": "iPhone Test", "owned": True,
+             }), \
+             mock.patch.object(ios_review, "run", side_effect=fake_run), \
+             mock.patch.object(ios_review, "wait_for_recording"), \
+             mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
+            with self.assertRaisesRegex(ios_review.ReviewError, "recorder failed with exit 9"):
+                ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))
+            receipt = json.loads(next(pathlib.Path(directory).rglob("receipt.json")).read_text())
+
+        self.assertEqual(receipt["status"], "failed")
+        self.assertIn("recorder failed with exit 9", receipt["failure"])
+        self.assertEqual(receipt["cleanup"]["status"], "failed")
+        self.assertIn(["xcrun", "simctl", "delete", "owned-device"], commands)
+
+    def test_video_validation_timeout_fails_journey_and_still_cleans_device(self):
+        recorder = FakeRecorder()
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if command[:2] == ["flutter", "drive"]:
+                return subprocess.CompletedProcess(command, 0, "journey passed", "")
+            if "screenshot" in command:
+                pathlib.Path(command[-1]).write_bytes(b"png")
+            if command[0] == "/usr/bin/avconvert":
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        def fake_wait_for_recording(_recorder):
+            run_dir = next((pathlib.Path(directory) / ("a" * 12) / "ios_pairing").iterdir())
+            (run_dir / "video.mp4").write_bytes(b"video")
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(ios_review.sys, "platform", "darwin"), \
+             mock.patch.object(ios_review.shutil, "which", return_value="/tool"), \
+             mock.patch.object(ios_review, "provenance", return_value={"head_sha": "a" * 40, "dirty": False, "status": []}), \
+             mock.patch.object(ios_review, "git", return_value="a" * 12), \
+             mock.patch.object(ios_review, "create_review_device", return_value={
+                 "name": "Buzz Native Review timeout", "udid": "owned-device",
+                 "runtimeIdentifier": "runtime", "deviceType": "iPhone Test", "owned": True,
+             }), \
+             mock.patch.object(ios_review, "run", side_effect=fake_run), \
+             mock.patch.object(ios_review, "wait_for_recording", side_effect=fake_wait_for_recording), \
+             mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
+            with self.assertRaisesRegex(ios_review.ReviewError, "timed out validating simulator video"):
+                ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))
+            receipt = json.loads(next(pathlib.Path(directory).rglob("receipt.json")).read_text())
+
+        self.assertEqual(receipt["status"], "failed")
+        self.assertEqual(receipt["failure"], "timed out validating simulator video")
+        self.assertIn(["xcrun", "simctl", "delete", "owned-device"], commands)
+
     def test_recorder_timeout_is_reported_and_device_is_cleaned(self):
         recorder = FakeRecorder()
         recorder.readline = mock.Mock(return_value="")
@@ -161,6 +237,7 @@ class IosReviewTests(unittest.TestCase):
              }), \
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
              mock.patch.object(ios_review, "wait_for_recording", side_effect=ios_review.ReviewError("timed out waiting for Simulator recording")), \
+             mock.patch.object(ios_review, "finalize_recording", side_effect=lambda process, _video: process.send_signal(0)), \
              mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
             with self.assertRaisesRegex(ios_review.ReviewError, "timed out"):
                 ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))

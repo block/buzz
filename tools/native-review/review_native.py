@@ -211,10 +211,14 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
             not isinstance(duration, int) or isinstance(duration, bool) or not 0 <= duration <= 30000
         ):
             raise HarnessError(f"{where}.act.duration_ms must be 0..30000")
-        if action_type == "scroll" and (
-            not isinstance(action.get("delta_y"), int) or isinstance(action.get("delta_y"), bool)
-        ):
-            raise HarnessError(f"{where}: scroll requires integer delta_y")
+        if action_type == "scroll":
+            delta_y = action.get("delta_y")
+            if (
+                not isinstance(delta_y, int)
+                or isinstance(delta_y, bool)
+                or not -10000 <= delta_y <= 10000
+            ):
+                raise HarnessError(f"{where}: scroll delta_y must be an integer from -10000..10000")
         validate_expectation(step["expect"], f"{where}.expect")
         if "expect_for" in step:
             sustained = step["expect_for"]
@@ -794,6 +798,9 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     if len(baseline) < minimum or len(candidate) < minimum:
         raise HarnessError(f"performance comparison requires at least {minimum} clean samples per cohort")
     all_receipts = baseline + candidate
+    run_ids = [receipt.get("run_id") for receipt in all_receipts]
+    if len(set(run_ids)) != len(run_ids):
+        raise HarnessError("baseline and candidate cohorts contain duplicate run_id values")
     flows = {receipt.get("flow") for receipt in all_receipts}
     machines = {json.dumps(receipt.get("performance", {}).get("machine"), sort_keys=True) for receipt in all_receipts}
     if flows != {budget["flow"]}:
@@ -803,6 +810,10 @@ def compare_performance(baseline_paths: list[pathlib.Path], candidate_paths: lis
     for label, cohort in (("baseline", baseline), ("candidate", candidate)):
         if len({receipt["provenance"].get("head_sha") for receipt in cohort}) != 1:
             raise HarnessError(f"{label} cohort mixes source revisions")
+    baseline_sha = baseline[0]["provenance"].get("head_sha")
+    candidate_sha = candidate[0]["provenance"].get("head_sha")
+    if baseline_sha == candidate_sha:
+        raise HarnessError("baseline and candidate cohorts must use different source revisions")
 
     baseline_summary = cohort_summary(baseline, list(metrics))
     candidate_summary = cohort_summary(candidate, list(metrics))
