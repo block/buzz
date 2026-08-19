@@ -1,7 +1,14 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import {
+  ALargeSmall,
+  ArrowUp,
+  AtSign,
+  Paperclip,
+  Square,
+  X,
+} from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -25,6 +32,7 @@ export const MessageComposerToolbar = React.memo(
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
+    isStoppingAgent = false,
     isUploading,
     onCaptureSelection,
     onEmojiPickerOpenChange,
@@ -33,6 +41,7 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
+    onStopAgent,
     sendDisabled,
   }: {
     composerDisabled: boolean;
@@ -42,6 +51,7 @@ export const MessageComposerToolbar = React.memo(
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
+    isStoppingAgent?: boolean;
     isUploading: boolean;
     onCaptureSelection: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
@@ -50,6 +60,7 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
+    onStopAgent?: () => void;
     sendDisabled: boolean;
   }) {
     return (
@@ -231,23 +242,50 @@ export const MessageComposerToolbar = React.memo(
 
         <div className="flex items-center gap-2">
           {extraActions}
-          <Button
-            aria-label={isSending ? "Sending" : "Send message"}
-            className="rounded-full"
-            data-testid="send-message"
-            disabled={sendDisabled || isSending}
-            size="icon"
-            type="submit"
-          >
-            {isSending ? (
-              <span
-                aria-hidden
-                className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
-              />
-            ) : (
-              <ArrowUp aria-hidden />
-            )}
-          </Button>
+          {onStopAgent ? (
+            <Tooltip disableHoverableContent>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="Stop agent output"
+                  className="rounded-full"
+                  data-testid="stop-agent-output"
+                  disabled={isStoppingAgent}
+                  onClick={onStopAgent}
+                  size="icon"
+                  type="button"
+                  variant="destructive"
+                >
+                  {isStoppingAgent ? (
+                    <span
+                      aria-hidden
+                      className="h-4 w-4 animate-spin rounded-full border-2 border-destructive-foreground border-t-transparent"
+                    />
+                  ) : (
+                    <Square aria-hidden className="fill-current" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Stop agent output</TooltipContent>
+            </Tooltip>
+          ) : (
+            <Button
+              aria-label={isSending ? "Sending" : "Send message"}
+              className="rounded-full"
+              data-testid="send-message"
+              disabled={sendDisabled || isSending}
+              size="icon"
+              type="submit"
+            >
+              {isSending ? (
+                <span
+                  aria-hidden
+                  className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
+                />
+              ) : (
+                <ArrowUp aria-hidden />
+              )}
+            </Button>
+          )}
         </div>
       </div>
     );

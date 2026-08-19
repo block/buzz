@@ -60,6 +60,11 @@ import { submitMessageEdit } from "./submitMessageEdit";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
+import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import { useActiveAgentTurnsByChannel } from "@/features/agents/activeAgentTurnsStore";
+import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { toast } from "sonner";
 function MessageComposerImpl({
   audienceContext = null,
   channelId = null,
@@ -121,6 +126,8 @@ function MessageComposerImpl({
   }, []);
   const drafts = useDrafts();
   const identityQuery = useIdentityQuery();
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const activeAgentTurns = useActiveAgentTurnsByChannel();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
   const audienceThreadRootId = audienceContext?.threadRootId ?? null;
@@ -155,6 +162,48 @@ function MessageComposerImpl({
   const media = mediaController ?? internalMedia;
   const [isDeferredEditPending, setDeferredEditPending] = React.useState(false);
   const composerDisabled = disabled || isDeferredEditPending;
+  const interruptibleAgentPubkeys = React.useMemo(() => {
+    if (!channelId || editTarget != null) return [];
+    const activeChannel = activeAgentTurns.find(
+      (turn) => turn.channelId === channelId,
+    );
+    if (!activeChannel) return [];
+    const managedAgentsByPubkey = new Map(
+      (managedAgentsQuery.data ?? [])
+        .filter(
+          (agent) => agent.status === "running" || agent.status === "deployed",
+        )
+        .map((agent) => [normalizePubkey(agent.pubkey), agent]),
+    );
+    return activeChannel.agentPubkeys.filter((pubkey) =>
+      managedAgentsByPubkey.has(normalizePubkey(pubkey)),
+    );
+  }, [activeAgentTurns, channelId, editTarget, managedAgentsQuery.data]);
+  const [isStoppingAgent, setIsStoppingAgent] = React.useState(false);
+  const handleStopAgent = React.useCallback(async () => {
+    if (!channelId || interruptibleAgentPubkeys.length === 0 || isStoppingAgent)
+      return;
+    setIsStoppingAgent(true);
+    const results = await Promise.allSettled(
+      interruptibleAgentPubkeys.map((pubkey) =>
+        cancelManagedAgentTurn(pubkey, channelId),
+      ),
+    );
+    const failed = results.filter((result) => result.status === "rejected");
+    if (failed.length === 0) {
+      toast.success("Stop signal sent to the agent.");
+    } else if (failed.length === results.length) {
+      const firstError = failed[0].reason;
+      toast.error(
+        firstError instanceof Error
+          ? firstError.message
+          : "Failed to stop agent output.",
+      );
+    } else {
+      toast.error("Some agents could not be stopped.");
+    }
+    setIsStoppingAgent(false);
+  }, [channelId, interruptibleAgentPubkeys, isStoppingAgent]);
   const isEditSubmissionLocked =
     isSending || media.isUploading || isDeferredEditPending;
   const canRestoreEditDraftRef = React.useRef(false);
@@ -989,6 +1038,7 @@ function MessageComposerImpl({
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending}
+              isStoppingAgent={isStoppingAgent}
               isUploading={media.isUploading}
               onCaptureSelection={handleCaptureSelection}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
@@ -997,6 +1047,11 @@ function MessageComposerImpl({
               onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={openMentionPicker}
               onPaperclip={handlePaperclipClick}
+              onStopAgent={
+                interruptibleAgentPubkeys.length > 0
+                  ? handleStopAgent
+                  : undefined
+              }
               sendDisabled={sendDisabled}
             />
           </form>
