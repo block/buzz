@@ -45,6 +45,8 @@ pub mod tts;
 pub mod tts_settings;
 mod tts_voice_import;
 mod tts_voice_registry;
+#[cfg_attr(not(test), allow(dead_code))] // T2 gate scaffold; wired into STT in T3.
+mod turn_gate;
 mod window;
 pub mod wire;
 
