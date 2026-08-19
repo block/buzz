@@ -5,6 +5,7 @@ import {
   dedupeRegisteredAgentsAgainstManaged,
   resolveRegisteredAgentDisplay,
   registeredAgentRoleSummary,
+  visibleRegisteredAgentReferences,
 } from "./registeredAgentCards.ts";
 
 const PUBKEY = "a1".repeat(32);
@@ -57,5 +58,21 @@ test("registered references are deduped against managed pubkeys", () => {
   assert.deepEqual(
     dedupeRegisteredAgentsAgainstManaged(references, [{ pubkey: PUBKEY }]),
     [reference(OTHER, "visible")],
+  );
+});
+
+test("registered-reference errors fail closed over stale cached data", () => {
+  const staleReferences = [reference(OTHER, "stale")];
+  assert.deepEqual(
+    visibleRegisteredAgentReferences(
+      staleReferences,
+      [],
+      new Error("reference store invalid"),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    visibleRegisteredAgentReferences(staleReferences, [], null),
+    staleReferences,
   );
 });

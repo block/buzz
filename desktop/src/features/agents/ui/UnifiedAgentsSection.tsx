@@ -22,7 +22,7 @@ import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { RegisteredAgentIdentityCard } from "./RegisteredAgentIdentityCard";
-import { dedupeRegisteredAgentsAgainstManaged } from "../lib/registeredAgentCards";
+import { visibleRegisteredAgentReferences } from "../lib/registeredAgentCards";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
@@ -128,8 +128,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const isLoading =
     isAgentsLoading || isPersonasLoading || isRegisteredReferencesLoading;
   const visibleRegisteredReferences = React.useMemo(
-    () => dedupeRegisteredAgentsAgainstManaged(registeredReferences, agents),
-    [registeredReferences, agents],
+    () =>
+      visibleRegisteredAgentReferences(
+        registeredReferences,
+        agents,
+        registeredReferencesError,
+      ),
+    [registeredReferences, agents, registeredReferencesError],
   );
 
   return (

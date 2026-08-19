@@ -44,3 +44,12 @@ export function dedupeRegisteredAgentsAgainstManaged<T extends PubkeyRecord>(
     (reference) => !managedPubkeys.has(normalizePubkey(reference.pubkey)),
   );
 }
+
+export function visibleRegisteredAgentReferences<T extends PubkeyRecord>(
+  references: readonly RegisteredAgentReference[],
+  managed: readonly T[],
+  error: Error | null,
+): RegisteredAgentReference[] {
+  if (error) return [];
+  return dedupeRegisteredAgentsAgainstManaged(references, managed);
+}
