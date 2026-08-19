@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const ROOT = new URL("../../..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const SRC = join(ROOT, "src");
 const boundaryScript = readFileSync(
   join(ROOT, "scripts/check-registered-agent-boundary.mjs"),
