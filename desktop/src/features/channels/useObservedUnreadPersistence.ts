@@ -29,8 +29,15 @@ export type ObservedUnreadPersistence = {
   schedule: (scope: string) => void;
   /** Remove a single channel from the persisted cache (clearObserved path). */
   removeChannel: (channelId: string) => void;
-  /** Clear the entire persisted cache (mark-all-read path). */
-  clearAll: () => void;
+  /**
+   * Clear the persisted cache (mark-all-read path).
+   *
+   * `retainChannelIds` keeps those channels' observed events and latest
+   * timestamps: mark-all-read repairs an implausible marker to the present, so
+   * a future-dated observed event stays uncovered and is genuinely still
+   * unread. Dropping its evidence here would lose its unread dot for good.
+   */
+  clearAll: (retainChannelIds?: ReadonlySet<string>) => void;
 };
 
 /**
@@ -163,27 +170,47 @@ export function useObservedUnreadPersistence(
     [currentScope, observedUnreadEventsByChannelRef, latestByChannelRef],
   );
 
-  const clearAll = React.useCallback(() => {
-    // Reject if the loaded scope has drifted — a stale callback must not
-    // cancel the new scope's pending snapshot or clear the wrong bucket.
-    if (scopeLoadedRef.current !== currentScope) return;
-    // Cancel any pending snapshot and clear both in-memory refs before touching
-    // storage — the parent no longer resets the refs directly, so this is the
-    // single transactional clear path for mark-all-read.
-    if (timerRef.current !== null) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    observedUnreadEventsByChannelRef.current = new Map();
-    latestByChannelRef.current = new Map();
-    clearObservedUnreadStorage(normalizedPubkey ?? "", normalizedRelayUrl);
-  }, [
-    currentScope,
-    normalizedPubkey,
-    normalizedRelayUrl,
-    observedUnreadEventsByChannelRef,
-    latestByChannelRef,
-  ]);
+  const clearAll = React.useCallback(
+    (retainChannelIds?: ReadonlySet<string>) => {
+      // Reject if the loaded scope has drifted — a stale callback must not
+      // cancel the new scope's pending snapshot or clear the wrong bucket.
+      if (scopeLoadedRef.current !== currentScope) return;
+      // Cancel any pending snapshot and clear both in-memory refs before touching
+      // storage — the parent no longer resets the refs directly, so this is the
+      // single transactional clear path for mark-all-read.
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      if (retainChannelIds && retainChannelIds.size > 0) {
+        // Partial clear: rebuild both refs from the retained channels and write
+        // the survivors back, rather than wiping the bucket. Assigning fresh
+        // Maps is safe — `persistRefs` holds the ref objects, not the Maps.
+        observedUnreadEventsByChannelRef.current = new Map(
+          [...observedUnreadEventsByChannelRef.current].filter(([channelId]) =>
+            retainChannelIds.has(channelId),
+          ),
+        );
+        latestByChannelRef.current = new Map(
+          [...latestByChannelRef.current].filter(([channelId]) =>
+            retainChannelIds.has(channelId),
+          ),
+        );
+        scheduleObservedUnreadWrite(currentScope, persistRefs.current);
+        return;
+      }
+      observedUnreadEventsByChannelRef.current = new Map();
+      latestByChannelRef.current = new Map();
+      clearObservedUnreadStorage(normalizedPubkey ?? "", normalizedRelayUrl);
+    },
+    [
+      currentScope,
+      normalizedPubkey,
+      normalizedRelayUrl,
+      observedUnreadEventsByChannelRef,
+      latestByChannelRef,
+    ],
+  );
 
   // isScopeLoaded reads the ref at call time — always fresh, never a stale
   // snapshot from a closed-over useMemo value.
