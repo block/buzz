@@ -67,6 +67,12 @@ function normalizeExpandedReplyIds(value: unknown): string[] {
   return ids;
 }
 
+function normalizeCustomTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const title = value.trim().slice(0, MAX_THREAD_RAIL_CUSTOM_TITLE_LENGTH);
+  return title || undefined;
+}
+
 function isPin(value: unknown): value is ThreadRailPin {
   if (typeof value !== "object" || value === null) return false;
   const pin = value as Record<string, unknown>;
@@ -80,6 +86,7 @@ function isPin(value: unknown): value is ThreadRailPin {
     typeof pin.pinnedAt === "number" &&
     Number.isFinite(pin.pinnedAt) &&
     pin.pinnedAt >= 0 &&
+    (pin.customTitle === undefined || typeof pin.customTitle === "string") &&
     (pin.channelName === undefined || typeof pin.channelName === "string") &&
     (pin.rootExcerpt === undefined || typeof pin.rootExcerpt === "string")
   );
@@ -95,6 +102,7 @@ function samePin(
 function normalizePin(pin: ThreadRailPin): ThreadRailPin {
   const {
     channelName,
+    customTitle,
     expandedReplyIds,
     returnAnchorId,
     rootExcerpt,
@@ -102,8 +110,10 @@ function normalizePin(pin: ThreadRailPin): ThreadRailPin {
   } = pin;
   const normalizedExpandedReplyIds =
     normalizeExpandedReplyIds(expandedReplyIds);
+  const normalizedCustomTitle = normalizeCustomTitle(customTitle);
   return {
     ...base,
+    ...(normalizedCustomTitle ? { customTitle: normalizedCustomTitle } : {}),
     ...(returnAnchorId
       ? { returnAnchorId: returnAnchorId.slice(0, MAX_THREAD_RAIL_ID_LENGTH) }
       : {}),

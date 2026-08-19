@@ -86,8 +86,9 @@ export function useThreadRail(
       setRailState((current) => {
         if (current.scopeKey !== currentScopeKey) return current;
         const store = update(current.store);
+        if (store === current.store) return current;
         writeThreadRailStore(scope, store);
-        return store === current.store ? current : { ...current, store };
+        return { ...current, store };
       });
     },
     [currentScopeKey, scope],

@@ -248,6 +248,23 @@ test("renames a pin locally, bounds its title, and clears it without changing id
   );
 });
 
+test("parse normalizes persisted custom titles and rejects non-string titles", () => {
+  const parsed = parseThreadRailStore({
+    version: 1,
+    collapsed: false,
+    pins: [
+      { ...PIN_A, customTitle: `  ${"T".repeat(140)}  ` },
+      { ...PIN_B, customTitle: {} },
+      { ...PIN_B, channelId: "channel-c", customTitle: "   " },
+    ],
+  });
+
+  assert.deepEqual(parsed?.pins, [
+    { ...PIN_A, customTitle: "T".repeat(128) },
+    { ...PIN_B, channelId: "channel-c" },
+  ]);
+});
+
 test("write failure leaves the caller-owned in-memory store usable", () => {
   const original = window.localStorage.setItem;
   window.localStorage.setItem = () => {
