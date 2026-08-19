@@ -1,0 +1,42 @@
+# Terminal-Bench trial: 1 Sonnet 4.6 orchestrator + 2 Haiku 4.5 workers over
+# one Buzz channel. Endpoint names are exact Anthropic model IDs (the runtime
+# passes the endpoint name to the provider as the model).
+# Prices: Anthropic list $/Mtok as of 2026-07 (Sonnet 3/15, Haiku 1/5).
+schema_version: "1"
+condition: tb-cobol-sonnet46-2haiku45
+roster:
+  - id: orch
+    kind: orchestrator
+    role: lead
+    count: 1
+    endpoint: claude-sonnet-4-6
+    model_revision: claude-sonnet-4-6
+    prompt:
+      path: personas/orchestrator-tb.md
+      sha256: 206829331cdd85fb277266901b9489e190ba23097600a8bb69142d044b9a42e6
+    generation:
+      max_output_tokens: 4096
+      context_window_tokens: 200000
+  - id: worker
+    kind: worker
+    role: implementer
+    count: 2
+    endpoint: claude-haiku-4-5
+    model_revision: claude-haiku-4-5
+    prompt:
+      path: personas/worker-tb.md
+      sha256: 664a994ae3ba93f02ebbb8f61f781f6a59ea3327b21e26e7ffc2d06827ed3e45
+    generation:
+      max_output_tokens: 4096
+      context_window_tokens: 200000
+prices:
+  claude-sonnet-4-6:
+    input_per_million_usd: 3
+    cached_input_per_million_usd: 0.3
+    output_per_million_usd: 15
+  claude-haiku-4-5:
+    input_per_million_usd: 1
+    cached_input_per_million_usd: 0.1
+    output_per_million_usd: 5
+trial_budget:
+  timeout_seconds: 900

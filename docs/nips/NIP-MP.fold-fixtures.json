@@ -1,0 +1,527 @@
+{
+  "$comment": "NIP-MP fold fixtures \u2014 the shared oracle for the client-side fold in docs/nips/NIP-MP.md (\"The fold\" and \"Required fold cases\"). Every case in the spec's required-cases table appears here, keyed by `spec_case`. Inputs are SEMANTIC, not signed envelopes: a repository or project is named by its coordinate plus the fold's inputs (signer, members, `maintainers`, visibility, viewer-hidden, deletion). Signing and envelope validation are the ingest contract and live in NIP-MP.fixtures.json; this file assumes every input is a valid, accepted head and tests only the placement the fold derives from it. `expect.containers` lists each rendered project with the members rendered inside it; `expect.implicit_cards` lists the repositories that additionally render as their own single-repository cards. EVERY collection in `expect` is compared as a set \u2014 the containers, each container's `members`, and the implicit cards alike \u2014 because the fold fixes placement, not order. `render` is `resolved` when the member coordinate resolves to a live head and `unavailable` when it does not. `state` is `live` or `deleted`; `visibility` is `listed` or `unlisted`; a value of `viewer_hidden` is a local, per-viewer decision, not event state.",
+  "version": 1,
+  "project_kind": 30621,
+  "repository_kind": 30617,
+  "pubkeys": {
+    "alice": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "carol": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "cases": [
+    {
+      "name": "owner_project_claims_own_repository",
+      "spec_case": "Owner's own project lists their repository",
+      "note": "The signer is the member coordinate's owner, so the project claims the repository and step 3 suppresses its implicit card.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": []
+      }
+    },
+    {
+      "name": "stranger_project_does_not_claim",
+      "spec_case": "Stranger's project lists someone else's repository",
+      "note": "Bob is neither the owner nor a maintainer, so his project renders the member but claims nothing. The repository keeps its own card: an unendorsed grouping cannot pull a repository out of where its owner expects to find it.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:borrowed",
+          "signer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:borrowed",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": [
+          "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+        ]
+      }
+    },
+    {
+      "name": "maintainer_signer_claims",
+      "spec_case": "Project signer is in the member repository's `maintainers` tag",
+      "note": "Claim authority is read from the member repository's own head, not from ownership alone. Carol is listed in `maintainers`, so her project claims the repository exactly as the owner's would.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false,
+          "maintainers": [
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          ]
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:platform",
+          "signer": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:platform",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": []
+      }
+    },
+    {
+      "name": "two_claiming_projects_both_render_member",
+      "spec_case": "Repository is a member of two projects that both claim it",
+      "note": "Multiple membership is not a move. The repository renders inside both containers and has no implicit card, and it appears once per container rather than twice in either.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        },
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:infra",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              }
+            ]
+          },
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:infra",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": []
+      }
+    },
+    {
+      "name": "repository_removed_from_every_project",
+      "spec_case": "Repository removed from every project",
+      "note": "A live project that no longer lists the repository. The container renders empty rather than being hidden, and the unclaimed repository falls back to its own card.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+            "members": []
+          }
+        ],
+        "implicit_cards": [
+          "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+        ]
+      }
+    },
+    {
+      "name": "unlisted_project_absent_member_falls_back",
+      "spec_case": "Project is `unlisted`, or locally hidden",
+      "note": "An unlisted project is not listing eligible, so it claims nothing even though its signer owns the member. The container that would hold the repository is not on screen, so the repository must render as its own card or vanish.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:skunkworks",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "unlisted",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [],
+        "implicit_cards": [
+          "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+        ]
+      }
+    },
+    {
+      "name": "locally_hidden_project_absent_member_falls_back",
+      "spec_case": "Project is `unlisted`, or locally hidden",
+      "note": "The second half of the same rule, reached by a different input: hiding a container is a statement about the grouping only. The viewer-hidden project claims nothing and its member returns as an implicit card.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": true
+        }
+      ],
+      "expect": {
+        "containers": [],
+        "implicit_cards": [
+          "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+        ]
+      }
+    },
+    {
+      "name": "viewer_hidden_repository_absent_everywhere",
+      "spec_case": "Viewer has hidden a member repository",
+      "note": "Hiding a repository hides it everywhere, including inside every project that lists it \u2014 otherwise someone else's grouping could undo the viewer's decision. The sibling member is unaffected.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": true
+        },
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz-infra",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz-infra"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz-infra",
+                "render": "resolved"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": []
+      }
+    },
+    {
+      "name": "unresolvable_member_renders_unavailable",
+      "spec_case": "Member coordinate resolves to nothing",
+      "note": "No repository answers the coordinate \u2014 never announced, deleted, or absent from this relay. It renders inside its project as explicitly unavailable: dropping it silently would make the project look smaller than its author declared, and promoting it to a standalone card would invent a repository.",
+      "repositories": [],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:ghost"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:ghost",
+                "render": "unavailable"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": []
+      }
+    },
+    {
+      "name": "deleted_project_absent_member_falls_back",
+      "spec_case": "Project head deleted",
+      "note": "Deletion does not cascade. The container is gone; the member repository, its refs and its channel survive and it falls back to an implicit card.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "deleted",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [],
+        "implicit_cards": [
+          "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+        ]
+      }
+    },
+    {
+      "name": "authorized_and_unauthorized_projects_share_member",
+      "spec_case": "One authorized and one unauthorized project both list the same repository",
+      "note": "The discriminating case for step 3's \"at least one\": Alice's claim suppresses the implicit card, and Bob's unauthorized project still renders the member. An implementation that requires every listing project to be authorized would wrongly emit an implicit card here; one that lets any listing project suppress would wrongly emit none in `stranger_project_does_not_claim`.",
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        },
+        {
+          "coordinate": "30621:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:borrowed",
+          "signer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              }
+            ]
+          },
+          {
+            "project": "30621:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:borrowed",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": []
+      }
+    },
+    {
+      "name": "exhaustive_enumeration_across_pages_with_tied_timestamps",
+      "spec_case": "More repositories and projects than one page holds, with several sharing one `created_at`",
+      "note": "Exercises step 1 rather than the placement rules: the inputs exceed `enumeration.page_size` and three entities share one `created_at`, so a timestamp-only cursor loses events at the page boundary. Every repository and project must still render. `created_at` is present only on this case, and only because the cursor is what is under test.",
+      "enumeration": {
+        "page_size": 2,
+        "cursor": "composite",
+        "note": "The harness must serve inputs in pages of `page_size`, ordered `(created_at DESC, coordinate ASC)`, and the client under test must page with a composite `(created_at, id)` cursor per the Pagination section. Ordering by coordinate stands in for event id, which unsigned semantic fixtures do not carry."
+      },
+      "repositories": [
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+          "state": "live",
+          "viewer_hidden": false,
+          "created_at": 1000
+        },
+        {
+          "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz-infra",
+          "state": "live",
+          "viewer_hidden": false,
+          "created_at": 1000
+        },
+        {
+          "coordinate": "30617:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:buzz-mobile",
+          "state": "live",
+          "viewer_hidden": false,
+          "created_at": 1000
+        }
+      ],
+      "projects": [
+        {
+          "coordinate": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+          "signer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "members": [
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+            "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz-infra"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false,
+          "created_at": 900
+        },
+        {
+          "coordinate": "30621:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:mobile",
+          "signer": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "members": [
+            "30617:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:buzz-mobile"
+          ],
+          "visibility": "listed",
+          "state": "live",
+          "viewer_hidden": false,
+          "created_at": 900
+        }
+      ],
+      "expect": {
+        "containers": [
+          {
+            "project": "30621:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:platform",
+            "members": [
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz",
+                "render": "resolved"
+              },
+              {
+                "coordinate": "30617:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:buzz-infra",
+                "render": "resolved"
+              }
+            ]
+          },
+          {
+            "project": "30621:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:mobile",
+            "members": [
+              {
+                "coordinate": "30617:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:buzz-mobile",
+                "render": "resolved"
+              }
+            ]
+          }
+        ],
+        "implicit_cards": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+/* ── Image lightbox zoom slider (shared/ui/markdown) ─────────────────── */
+.image-zoom-slider {
+  appearance: none;
+  background: transparent;
+}
+
+.image-zoom-slider:focus-visible {
+  outline: none;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.7);
+}
+
+.image-zoom-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    currentColor var(--image-zoom-fill, 0%),
+    color-mix(in srgb, currentColor 30%, transparent) var(--image-zoom-fill, 0%)
+  );
+}
+
+.image-zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -4px;
+  height: 12px;
+  width: 12px;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+}
+
+.image-zoom-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 3px hsl(var(--ring) / 0.25),
+    0 1px 3px rgb(0 0 0 / 0.3);
+}
+
+.image-zoom-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 9999px;
+  background: color-mix(in srgb, currentColor 30%, transparent);
+}
+
+.image-zoom-slider::-moz-range-progress {
+  height: 4px;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+.image-zoom-slider::-moz-range-thumb {
+  border: none;
+  height: 12px;
+  width: 12px;
+  border-radius: 9999px;
+  background: currentColor;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+}
+
+.image-zoom-slider:focus-visible::-moz-range-thumb {
+  box-shadow:
+    0 0 0 3px hsl(var(--ring) / 0.25),
+    0 1px 3px rgb(0 0 0 / 0.3);
+}

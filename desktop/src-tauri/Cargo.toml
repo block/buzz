@@ -1,0 +1,158 @@
+[workspace]
+# Explicit: membership must NOT be inferred from the path-dependency edge below.
+# With a bare `[workspace]` and no `members`, `cargo test/check --workspace`
+# expands to a set that excludes this crate, and its gates pass green-and-empty
+# over a real defect. Verified: Sami Arm A/D, Dawn `.scratch/armA`.
+members = ["crates/buzz-terminal"]
+
+[package]
+name = "buzz-desktop"
+version = "0.5.17"
+description = "Buzz desktop app"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "buzz_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["system-keyring"]
+mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:mesh-llm-client", "dep:mesh-llm-node", "dep:mesh-llm-system", "dep:mesh-llm-events"]
+# OS keyring backing for desktop secret storage (nsec private keys). When
+# disabled, secrets fall back to 0o600 files. On by default for real builds.
+system-keyring = ["dep:keyring"]
+
+[build-dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-build = { version = "2", features = [] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+ctrlc = { version = "3", features = ["termination"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
+# Used directly (alongside tauri-plugin-notification) so we can hold the posting
+# D-Bus connection open. GNOME 46+ dismisses a notification the moment that
+# connection is dropped, which the plugin does immediately. Default features
+# keep the pure-Rust zbus backend, matching the plugin (no libdbus needed).
+notify-rust = "4"
+# Enable getUserMedia in the WebKitGTK webview (see src/linux_media.rs). Pinned
+# to the exact version wry links so both resolve to one webkit2gtk-sys and we
+# don't get duplicate symbols; bump in lockstep with wry.
+webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2 = { version = "0.6.4", default-features = false }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSEvent", "NSHapticFeedback", "NSMenu", "NSMenuItem", "NSStatusItem", "block2"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSDictionary", "NSError", "NSBundle", "NSObject", "NSProcessInfo", "NSString"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
+security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
+window-vibrancy = "0.6"
+user-idle = { version = "0.6", default-features = false }
+plist = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
+user-idle = { version = "0.6", default-features = false }
+
+[dependencies]
+atomic-write-file = "0.3"
+anyhow = "1"
+dirs = "6"
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-window-state = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+infer = "0.19"
+hex = "0.4"
+ed25519-dalek = "=3.0.0-rc.0"
+tokio = { version = "1", features = ["fs", "sync", "rt", "macros", "time", "net", "io-util"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+bytes = "1"
+futures-util = "0.3"
+opus = "0.3"
+neteq = { version = "0.8", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+nostr = { version = "0.44", features = ["nip44", "nip49"] }
+# OS-entropy source for backup passphrase generation (already in the tree as a
+# transitive dependency; pinned here for direct use).
+getrandom = "0.2"
+zeroize = "1"
+percent-encoding = "2"
+reqwest = { version = "0.13", features = ["json", "query", "stream", "blocking"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+url = "2"
+buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
+buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }
+buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
+buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
+buzz_voice_pkg = { package = "buzz-voice", path = "../../crates/buzz-voice" }
+buzz_terminal = { package = "buzz-terminal", path = "crates/buzz-terminal" }
+buzz_ws_client_pkg = { package = "buzz-ws-client", path = "../../crates/buzz-ws-client" }
+portable-pty = "0.9"
+iroh = { version = "1.0.2", optional = true }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
+# Model catalog + hardware survey for the Share-compute model picker (same
+# diagnose pattern as mesh-console). Lib name of mesh-llm-client is mesh_client.
+mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-client", optional = true }
+mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-node", optional = true }
+mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-system", optional = true }
+mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-events", optional = true }
+base64 = "0.22"
+sha2 = "0.11"
+tar = "0.4"
+bzip2 = "0.6"
+chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2.3.3"
+uuid = { version = "1", features = ["v4", "v5"] }
+png = "0.18"
+# wayland-data-control: without it arboard is X11-only on Linux, so copies made
+# in a Wayland session land in XWayland's clipboard where Wayland-native apps
+# never see them (set_text still returns Ok). The backing wl-clipboard-rs dep is
+# target-gated inside arboard; at runtime X11 sessions still fall back to X11.
+arboard = { version = "3", features = ["wayland-data-control"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+zip = "8"
+flate2 = "1"
+sherpa-onnx = "1.12"
+regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+axum = "0.8"
+rodio = "0.22"
+earshot = "1.0"
+rubato = "3.0"
+audioadapter-buffers = "3.0"
+tempfile = "3"
+strip-ansi-escapes = "0.2"
+tracing = "0.1"
+
+[dev-dependencies]
+tauri-utils = "2"
+# `test-util` enables tokio's paused-clock (`start_paused`) so the relay
+# admission gate tests can assert exact wait durations without real sleeps.
+tokio = { version = "1", features = ["test-util"] }
+# The relay's media validation, so the snapshot-sharing tests can prove the
+# full export → sanitize → relay-accept → import contract end to end.
+buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }

@@ -1,0 +1,45 @@
+[package]
+name = "git-sign-nostr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "NIP-GS git commit/tag signing program using Nostr secp256k1 keys"
+readme = "README.md"
+publish = false  # internal workspace tool, not published to crates.io
+
+[lib]
+name = "git_sign_nostr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "git-sign-nostr"
+path = "src/main.rs"
+
+[dependencies]
+# Base64 armor encoding/decoding for NIP-GS signature envelopes.
+# Not in workspace deps — each crate pins independently (same pattern as
+# buzz-relay, buzz-cli, git-credential-nostr).
+base64 = "0.22"
+
+# Hex encoding for BIP-340 signatures and public keys.
+hex = { workspace = true }
+
+# Secret key zeroization on drop.
+zeroize = { workspace = true, features = ["derive"] }
+
+# Nostr key parsing (nsec/npub bech32), secp256k1 Schnorr signing, SHA-256.
+# Uses the full default feature set because we need: Keys, PublicKey,
+# FromBech32, and the re-exported bitcoin::secp256k1 + bitcoin::hashes.
+nostr = { workspace = true }
+
+# JSON parsing for NIP-OA auth tag and envelope verification.
+serde_json = { workspace = true }
+
+# Timestamp formatting for GnuPG VALIDSIG status lines.
+chrono = { workspace = true }
+
+# Unix-specific: O_NOFOLLOW for keyfile open, fcntl for fd validation.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

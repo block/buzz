@@ -1,0 +1,12 @@
+{
+  "claude-sonnet-4-6": {
+    "provider": "anthropic",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "env": {}
+  },
+  "claude-haiku-4-5": {
+    "provider": "anthropic",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "env": {}
+  }
+}
