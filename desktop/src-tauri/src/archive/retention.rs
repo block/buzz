@@ -46,18 +46,30 @@ CREATE TABLE archive_meta (
 ";
 
 /// Covering index for the retention prune candidate scan, seeking on the
-/// scope-row `archived_at` age basis (Phase 2 uses this; built in M4 so the
-/// one-time cost over the existing 1.3M-row archive is paid behind the init
-/// barrier rather than on the prune hot path). The scope PK
-/// `(identity, relay, id, scope_type, scope_value)` puts `id` before the
-/// scope keys and lacks `archived_at`, so it cannot range-seek by age. M4
+/// Covering index for the Phase-2 retention prune candidate scan. V4 prunes
+/// one global observer window, so the scan filters `(identity_pubkey,
+/// relay_url, archived_at < cutoff)` and joins `archived_events` for
+/// `kind = 24200` — it does NOT constrain `scope_type`/`scope_value`. Age
+/// therefore has to lead the non-equality keys: putting `archived_at`
+/// immediately after the two identity/relay equality keys lets SQLite
+/// range-seek `archived_at < ?` directly (`SEARCH ... USING COVERING INDEX
+/// ... (identity_pubkey=? AND relay_url=? AND archived_at<?)`). The v3 order
+/// buried `archived_at` behind the two now-unconstrained scope keys, so the
+/// planner fell back to a bare identity/relay seek plus a temp b-tree.
+///
+/// The trailing `id, scope_type, scope_value` complete the scope-row primary
+/// key, so the index both covers the scan (no table lookup) and hands Phase 2
+/// the exact keys its bounded `DELETE` needs to materialize candidates.
+///
+/// Built in M4 so the one-time cost over the existing 1.3M-row archive is paid
+/// behind the init barrier rather than on the prune hot path. M4
 /// `DROP INDEX IF EXISTS`es under this name and recreates it unconditionally,
 /// so a fresh build is always correct — plain `CREATE INDEX`, no `IF NOT
 /// EXISTS`.
 pub(super) const SCOPE_AGE_INDEX_DDL: &str = "
 CREATE INDEX idx_archived_event_scopes_age
     ON archived_event_scopes
-       (identity_pubkey, relay_url, scope_type, scope_value, archived_at, id);
+       (identity_pubkey, relay_url, archived_at, id, scope_type, scope_value);
 ";
 
 /// Name of the scope-age index, shared by the DDL and M4's unconditional
