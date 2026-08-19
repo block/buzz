@@ -59,7 +59,7 @@ else
 fi
 
 BUNDLE_BIN="sprig"
-COMMANDS=(buzz-acp buzz-agent buzz-dev-mcp)
+COMMANDS=(buzz buzz-acp buzz-agent buzz-dev-mcp)
 
 echo "==> Building Sprig v${VERSION} for ${TARGET}"
 echo "    git_sha=${GIT_SHA}"

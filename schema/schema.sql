@@ -278,6 +278,20 @@ CREATE INDEX idx_events_not_before ON events (community_id, not_before)
 -- EXPLAIN before its work lands (Quinn option A; Max's index-spelling caveat).
 CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 
+-- ── Message idempotency receipts ────────────────────────────────────────────
+-- A caller key is scoped to its authenticated author and channel. The relay
+-- inserts this receipt and its canonical event in one transaction.
+CREATE TABLE message_idempotency_receipts (
+    community_id UUID NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    author_pubkey BYTEA NOT NULL CHECK (octet_length(author_pubkey) = 32),
+    channel_id UUID NOT NULL,
+    idempotency_key BYTEA NOT NULL CHECK (octet_length(idempotency_key) = 32),
+    semantic_digest BYTEA NOT NULL CHECK (octet_length(semantic_digest) = 32),
+    event_id BYTEA NOT NULL CHECK (octet_length(event_id) = 32),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, author_pubkey, channel_id, idempotency_key)
+);
+
 -- ── Event mentions ────────────────────────────────────────────────────────────
 -- Conformance: "Channel-less global events and DMs" (#p fan-out). The join to
 -- events MUST carry the community tuple (e.community_id = m.community_id AND

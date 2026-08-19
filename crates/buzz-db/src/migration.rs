@@ -1036,6 +1036,14 @@ mod tests {
         assert_eq!(migrations[29].version, 30);
         let deletion_recovery = migrations[29].sql.as_str();
         assert!(deletion_recovery.contains("SET LOCAL lock_timeout = '5s'"));
+
+        // Idempotency receipts are additive and follow main's deletion migrations.
+        assert_eq!(migrations[30].version, 31);
+        let idempotency = migrations[30].sql.as_str();
+        assert!(idempotency.contains("CREATE TABLE message_idempotency_receipts"));
+        assert!(idempotency.contains("community_id UUID NOT NULL"));
+        assert!(idempotency
+            .contains("PRIMARY KEY (community_id, author_pubkey, channel_id, idempotency_key)"));
     }
 
     #[test]

@@ -74,6 +74,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Resolved version=$VERSION channel=$CHANNEL"
 
+      - name: Verify immutable tagged source
+        if: steps.ver.outputs.channel == 'tag'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: scripts/verify-release-ref.sh sprig-v "$VERSION"
+
       - name: Build & package Sprig
         id: pkg
         env:
@@ -94,6 +100,19 @@ jobs:
           test -f "$ARCHIVE"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "archive_name=${ARCHIVE_BASENAME}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-check packaged Buzz CLI
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        env:
+          ARCHIVE: ${{ steps.pkg.outputs.archive }}
+        run: |
+          set -euo pipefail
+          sha256sum -c "${ARCHIVE}.sha256"
+          tar -tzf "$ARCHIVE" | grep -Eq '(^|/)buzz$'
+          smoke_dir=$(mktemp -d)
+          trap 'rm -rf "$smoke_dir"' EXIT
+          tar -xzf "$ARCHIVE" -C "$smoke_dir"
+          "$smoke_dir/buzz" --help >/dev/null
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

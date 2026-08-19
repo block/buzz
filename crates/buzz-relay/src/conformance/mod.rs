@@ -432,7 +432,7 @@ impl Drop for EmitGuard {
 pub fn sanitized_reason_for(err: &crate::handlers::ingest::IngestError) -> SanitizedReason {
     use crate::handlers::ingest::IngestError as E;
     match err {
-        E::Rejected(_) => SanitizedReason::Invalid,
+        E::Rejected(_) | E::Conflict(_) => SanitizedReason::Invalid,
         E::AuthFailed(_) => SanitizedReason::Restricted,
         E::Internal(_) => SanitizedReason::ServerError,
     }

@@ -862,6 +862,14 @@ async fn submit_event_authed(
                 response: api_error(StatusCode::BAD_REQUEST, &msg),
             }
         }
+        Err(IngestError::Conflict(msg)) => {
+            crate::handlers::ingest::reject_with_transport("http", "invalid");
+            let e = api_error(StatusCode::CONFLICT, &msg);
+            SubmitOutcome::Err {
+                status: e.0,
+                response: e,
+            }
+        }
         Err(IngestError::AuthFailed(msg)) => {
             crate::handlers::ingest::reject_with_transport("http", "auth");
             let e = api_error(StatusCode::FORBIDDEN, &msg);

@@ -781,7 +781,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         Err(e) => {
             // Sanitize internal errors — don't leak DB/system details over WS.
             let (msg, reason) = match &e {
-                IngestError::Rejected(m) => (m.clone(), "invalid"),
+                IngestError::Rejected(m) | IngestError::Conflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
                 IngestError::Internal(_) => ("error: internal server error".to_string(), "error"),
             };

@@ -371,7 +371,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  buzz messages send --channel <UUID> --content \"retry-safe\" --idempotency-key work-outbox-123\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
@@ -395,6 +395,9 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// Stable caller key for durable retry safety. Reusing it with different message content conflicts.
+        #[arg(long)]
+        idempotency_key: Option<String>,
     },
     /// Send a code diff / patch to a channel
     SendDiff {

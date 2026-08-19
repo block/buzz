@@ -1129,6 +1129,40 @@ pub struct ThreadMetadataParams<'a> {
     pub broadcast: bool,
 }
 
+/// Caller idempotency material for a channel message.
+///
+/// The key is already a fixed-length opaque digest; never persist a caller's
+/// raw idempotency token in an event or database row.
+#[derive(Debug)]
+pub struct MessageIdempotencyParams<'a> {
+    /// Authenticated message author (32-byte Nostr pubkey).
+    pub author_pubkey: &'a [u8],
+    /// Opaque, caller-derived idempotency key digest (32 bytes).
+    pub key: &'a [u8],
+    /// Digest of the request's semantic message payload (32 bytes).
+    pub semantic_digest: &'a [u8],
+}
+
+/// Result of an atomic idempotent message write.
+#[derive(Debug)]
+pub enum IdempotentMessageInsertOutcome {
+    /// A receipt was created for this request. The event may already have been
+    /// stored only when an identical signed event won a separate exact-ID race.
+    Created {
+        /// Stored message event.
+        stored_event: Box<StoredEvent>,
+        /// Whether this call inserted the event row.
+        event_was_inserted: bool,
+    },
+    /// The receipt already exists with the same semantic digest.
+    Replay {
+        /// Canonical event ID recorded by the original successful write.
+        event_id: Vec<u8>,
+    },
+    /// The caller reused a key for a different semantic payload.
+    Conflict,
+}
+
 pub(crate) async fn insert_event_with_thread_metadata_tx(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
@@ -1318,6 +1352,76 @@ pub async fn insert_event_with_thread_metadata(
             .await?;
     tx.commit().await?;
     Ok(result)
+}
+
+/// Atomically establish a caller-idempotency receipt and persist its message.
+///
+/// The unique receipt key serializes concurrent callers. If the winning
+/// transaction commits, a waiter observes either its canonical event ID (same
+/// digest) or a conflict (different digest); if it rolls back, the waiter can
+/// become the winner. Consequently a committed receipt never points to an
+/// absent event.
+pub async fn insert_idempotent_message_with_thread_metadata(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Uuid,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+    idempotency: MessageIdempotencyParams<'_>,
+) -> Result<IdempotentMessageInsertOutcome> {
+    let mut tx = pool.begin().await?;
+    let inserted_receipt: Option<(Vec<u8>,)> = sqlx::query_as(
+        r#"
+        INSERT INTO message_idempotency_receipts
+            (community_id, author_pubkey, channel_id, idempotency_key, semantic_digest, event_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT DO NOTHING
+        RETURNING event_id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(idempotency.author_pubkey)
+    .bind(channel_id)
+    .bind(idempotency.key)
+    .bind(idempotency.semantic_digest)
+    .bind(event.id.as_bytes().as_slice())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if inserted_receipt.is_none() {
+        let (existing_digest, event_id): (Vec<u8>, Vec<u8>) = sqlx::query_as(
+            r#"
+            SELECT semantic_digest, event_id
+            FROM message_idempotency_receipts
+            WHERE community_id = $1 AND author_pubkey = $2 AND channel_id = $3
+              AND idempotency_key = $4
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(idempotency.author_pubkey)
+        .bind(channel_id)
+        .bind(idempotency.key)
+        .fetch_one(&mut *tx)
+        .await?;
+        if existing_digest == idempotency.semantic_digest {
+            return Ok(IdempotentMessageInsertOutcome::Replay { event_id });
+        }
+        return Ok(IdempotentMessageInsertOutcome::Conflict);
+    }
+
+    let (stored_event, event_was_inserted) = insert_event_with_thread_metadata_tx(
+        &mut tx,
+        community_id,
+        event,
+        Some(channel_id),
+        thread_meta,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(IdempotentMessageInsertOutcome::Created {
+        stored_event: Box::new(stored_event),
+        event_was_inserted,
+    })
 }
 
 /// Atomically insert a kind:7 reaction event and its reaction row.
@@ -1581,6 +1685,145 @@ mod tests {
             .await
             .expect("insert test community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn idempotency_receipt_is_atomic_under_concurrency_and_replays_canonical_event() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+        let author = Keys::generate();
+        let event_a = EventBuilder::new(Kind::Custom(9), "retry-safe message")
+            .sign_with_keys(&author)
+            .expect("sign first event");
+        let event_b = EventBuilder::new(Kind::Custom(9), "retry-safe message")
+            .custom_created_at(nostr::Timestamp::from(event_a.created_at.as_secs() + 1))
+            .sign_with_keys(&author)
+            .expect("sign competing event");
+        let author_bytes = author.public_key().to_bytes();
+        let key = [7u8; 32];
+        let digest = [9u8; 32];
+
+        let first = insert_idempotent_message_with_thread_metadata(
+            &pool,
+            community,
+            &event_a,
+            channel,
+            None,
+            MessageIdempotencyParams {
+                author_pubkey: &author_bytes,
+                key: &key,
+                semantic_digest: &digest,
+            },
+        );
+        let second = insert_idempotent_message_with_thread_metadata(
+            &pool,
+            community,
+            &event_b,
+            channel,
+            None,
+            MessageIdempotencyParams {
+                author_pubkey: &author_bytes,
+                key: &key,
+                semantic_digest: &digest,
+            },
+        );
+        let (first, second) = tokio::join!(first, second);
+        let (first, second) = (first.expect("first write"), second.expect("second write"));
+        let canonical = match (&first, &second) {
+            (
+                IdempotentMessageInsertOutcome::Created { stored_event, .. },
+                IdempotentMessageInsertOutcome::Replay { event_id },
+            )
+            | (
+                IdempotentMessageInsertOutcome::Replay { event_id },
+                IdempotentMessageInsertOutcome::Created { stored_event, .. },
+            ) => {
+                assert_eq!(
+                    event_id.as_slice(),
+                    stored_event.event.id.as_bytes().as_slice()
+                );
+                stored_event.event.id.to_hex()
+            }
+            other => panic!("one caller must create and one replay, got {other:?}"),
+        };
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND channel_id = $2",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("count stored events");
+        assert_eq!(
+            stored, 1,
+            "concurrent retries must create one visible event"
+        );
+
+        let conflicting = EventBuilder::new(Kind::Custom(9), "different payload")
+            .sign_with_keys(&author)
+            .expect("sign conflicting event");
+        assert!(matches!(
+            insert_idempotent_message_with_thread_metadata(
+                &pool,
+                community,
+                &conflicting,
+                channel,
+                None,
+                MessageIdempotencyParams {
+                    author_pubkey: &author_bytes,
+                    key: &key,
+                    semantic_digest: &[3u8; 32],
+                },
+            )
+            .await
+            .expect("conflict result"),
+            IdempotentMessageInsertOutcome::Conflict
+        ));
+
+        // A rejected event must roll the freshly-inserted receipt back too;
+        // otherwise an ambiguous failed delivery would permanently consume a
+        // caller key without producing a canonical event to replay.
+        let rollback_key = [8u8; 32];
+        let rejected = EventBuilder::new(Kind::Custom(KIND_AUTH as u16), "not stored")
+            .sign_with_keys(&author)
+            .expect("sign rejected event");
+        assert!(matches!(
+            insert_idempotent_message_with_thread_metadata(
+                &pool,
+                community,
+                &rejected,
+                channel,
+                None,
+                MessageIdempotencyParams {
+                    author_pubkey: &author_bytes,
+                    key: &rollback_key,
+                    semantic_digest: &digest,
+                },
+            )
+            .await,
+            Err(DbError::AuthEventRejected)
+        ));
+        assert!(matches!(
+            insert_idempotent_message_with_thread_metadata(
+                &pool,
+                community,
+                &event_a,
+                channel,
+                None,
+                MessageIdempotencyParams {
+                    author_pubkey: &author_bytes,
+                    key: &rollback_key,
+                    semantic_digest: &digest,
+                },
+            )
+            .await
+            .expect("retry after rollback"),
+            IdempotentMessageInsertOutcome::Created { .. }
+        ));
+        assert_eq!(canonical.len(), 64, "canonical id stays a Nostr hex id");
     }
 
     async fn make_test_channel(

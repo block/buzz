@@ -1,5 +1,6 @@
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
-use nostr::PublicKey;
+use nostr::{PublicKey, Tag};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
@@ -569,6 +570,18 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+    pub idempotency_key: Option<String>,
+}
+
+/// Convert a caller's opaque retry key to the fixed-width value stored in the
+/// event receipt tag. The raw key never leaves the CLI process.
+fn idempotency_key_digest(key: &str) -> Result<String, CliError> {
+    if key.is_empty() || key.len() > 256 || key.chars().any(char::is_control) {
+        return Err(CliError::Usage(
+            "--idempotency-key must be 1–256 non-control UTF-8 bytes".into(),
+        ));
+    }
+    Ok(hex::encode(Sha256::digest(key.as_bytes())))
 }
 
 pub async fn cmd_send_message(
@@ -677,9 +690,23 @@ pub async fn cmd_send_message(
         }
     };
 
+    let idempotency_enabled = p.idempotency_key.is_some();
+    let builder = if let Some(key) = p.idempotency_key.as_deref() {
+        let key_digest = idempotency_key_digest(key)?;
+        let tag = Tag::parse(["buzz-idempotency", key_digest.as_str()])
+            .map_err(|e| CliError::Other(format!("build idempotency tag failed: {e}")))?;
+        builder.tag(tag)
+    } else {
+        builder
+    };
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
-    let resp = client.submit_event(event).await?;
+    let resp = match client.submit_event(event).await {
+        Err(CliError::Relay { status: 409, body }) if idempotency_enabled => {
+            return Err(CliError::Conflict(body));
+        }
+        other => other?,
+    };
     let mut output: serde_json::Value = serde_json::from_str(&normalize_write_response(&resp))
         .unwrap_or_else(|_| serde_json::json!({ "response": resp }));
     if let Some(object) = output.as_object_mut() {
@@ -687,6 +714,14 @@ pub async fn cmd_send_message(
             "mention_pubkeys".into(),
             serde_json::json!(emitted_mentions),
         );
+        if idempotency_enabled {
+            let replayed = object.get("message").and_then(serde_json::Value::as_str)
+                == Some("idempotency-replay");
+            object.insert(
+                "idempotency".into(),
+                serde_json::json!({ "replayed": replayed }),
+            );
+        }
     }
     println!("{output}");
     Ok(())
@@ -880,6 +915,7 @@ pub async fn dispatch(
             broadcast,
             files,
             mentions,
+            idempotency_key,
         } => {
             cmd_send_message(
                 client,
@@ -891,6 +927,7 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
+                    idempotency_key,
                 },
             )
             .await
@@ -993,14 +1030,23 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, idempotency_key_digest, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
     use serde_json::json;
+
+    #[test]
+    fn idempotency_key_digest_is_stable_and_rejects_empty_keys() {
+        assert_eq!(
+            idempotency_key_digest("outbox-event-1").expect("digest"),
+            idempotency_key_digest("outbox-event-1").expect("same digest")
+        );
+        assert!(idempotency_key_digest("").is_err());
+    }
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
