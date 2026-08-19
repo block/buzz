@@ -3172,6 +3172,7 @@ function mockObservedUnreadProjections(
       channelId,
       latest,
       count: 0,
+      unreadRootIds: [],
       badgeCount: 0,
       appBadgeCount: 0,
       topLevelUnread: false,
@@ -3194,6 +3195,7 @@ function mockObservedUnreadProjections(
       channelId: event.channelId,
       latest: 0,
       count: 0,
+      unreadRootIds: [],
       badgeCount: 0,
       appBadgeCount: 0,
       topLevelUnread: false,
@@ -3201,6 +3203,9 @@ function mockObservedUnreadProjections(
     };
     projection.latest = Math.max(projection.latest, event.createdAt);
     projection.count += 1;
+    if (event.rootId && !projection.unreadRootIds.includes(event.rootId)) {
+      projection.unreadRootIds.push(event.rootId);
+    }
     projection.badgeCount += event.countsTowardBadge ? 1 : 0;
     projection.appBadgeCount += event.countsTowardAppBadge ? 1 : 0;
     projection.topLevelUnread ||= event.rootId === null;

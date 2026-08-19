@@ -834,16 +834,19 @@ export function useUnreadChannels(
         const nativeProjection = observedPersistence.isNative()
           ? observedPersistence.projectionsRef.current.get(channel.id)
           : undefined;
+        for (const rootId of nativeProjection?.unreadRootIds ?? []) {
+          unreadThreadRoots.add(rootId);
+        }
         const unreadCount = observedPersistence.isNative()
           ? (nativeProjection?.count ?? 0)
           : latestByChannelRef.current.get(channel.id) === undefined
             ? 0
             : countUnreadObservedEvents(observedEvents, readAtForObservedEvent);
         for (const event of observedEvents?.values() ?? []) {
+          const eventReadAt = readAtForObservedEvent(event);
           if (
             event.rootId !== null &&
-            (readAtForObservedEvent(event) === null ||
-              event.createdAt > readAtForObservedEvent(event)!)
+            (eventReadAt === null || event.createdAt > eventReadAt)
           ) {
             unreadThreadRoots.add(event.rootId);
           }

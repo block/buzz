@@ -6,6 +6,7 @@ export type ObservedUnreadProjection = {
   channelId: string;
   latest: number;
   count: number;
+  unreadRootIds: string[];
   badgeCount: number;
   appBadgeCount: number;
   topLevelUnread: boolean;
