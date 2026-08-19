@@ -22,12 +22,49 @@ const OBSERVER_BUFFER_CAP: usize = 1_000;
 pub struct ObserverContext {
     /// Buzz channel UUID for the current turn, when channel-scoped.
     pub channel_id: Option<String>,
+    /// NIP-10 thread root for the current turn, when thread-scoped.
+    pub thread_head_id: Option<String>,
     /// ACP session ID associated with the current turn, once known.
     pub session_id: Option<String>,
     /// Local UUID for one prompt turn.
     pub turn_id: Option<String>,
     /// RFC3339 timestamp at which the current turn began, when known.
     pub started_at: Option<String>,
+}
+
+/// Shared thread scope for a live observer turn.
+///
+/// Native steering can move one in-flight ACP turn between Buzz threads. Raw
+/// ACP frames, liveness pings, and the completion guard all hold clones of this
+/// handle so a successful steer updates every later frame atomically.
+#[derive(Clone, Debug)]
+pub struct ObserverTurnScope {
+    thread_head_id: Arc<Mutex<Option<String>>>,
+}
+
+impl ObserverTurnScope {
+    /// Create a turn scope with its initial NIP-10 thread root.
+    pub fn new(thread_head_id: Option<String>) -> Self {
+        Self {
+            thread_head_id: Arc::new(Mutex::new(thread_head_id)),
+        }
+    }
+
+    /// Return the turn's current NIP-10 thread root.
+    pub fn thread_head_id(&self) -> Option<String> {
+        match self.thread_head_id.lock() {
+            Ok(thread_head_id) => thread_head_id.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Move the live turn to another NIP-10 thread root.
+    pub fn set_thread_head_id(&self, thread_head_id: Option<String>) {
+        match self.thread_head_id.lock() {
+            Ok(mut current) => *current = thread_head_id,
+            Err(poisoned) => *poisoned.into_inner() = thread_head_id,
+        }
+    }
 }
 
 /// Handle used by the harness to publish local observer events.
@@ -67,6 +104,10 @@ pub struct ObserverEvent {
     pub agent_index: Option<usize>,
     /// Buzz channel UUID for channel-scoped events.
     pub channel_id: Option<String>,
+    /// NIP-10 thread root for this frame's turn. Serializes as null for the
+    /// channel root so consumers can distinguish an explicit root rescope from
+    /// legacy frames that omitted scope metadata.
+    pub thread_head_id: Option<String>,
     /// ACP session ID when known.
     pub session_id: Option<String>,
     /// Local UUID for one prompt turn.
@@ -114,6 +155,7 @@ impl ObserverHandle {
             kind: kind.into(),
             agent_index,
             channel_id: context.channel_id.clone(),
+            thread_head_id: context.thread_head_id.clone(),
             session_id: context.session_id.clone(),
             turn_id: context.turn_id.clone(),
             started_at: context.started_at.clone(),
@@ -144,6 +186,7 @@ pub fn context_for(
 ) -> ObserverContext {
     ObserverContext {
         channel_id: channel_id.map(|id| id.to_string()),
+        thread_head_id: None,
         session_id,
         turn_id,
         started_at: None,
@@ -153,14 +196,41 @@ pub fn context_for(
 /// Attach the authoritative start timestamp to every observer frame for a turn.
 pub fn context_for_turn(
     channel_id: Option<uuid::Uuid>,
+    thread_head_id: Option<String>,
     session_id: Option<String>,
     turn_id: String,
     started_at: String,
 ) -> ObserverContext {
     ObserverContext {
         channel_id: channel_id.map(|id| id.to_string()),
+        thread_head_id,
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_root_scope_serializes_as_explicit_null() {
+        let event = ObserverEvent {
+            seq: 1,
+            timestamp: "2026-08-18T00:00:00Z".into(),
+            kind: "turn_liveness".into(),
+            agent_index: Some(0),
+            channel_id: Some("channel-1".into()),
+            thread_head_id: None,
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            started_at: None,
+            payload: serde_json::json!({}),
+        };
+
+        let json = serde_json::to_value(event).expect("serialize observer event");
+        assert!(json.get("threadHeadId").is_some());
+        assert!(json["threadHeadId"].is_null());
     }
 }

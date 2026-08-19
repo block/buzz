@@ -7,11 +7,17 @@ import 'package:flutter/rendering.dart' show ScrollDirection, SemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/agent_activity/active_agent_turns.dart';
+import 'package:buzz/features/channels/agent_activity/composer_agent_activity_indicator.dart';
+import 'package:buzz/features/channels/agent_activity/observer_models.dart';
+import 'package:buzz/features/channels/agent_activity/observer_subscription.dart';
+import 'package:buzz/features/channels/agent_activity/working_bots_provider.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
@@ -204,6 +210,7 @@ Widget _buildTestable({
   Duration? Function(int retryCount, Object error)? providerRetry,
   RelaySessionNotifier? relaySessionNotifier,
   http.Client? mediaClient,
+  List<Override> extraOverrides = const [],
   Widget? home,
 }) {
   final resolvedChannel = channel ?? _testChannel;
@@ -283,6 +290,7 @@ Widget _buildTestable({
         relaySessionProvider.overrideWith(() => relaySessionNotifier),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
+      ...extraOverrides,
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
@@ -2930,6 +2938,240 @@ void main() {
           find.byKey(const ValueKey('channel-jump-to-latest')),
           findsNothing,
         );
+      },
+    );
+
+    testWidgets(
+      'agent activity follows composer width and overlays without reflowing the tail',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        const agentPubkey = 'agent-a';
+        const turnId = 'turn-a';
+        final messages = [
+          for (var i = 0; i < 20; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+            ),
+        ];
+        final turn = AgentTurnState(
+          agentPubkey: agentPubkey,
+          channelId: _channelId,
+          turnId: turnId,
+          startedAt: DateTime.utc(2026, 8, 16, 12),
+          lastActivityAt: DateTime.utc(2026, 8, 16, 12, 0, 5),
+          livenessTimeout: const Duration(seconds: 30),
+          phase: AgentTurnPhase.working,
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            disableAnimations: false,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              agentPubkey: UserProfile(
+                pubkey: agentPubkey,
+                displayName: 'Pollen',
+                ownerPubkey: 'self',
+              ),
+            },
+            extraOverrides: [
+              composerActivityStateProvider((
+                channelId: _channelId,
+                threadHeadId: null,
+              )).overrideWithValue(
+                const ComposerActivityState(
+                  agents: [
+                    WorkingAgentSignal(
+                      pubkey: agentPubkey,
+                      source: AgentWorkingSource.observer,
+                      canViewActivity: true,
+                      turnId: turnId,
+                    ),
+                  ],
+                  humanTyping: [],
+                ),
+              ),
+              agentTurnStatesProvider.overrideWithValue([turn]),
+              observerTurnSubscriptionProvider((
+                channelId: _channelId,
+                agentPubkey: agentPubkey,
+                turnId: turnId,
+              )).overrideWithValue(
+                ObserverState(
+                  connection: ObserverConnectionState.open,
+                  transcript: [
+                    ToolItem(
+                      id: 'tool-1',
+                      title: 'Read channel',
+                      toolName: 'get_messages',
+                      status: ToolStatus.executing,
+                      args: const {},
+                      result: '',
+                      isError: false,
+                      timestamp: '2026-08-16T12:00:05Z',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final latestMessage = find.byKey(
+          const ValueKey('channel-message-group-msg19'),
+        );
+        final composerDock = find.byKey(
+          const ValueKey('channel-composer-dock'),
+        );
+        final activitySurface = find.byKey(
+          const ValueKey('composer-agent-activity-surface'),
+        );
+        final composerWidth = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactActivityWidth = tester.getSize(activitySurface).width;
+        final compactComposerWidth = tester.getSize(composerWidth).width;
+        expect(compactActivityWidth, closeTo(compactComposerWidth, 0.1));
+        expect(
+          tester.getCenter(activitySurface).dx,
+          closeTo(tester.getCenter(composerWidth).dx, 0.1),
+        );
+
+        await tester.tap(find.text('Message #general'));
+        await tester.pumpAndSettle();
+        final textField = tester.widget<TextField>(find.byType(TextField));
+        expect(textField.focusNode?.hasFocus, isTrue);
+        final expandedActivityWidth = tester.getSize(activitySurface).width;
+        final expandedComposerWidth = tester.getSize(composerWidth).width;
+        expect(expandedActivityWidth, greaterThan(compactActivityWidth));
+        expect(expandedActivityWidth, closeTo(expandedComposerWidth, 0.1));
+
+        textField.focusNode?.unfocus();
+        await tester.pumpAndSettle();
+        final dockHeightBeforeActivity = tester.getSize(composerDock).height;
+        final latestMessageBottomBeforeActivity = tester
+            .getBottomLeft(latestMessage)
+            .dy;
+
+        await tester.tap(
+          find.byKey(const ValueKey('composer-agent-activity-control')),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const ValueKey('composer-agent-activity-panel')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('composer-agent-segmented-container')),
+          findsNothing,
+        );
+        expect(find.text('Pollen'), findsNothing);
+        expect(
+          tester
+              .getCenter(
+                find.byKey(const ValueKey('composer-agent-activity-panel')),
+              )
+              .dx,
+          closeTo(tester.getCenter(composerWidth).dx, 0.1),
+        );
+        expect(
+          tester
+              .getSize(
+                find.byKey(const ValueKey('composer-agent-activity-panel')),
+              )
+              .width,
+          closeTo(expandedComposerWidth, 0.1),
+        );
+        expect(find.byType(BottomSheet), findsNothing);
+        expect(textField.focusNode?.hasFocus, isFalse);
+        expect(textField.focusNode?.canRequestFocus, isTrue);
+        await tester.tap(find.text('Message #general'), warnIfMissed: false);
+        await tester.pump();
+        expect(textField.focusNode?.hasFocus, isFalse);
+        expect(find.byType(TextField), findsNothing);
+        expect(
+          tester.getSize(composerDock).height,
+          closeTo(dockHeightBeforeActivity, 0.1),
+        );
+        expect(
+          tester.getBottomLeft(latestMessage).dy,
+          closeTo(latestMessageBottomBeforeActivity, 0.1),
+        );
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('composer-agent-activity-panel')),
+          findsNothing,
+        );
+        final activatedComposer = tester.widget<TextField>(
+          find.byType(TextField),
+        );
+        expect(activatedComposer.focusNode?.canRequestFocus, isTrue);
+        expect(activatedComposer.focusNode?.hasFocus, isTrue);
+
+        activatedComposer.focusNode?.unfocus();
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .getSize(
+                find.byKey(const ValueKey('composer-agent-activity-surface')),
+              )
+              .width,
+          closeTo(compactActivityWidth, 0.1),
+        );
+
+        await tester.tap(find.text('Message #general'));
+        await tester.pumpAndSettle();
+        final reopenedTextField = tester.widget<TextField>(
+          find.byType(TextField),
+        );
+        expect(reopenedTextField.focusNode?.hasFocus, isTrue);
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const ValueKey('composer-agent-activity-control')),
+        );
+        await tester.pump();
+        expect(reopenedTextField.focusNode?.hasFocus, isFalse);
+        expect(
+          find.byKey(const ValueKey('composer-agent-activity-panel')),
+          findsNothing,
+        );
+
+        tester.view.viewInsets = FakeViewPadding.zero;
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('composer-agent-activity-panel')),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .getSize(
+                find.byKey(const ValueKey('composer-agent-activity-panel')),
+              )
+              .width,
+          closeTo(expandedComposerWidth, 0.1),
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('composer-agent-activity-collapse')),
+        );
+        await tester.pumpAndSettle();
+        final restoredTextField = tester.widget<TextField>(
+          find.byType(TextField),
+        );
+        expect(restoredTextField.focusNode?.hasFocus, isTrue);
       },
     );
 
@@ -5688,6 +5930,11 @@ void main() {
       );
       expect(threadPage.threadHead.id, 'parent');
       expect(threadPage.initialMessageId, 'target');
+
+      final activityIndicator = tester.widget<ComposerAgentActivityIndicator>(
+        find.byType(ComposerAgentActivityIndicator),
+      );
+      expect(activityIndicator.threadHeadId, 'root');
 
       final highlighted = tester.widget<DecoratedBox>(
         find.byKey(const ValueKey('thread-message-target')),

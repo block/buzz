@@ -6,6 +6,7 @@ export type ObserverEvent = {
   kind: string;
   agentIndex: number | null;
   channelId: string | null;
+  threadHeadId?: string | null;
   sessionId: string | null;
   turnId: string | null;
   startedAt?: string | null;

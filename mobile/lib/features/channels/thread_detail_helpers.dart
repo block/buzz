@@ -90,24 +90,48 @@ class _ThreadTailIntent {
   }
 }
 
-/// Thread-scoped typing status with optional size animation.
+/// Thread-scoped composer activity with optional size animation.
 class _ThreadTypingIndicator extends StatelessWidget {
-  final List<TypingEntry> entries;
+  final String channelId;
+  final String threadHeadId;
   final bool animated;
+  final double horizontalInset;
+  final double? overlayTopBoundary;
+  final double compactWidthFactor;
+  final Animation<double>? composerWidthAnimation;
+  final FocusNode? composerFocusNode;
+  final ValueNotifier<bool>? composerInteractionLock;
+  final ValueNotifier<int>? composerActivationRequests;
+  final VoidCallback? onRestoreComposerFocus;
 
-  const _ThreadTypingIndicator({required this.entries, this.animated = true});
+  const _ThreadTypingIndicator({
+    required this.channelId,
+    required this.threadHeadId,
+    this.animated = true,
+    this.horizontalInset = Grid.twelve,
+    this.overlayTopBoundary,
+    this.compactWidthFactor = 1,
+    this.composerWidthAnimation,
+    this.composerFocusNode,
+    this.composerInteractionLock,
+    this.composerActivationRequests,
+    this.onRestoreComposerFocus,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final child = entries.isEmpty
-        ? const SizedBox.shrink()
-        : ChannelTypingIndicator(entries: entries);
-    if (!animated || MediaQuery.disableAnimationsOf(context)) return child;
-    return AnimatedSize(
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOutCubic,
-      alignment: Alignment.bottomCenter,
-      child: child,
+    return ComposerAgentActivityIndicator(
+      channelId: channelId,
+      threadHeadId: threadHeadId,
+      animated: animated,
+      horizontalInset: horizontalInset,
+      overlayTopBoundary: overlayTopBoundary,
+      compactWidthFactor: compactWidthFactor,
+      composerWidthAnimation: composerWidthAnimation,
+      composerFocusNode: composerFocusNode,
+      composerInteractionLock: composerInteractionLock,
+      composerActivationRequests: composerActivationRequests,
+      onRestoreComposerFocus: onRestoreComposerFocus,
     );
   }
 }

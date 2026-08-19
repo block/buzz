@@ -876,6 +876,7 @@ impl HarnessRelay {
         channel_id: Uuid,
         root_event_id: Option<&str>,
         parent_event_id: Option<&str>,
+        turn_id: Option<&str>,
     ) -> Result<Event, RelayError> {
         let h_tag = Tag::parse(["h", &channel_id.to_string()])
             .map_err(|e| RelayError::AuthFailed(e.to_string()))?;
@@ -892,6 +893,11 @@ impl HarnessRelay {
             tags.push(
                 Tag::parse(["e", parent, "", "reply"])
                     .map_err(|e| RelayError::AuthFailed(e.to_string()))?,
+            );
+        }
+        if let Some(turn_id) = turn_id.filter(|turn_id| !turn_id.is_empty()) {
+            tags.push(
+                Tag::parse(["turn", turn_id]).map_err(|e| RelayError::AuthFailed(e.to_string()))?,
             );
         }
         let event = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
@@ -4025,6 +4031,37 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_event_carries_active_turn_identity() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (cmd_tx, _cmd_rx) = mpsc::channel(1);
+        let relay = HarnessRelay {
+            event_rx,
+            observer_control_rx: None,
+            cmd_tx,
+            http: reqwest::Client::new(),
+            relay_url: "ws://localhost:3000".into(),
+            keys: Keys::generate(),
+            auth_tag: None,
+            bg_handle: None,
+        };
+
+        let event = relay
+            .build_typing_event(
+                Uuid::new_v4(),
+                Some("thread-root"),
+                Some("message-parent"),
+                Some("turn-1"),
+            )
+            .expect("build typing event");
+
+        assert!(event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.first().map(String::as_str) == Some("turn")
+                && parts.get(1).map(String::as_str) == Some("turn-1")
+        }));
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {

@@ -5,9 +5,9 @@ class ComposeBar extends HookConsumerWidget {
   final String channelName;
   final String? hintText;
   final ComposeBarOnSend onSend;
+  final ComposeBarActivityIndicatorBuilder? activityIndicatorBuilder;
 
-  /// Runs immediately before the editor requests focus, allowing a parent to
-  /// prepare focus-dependent layout (for example, following a thread tail).
+  /// Runs before editor focus so a parent can prepare focus-dependent layout.
   final VoidCallback? onFocusRequested;
 
   /// Parent-owned if set; otherwise internally created and disposed.
@@ -29,6 +29,7 @@ class ComposeBar extends HookConsumerWidget {
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
+    this.activityIndicatorBuilder,
     required this.onSend,
   });
   @override
@@ -54,6 +55,8 @@ class ComposeBar extends HookConsumerWidget {
     final androidImeFallbackTimer = useRef<Timer?>(null);
     final ownedFocusNode = useFocusNode();
     final focusNode = this.focusNode ?? ownedFocusNode;
+    final activityInteractionLock = useState(false);
+    final composerActivationRequests = useState(0);
     useEffect(
       () => () {
         androidImeFallbackTimer.value?.cancel();
@@ -112,16 +115,13 @@ class ComposeBar extends HookConsumerWidget {
       isComposerExpanded.value = false;
     }
 
-    useEffect(() {
-      void collapseWhenUnfocused() {
-        if (!focusNode.hasFocus && !isEmojiPickerOpen.value) {
-          collapseComposer();
-        }
-      }
-
-      focusNode.addListener(collapseWhenUnfocused);
-      return () => focusNode.removeListener(collapseWhenUnfocused);
-    }, [focusNode]);
+    _useComposerActivityFocusHandoff(
+      focusNode: focusNode,
+      activityInteractionLock: activityInteractionLock,
+      composerActivationRequests: composerActivationRequests,
+      isEmojiPickerOpen: isEmojiPickerOpen,
+      collapseComposer: collapseComposer,
+    );
 
     final appView = View.of(context);
     useEffect(() {
@@ -205,7 +205,6 @@ class ComposeBar extends HookConsumerWidget {
       };
     }, [focusNode]);
 
-    // Mention state --------------------------------------------------------
     final mentionQuery = useState<String?>(null);
     final mentionStartIdx = useState(-1);
     // Map of displayName → selected mention candidate built as the user selects
@@ -213,7 +212,6 @@ class ComposeBar extends HookConsumerWidget {
     // selected non-member agents before the message is published.
     final mentionMap = useRef(<String, MentionCandidate>{});
 
-    // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
     final channelStartIdx = useState(-1);
     final channelsAsync = ref.watch(channelsProvider);
@@ -852,16 +850,24 @@ class ComposeBar extends HookConsumerWidget {
       return null;
     }, [suggestionOverlayController]);
 
-    void expandComposer() => _expandComposer(
-      context: context,
-      isExpanded: isComposerExpanded,
-      attachmentSurface: attachmentSurface,
-      onFocusRequested: onFocusRequested,
-      focusNode: focusNode,
-      view: appView,
-      androidImeTransitionStarted: androidImeTransitionStarted,
-      androidImeFallbackTimer: androidImeFallbackTimer,
-    );
+    void expandComposer() {
+      if (_requestComposerHandoff(
+        activityInteractionLock,
+        composerActivationRequests,
+      )) {
+        return;
+      }
+      _expandComposer(
+        context: context,
+        isExpanded: isComposerExpanded,
+        attachmentSurface: attachmentSurface,
+        onFocusRequested: onFocusRequested,
+        focusNode: focusNode,
+        view: appView,
+        androidImeTransitionStarted: androidImeTransitionStarted,
+        androidImeFallbackTimer: androidImeFallbackTimer,
+      );
+    }
 
     _useComposerFocusRestorer(
       onChanged: onFocusRestorerChanged,
@@ -919,13 +925,20 @@ class ComposeBar extends HookConsumerWidget {
       );
     }
 
-    // Suggestions and attachments live in the overlay.
     final hasPendingUploads = uploadingCount.value > 0;
+    final activityIndicator = activityIndicatorBuilder?.call(
+      composerExpansionController,
+      focusNode,
+      activityInteractionLock,
+      composerActivationRequests,
+      expandComposer,
+    );
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          ?activityIndicator,
           _UploadProgressMotion(
             visible: hasPendingUploads,
             progress: uploadProgress.value,
@@ -941,10 +954,11 @@ class ComposeBar extends HookConsumerWidget {
             controller: suggestionOverlayController,
             attachmentSurface: attachmentSurface,
             reducedMotion: reducedMotion,
+            interactionLocked: activityInteractionLock.value,
+            onInteractionLockedTap: () => composerActivationRequests.value += 1,
             buildOverlayPanel: buildOverlayPanel,
-            onDismissAttachmentSurface: () {
-              attachmentSurface.value = _AttachmentSurface.closed;
-            },
+            onDismissAttachmentSurface: () =>
+                attachmentSurface.value = _AttachmentSurface.closed,
             child: _ComposeBarLayout(
               attachments: attachments.value,
               onRemoveAttachment: removeAttachment,

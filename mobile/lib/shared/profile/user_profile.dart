@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+/// Relay-backed user identity metadata shared across product features.
 @immutable
 class UserProfile {
   final String pubkey;

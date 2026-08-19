@@ -30,12 +30,11 @@ import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_link_navigation.dart';
+import 'agent_activity/composer_agent_activity_indicator.dart';
 import 'agent_activity/working_bots_provider.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
-import 'channel_typing_provider.dart';
-import 'channel_typing_indicator.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
 import 'compose_bar.dart';
@@ -209,16 +208,6 @@ class ChannelDetailPage extends HookConsumerWidget {
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
         .value;
-    // Only show channel-level typing (exclude thread-scoped entries and self).
-    final typingEntries = ref
-        .watch(channelTypingProvider(channel.id))
-        .where((e) => e.threadHeadId == null)
-        .where(
-          (e) =>
-              currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
-        )
-        .toList();
     final baseChannel =
         channelsAsync
             .whenData(
@@ -493,15 +482,12 @@ class ChannelDetailPage extends HookConsumerWidget {
               if (!resolvedChannel.isForum &&
                   (!resolvedChannel.isMember ||
                       resolvedChannel.isArchived)) ...[
-                AnimatedSize(
-                  duration: MediaQuery.disableAnimationsOf(context)
-                      ? Duration.zero
-                      : const Duration(milliseconds: 180),
-                  curve: Curves.easeOutCubic,
-                  alignment: Alignment.bottomCenter,
-                  child: typingEntries.isEmpty
-                      ? const SizedBox.shrink()
-                      : ChannelTypingIndicator(entries: typingEntries),
+                ComposerAgentActivityIndicator(
+                  channelId: channel.id,
+                  overlayTopBoundary: frostedAppBarHeight(
+                    context,
+                    titleContentHeight: appBarTitleContentHeight,
+                  ),
                 ),
                 if (!resolvedChannel.isDm)
                   _ReadOnlyNotice(channel: resolvedChannel),
@@ -521,18 +507,31 @@ class ChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      AnimatedSize(
-                        duration: MediaQuery.disableAnimationsOf(context)
-                            ? Duration.zero
-                            : const Duration(milliseconds: 180),
-                        curve: Curves.easeOutCubic,
-                        alignment: Alignment.bottomCenter,
-                        child: typingEntries.isEmpty
-                            ? const SizedBox.shrink()
-                            : ChannelTypingIndicator(entries: typingEntries),
-                      ),
                       ComposeBar(
                         channelId: channel.id,
+                        activityIndicatorBuilder:
+                            (
+                              composerWidthAnimation,
+                              activityFocusNode,
+                              composerInteractionLock,
+                              composerActivationRequests,
+                              restoreActivityComposerFocus,
+                            ) => ComposerAgentActivityIndicator(
+                              channelId: channel.id,
+                              horizontalInset: 0,
+                              overlayTopBoundary: frostedAppBarHeight(
+                                context,
+                                titleContentHeight: appBarTitleContentHeight,
+                              ),
+                              compactWidthFactor: 0.85,
+                              composerWidthAnimation: composerWidthAnimation,
+                              composerFocusNode: activityFocusNode,
+                              composerInteractionLock: composerInteractionLock,
+                              composerActivationRequests:
+                                  composerActivationRequests,
+                              onRestoreComposerFocus:
+                                  restoreActivityComposerFocus,
+                            ),
                         focusNode: composerFocusNode,
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,

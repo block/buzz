@@ -58,6 +58,8 @@ class _ComposerOverlayPortal extends StatelessWidget {
   final OverlayPortalController controller;
   final ValueListenable<_AttachmentSurface> attachmentSurface;
   final bool reducedMotion;
+  final bool interactionLocked;
+  final VoidCallback onInteractionLockedTap;
   final Widget Function(_AttachmentSurface surface) buildOverlayPanel;
   final VoidCallback onDismissAttachmentSurface;
   final Widget child;
@@ -66,6 +68,8 @@ class _ComposerOverlayPortal extends StatelessWidget {
     required this.controller,
     required this.attachmentSurface,
     required this.reducedMotion,
+    required this.interactionLocked,
+    required this.onInteractionLockedTap,
     required this.buildOverlayPanel,
     required this.onDismissAttachmentSurface,
     required this.child,
@@ -144,7 +148,22 @@ class _ComposerOverlayPortal extends StatelessWidget {
           },
         );
       },
-      child: child,
+      child: Stack(
+        children: [
+          AbsorbPointer(absorbing: interactionLocked, child: child),
+          if (interactionLocked)
+            Positioned.fill(
+              child: Semantics(
+                button: true,
+                label: 'Open composer',
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onInteractionLockedTap,
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }

@@ -586,6 +586,20 @@ List<TranscriptItem> buildTranscript(List<ObserverFrame> events) {
       continue;
     }
 
+    if (event.kind == 'turn_error' || event.kind == 'agent_panic') {
+      final payload = _asRecord(event.payload);
+      final error = _asString(payload['error']) ?? 'Unknown error';
+      final outcome = _asString(payload['outcome']) ?? 'error';
+      upsertTextItem(
+        '${event.kind}:${event.turnId ?? event.seq}',
+        'lifecycle',
+        event.kind == 'agent_panic' ? 'Agent error' : 'Turn error',
+        '$outcome: $error',
+        event.timestamp,
+      );
+      continue;
+    }
+
     if (event.kind != 'acp_read' && event.kind != 'acp_write') {
       continue;
     }

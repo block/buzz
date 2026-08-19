@@ -122,6 +122,29 @@ void main() {
     expect(items[1], isA<MetadataItem>());
     expect((items[1] as MetadataItem).sections, hasLength(2));
   });
+
+  test('surfaces explicit turn errors without inventing completion rows', () {
+    final items = buildTranscript([
+      ObserverFrame(
+        seq: 1,
+        timestamp: _timestamp(1),
+        kind: 'turn_error',
+        turnId: 'turn-1',
+        payload: const {'outcome': 'failed', 'error': 'Permission denied'},
+      ),
+      ObserverFrame(
+        seq: 2,
+        timestamp: _timestamp(2),
+        kind: 'turn_completed',
+        turnId: 'turn-2',
+      ),
+    ]);
+
+    expect(items, hasLength(1));
+    expect(items.single, isA<LifecycleItem>());
+    expect((items.single as LifecycleItem).title, 'Turn error');
+    expect((items.single as LifecycleItem).text, 'failed: Permission denied');
+  });
 }
 
 ObserverFrame _updateFrame({

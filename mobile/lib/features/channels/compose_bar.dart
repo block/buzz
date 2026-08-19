@@ -57,6 +57,7 @@ part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
 part 'compose_bar/layout.dart';
 part 'compose_bar/dock.dart';
+part 'compose_bar/activity_handoff.dart';
 part 'compose_bar/compose_bar_widget.dart';
 
 /// Callback used by channels and threads to submit composer content.
@@ -66,3 +67,12 @@ typedef ComposeBarOnSend =
       List<String> mentionPubkeys, {
       List<List<String>> mediaTags,
     });
+
+typedef ComposeBarActivityIndicatorBuilder =
+    Widget Function(
+      Animation<double> composerWidthAnimation,
+      FocusNode composerFocusNode,
+      ValueNotifier<bool> composerInteractionLock,
+      ValueNotifier<int> composerActivationRequests,
+      VoidCallback restoreComposerFocus,
+    );

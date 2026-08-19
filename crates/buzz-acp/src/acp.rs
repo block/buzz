@@ -174,6 +174,8 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
+    /// Shared thread scope for the active turn, updated by successful steering.
+    observer_turn_scope: Option<crate::observer::ObserverTurnScope>,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -557,6 +559,7 @@ impl AcpClient {
             observer: None,
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
+            observer_turn_scope: None,
             active_run_id: None,
             steering_supported: false,
             steer_rx: None,
@@ -577,6 +580,25 @@ impl AcpClient {
         self.observer_context = context;
     }
 
+    /// Share the active turn's mutable thread scope with subsequent wire events.
+    pub fn set_observer_turn_scope(&mut self, scope: Option<crate::observer::ObserverTurnScope>) {
+        self.observer_turn_scope = scope;
+    }
+
+    /// Return the observer metadata for the current turn.
+    pub(crate) fn observer_context(&self) -> ObserverContext {
+        let mut context = self.observer_context.clone();
+        if let Some(scope) = &self.observer_turn_scope {
+            context.thread_head_id = scope.thread_head_id();
+        }
+        context
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observer_turn_scope(&self) -> Option<crate::observer::ObserverTurnScope> {
+        self.observer_turn_scope.clone()
+    }
+
     /// Return a clone of the observer handle, if attached.
     pub(crate) fn observer_handle(&self) -> Option<ObserverHandle> {
         self.observer.clone()
@@ -590,12 +612,8 @@ impl AcpClient {
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
         if let Some(observer) = &self.observer {
-            observer.emit(
-                kind,
-                self.observer_agent_index,
-                &self.observer_context,
-                payload,
-            );
+            let context = self.observer_context();
+            observer.emit(kind, self.observer_agent_index, &context, payload);
         }
     }
 
@@ -1338,6 +1356,7 @@ impl AcpClient {
         let mut pending_steer: Option<(
             u64,
             SteerTransport,
+            Option<String>,
             tokio::sync::oneshot::Sender<crate::pool::SteerAck>,
         )> = None;
 
@@ -1364,7 +1383,7 @@ impl AcpClient {
             // exists). Check the classified deadline here so a steady-
             // stream agent is still bounded.
             if Instant::now() >= next_deadline {
-                if let Some((_, _, ack_tx)) = pending_steer.take() {
+                if let Some((_, _, _, ack_tx)) = pending_steer.take() {
                     // Prompt is timing out — release the withheld event via
                     // PromptCompletedNeutral (no fallback signal: there is
                     // no in-flight turn to signal once we return, and
@@ -1466,7 +1485,12 @@ impl AcpClient {
                             );
                             match self.write_ndjson(&msg).await {
                                 Ok(()) => {
-                                    pending_steer = Some((id, transport, req.ack_tx));
+                                    pending_steer = Some((
+                                        id,
+                                        transport,
+                                        req.observer_thread_head_id,
+                                        req.ack_tx,
+                                    ));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -1489,7 +1513,7 @@ impl AcpClient {
                     // would catch this anyway, but firing the deadline arm
                     // here makes the wakeup immediate (no extra reader poll
                     // round-trip when stdout is idle).
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, _, ack_tx)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     if idle_fires_first {
@@ -1513,13 +1537,13 @@ impl AcpClient {
 
             match read_result {
                 None => {
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, _, ack_tx)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::AgentExited);
                 }
                 Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, _, ack_tx)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::Protocol(
@@ -1527,7 +1551,7 @@ impl AcpClient {
                     ));
                 }
                 Some(Err(e)) => {
-                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                    if let Some((_, _, _, ack_tx)) = pending_steer.take() {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::Io(std::io::Error::other(e)));
@@ -1570,13 +1594,13 @@ impl AcpClient {
                     // share the `no method` guard.
                     if let Some(id) = msg.get("id") {
                         if msg.get("method").is_none() {
-                            if let Some((steer_id, _, _)) = pending_steer.as_ref() {
+                            if let Some((steer_id, _, _, _)) = pending_steer.as_ref() {
                                 if *id == serde_json::json!(*steer_id) {
                                     // Take the ack_tx out and route the
                                     // response. We do not return — keep
                                     // reading until the prompt response
                                     // arrives.
-                                    let (_, transport, ack_tx) =
+                                    let (_, transport, observer_thread_head_id, ack_tx) =
                                         pending_steer.take().expect("just checked");
                                     let ack = if let Some(error) = msg.get("error") {
                                         let code = error
@@ -1670,19 +1694,24 @@ impl AcpClient {
                                             }
                                         }
                                     };
+                                    if matches!(ack, crate::pool::SteerAck::Success { .. }) {
+                                        if let Some(scope) = &self.observer_turn_scope {
+                                            scope.set_thread_head_id(observer_thread_head_id);
+                                        }
+                                    }
                                     let _ = ack_tx.send(ack);
                                     continue;
                                 }
                             }
                             if *id == serde_json::json!(expected_id) {
                                 if let Some(error) = msg.get("error") {
-                                    if let Some((_, _, ack_tx)) = pending_steer.take() {
+                                    if let Some((_, _, _, ack_tx)) = pending_steer.take() {
                                         let _ = ack_tx
                                             .send(crate::pool::SteerAck::PromptCompletedNeutral);
                                     }
                                     return Err(agent_error_from_json(error));
                                 }
-                                if let Some((_, _, ack_tx)) = pending_steer.take() {
+                                if let Some((_, _, _, ack_tx)) = pending_steer.take() {
                                     let _ =
                                         ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                                 }
@@ -3853,6 +3882,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["test steer body".into()],
+                    observer_thread_head_id: None,
                     ack_tx,
                 })
                 .await
@@ -3914,6 +3944,8 @@ mod tests {
         let _ = client.handle_session_update(&update);
         assert_eq!(client.active_run_id(), Some("run-42"));
 
+        let turn_scope = crate::observer::ObserverTurnScope::new(Some("thread-a".into()));
+        client.set_observer_turn_scope(Some(turn_scope.clone()));
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
         client.install_steer_rx(steer_rx);
 
@@ -3922,6 +3954,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["test steer body".into()],
+                    observer_thread_head_id: Some("thread-b".into()),
                     ack_tx,
                 })
                 .await
@@ -3960,6 +3993,11 @@ mod tests {
             crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
+        assert_eq!(
+            turn_scope.thread_head_id().as_deref(),
+            Some("thread-b"),
+            "successful ACK must update live observer scope before reaching the main loop",
+        );
     }
 
     /// Steer-success renewal keeps the turn alive past the original hard
@@ -3994,6 +4032,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    observer_thread_head_id: None,
                     ack_tx,
                 })
                 .await
@@ -4068,6 +4107,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    observer_thread_head_id: None,
                     ack_tx,
                 })
                 .await
@@ -4318,6 +4358,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    observer_thread_head_id: None,
                     ack_tx,
                 })
                 .await
@@ -4371,6 +4412,7 @@ mod tests {
             steer_tx
                 .send(crate::pool::SteerRequest {
                     prompt_blocks: vec!["steer body".into()],
+                    observer_thread_head_id: None,
                     ack_tx,
                 })
                 .await

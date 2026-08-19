@@ -84,6 +84,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   }
 }
 
+/// Shared relay-backed profile cache for cross-feature identity presentation.
 final userCacheProvider =
     NotifierProvider<UserCacheNotifier, Map<String, UserProfile>>(
       UserCacheNotifier.new,

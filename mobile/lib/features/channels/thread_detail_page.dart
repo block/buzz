@@ -15,11 +15,10 @@ import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
+import 'agent_activity/composer_agent_activity_indicator.dart';
 import 'android_ime_lift.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
-import 'channel_typing_provider.dart';
-import 'channel_typing_indicator.dart';
 import 'thread_replies_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
@@ -533,17 +532,6 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [threadHead.id, readState.isReady, visibleReplyReadKey]);
 
-    // Thread-scoped typing indicators (exclude self).
-    final allTyping = ref.watch(channelTypingProvider(channelId));
-    final threadTyping = allTyping
-        .where((e) => e.threadHeadId == threadHead.id)
-        .where(
-          (e) =>
-              currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey?.toLowerCase(),
-        )
-        .toList();
-
     // Resolve thread head from live data (reactions/edits may have changed).
     final liveHead =
         allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
@@ -867,7 +855,12 @@ class ThreadDetailPage extends HookConsumerWidget {
                 ),
               ),
               if (!isMember || isArchived)
-                _ThreadTypingIndicator(entries: threadTyping, animated: false),
+                _ThreadTypingIndicator(
+                  channelId: channelId,
+                  threadHeadId: effectiveRootId,
+                  animated: false,
+                  overlayTopBoundary: frostedAppBarHeight(context),
+                ),
             ],
           ),
           if (isMember && !isArchived)
@@ -880,9 +873,29 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _ThreadTypingIndicator(entries: threadTyping),
                       ComposeBar(
                         channelId: channelId,
+                        activityIndicatorBuilder:
+                            (
+                              composerWidthAnimation,
+                              activityFocusNode,
+                              composerInteractionLock,
+                              composerActivationRequests,
+                              restoreActivityComposerFocus,
+                            ) => _ThreadTypingIndicator(
+                              channelId: channelId,
+                              threadHeadId: effectiveRootId,
+                              horizontalInset: 0,
+                              overlayTopBoundary: frostedAppBarHeight(context),
+                              compactWidthFactor: 0.85,
+                              composerWidthAnimation: composerWidthAnimation,
+                              composerFocusNode: activityFocusNode,
+                              composerInteractionLock: composerInteractionLock,
+                              composerActivationRequests:
+                                  composerActivationRequests,
+                              onRestoreComposerFocus:
+                                  restoreActivityComposerFocus,
+                            ),
                         focusNode: composerFocusNode,
                         onFocusRestorerChanged: (restoreFocus) =>
                             restoreComposerFocus.value = restoreFocus,

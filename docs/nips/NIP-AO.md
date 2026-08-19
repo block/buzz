@@ -85,21 +85,23 @@ The `content` field decrypts to an `ObserverEvent` JSON object:
   "kind":        "<frame_kind>",
   "agentIndex":  <integer> | null,
   "channelId":   "<channel_uuid>" | null,
+  "threadHeadId": "<nip10_root_event_id>" | null,
   "sessionId":   "<session_id>" | null,
   "turnId":      "<turn_id>" | null,
   "payload":     { ... }
 }
 ```
 
-`seq`, `timestamp`, `kind`, and `payload` are REQUIRED. `agentIndex`, `channelId`, `sessionId`,
-and `turnId` are OPTIONAL — they MAY be `null` when the value is not yet known
-(e.g., `sessionId` before session establishment). Clients MUST handle `null` values
-gracefully.
+`seq`, `timestamp`, `kind`, and `payload` are REQUIRED. `agentIndex`, `channelId`,
+`threadHeadId`, `sessionId`, and `turnId` are OPTIONAL — they MAY be `null` when
+the value is not yet known (e.g., `sessionId` before session establishment).
+Clients MUST handle `null` values gracefully.
 
 `seq` is monotonically increasing per session (drop detection). `timestamp` is an
 RFC 3339 datetime string with sub-second precision (e.g., `"2026-04-29T12:00:41.500Z"`).
-`agentIndex` identifies the agent in multi-agent scenarios. `sessionId`/`turnId`
-correlate frames across a session and turn. `payload` is kind-specific (MAY be `{}`).
+`agentIndex` identifies the agent in multi-agent scenarios. `threadHeadId` is the
+NIP-10 root event ID for a thread-scoped turn. `sessionId`/`turnId` correlate
+frames across a session and turn. `payload` is kind-specific (MAY be `{}`).
 Unknown `kind` values MUST be ignored.
 
 ### Frame Kinds
@@ -109,7 +111,17 @@ Unknown `kind` values MUST be ignored.
 | `acp_read`         | Inbound ACP protocol frame (model → harness)             |
 | `acp_write`        | Outbound ACP protocol frame (harness → model)            |
 | `turn_started`     | A new agent turn has begun                               |
+| `turn_liveness`    | The current turn is still active                          |
+| `turn_completed`   | The current turn ended, optionally with an outcome        |
+| `turn_error`       | The current turn stopped with an error                    |
+| `agent_panic`      | The agent task terminated unexpectedly                    |
 | `session_resolved` | Session completed or terminated                          |
+
+`turn_completed.payload.outcome` MAY be `"cancelled"` when the turn was
+explicitly cancelled. A missing outcome retains the legacy completion semantics
+and SHOULD be treated as finished unless a more specific terminal frame exists.
+`turn_started` and `turn_liveness` carry `livenessIntervalSecs`; other mid-turn
+frames are not required to repeat it.
 
 ### Control (`frame=control`)
 
@@ -254,6 +266,7 @@ of decrypted payloads and MUST NOT log it at INFO level or above.
   "kind":       "acp_write",
   "agentIndex": 0,
   "channelId":  "52a85618-0f8f-4542-94ec-599e6e1c6f2e",
+  "threadHeadId": "9f0d...c2a1",
   "sessionId":  "a1b2c3d4",
   "turnId":     "e5f6g7h8",
   "payload": {

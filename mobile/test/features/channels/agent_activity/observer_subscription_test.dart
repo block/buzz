@@ -10,6 +10,65 @@ import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
+  test('decodes explicit root scope separately from legacy omission', () {
+    final explicitRoot = ObserverFrame.fromJson({
+      'seq': 1,
+      'timestamp': '2026-04-30T12:00:01.000Z',
+      'kind': 'turn_liveness',
+      'channelId': 'channel-1',
+      'threadHeadId': null,
+      'turnId': 'turn-1',
+    });
+    final legacy = ObserverFrame.fromJson({
+      'seq': 2,
+      'timestamp': '2026-04-30T12:00:02.000Z',
+      'kind': 'turn_liveness',
+      'channelId': 'channel-1',
+      'turnId': 'turn-1',
+    });
+
+    expect(explicitRoot.hasThreadScope, isTrue);
+    expect(explicitRoot.threadHeadId, isNull);
+    expect(legacy.hasThreadScope, isFalse);
+  });
+
+  test('turn-scoped provider does not merge concurrent agent turns', () {
+    final container = ProviderContainer(
+      overrides: [
+        observerRelayProvider.overrideWith(
+          () => _StaticObserverRelay({
+            'agent-a': [
+              _turnMessageFrame(seq: 1, turnId: 'turn-1', text: 'First turn'),
+              _turnMessageFrame(seq: 2, turnId: 'turn-2', text: 'Second turn'),
+              ObserverFrame(
+                seq: 3,
+                timestamp: '2026-04-30T12:00:03.000Z',
+                kind: 'agent_panic',
+                turnId: 'turn-1',
+                payload: const {'error': 'Process exited'},
+              ),
+            ],
+          }),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    final state = container.read(
+      observerTurnSubscriptionProvider((
+        channelId: 'test-channel',
+        agentPubkey: 'agent-a',
+        turnId: 'turn-1',
+      )),
+    );
+
+    expect(state.transcript.whereType<MessageItem>().single.text, 'First turn');
+    expect(
+      state.transcript.whereType<LifecycleItem>().single.title,
+      'Agent error',
+    );
+  });
+
   test('provider initializes without circular dependency error', () {
     // Regression test: reading the provider should NOT throw
     // "Bad state: Tried to read the state of an uninitialized provider".
@@ -254,6 +313,7 @@ void main() {
           'kind': 'turn_started',
           'channelId': channelId,
           'turnId': 'turn-1',
+          'startedAt': '2026-04-30T11:59:00.000Z',
           'payload': {
             'triggeringEventIds': ['0123456789abcdef'],
           },
@@ -279,6 +339,12 @@ void main() {
       final item = state.transcript.single;
       expect(item, isA<LifecycleItem>());
       expect((item as LifecycleItem).title, 'Turn started');
+      final storedFrame = container
+          .read(observerRelayProvider)
+          .framesByAgent[agentKeychain.public]!
+          .single;
+      expect(storedFrame.startedAt, '2026-04-30T11:59:00.000Z');
+      expect(storedFrame.receivedAt, isNotNull);
 
       final otherChannelState = container.read(
         observerSubscriptionProvider((
@@ -313,10 +379,11 @@ void main() {
       seq: 2,
       channelId: channelId,
       turnId: 'turn-2',
-    );
+    )..['threadHeadId'] = null;
     final earlierFrame = _observerFrameJson(
       seq: 1,
       channelId: channelId,
+      threadHeadId: 'thread-1',
       turnId: 'turn-1',
     );
     relaySession.emit(
@@ -339,6 +406,15 @@ void main() {
     final relayState = container.read(observerRelayProvider);
     final frames = relayState.framesByAgent[agentKeychain.public];
     expect(frames?.map((frame) => frame.seq), [1, 2]);
+    expect(
+      frames![0].receivedAt!.isBefore(frames[1].receivedAt!),
+      isTrue,
+      reason: 'batch receipt order must follow timestamp and sequence',
+    );
+    expect(frames[0].threadHeadId, 'thread-1');
+    expect(frames[0].hasThreadScope, isTrue);
+    expect(frames[1].threadHeadId, isNull);
+    expect(frames[1].hasThreadScope, isTrue);
 
     final state = container.read(observerSubscriptionProvider(key));
     expect(state.connection, ObserverConnectionState.open);
@@ -518,15 +594,41 @@ void main() {
   );
 }
 
+ObserverFrame _turnMessageFrame({
+  required int seq,
+  required String turnId,
+  required String text,
+}) => ObserverFrame(
+  seq: seq,
+  timestamp: '2026-04-30T12:00:0$seq.000Z',
+  kind: 'acp_read',
+  channelId: 'test-channel',
+  turnId: turnId,
+  payload: {
+    'method': 'session/update',
+    'params': {
+      'update': {
+        'sessionUpdate': 'agent_message_chunk',
+        'messageId': 'message-$turnId',
+        'content': [
+          {'type': 'text', 'text': text},
+        ],
+      },
+    },
+  },
+);
+
 Map<String, dynamic> _observerFrameJson({
   required int seq,
   required String channelId,
+  String? threadHeadId,
   required String turnId,
 }) => {
   'seq': seq,
   'timestamp': '2026-04-30T12:00:0$seq.000Z',
   'kind': 'turn_started',
   'channelId': channelId,
+  'threadHeadId': ?threadHeadId,
   'turnId': turnId,
   'payload': {
     'triggeringEventIds': ['$seq'],
@@ -612,6 +714,18 @@ class _RecordingRelaySession extends RelaySessionNotifier {
       gate.complete();
     }
   }
+}
+
+class _StaticObserverRelay extends ObserverRelayNotifier {
+  final Map<String, List<ObserverFrame>> frames;
+
+  _StaticObserverRelay(this.frames);
+
+  @override
+  ObserverRelayState build() => ObserverRelayState(
+    connection: ObserverConnectionState.open,
+    framesByAgent: frames,
+  );
 }
 
 class _FakeRelayConfigNotifier extends RelayConfigNotifier {

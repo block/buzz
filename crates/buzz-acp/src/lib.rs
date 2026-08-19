@@ -591,6 +591,7 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         kind: OBSERVER_BATCH_KIND.to_string(),
         agent_index: last.agent_index,
         channel_id: last.channel_id.clone(),
+        thread_head_id: last.thread_head_id.clone(),
         session_id: last.session_id.clone(),
         turn_id: last.turn_id.clone(),
         started_at: last.started_at.clone(),
@@ -1259,6 +1260,7 @@ fn emit_project_owner_control_result(
         None,
         &observer::ObserverContext {
             channel_id: None,
+            thread_head_id: None,
             session_id: None,
             turn_id: None,
             started_at: None,
@@ -1296,6 +1298,7 @@ fn handle_cancel_turn_control(
             None,
             &observer::ObserverContext {
                 channel_id: Some(channel_id.to_string()),
+                thread_head_id: None,
                 session_id: None,
                 turn_id: None,
                 started_at: None,
@@ -1383,6 +1386,7 @@ fn handle_switch_model_control(
             None,
             &observer::ObserverContext {
                 channel_id: Some(channel_id.to_string()),
+                thread_head_id: None,
                 session_id: None,
                 turn_id: None,
                 started_at: None,
@@ -1551,6 +1555,7 @@ struct RespawnResult {
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    thread_tags: ThreadTags,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -3109,10 +3114,16 @@ async fn tokio_main() -> Result<()> {
                     // they're ephemeral and must not block the main loop during
                     // relay reconnection (#35).
                     for (&ch, thread_tags) in &typing_channels {
+                        let turn_id = pool
+                            .task_map()
+                            .values()
+                            .find(|meta| meta.channel_id == Some(ch))
+                            .map(|meta| meta.turn_id.as_str());
                         if let Ok(event) = relay.build_typing_event(
                             ch,
                             thread_tags.root_event_id.as_deref(),
                             thread_tags.parent_event_id.as_deref(),
+                            turn_id,
                         ) {
                             if let Err(e) = relay.try_publish_event(event) {
                                 tracing::debug!("typing indicator dropped for {ch}: {e}");
@@ -3199,6 +3210,7 @@ async fn tokio_main() -> Result<()> {
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                thread_tags,
                 ack,
             })) => {
                 // Mid-turn steer attempt resolved (either transport:
@@ -3311,6 +3323,31 @@ async fn tokio_main() -> Result<()> {
                     "non-cancelling steer ack received"
                 );
                 if let Ok(pool::SteerAck::Success { session_id }) = &ack {
+                    let steered_turn = rescope_successful_steer(
+                        &mut pool,
+                        &mut typing_channels,
+                        channel_id,
+                        &thread_tags,
+                    );
+                    if let Some(turn_id) = steered_turn {
+                        if let Some(observer) = observer.as_ref() {
+                            let mut context =
+                                observer::context_for(Some(channel_id), None, Some(turn_id));
+                            context.thread_head_id = thread_tags.root_event_id.clone();
+                            observer.emit(
+                                "turn_rescoped",
+                                None,
+                                &context,
+                                serde_json::json!({ "triggeringEventId": event_id }),
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            channel = %channel_id,
+                            event_id = %event_id,
+                            "successful steer could not rescope in-flight observer telemetry"
+                        );
+                    }
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
                     if !pool.record_successful_steer(
                         channel_id,
@@ -3641,6 +3678,7 @@ fn try_native_steer(
     // steering (which is to inject only what's new).
     let (header, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
+    let thread_tags = queue::parse_thread_tags(&event);
     let be = queue::BatchEvent {
         event,
         prompt_tag: prompt_tag.clone(),
@@ -3652,6 +3690,7 @@ fn try_native_steer(
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
         prompt_blocks: vec![body],
+        observer_thread_head_id: thread_tags.root_event_id.clone(),
         ack_tx,
     };
 
@@ -3685,6 +3724,7 @@ fn try_native_steer(
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    thread_tags,
                     ack,
                 });
             });
@@ -3699,6 +3739,22 @@ fn try_native_steer(
             false
         }
     }
+}
+
+/// Rescope a successful non-cancelling steer while its original turn is live.
+///
+/// The prompt result and steer acknowledgement race in the main `select!` loop.
+/// If the result won, its handler already removed the typing entry and retired
+/// the `TaskMeta`; a late acknowledgement must not resurrect typing forever.
+fn rescope_successful_steer(
+    pool: &mut AgentPool,
+    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+) -> Option<String> {
+    let turn_id = pool.rescope_in_flight_turn(channel_id, thread_tags.root_event_id.clone())?;
+    typing_channels.insert(channel_id, thread_tags.clone());
+    Some(turn_id)
 }
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────
@@ -3762,6 +3818,9 @@ fn dispatch_pending(
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
         let turn_id = Uuid::new_v4().to_string();
         let task_turn_id = turn_id.clone();
+        let observer_turn_scope =
+            observer::ObserverTurnScope::new(typing_scope.root_event_id.clone());
+        let task_observer_turn_scope = observer_turn_scope.clone();
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -3772,6 +3831,7 @@ fn dispatch_pending(
                 result_tx,
                 Some(control_rx),
                 task_turn_id,
+                task_observer_turn_scope,
             )
             .await;
         });
@@ -3781,6 +3841,8 @@ fn dispatch_pending(
             pool::TaskMeta {
                 agent_index,
                 channel_id: Some(channel_id),
+                thread_head_id: typing_scope.root_event_id.clone(),
+                observer_turn_scope: Some(observer_turn_scope),
                 turn_id,
                 recoverable_batch,
                 control_tx: Some(control_tx),
@@ -4045,11 +4107,16 @@ fn handle_prompt_result(
         .to_string();
     let harness_pid = std::process::id();
 
-    let channel_id = match &result.source {
-        PromptSource::Channel(ch) => Some(*ch),
-        PromptSource::Heartbeat => None,
-    };
-    let turn_id = result.turn_id.clone();
+    let mut observer_context = result.agent.acp.observer_context();
+    if observer_context.channel_id.is_none() {
+        observer_context.channel_id = match &result.source {
+            PromptSource::Channel(channel_id) => Some(channel_id.to_string()),
+            PromptSource::Heartbeat => None,
+        };
+    }
+    if observer_context.turn_id.is_none() {
+        observer_context.turn_id = Some(result.turn_id.clone());
+    }
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -4059,12 +4126,7 @@ fn handle_prompt_result(
             if let Some(code) = error_code {
                 payload["code"] = serde_json::json!(code);
             }
-            observer.emit(
-                "turn_error",
-                Some(agent_index),
-                &observer::context_for(channel_id, None, Some(turn_id.clone())),
-                payload,
-            );
+            observer.emit("turn_error", Some(agent_index), &observer_context, payload);
         }
     };
 
@@ -4291,7 +4353,13 @@ fn recover_panicked_agent(
         observer.emit(
             "agent_panic",
             Some(i),
-            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
+            &observer::ObserverContext {
+                channel_id: meta.channel_id.map(|channel_id| channel_id.to_string()),
+                thread_head_id: meta.thread_head_id,
+                session_id: None,
+                turn_id: Some(meta.turn_id),
+                started_at: None,
+            },
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
@@ -4398,6 +4466,8 @@ fn dispatch_heartbeat(
     let agent_index = agent.index;
     let turn_id = Uuid::new_v4().to_string();
     let task_turn_id = turn_id.clone();
+    let observer_turn_scope = observer::ObserverTurnScope::new(None);
+    let task_observer_turn_scope = observer_turn_scope.clone();
 
     let abort_handle = pool.join_set.spawn(async move {
         pool::run_prompt_task(
@@ -4408,6 +4478,7 @@ fn dispatch_heartbeat(
             result_tx,
             None,
             task_turn_id,
+            task_observer_turn_scope,
         )
         .await;
     });
@@ -4417,6 +4488,8 @@ fn dispatch_heartbeat(
         pool::TaskMeta {
             agent_index,
             channel_id: None,
+            thread_head_id: None,
+            observer_turn_scope: Some(observer_turn_scope),
             turn_id,
             recoverable_batch: None,
             control_tx: None,
@@ -5216,6 +5289,8 @@ mod owner_control_command_tests {
             pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
@@ -5779,6 +5854,7 @@ mod observer_publish_queue_tests {
             kind: kind.to_string(),
             agent_index: Some(0),
             channel_id: channel.map(ToOwned::to_owned),
+            thread_head_id: None,
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
@@ -6647,6 +6723,7 @@ mod observer_chunk_coalescer_tests {
             kind: "acp_read".to_string(),
             agent_index: Some(0),
             channel_id: Some("channel-1".to_string()),
+            thread_head_id: None,
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
@@ -6675,6 +6752,7 @@ mod observer_chunk_coalescer_tests {
             kind: "turn_started".to_string(),
             agent_index: Some(0),
             channel_id: Some("channel-1".to_string()),
+            thread_head_id: None,
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
@@ -7055,6 +7133,86 @@ mod error_outcome_emission_tests {
     }
 
     #[tokio::test]
+    async fn stale_successful_steer_ack_does_not_resurrect_typing() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![]);
+        let mut typing_channels = HashMap::new();
+        let thread_tags = ThreadTags {
+            root_event_id: Some("thread-b".into()),
+            parent_event_id: Some("message-b".into()),
+            mentioned_pubkeys: vec![],
+        };
+
+        assert_eq!(
+            rescope_successful_steer(&mut pool, &mut typing_channels, channel_id, &thread_tags,),
+            None,
+        );
+        assert!(typing_channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_successful_steer_ack_rescopes_turn_and_typing() {
+        let channel_id = Uuid::new_v4();
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        let observer_turn_scope = crate::observer::ObserverTurnScope::new(Some("thread-a".into()));
+        let mut live_agent = dummy_agent(0).await;
+        let mut observer_context =
+            crate::observer::context_for(Some(channel_id), None, Some("turn-1".into()));
+        observer_context.thread_head_id = Some("thread-a".into());
+        live_agent.acp.set_observer_context(observer_context);
+        live_agent
+            .acp
+            .set_observer_turn_scope(Some(observer_turn_scope.clone()));
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                thread_head_id: Some("thread-a".into()),
+                observer_turn_scope: Some(observer_turn_scope.clone()),
+                turn_id: "turn-1".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut typing_channels = HashMap::new();
+        let thread_tags = ThreadTags {
+            root_event_id: Some("thread-b".into()),
+            parent_event_id: Some("message-b".into()),
+            mentioned_pubkeys: vec![],
+        };
+
+        assert_eq!(
+            rescope_successful_steer(&mut pool, &mut typing_channels, channel_id, &thread_tags,)
+                .as_deref(),
+            Some("turn-1"),
+        );
+        let updated_typing = typing_channels.get(&channel_id).expect("typing scope");
+        assert_eq!(updated_typing.root_event_id.as_deref(), Some("thread-b"));
+        assert_eq!(updated_typing.parent_event_id.as_deref(), Some("message-b"));
+        assert_eq!(
+            observer_turn_scope.thread_head_id().as_deref(),
+            Some("thread-b"),
+            "subsequent live observer frames must use the steered thread",
+        );
+        assert_eq!(
+            live_agent.acp.observer_context().thread_head_id.as_deref(),
+            Some("thread-b"),
+            "raw ACP frames must read the shared steered scope",
+        );
+        assert_eq!(
+            pool.task_map()
+                .values()
+                .find(|meta| meta.channel_id == Some(channel_id))
+                .and_then(|meta| meta.thread_head_id.as_deref()),
+            Some("thread-b"),
+        );
+    }
+
+    #[tokio::test]
     async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
         let channel_id = Uuid::new_v4();
         let steer_event_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -7075,6 +7233,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7147,6 +7307,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7262,6 +7424,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7314,7 +7478,11 @@ mod error_outcome_emission_tests {
     /// Drive one error outcome through `handle_prompt_result` and return how
     /// many `turn_error` events it emitted to the observer feed.
     async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
-        let agent = dummy_agent(0).await;
+        let mut agent = dummy_agent(0).await;
+        let mut observer_context =
+            crate::observer::context_for(None, None, Some("test-turn-id".to_string()));
+        observer_context.thread_head_id = Some("thread-1".to_string());
+        agent.acp.set_observer_context(observer_context);
         let mut pool = AgentPool::from_slots(vec![None]);
 
         // `handle_prompt_result` asserts it removes exactly one in-flight task
@@ -7327,6 +7495,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7381,6 +7551,12 @@ mod error_outcome_emission_tests {
                 .all(|event| event.turn_id.as_deref() == Some("test-turn-id")),
             "turn_error must retain the completed turn id"
         );
+        assert!(
+            turn_errors
+                .iter()
+                .all(|event| event.thread_head_id.as_deref() == Some("thread-1")),
+            "turn_error must retain the completed turn thread"
+        );
         turn_errors.len()
     }
 
@@ -7404,6 +7580,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                thread_head_id: Some("thread-1".into()),
+                observer_turn_scope: None,
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7453,6 +7631,7 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+        assert_eq!(panic.thread_head_id.as_deref(), Some("thread-1"));
     }
 
     #[tokio::test]
@@ -7497,6 +7676,8 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    thread_head_id: None,
+                    observer_turn_scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -7589,6 +7770,8 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    thread_head_id: None,
+                    observer_turn_scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -7695,6 +7878,8 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    thread_head_id: None,
+                    observer_turn_scope: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -7772,6 +7957,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7867,6 +8054,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7984,6 +8173,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8124,6 +8315,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8313,6 +8506,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8399,6 +8594,8 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                thread_head_id: None,
+                observer_turn_scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8463,6 +8660,7 @@ mod observer_payload_trim_tests {
             kind: kind.to_string(),
             agent_index: Some(0),
             channel_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            thread_head_id: None,
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
