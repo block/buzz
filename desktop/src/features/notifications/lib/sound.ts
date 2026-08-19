@@ -8,6 +8,13 @@ import {
 import type { FeedItemCategory } from "@/shared/api/types";
 
 export const SOUND_NAMES = [
+  "berd",
+  "berd-chime",
+  "berd-ding-dong",
+  "berd-everything",
+  "berd-excited",
+  "berd-twinkle",
+  "berd-very-excited",
   "bong",
   "boo",
   "dng",
