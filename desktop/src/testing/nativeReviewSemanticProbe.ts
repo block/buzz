@@ -87,9 +87,11 @@ function snapshot(): SemanticNode[] {
   return nodes;
 }
 
-export function installNativeReviewSemanticProbe(): void {
-  const probeUrl = import.meta.env.VITE_NATIVE_REVIEW_PROBE_URL;
-  const probeToken = import.meta.env.VITE_NATIVE_REVIEW_PROBE_TOKEN;
+export function installNativeReviewSemanticProbe(config: {
+  probeUrl: string;
+  probeToken: string;
+}): void {
+  const { probeUrl, probeToken } = config;
   const parsed = new URL(probeUrl);
   if (
     parsed.protocol !== "http:" ||

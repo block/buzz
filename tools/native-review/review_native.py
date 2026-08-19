@@ -42,6 +42,7 @@ MAX_ACTION_DURATION_MS = 30_000
 MAX_SCROLL_DELTA = 10_000
 MAX_SEMANTIC_SNAPSHOT_BYTES = 1_000_000
 PUBKEY = re.compile(r"[0-9a-f]{64}")
+PLATFORM_UUID = re.compile(r'"IOPlatformUUID"\s*=\s*"([0-9A-Fa-f-]+)"')
 
 
 class HarnessError(RuntimeError):
@@ -76,7 +77,14 @@ def utc_now() -> str:
 def machine_fingerprint() -> dict[str, str]:
     """Return comparison-critical host attributes without user-specific data."""
     cpu = run(["sysctl", "-n", "machdep.cpu.brand_string"], check=False).stdout.strip()
+    platform_expert = run(
+        ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], check=False
+    ).stdout
+    host_match = PLATFORM_UUID.search(platform_expert)
+    if not host_match:
+        raise HarnessError("cannot determine stable macOS host identity")
     return {
+        "host_id_sha256": hashlib.sha256(host_match.group(1).lower().encode()).hexdigest(),
         "system": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
@@ -272,6 +280,7 @@ def parse_loopback_relay(relay_url: str) -> urllib.parse.ParseResult:
         or parsed.query
         or parsed.fragment
         or port is None
+        or not 1 <= port <= 65535
     ):
         raise HarnessError(f"refusing ambiguous or non-loopback review relay: {relay_url}")
     return parsed
@@ -527,39 +536,36 @@ def semantic_probe_server(path: pathlib.Path, token: str) -> tuple[http.server.T
 
 
 def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: dict[str, Any],
-                     probe_url: str, probe_token: str) -> tuple[subprocess.Popen[str], pathlib.Path, int]:
-    # Build with the repository toolchain but no inherited credentials. Launch
-    # the resulting executable separately so only the app receives isolated HOME.
-    dev_url = (
-        "http://localhost:1420?nativeReview=1"
-        f"&reviewRelay={urllib.parse.quote(isolation['relay_url'], safe='')}"
-        f"&reviewPubkey={urllib.parse.quote(fixture['identity_pubkey'], safe='')}"
-    )
-    config = json.dumps({
-        "build": {"devUrl": dev_url},
-        "identifier": isolation["bundle_id"], "productName": "Buzz Native Review",
-        "bundle": {"externalBin": []},
-    }, separators=(",", ":"))
-    build_env = scrubbed_environment(include_home=True)
-    build_env["VITE_NATIVE_REVIEW"] = "1"
-    build_env["VITE_NATIVE_REVIEW_RELAY"] = isolation["relay_url"]
-    build_env["VITE_NATIVE_REVIEW_PUBKEY"] = fixture["identity_pubkey"]
-    build_env["VITE_NATIVE_REVIEW_PROBE_URL"] = probe_url
-    build_env["VITE_NATIVE_REVIEW_PROBE_TOKEN"] = probe_token
-    run(["pnpm", "exec", "tauri", "build", "--debug", "--bundles", "app", "--config", config],
-        cwd=ROOT / "desktop", env=build_env, capture=False)
-    app_binary = (ROOT / "desktop" / "src-tauri" / "target" / "debug" / "bundle" / "macos" /
-                  "Buzz Native Review.app" / "Contents" / "MacOS" / "buzz-desktop")
-    if not app_binary.is_file():
-        raise HarnessError(f"Tauri build succeeded without app binary: {app_binary}")
+                     probe_url: str, probe_token: str,
+                     app_binary: pathlib.Path | None = None) -> tuple[subprocess.Popen[str], pathlib.Path, int]:
+    # Build once per benchmark cohort, then launch that immutable executable
+    # with run-specific fixture and probe coordinates supplied over Tauri IPC.
+    if app_binary is None:
+        config = json.dumps({
+            "identifier": isolation["bundle_id"], "productName": "Buzz Native Review",
+            "bundle": {"externalBin": []},
+        }, separators=(",", ":"))
+        build_env = scrubbed_environment(include_home=True)
+        build_env["VITE_NATIVE_REVIEW"] = "1"
+        run(["pnpm", "exec", "tauri", "build", "--debug", "--bundles", "app", "--config", config],
+            cwd=ROOT / "desktop", env=build_env, capture=False)
+        app_binary = (ROOT / "desktop" / "src-tauri" / "target" / "debug" / "bundle" / "macos" /
+                      "Buzz Native Review.app" / "Contents" / "MacOS" / "buzz-desktop")
+        if not app_binary.is_file():
+            raise HarnessError(f"Tauri build succeeded without app binary: {app_binary}")
+    elif not app_binary.is_file():
+        raise HarnessError(f"prepared native review app does not exist: {app_binary}")
 
     env = scrubbed_environment()
     env["HOME"] = str(run_dir / "home")
     pathlib.Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
     env.update({
         "BUZZ_PRIVATE_KEY": pathlib.Path(fixture["secret_path"]).read_text().strip(),
+        "BUZZ_REVIEW_PUBKEY": fixture["identity_pubkey"],
         "BUZZ_RELAY_URL": isolation["relay_url"], "BUZZ_DEV_KEYRING_SERVICE": isolation["keyring_service"],
         "BUZZ_NATIVE_REVIEW": "1", "BUZZ_NATIVE_REVIEW_CHANNEL": "general",
+        "BUZZ_NATIVE_REVIEW_PROBE_URL": probe_url,
+        "BUZZ_NATIVE_REVIEW_PROBE_TOKEN": probe_token,
     })
     log = (run_dir / "logs" / "app.log").open("w")
     process = subprocess.Popen([str(app_binary)], cwd=ROOT, env=env, stdout=log,
@@ -574,7 +580,6 @@ def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: 
         time.sleep(0.25)
     process.terminate()
     raise HarnessError("timed out waiting for native Buzz process")
-
 
 def wait_for_visible_window(driver: Driver, process: subprocess.Popen[str], timeout_seconds: float = 30) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
@@ -668,10 +673,12 @@ def cleanup_review_state(run_dir: pathlib.Path, isolation: dict[str, str],
         raise HarnessError("; ".join(errors))
 
 
-def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -> pathlib.Path:
+def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
+                *, app_binary: pathlib.Path | None = None,
+                isolation_id: str | None = None) -> pathlib.Path:
     journey = load_journey(path)
     run_id = f"{journey['flow']}-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
-    isolation = isolation_manifest(run_id, relay_url)
+    isolation = isolation_manifest(isolation_id or run_id, relay_url)
     run_dir = output_root / git("rev-parse", "--short=12", "HEAD") / journey["flow"] / run_id
     for child in ("manifest", "logs", "screenshots", "accessibility", "state", "home"):
         (run_dir / child).mkdir(parents=True, exist_ok=True)
@@ -698,7 +705,7 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
             run_dir / "state" / "semantic.json", probe_token
         )
         process, app_binary, app_pid = build_and_launch(
-            run_dir, isolation, fixture, probe_url, probe_token
+            run_dir, isolation, fixture, probe_url, probe_token, app_binary
         )
         receipt["provenance"]["artifact_path"] = str(app_binary)
         receipt["provenance"]["artifact_sha256"] = sha256(app_binary)
@@ -787,6 +794,29 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
     return run_dir
 
 
+def benchmark(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
+              runs: int) -> list[pathlib.Path]:
+    """Capture a cohort from one immutable app artifact."""
+    cohort_id = f"benchmark-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+    receipts: list[pathlib.Path] = []
+    app_binary: pathlib.Path | None = None
+    for _ in range(runs):
+        receipt_path = run_journey(
+            path, relay_url, output_root, app_binary=app_binary, isolation_id=cohort_id
+        ) / "receipt.json"
+        if app_binary is None:
+            receipt = json.loads(receipt_path.read_text())
+            built_binary = pathlib.Path(receipt["provenance"]["artifact_path"])
+            cohort_binary = output_root / ".cohorts" / cohort_id / "buzz-desktop"
+            cohort_binary.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(built_binary, cohort_binary)
+            if sha256(cohort_binary) != receipt["provenance"]["artifact_sha256"]:
+                raise HarnessError("prepared benchmark artifact changed while being copied")
+            app_binary = cohort_binary
+        receipts.append(receipt_path)
+    return receipts
+
+
 def numeric(value: Any) -> bool:
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
             and math.isfinite(value))
@@ -817,7 +847,8 @@ def load_receipts(paths: list[pathlib.Path], label: str) -> list[dict[str, Any]]
                 or not isinstance(provenance.get("artifact_sha256"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", provenance["artifact_sha256"])
                 or not isinstance(machine, dict)
-                or set(machine) != {"system", "release", "machine", "cpu"}
+                or set(machine) != {"host_id_sha256", "system", "release", "machine", "cpu"}
+                or not re.fullmatch(r"[0-9a-f]{64}", machine.get("host_id_sha256", ""))
                 or any(not isinstance(value, str) or not value for value in machine.values())):
             raise HarnessError(f"{label} receipt has incomplete provenance: {path}")
         receipts.append(receipt)
@@ -970,7 +1001,7 @@ def main() -> int:
         if args.command == "benchmark":
             if args.runs < PERFORMANCE_SAMPLE_MINIMUM:
                 raise HarnessError(f"benchmark requires at least {PERFORMANCE_SAMPLE_MINIMUM} runs")
-            receipts = [run_journey(args.journey, args.relay, args.output) / "receipt.json" for _ in range(args.runs)]
+            receipts = benchmark(args.journey, args.relay, args.output, args.runs)
             print(json.dumps({"receipts": [str(path) for path in receipts]}, indent=2)); return 0
         run_journey(args.journey, args.relay, args.output); return 0
     except HarnessError as exc:

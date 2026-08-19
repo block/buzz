@@ -94,7 +94,37 @@
       ],
       "properties": {
         "machine": {
-          "type": "object"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host_id_sha256",
+            "system",
+            "release",
+            "machine",
+            "cpu"
+          ],
+          "properties": {
+            "host_id_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "system": {
+              "type": "string",
+              "minLength": 1
+            },
+            "release": {
+              "type": "string",
+              "minLength": 1
+            },
+            "machine": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cpu": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
         },
         "process": {
           "type": "object"

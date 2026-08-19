@@ -49,7 +49,9 @@ mutation.
 A step with `measure: <name>` persists its complete native action-to-observed-
 postcondition duration in the receipt. While the journey runs, the harness also
 samples the app process every 100 ms and records median/peak CPU percentage and
-resident memory. Capture a cohort rather than trusting one noisy laptop run:
+resident memory. Capture a cohort rather than trusting one noisy laptop run. Each benchmark
+builds one immutable app artifact, then supplies run-specific fixture and probe
+coordinates at launch so every receipt in the cohort hashes the same binary:
 
 ```bash
 just native-review-benchmark tools/native-review/desktop/tooltip-fresh-dwell.yaml 5
@@ -70,8 +72,9 @@ candidate receipts using `compare` and a checked-in policy such as
 Comparison uses cohort medians, reports every raw sample and min/max, and exits
 nonzero when an absolute ceiling or relative regression limit is breached. It
 fails closed for dirty-tree runs, failed cleanup, mixed source revisions within a
-cohort, wrong flows, missing metrics, too few samples, or different machine/OS
-fingerprints. Baseline and candidate therefore need to run on the same host;
+cohort, wrong flows, missing metrics, too few samples, different host IDs,
+or different machine/OS fingerprints. Baseline and candidate therefore need to
+run on the same host;
 thermal/load noise is reduced by repeated samples, not disguised as universal
 lab-grade benchmarking. Recording overhead is intentionally present in both
 cohorts because this tool measures the reviewer-visible workflow.

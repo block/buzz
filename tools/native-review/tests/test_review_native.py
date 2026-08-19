@@ -93,7 +93,7 @@ class JourneyTests(unittest.TestCase):
         for relay in (
             "ws://localhost:3030/path", "ws://user@localhost:3030",
             "ws://localhost:3030?x=1", "ws://localhost:3030#x",
-            "ws://localhost", "ws://localhost:99999",
+            "ws://localhost", "ws://localhost:0", "ws://localhost:99999",
         ):
             with self.subTest(relay=relay), self.assertRaises(review_native.HarnessError):
                 review_native.isolation_manifest("run", relay)
@@ -269,7 +269,7 @@ class JourneyTests(unittest.TestCase):
 
 
 class PerformanceTests(unittest.TestCase):
-    MACHINE = {"system": "Darwin", "release": "test", "machine": "arm64", "cpu": "test"}
+    MACHINE = {"host_id_sha256": "f" * 64, "system": "Darwin", "release": "test", "machine": "arm64", "cpu": "test"}
 
     def receipt(self, path, artifact, timing, cpu=10, memory=100, flow="tooltip_fresh_dwell"):
         payload = {
@@ -389,6 +389,46 @@ metrics:
             candidate[0].write_text(json.dumps(payload))
             with self.assertRaisesRegex(review_native.HarnessError, "incompatible machines"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_comparison_rejects_different_same_model_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            baseline = [self.receipt(root / f"b{i}.json", "base", 100) for i in range(3)]
+            candidate = [self.receipt(root / f"c{i}.json", "head", 100) for i in range(3)]
+            for path in candidate:
+                payload = json.loads(path.read_text())
+                payload["performance"]["machine"]["host_id_sha256"] = "e" * 64
+                path.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(review_native.HarnessError, "incompatible machines"):
+                review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
+
+    def test_benchmark_reuses_first_run_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            artifact = root / "buzz-desktop"
+            artifact.write_text("immutable")
+            calls = []
+
+            def fake_run_journey(_path, _relay, output, *, app_binary, isolation_id):
+                calls.append((app_binary, isolation_id))
+                run_dir = output / f"run-{len(calls)}"
+                run_dir.mkdir(parents=True)
+                (run_dir / "receipt.json").write_text(json.dumps({
+                    "provenance": {
+                        "artifact_path": str(artifact),
+                        "artifact_sha256": review_native.sha256(artifact),
+                    }
+                }))
+                return run_dir
+
+            with mock.patch.object(review_native, "run_journey", side_effect=fake_run_journey):
+                receipts = review_native.benchmark(pathlib.Path("journey.yaml"), "ws://localhost:3030", root, 3)
+            self.assertEqual(len(receipts), 3)
+            self.assertIsNone(calls[0][0])
+            prepared = root / ".cohorts" / calls[0][1] / "buzz-desktop"
+            self.assertEqual([call[0] for call in calls[1:]], [prepared, prepared])
+            self.assertEqual(prepared.read_text(), "immutable")
+            self.assertEqual(len({call[1] for call in calls}), 1)
 
     def test_comparison_rejects_mixed_revisions(self):
         with tempfile.TemporaryDirectory() as directory:
