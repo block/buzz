@@ -187,12 +187,20 @@ Widget _buildTestable({
   String? canvasContent,
   String? initialMessageId,
   String? initialThreadRootId,
+  InitialThreadRouteBehavior initialThreadRouteBehavior =
+      InitialThreadRouteBehavior.push,
   Map<String, List<NostrEvent>> threadReplies = const {},
   Map<String, Future<List<NostrEvent>>> pendingThreadReplies = const {},
+  Map<String, Future<List<NostrEvent>> Function()> threadReplyLoaders =
+      const {},
+  Map<String, List<NostrEvent>> localThreadReplies = const {},
   TextScaler textScaler = TextScaler.noScaling,
   bool disableAnimations = false,
+  bool disableRetries = false,
+  Duration? Function(int retryCount, Object error)? providerRetry,
   RelaySessionNotifier? relaySessionNotifier,
   http.Client? mediaClient,
+  Widget? home,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -200,6 +208,7 @@ Widget _buildTestable({
   final fakeMessagesNotifier =
       messagesNotifier ?? _FakeMessagesNotifier(messages);
   return ProviderScope(
+    retry: providerRetry ?? (disableRetries ? (_, _) => null : null),
     overrides: [
       channelMessagesProvider(
         _channelId,
@@ -240,6 +249,19 @@ Widget _buildTestable({
         threadRepliesProvider(
           ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
         ).overrideWith((ref) => entry.value),
+      for (final entry in threadReplyLoaders.entries)
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith((ref) => entry.value()),
+      for (final entry in localThreadReplies.entries)
+        threadLocalRepliesProvider(
+          ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+        ).overrideWith(
+          () => _FakeThreadLocalRepliesNotifier(
+            ThreadRepliesArgs(channelId: _channelId, rootId: entry.key),
+            entry.value,
+          ),
+        ),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -265,11 +287,14 @@ Widget _buildTestable({
         child: child!,
       ),
       navigatorObservers: navigatorObservers,
-      home: ChannelDetailPage(
-        channel: resolvedChannel,
-        initialMessageId: initialMessageId,
-        initialThreadRootId: initialThreadRootId,
-      ),
+      home:
+          home ??
+          ChannelDetailPage(
+            channel: resolvedChannel,
+            initialMessageId: initialMessageId,
+            initialThreadRootId: initialThreadRootId,
+            initialThreadRouteBehavior: initialThreadRouteBehavior,
+          ),
     ),
   );
 }
@@ -1478,8 +1503,19 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const ValueKey('reaction-popover-tray')), findsNothing);
-      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('message-action-reaction-tray')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-preview')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('message-action-surface')),
+        findsOneWidget,
+      );
+      expect(find.byType(BottomSheet), findsNothing);
       expect(find.text('Copy text'), findsOneWidget);
     });
 
@@ -1717,8 +1753,9 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsOneWidget,
       );
-      expect(find.text('Latest'), findsOneWidget);
+      expect(find.text('Latest'), findsNothing);
       expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      expect(find.byTooltip('Jump to latest message'), findsOneWidget);
     });
 
     testWidgets('loads history through the oldest unread boundary', (
@@ -2515,19 +2552,83 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsOneWidget,
       );
-      final latestSurface = tester.widget<Container>(
-        find.byKey(const ValueKey('channel-jump-to-latest-surface')),
+      final latestSurfaceFinder = find.byKey(
+        const ValueKey('channel-jump-to-latest-surface'),
       );
+      final latestSurface = tester.widget<Container>(latestSurfaceFinder);
       final latestDecoration = latestSurface.decoration! as BoxDecoration;
-      expect(latestDecoration.borderRadius, BorderRadius.circular(Radii.full));
+      expect(latestDecoration.shape, BoxShape.circle);
       expect(
         latestDecoration.color,
-        AppTheme.light().colorScheme.surface.withValues(alpha: 0.5),
+        AppTheme.light().colorScheme.surface.withValues(alpha: 0.72),
       );
       expect(
         (latestDecoration.border! as Border).top.color,
-        Colors.black.withValues(alpha: 0.04),
+        AppTheme.light().colorScheme.onSurface.withValues(alpha: 0.08),
       );
+      expect(
+        tester.getSize(find.byKey(const ValueKey('channel-jump-to-latest'))),
+        const Size.square(Grid.xl),
+      );
+      expect(
+        tester
+            .getCenter(find.byKey(const ValueKey('channel-jump-to-latest')))
+            .dx,
+        closeTo(tester.getCenter(messageList).dx, 0.1),
+      );
+      expect(
+        tester
+                .getTopLeft(find.byKey(const ValueKey('channel-composer-dock')))
+                .dy -
+            tester
+                .getBottomRight(
+                  find.byKey(const ValueKey('channel-jump-to-latest')),
+                )
+                .dy,
+        closeTo(Grid.xs, 0.1),
+      );
+      final latestSwitcher = tester.widget<AnimatedSwitcher>(
+        find.byKey(const ValueKey('channel-jump-to-latest-switcher')),
+      );
+      expect(latestSwitcher.duration, const Duration(milliseconds: 180));
+      expect(latestSwitcher.reverseDuration, const Duration(milliseconds: 160));
+      expect(latestSwitcher.switchInCurve, Curves.easeOutCubic);
+      expect(latestSwitcher.switchOutCurve, Curves.easeInCubic);
+      final latestScaleTransition = tester.widget<ScaleTransition>(
+        find.descendant(
+          of: find.byKey(const ValueKey('channel-jump-to-latest-switcher')),
+          matching: find.byType(ScaleTransition),
+        ),
+      );
+      expect(latestScaleTransition.alignment, Alignment.bottomCenter);
+      final visualAnchor = tester.widget<Align>(
+        find.byKey(const ValueKey('channel-jump-to-latest-visual-anchor')),
+      );
+      expect(visualAnchor.alignment, Alignment.bottomCenter);
+      expect(tester.getSize(latestSurfaceFinder), const Size.square(Grid.lg));
+      expect(
+        tester.getBottomRight(latestSurfaceFinder).dy,
+        closeTo(
+          tester
+              .getBottomRight(
+                find.byKey(const ValueKey('channel-jump-to-latest')),
+              )
+              .dy,
+          0.1,
+        ),
+      );
+      expect(find.text('Latest'), findsNothing);
+      expect(find.byIcon(LucideIcons.arrowDown), findsOneWidget);
+      for (final container in tester.widgetList<Container>(
+        find.descendant(
+          of: find.byKey(const ValueKey('channel-jump-to-latest')),
+          matching: find.byType(Container),
+        ),
+      )) {
+        if (container.decoration case final BoxDecoration decoration) {
+          expect(decoration.boxShadow, anyOf(isNull, isEmpty));
+        }
+      }
       expect(
         find.descendant(
           of: find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -2549,6 +2650,30 @@ void main() {
 
       expect(findRichText('Newest live update'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('channel-jump-to-latest')));
+      await tester.pump();
+
+      ScaleTransition exitingScaleTransition() {
+        return tester.widget<ScaleTransition>(
+          find.ancestor(
+            of: find.byKey(const ValueKey('channel-jump-to-latest')),
+            matching: find.byType(ScaleTransition),
+          ),
+        );
+      }
+
+      for (var frame = 0; frame < 60; frame += 1) {
+        await tester.pump(const Duration(milliseconds: 16));
+        if (exitingScaleTransition().scale.status == AnimationStatus.reverse) {
+          break;
+        }
+      }
+      expect(exitingScaleTransition().scale.status, AnimationStatus.reverse);
+      await tester.pump(const Duration(milliseconds: 120));
+
+      final collapsedScaleTransition = exitingScaleTransition();
+      expect(collapsedScaleTransition.alignment, Alignment.bottomCenter);
+      expect(collapsedScaleTransition.scale.value, lessThan(0.1));
+
       await tester.pumpAndSettle();
 
       expect(findRichText('Newest live update'), findsOneWidget);
@@ -2743,6 +2868,74 @@ void main() {
     );
 
     testWidgets(
+      'pins the current day below the app bar after its divider scrolls away',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
+        final firstDay =
+            DateTime(2025, 1, 1, 12).toUtc().millisecondsSinceEpoch ~/ 1000;
+        final messages = [
+          for (var day = 0; day < 3; day += 1)
+            for (var index = 0; index < 10; index += 1)
+              _textMsg(
+                id: 'day-$day-message-$index',
+                pubkey: 'alice',
+                content: 'Day $day message $index',
+                createdAt: firstDay + day * 86400 + index,
+              ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: messages,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        final list = tester.widget<ScrollablePositionedList>(messageList);
+        list.itemScrollController!.jumpTo(index: 14, alignment: 0.8);
+        await tester.pumpAndSettle();
+
+        final stickyHeader = find.byKey(
+          const ValueKey('channel-sticky-date-header'),
+        );
+        final stickySurface = find.byKey(
+          const ValueKey('channel-sticky-date-header-surface'),
+        );
+        expect(stickyHeader, findsOneWidget);
+        expect(stickySurface, findsOneWidget);
+        expect(
+          find.descendant(
+            of: stickyHeader,
+            matching: find.text(formatDayHeading(firstDay + 86400)),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester.getTopLeft(stickySurface).dy,
+          closeTo(
+            frostedAppBarHeight(tester.element(stickyHeader)) + Grid.twelve,
+            1,
+          ),
+        );
+        expect(
+          find.descendant(
+            of: stickyHeader,
+            matching: find.byType(BackdropFilter),
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
       'keeps follow mode off while a tall newest message stays visible',
       (tester) async {
         tester.view.physicalSize = const Size(400, 600);
@@ -2790,7 +2983,7 @@ void main() {
         expect(findRichText('Newest message line 0'), findsOneWidget);
         expect(
           find.byKey(const ValueKey('channel-jump-to-latest')),
-          findsOneWidget,
+          findsNothing,
         );
 
         messagesNotifier.setMessages([
@@ -4266,6 +4459,372 @@ void main() {
   });
 
   group('Deep-link navigation', () {
+    testWidgets('fades the target highlight in after the thread route lands', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'bob',
+        content: 'Target reply',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final timelineMessages = formatTimeline([root, target]);
+      final threadHead = timelineMessages.firstWhere(
+        (message) => message.id == root.id,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, target],
+          threadReplies: {
+            'root': [target],
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ThreadDetailPage(
+                        threadHead: threadHead,
+                        allMessages: timelineMessages,
+                        channelId: _testChannel.id,
+                        currentPubkey: null,
+                        isMember: true,
+                        isArchived: false,
+                        initialMessageId: 'target',
+                      ),
+                    ),
+                  ),
+                  child: const Text('Open highlighted thread'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open highlighted thread'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+
+      final threadRoute =
+          ModalRoute.of(tester.element(find.byType(ThreadDetailPage)))!
+              as MaterialPageRoute<void>;
+      expect(threadRoute.animation!.status, AnimationStatus.forward);
+      final transitionDecoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(transitionDecoration.color, Colors.transparent);
+
+      await tester.pump(threadRoute.transitionDuration);
+      expect(threadRoute.animation!.status, AnimationStatus.completed);
+      await tester.pump();
+      await tester.pump();
+      final landedDecoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(landedDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+      final enteringDecoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(enteringDecoration.color!.a, greaterThan(0));
+      expect(enteringDecoration.color!.a, lessThan(0.12));
+
+      await tester.pump(const Duration(milliseconds: 150));
+      final visibleDecoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(visibleDecoration.color!.a, closeTo(0.12, 0.001));
+    });
+
+    testWidgets('waits for a delayed target jump before highlighting', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 40; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+      final timelineMessages = formatTimeline([root, ...replies]);
+      final threadHead = timelineMessages.first;
+      final replyCompleter = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          pendingThreadReplies: {'root': replyCompleter.future},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ThreadDetailPage(
+                        threadHead: threadHead,
+                        allMessages: timelineMessages,
+                        channelId: _testChannel.id,
+                        currentPubkey: null,
+                        isMember: true,
+                        isArchived: false,
+                        initialMessageId: 'reply-30',
+                      ),
+                    ),
+                  ),
+                  child: const Text('Open delayed thread'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open delayed thread'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 4));
+
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-30')),
+        findsNothing,
+      );
+
+      replyCompleter.complete(replies);
+      await tester.pumpAndSettle();
+
+      final target = find.byKey(const ValueKey('thread-message-reply-30'));
+      expect(target, findsOneWidget);
+      final landedDecoration =
+          tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
+      expect(landedDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+      final enteringDecoration =
+          tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
+      expect(enteringDecoration.color!.a, greaterThan(0));
+      expect(enteringDecoration.color!.a, lessThan(0.12));
+    });
+
+    testWidgets('waits for a retry before jumping to a hydrated target', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'bob',
+        content: 'Hydrated target',
+        createdAt: 1400,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final earlierReplies = [
+        for (var i = 0; i < 30; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Reply $i',
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'root', '', 'reply'],
+            ],
+          ),
+      ];
+      final timelineMessages = formatTimeline([root, target]);
+      final firstAttempt = Completer<List<NostrEvent>>();
+      var attempts = 0;
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, target],
+          providerRetry: (retryCount, _) =>
+              retryCount == 0 ? const Duration(seconds: 30) : null,
+          localThreadReplies: {
+            'root': [target],
+          },
+          threadReplyLoaders: {
+            'root': () {
+              attempts++;
+              if (attempts == 1) return firstAttempt.future;
+              return Future.value([...earlierReplies, target]);
+            },
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: ThreadDetailPage(
+            threadHead: timelineMessages.first,
+            allMessages: timelineMessages,
+            channelId: _testChannel.id,
+            currentPubkey: null,
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'target',
+          ),
+        ),
+      );
+      await tester.pump();
+      firstAttempt.completeError(Exception('transient thread query failure'));
+      await tester.pump();
+      await tester.pump();
+
+      final targetFinder = find.byKey(const ValueKey('thread-message-target'));
+      expect(targetFinder, findsOneWidget);
+      final retryingDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(retryingDecoration.color, Colors.transparent);
+      expect(attempts, 1);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+      final stillRetryingDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(stillRetryingDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(milliseconds: 2800));
+      expect(attempts, 1);
+      final expiredJumpDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(expiredJumpDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+
+      expect(attempts, 2);
+      expect(
+        find.byKey(const ValueKey('thread-message-group-target')),
+        findsOneWidget,
+      );
+      final landedDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(landedDecoration.color, Colors.transparent);
+
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+      final highlightedDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(highlightedDecoration.color!.a, greaterThan(0));
+    });
+
+    testWidgets('highlights a hydrated target after the thread query fails', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'bob',
+        content: 'Hydrated target',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final timelineMessages = formatTimeline([root, target]);
+      final replyCompleter = Completer<List<NostrEvent>>();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, target],
+          pendingThreadReplies: {'root': replyCompleter.future},
+          disableRetries: true,
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: ThreadDetailPage(
+            threadHead: timelineMessages.first,
+            allMessages: timelineMessages,
+            channelId: _testChannel.id,
+            currentPubkey: null,
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'target',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final targetFinder = find.byKey(const ValueKey('thread-message-target'));
+      expect(targetFinder, findsOneWidget);
+      final loadingDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(loadingDecoration.color, Colors.transparent);
+
+      replyCompleter.completeError(Exception('thread query failed'));
+      for (var i = 0; i < 8; i++) {
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pump(const Duration(milliseconds: 150));
+
+      final highlightedDecoration =
+          tester.widget<DecoratedBox>(targetFinder).decoration as BoxDecoration;
+      expect(highlightedDecoration.color!.a, greaterThan(0));
+      expect(highlightedDecoration.color!.a, lessThan(0.12));
+    });
+
     testWidgets('opens a nested reply in its direct-parent thread', (
       tester,
     ) async {
@@ -4324,7 +4883,147 @@ void main() {
         find.byKey(const ValueKey('thread-message-target')),
       );
       final decoration = highlighted.decoration as BoxDecoration;
-      expect(decoration.color, isNot(Colors.transparent));
+      final initialHighlight = decoration.color!;
+      expect(initialHighlight, isNot(Colors.transparent));
+      expect(initialHighlight.a, closeTo(0.12, 0.001));
+
+      await tester.pump(const Duration(milliseconds: 2999));
+      final heldDecoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(heldDecoration.color, initialHighlight);
+
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump(const Duration(milliseconds: 150));
+
+      final fadingDecoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(fadingDecoration.color!.a, greaterThan(0));
+      expect(fadingDecoration.color!.a, lessThan(initialHighlight.a));
+
+      await tester.pump(const Duration(milliseconds: 150));
+      final dismissedDecoration =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('thread-message-target')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      expect(dismissedDecoration.color, Colors.transparent);
+    });
+
+    testWidgets('does not replace a newer route after delayed hydration', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+      );
+      final messagesNotifier = _FakeMessagesNotifier(const []);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: messagesNotifier,
+          initialThreadRootId: 'root',
+          initialThreadRouteBehavior:
+              InitialThreadRouteBehavior.replaceCurrentRoute,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final navigator = Navigator.of(
+        tester.element(find.byType(ChannelDetailPage)),
+      );
+      messagesNotifier.setMessages([root]);
+      navigator.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const Scaffold(body: Text('New destination')),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('New destination'), findsOneWidget);
+      expect(find.byType(ThreadDetailPage), findsNothing);
+    });
+
+    testWidgets('replaces a temporary channel route for an initial thread', (
+      tester,
+    ) async {
+      final root = _textMsg(
+        id: 'root',
+        pubkey: 'alice',
+        content: 'Thread root',
+      );
+      final target = _textMsg(
+        id: 'target',
+        pubkey: 'bob',
+        content: 'Target reply',
+        createdAt: 1100,
+        extraTags: const [
+          ['e', 'root', '', 'reply'],
+        ],
+      );
+      final relaySession = _TrackingRelaySession();
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root, target],
+          relaySessionNotifier: relaySession,
+          threadReplies: {
+            'root': [target],
+          },
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChannelDetailPage(
+                        channel: _testChannel,
+                        initialMessageId: 'target',
+                        initialThreadRootId: 'root',
+                        initialThreadRouteBehavior:
+                            InitialThreadRouteBehavior.replaceCurrentRoute,
+                      ),
+                    ),
+                  ),
+                  child: const Text('Open activity thread'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open activity thread'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(relaySession.visibleChannels, [_testChannel.id]);
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      expect(find.text('Open activity thread'), findsOneWidget);
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(relaySession.visibleChannels, isEmpty);
     });
   });
 
@@ -6057,7 +6756,9 @@ void main() {
           const ValueKey('thread-message-group-reply-29'),
         );
         final composer = find.byKey(const ValueKey('composer-surface'));
-        await tester.drag(list, const Offset(0, 24));
+        // Clear the gesture arena's touch slop so this represents a deliberate
+        // tail-detaching drag rather than a long-press hold with small motion.
+        await tester.drag(list, const Offset(0, 48));
         await tester.pumpAndSettle();
         expect(
           tester.getBottomLeft(latest).dy,
@@ -7122,6 +7823,15 @@ Channel _channel({required String id, required String name}) => Channel(
   isMember: true,
 );
 
+class _FakeThreadLocalRepliesNotifier extends ThreadLocalRepliesNotifier {
+  final List<NostrEvent> _replies;
+
+  _FakeThreadLocalRepliesNotifier(super.args, this._replies);
+
+  @override
+  List<NostrEvent> build() => _replies;
+}
+
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
@@ -7171,6 +7881,27 @@ class _ErrorMessagesNotifier extends ChannelMessagesNotifier {
   @override
   AsyncValue<List<NostrEvent>> build() =>
       AsyncError('Connection failed', StackTrace.current);
+}
+
+class _TrackingRelaySession extends RelaySessionNotifier {
+  final visibleChannels = <String>[];
+
+  @override
+  SessionState build() =>
+      const SessionState(status: SessionStatus.disconnected);
+
+  @override
+  void Function() registerVisibleChannel(String channelId) {
+    final release = super.registerVisibleChannel(channelId);
+    visibleChannels.add(channelId);
+    var released = false;
+    return () {
+      if (released) return;
+      released = true;
+      visibleChannels.remove(channelId);
+      release();
+    };
+  }
 }
 
 class _ReconnectingRelaySession extends RelaySessionNotifier {

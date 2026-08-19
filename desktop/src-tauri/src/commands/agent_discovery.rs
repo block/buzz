@@ -1033,7 +1033,7 @@ pub async fn discover_managed_agent_prereqs(
 mod relay_directory;
 #[cfg(test)]
 use relay_directory::advance_relay_cursor;
-pub use relay_directory::list_relay_agents;
+pub use relay_directory::{list_relay_agents, revalidate_relay_agents};
 
 #[cfg(test)]
 mod tests {

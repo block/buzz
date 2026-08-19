@@ -57,17 +57,16 @@ use deep_link::{
     take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingEntityDeepLinks,
     PendingNavigationDeepLinks,
 };
-use huddle::audio_output::{
-    get_audio_output_device, list_audio_output_devices, set_audio_output_device,
-};
-use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
-    add_agent_to_huddle, check_pipeline_hotstart, close_huddle_companion, confirm_huddle_active,
-    download_voice_models, end_huddle, get_huddle_agent_pubkeys, get_huddle_state,
-    get_model_status, get_voice_input_mode, interrupt_huddle_speech, join_huddle, leave_huddle,
-    open_huddle_window, push_audio_pcm, remove_agent_from_huddle, set_huddle_manual_mic_unmuted,
-    set_huddle_transcription_enabled, set_tts_enabled, set_voice_input_mode, speak_agent_message,
-    start_huddle, start_stt_pipeline, HuddlePhase,
+    add_agent_to_huddle,
+    audio_output::{get_audio_output_device, list_audio_output_devices, set_audio_output_device},
+    check_pipeline_hotstart, close_huddle_companion, confirm_huddle_active, download_voice_models,
+    end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
+    interrupt_huddle_speech, join_huddle, leave_huddle, open_huddle_window, push_audio_pcm,
+    reconnect::reconnect_huddle_audio,
+    remove_agent_from_huddle, set_huddle_manual_mic_unmuted, set_huddle_transcription_enabled,
+    set_tts_enabled, set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
+    HuddlePhase,
 };
 use initial_window::*;
 use managed_agents::{
@@ -146,7 +145,6 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
-
                     // Linux/WebKitGTK needs media-stream settings and a
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
@@ -724,6 +722,7 @@ pub fn run() {
             get_relay_self,
             resolve_oa_owner,
             list_relay_agents,
+            revalidate_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
@@ -747,6 +746,7 @@ pub fn run() {
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,
+            persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,
             mesh_start_node,

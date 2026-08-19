@@ -558,7 +558,7 @@
   .buzz-onboarding-runtime-pill {
     animation: buzz-onboarding-runtime-pill-in 180ms
       cubic-bezier(0.22, 1, 0.36, 1) both;
-    font-size: 0.625rem;
+    font-size: calc(var(--buzz-type-rem) * 0.625);
     letter-spacing: 0;
     line-height: 1;
     text-transform: uppercase;

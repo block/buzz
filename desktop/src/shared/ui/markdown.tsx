@@ -1877,10 +1877,10 @@ function MarkdownInner({
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
         [
-          "max-w-none wrap-anywhere text-sm leading-5 text-foreground",
+          "max-w-none wrap-anywhere text-message font-normal tracking-normal text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           "[&>*+*]:mt-3",
-          "[&>p+p]:mt-1.5",
+          "[&>p+p]:mt-conversation-paragraph [&>ol]:space-y-conversation-list [&>ul]:space-y-conversation-list",
           "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5 [&>*+h4]:mt-3.5 [&>*+h5]:mt-3.5 [&>*+h6]:mt-3.5",
           "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5 [&>h4+*]:mt-0.5 [&>h5+*]:mt-0.5 [&>h6+*]:mt-0.5",
           "[&>h1+h2]:mt-1.5! [&>h2+h3]:mt-1.5! [&>h3+h4]:mt-1.5! [&>h4+h5]:mt-1.5! [&>h5+h6]:mt-1.5!",

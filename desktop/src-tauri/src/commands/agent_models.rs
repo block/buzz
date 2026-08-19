@@ -18,7 +18,7 @@ use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRoll
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, clear_legacy_runtime_pids, discovery_env_with_baked_floor,
+        clear_legacy_runtime_pids, discovery_env_with_baked_floor,
         find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
         load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
         resolve_command, save_managed_agents, try_regenerate_nest, AgentModelInfo,

@@ -171,6 +171,7 @@ fn fixture(
         backend_agent_id: None,
         provider_binary_path: None,
         provider_policy_pending: false,
+        effort_level: None,
         team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,

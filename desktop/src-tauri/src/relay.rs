@@ -31,7 +31,7 @@ pub fn relay_ws_url() -> String {
 
 /// Read the workspace relay URL override, if set. Returns `None` when no
 /// override is active or when the mutex is poisoned (best-effort).
-fn workspace_relay_override(state: &AppState) -> Option<String> {
+pub(crate) fn workspace_relay_override(state: &AppState) -> Option<String> {
     state
         .relay_url_override
         .lock()
