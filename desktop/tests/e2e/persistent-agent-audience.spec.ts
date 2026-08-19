@@ -173,7 +173,7 @@ test("always addresses multiple agents without closing the mention picker", asyn
     .toEqual([AGENT_A, AGENT_B]);
 });
 
-test("the avatar opens the profile and only the hover x removes the agent", async ({
+test("the ingress opens the mention menu without editing the draft", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -181,18 +181,26 @@ test("the avatar opens the profile and only the hover x removes the agent", asyn
   await openGeneral(page);
 
   const composer = channelComposer(page);
-  const avatar = composer.getByRole("button", {
-    name: "Open profile for Morgarita",
+  const input = composer.getByTestId("message-input");
+  const ingress = composer.getByRole("button", {
+    name: "Open mention menu for Morgarita",
   });
   const remove = composer.getByRole("button", {
     name: "Stop always mentioning Morgarita",
   });
 
+  await input.fill("draft text");
   await expect(remove).toHaveCSS("opacity", "0");
-  await avatar.hover();
+  await ingress.hover();
   await expect(remove).toHaveCSS("opacity", "1");
-  await avatar.click();
-  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await ingress.click();
+  const menu = composer.getByTestId("mention-autocomplete");
+  await expect(menu).toBeVisible();
+  await expect(input).toHaveText("draft text");
+  await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);
+  await expect(
+    menu.getByRole("button", { name: "Always address Morgarita" }),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect
     .poll(() =>
       page.evaluate(
@@ -207,7 +215,7 @@ test("the avatar opens the profile and only the hover x removes the agent", asyn
     )
     .toEqual([AGENT_A]);
 
-  await avatar.hover();
+  await ingress.hover();
   await remove.click();
   await expect
     .poll(() =>
@@ -340,6 +348,20 @@ test("ordinary agent mentions remain one-shot and return to the placeholder", as
     .getByTestId("mention-autocomplete")
     .getByText("Morgarita", { exact: true })
     .click();
+  await expect
+    .poll(() =>
+      input.evaluate((element) => {
+        const selection = window.getSelection();
+        if (!selection?.focusNode || !element.contains(selection.focusNode)) {
+          return null;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        range.setEnd(selection.focusNode, selection.focusOffset);
+        return range.toString();
+      }),
+    )
+    .toBe("@Morgarita ");
   await input.pressSequentially("hello");
   await expect(input).toHaveText("@Morgarita hello");
   await input.press("Enter");
@@ -387,7 +409,7 @@ test("always-mentioned agents restore and can be removed independently", async (
   ).toBeVisible();
 
   await composer
-    .getByRole("button", { name: "Open profile for Vogue" })
+    .getByRole("button", { name: "Open mention menu for Vogue" })
     .hover();
   await composer
     .getByRole("button", { name: "Stop always mentioning Vogue" })
@@ -446,7 +468,7 @@ test("channel always-mentions carry into threads and stay synchronized", async (
   await expect(threadAlwaysMention).toBeVisible();
 
   await threadComposer(page)
-    .getByRole("button", { name: "Open profile for Morgarita" })
+    .getByRole("button", { name: "Open mention menu for Morgarita" })
     .hover();
   await threadAlwaysMention.click();
   await expect(threadAlwaysMention).toHaveCount(0);

@@ -463,32 +463,39 @@ function MessageComposerImpl({
     },
     [richText.editor, mentions.clearMentions, customEmoji],
   );
-  const openMentionPicker = React.useCallback(() => {
-    if (!richText.editor) return;
-    const { text, cursor } = richText.getPlainTextAndCursor();
-    // Check if there's already an @-query in progress
-    const beforeCursor = text.slice(0, cursor);
-    if (/(?:^|[\s])@[^\s]*$/.test(beforeCursor)) {
-      mentions.updateMentionQuery(text, cursor);
-      richText.focus();
-      return;
-    }
-    // Insert a fresh trigger at the captured cursor so the toolbar behaves
-    // exactly like typing `@` in the composer.
-    const previousChar = text.slice(0, cursor).slice(-1);
-    const prefix =
-      cursor > 0 && previousChar && !/\s/.test(previousChar) ? " @" : "@";
-    richText.editor.chain().focus().insertContent(prefix).run();
-    setIsEmojiPickerOpen(false);
-    const { text: updatedText, cursor: updatedCursor } =
-      richText.getPlainTextAndCursor();
-    mentions.updateMentionQuery(updatedText, updatedCursor);
-  }, [
-    richText.editor,
-    richText.getPlainTextAndCursor,
-    richText.focus,
-    mentions.updateMentionQuery,
-  ]);
+  const openMentionPicker = React.useCallback(
+    (insertTrigger = true) => {
+      if (!richText.editor) return;
+      const { text, cursor } = richText.getPlainTextAndCursor();
+      if (!insertTrigger) {
+        mentions.openMentionPicker(cursor);
+        setIsEmojiPickerOpen(false);
+        richText.focus();
+        return;
+      }
+      const beforeCursor = text.slice(0, cursor);
+      if (/(?:^|[\s])@[^\s]*$/.test(beforeCursor)) {
+        mentions.updateMentionQuery(text, cursor);
+        richText.focus();
+        return;
+      }
+      const previousChar = text.slice(0, cursor).slice(-1);
+      const prefix =
+        cursor > 0 && previousChar && !/\s/.test(previousChar) ? " @" : "@";
+      richText.editor.chain().focus().insertContent(prefix).run();
+      setIsEmojiPickerOpen(false);
+      const { text: updatedText, cursor: updatedCursor } =
+        richText.getPlainTextAndCursor();
+      mentions.updateMentionQuery(updatedText, updatedCursor);
+    },
+    [
+      richText.editor,
+      richText.getPlainTextAndCursor,
+      richText.focus,
+      mentions.openMentionPicker,
+      mentions.updateMentionQuery,
+    ],
+  );
   const submitMessage = React.useCallback(async () => {
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
@@ -926,6 +933,7 @@ function MessageComposerImpl({
                 {lockedAgents.length > 0 && editTarget == null ? (
                   <ComposerAddressLocks
                     agents={lockedAgents}
+                    onOpenMentionMenu={() => openMentionPicker(false)}
                     onRemove={persistentAudience.removePubkey}
                     pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
                     shakeVersionByPubkey={addressPulse.shakeVersionByPubkey}

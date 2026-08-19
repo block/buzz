@@ -7,7 +7,6 @@ import {
   useReducedMotion,
 } from "motion/react";
 
-import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -73,17 +72,17 @@ function AddressMentionBadge({
 
 export function ComposerAddressLocks({
   agents,
+  onOpenMentionMenu,
   onRemove,
   pulseVersionByPubkey = {},
   shakeVersionByPubkey = {},
 }: {
   agents: readonly ComposerAddressLock[];
+  onOpenMentionMenu: () => void;
   onRemove: (pubkey: string) => void;
   pulseVersionByPubkey?: Readonly<Record<string, number>>;
   shakeVersionByPubkey?: Readonly<Record<string, number>>;
 }) {
-  const { openProfilePanel } = useProfilePanel();
-
   return (
     <div
       className="flex min-w-0 select-none flex-wrap items-center gap-1.5"
@@ -102,9 +101,9 @@ export function ComposerAddressLocks({
             transition={{ type: "spring", stiffness: 500, damping: 30 }}
           >
             <button
-              aria-label={`Open profile for ${agent.displayName}`}
+              aria-label={`Open mention menu for ${agent.displayName}`}
               className="relative h-9 w-9 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              onClick={() => openProfilePanel?.(agent.pubkey)}
+              onClick={onOpenMentionMenu}
               type="button"
             >
               <UserAvatar
