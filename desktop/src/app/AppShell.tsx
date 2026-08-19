@@ -8,6 +8,10 @@ import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
+import {
+  type TerminalContextOverride,
+  TerminalContextOverrideProvider,
+} from "@/app/TerminalContextOverrideContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
 import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
@@ -90,7 +94,7 @@ import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBou
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
-import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
+import { useAppDeepLinks } from "@/shared/useAppDeepLinks";
 import { SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -312,6 +316,8 @@ export function AppShell() {
     selectedView,
     sidebarChannels,
   ]);
+  const [terminalContextOverride, setTerminalContextOverride] =
+    React.useState<TerminalContextOverride | null>(null);
   const { activeChannel, terminalContext } = useTerminalContext({
     channelId: selectedChannelId,
     channels,
@@ -319,6 +325,14 @@ export function AppShell() {
     pubkey: identityQuery.data?.pubkey,
     relayUrl: communitiesHook.activeCommunity?.relayUrl,
   });
+  const effectiveTerminalContext = terminalContextOverride
+    ? {
+        ...terminalContext,
+        channelId: terminalContextOverride.channelId,
+        channelName: terminalContextOverride.channelName,
+        threadId: null,
+      }
+    : terminalContext;
   const managedChannel = React.useMemo(() => {
     const targetChannelId = managedChannelId ?? selectedChannelId;
     return targetChannelId
@@ -640,8 +654,8 @@ export function AppShell() {
     unreadChannelIds,
     unreadChannelNotificationCount,
   });
-  // Dispatch `buzz://message` deep links only from the main window; the companion is dedicated to its active Huddle route.
-  useMessageDeepLinks(!isHuddleRoom);
+  // Dispatch `buzz://` deep links only from the main window; the companion is dedicated to its active Huddle route.
+  useAppDeepLinks(!isHuddleRoom);
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
@@ -893,14 +907,21 @@ export function AppShell() {
                         onUnstarChannel={unstarChannel}
                       />
                     ) : null}
-                    <AppShellChannelSurface
-                      isHuddleRoom={isHuddleRoom}
-                      isHuddleRoomStarting={isHuddleRoomStarting}
-                      mainInsetRef={mainInsetRef}
-                      terminal={<TerminalBootstrap {...terminalContext} />}
+                    <TerminalContextOverrideProvider
+                      onChange={setTerminalContextOverride}
                     >
-                      <Outlet />
-                    </AppShellChannelSurface>
+                      <AppShellChannelSurface
+                        hasCommunityRail={hasCommunityRail}
+                        isHuddleRoom={isHuddleRoom}
+                        isHuddleRoomStarting={isHuddleRoomStarting}
+                        mainInsetRef={mainInsetRef}
+                        terminal={
+                          <TerminalBootstrap {...effectiveTerminalContext} />
+                        }
+                      >
+                        <Outlet />
+                      </AppShellChannelSurface>
+                    </TerminalContextOverrideProvider>
                     {!isHuddleRoom ? (
                       <RelayConnectionOverlay
                         card={relayConnectionCard}

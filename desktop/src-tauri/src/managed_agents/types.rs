@@ -125,6 +125,7 @@ impl AgentDefinition {
             runtime_pid: None,
             backend: BackendKind::default(),
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -153,6 +154,7 @@ impl AgentDefinition {
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
             relay_mesh: None,
+            effort_level: None,
         }
     }
 }
@@ -196,6 +198,8 @@ impl ManagedAgentRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayAgentInfo {
     pub pubkey: String,
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
     pub name: String,
     pub agent_type: String,
     pub channels: Vec<String>,
@@ -245,13 +249,9 @@ pub struct ManagedAgentRecord {
     pub avatar_url: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
-    /// Explicit per-instance harness pin. `None` (the default) means inherit
-    /// the harness from the linked persona's `runtime`, so persona harness
-    /// edits propagate on the next spawn — mirroring the opt-in `model`
-    /// override. `Some` is set only when the user deliberately picks a harness
-    /// that diverges from the persona. Resolved via `effective_agent_command`;
-    /// `agent_command` above is the create-time snapshot kept for avatar/legacy
-    /// derivations and is not authoritative for spawn.
+    /// Explicit per-instance harness pin; `None` inherits the persona runtime.
+    /// The effective command is resolved at spawn; `agent_command` is a legacy
+    /// create-time snapshot.
     #[serde(default)]
     pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
@@ -320,6 +320,8 @@ pub struct ManagedAgentRecord {
     pub backend: BackendKind,
     #[serde(default)]
     pub backend_agent_id: Option<String>,
+    #[serde(default)]
+    pub provider_policy_pending: bool,
     #[serde(default)]
     pub provider_binary_path: Option<String>,
     /// Installed team directory path (absolute). Set when agent was created from a team persona.
@@ -438,24 +440,10 @@ pub struct ManagedAgentRecord {
     /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
-}
-
-/// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
-///
-/// Feature-independent on purpose: the field is always present in the record
-/// schema so saved agents round-trip identically whether or not the `mesh-llm`
-/// feature is compiled in.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelayMeshConfig {
-    /// The served model id this agent routes to (e.g. "Qwen3").
-    ///
-    /// `alias` because this struct crosses two boundaries with different
-    /// casing conventions: the TS create request sends camelCase
-    /// (`relayMesh: { modelRef }` — `rename_all` on the request does not
-    /// recurse into nested structs), while persisted records use snake_case.
-    /// Serialization stays `model_ref` so saved records are stable.
-    #[serde(alias = "modelRef")]
-    pub model_ref: String,
+    /// Canonical Claude Code effort level. Injected as `BUZZ_ACP_EFFORT_LEVEL` at spawn
+    /// so the harness applies it via `session/set_config_option` at session creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_level: Option<String>,
 }
 
 #[derive(Debug)]
@@ -990,6 +978,8 @@ pub fn resolve_mint_behavioral_defaults(
 
 mod catalog_source;
 pub use catalog_source::CatalogSource;
+mod relay_mesh;
+pub use relay_mesh::RelayMeshConfig;
 mod requests;
 pub use requests::*;
 

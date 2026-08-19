@@ -93,10 +93,9 @@
 }
 
 .rich-text-composer .tiptap {
+  @apply text-message font-normal tracking-normal;
   outline: none;
   min-height: 1lh;
-  font-size: var(--text-sm);
-  line-height: var(--text-sm--line-height);
 }
 
 .rich-text-composer .tiptap p {

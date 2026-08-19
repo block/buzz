@@ -47,22 +47,26 @@ mod util;
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
+#[doc(hidden)]
+pub use commands::print_agent_access_owner_only_probe_if_requested;
 use commands::*;
 use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
-    take_pending_community_deep_link, PendingCommunityDeepLinks,
+    acknowledge_pending_community_deep_link, acknowledge_pending_entity_deep_link,
+    acknowledge_pending_navigation_deep_link, clear_pending_navigation_deep_links,
+    handle_deep_link_url, take_pending_community_deep_link, take_pending_entity_deep_link,
+    take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingEntityDeepLinks,
+    PendingNavigationDeepLinks,
 };
-use huddle::audio_output::{
-    get_audio_output_device, list_audio_output_devices, set_audio_output_device,
-};
-use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
-    add_agent_to_huddle, check_pipeline_hotstart, close_huddle_companion, confirm_huddle_active,
-    download_voice_models, end_huddle, get_huddle_agent_pubkeys, get_huddle_state,
-    get_model_status, get_voice_input_mode, interrupt_huddle_speech, join_huddle, leave_huddle,
-    open_huddle_window, push_audio_pcm, remove_agent_from_huddle, set_huddle_manual_mic_unmuted,
-    set_huddle_transcription_enabled, set_tts_enabled, set_voice_input_mode, speak_agent_message,
-    start_huddle, start_stt_pipeline, HuddlePhase,
+    add_agent_to_huddle,
+    audio_output::{get_audio_output_device, list_audio_output_devices, set_audio_output_device},
+    check_pipeline_hotstart, close_huddle_companion, confirm_huddle_active, download_voice_models,
+    end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
+    interrupt_huddle_speech, join_huddle, leave_huddle, open_huddle_window, push_audio_pcm,
+    reconnect::reconnect_huddle_audio,
+    remove_agent_from_huddle, set_huddle_manual_mic_unmuted, set_huddle_transcription_enabled,
+    set_tts_enabled, set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
+    HuddlePhase,
 };
 use initial_window::*;
 use managed_agents::{
@@ -141,7 +145,6 @@ pub fn run() {
                     if webview.label() != "main" {
                         return;
                     }
-
                     // Linux/WebKitGTK needs media-stream settings and a
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
@@ -291,7 +294,6 @@ pub fn run() {
     } else {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
     };
-
     let app = app_menu::install(builder)
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -303,6 +305,8 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(PendingNavigationDeepLinks::default())
+        .manage(PendingEntityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
@@ -517,15 +521,7 @@ pub fn run() {
             // and on cold start. The single-instance plugin handles forwarding
             // from duplicate launches on Windows/Linux.
             #[cfg(desktop)]
-            {
-                use tauri_plugin_deep_link::DeepLinkExt;
-                let dl_handle = app.handle().clone();
-                app.deep_link().on_open_url(move |event| {
-                    for url in event.urls() {
-                        handle_deep_link_url(&dl_handle, url.as_str());
-                    }
-                });
-            }
+            deep_link::install_deep_link_handlers(app);
 
             // Defer launch-time agent restoration until `apply_workspace` has
             // installed the active workspace relay and identity. Starting here
@@ -618,6 +614,11 @@ pub fn run() {
             terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            take_pending_navigation_deep_link,
+            acknowledge_pending_navigation_deep_link,
+            clear_pending_navigation_deep_links,
+            take_pending_entity_deep_link,
+            acknowledge_pending_entity_deep_link,
             start_builderlab_login,
             cancel_builderlab_login,
             get_builderlab_auth,
@@ -658,8 +659,11 @@ pub fn run() {
             delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
+            publish_project_owner_announcement,
             sign_project_pull_request_status,
             sign_project_pull_request_review_request,
+            sign_project_issue_assignment,
+            sign_project_issue_unassignment,
             publish_project_pull_request_merged_status,
             merge_project_pull_request,
             open_project_terminal,
@@ -739,6 +743,7 @@ pub fn run() {
             upload_media_bytes,
             upload_media_bytes_raw,
             cancel_media_upload,
+            release_media_upload,
             download_image,
             save_png_data_url,
             download_file,
@@ -759,6 +764,7 @@ pub fn run() {
             get_relay_self,
             resolve_oa_owner,
             list_relay_agents,
+            revalidate_relay_agents,
             list_managed_agents,
             list_managed_agent_runtimes,
             start_managed_agent_runtime,
@@ -782,6 +788,7 @@ pub fn run() {
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,
+            persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,
             mesh_start_node,

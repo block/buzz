@@ -192,6 +192,7 @@ type MockBridgeOptions = {
   acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
   acpAuthMethodsError?: string;
   /** When set, the `delete_custom_harness` mock command throws with this message. */
+  workflowUpdateError?: string;
   deleteCustomHarnessError?: string;
   connectAcpRuntimeResult?: { launched: boolean };
   connectAcpRuntimeDelayMs?: number;
@@ -280,8 +281,13 @@ type MockBridgeOptions = {
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
+  /** Reject `clear_pending_navigation_deep_links` with this message. */
+  clearPendingNavigationDeepLinksError?: string;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
+   * community mid-startup and observe the fail-closed scope check. */
+  startManagedAgentDelayMs?: number;
   /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
   mediaProxyInitiallyUnavailable?: boolean;
   /** Hold mock send live echoes until the E2E release seam is invoked. */
@@ -351,6 +357,10 @@ type MockBridgeOptions = {
   nostrBindSignDelayMs?: number;
   /** Reject successive mock WebSocket connect attempts, then resume. */
   websocketConnectErrors?: string[];
+  /** Deliver AUTH synchronously, before the mock connect command resolves. */
+  websocketAuthBeforeConnectResolves?: boolean;
+  /** Stall the first AUTH signing command forever; later attempts complete. */
+  stallFirstAuthSigning?: boolean;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
@@ -462,6 +472,19 @@ type MockBridgeOptions = {
     relayUrl: string;
     code?: string | null;
     name?: string | null;
+  }>;
+  /** Pending channel/message links that arrived before AppShell mounted. */
+  pendingNavigationDeepLinks?: Array<{
+    id: string;
+    kind: "channel" | "message";
+    channelId: string;
+    messageId?: string | null;
+    threadRootId?: string | null;
+  }>;
+  /** Entity links captured by Rust before the React listener mounts. */
+  pendingEntityDeepLinks?: Array<{
+    id: string;
+    href: string;
   }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to

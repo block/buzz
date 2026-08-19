@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/sidebar-offcanvas-rail.spec.ts",
         "**/search-scope-screenshots.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
         "**/identity-key-help.spec.ts",
@@ -109,6 +110,7 @@ export default defineConfig({
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
         "**/project-inbox.spec.ts",
+        "**/projects-v3-screenshots.spec.ts",
         "**/project-issue-comments.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
@@ -130,6 +132,7 @@ export default defineConfig({
         "**/profile-nsec-reveal.spec.ts",
         "**/profile-backup-settings.spec.ts",
         "**/signout-confirmation.spec.ts",
+        "**/settings-section-layout.spec.ts",
         "**/agent-provider-dropdowns.spec.ts",
         "**/agent-lifecycle-feedback.spec.ts",
         "**/agent-access-warning.spec.ts",

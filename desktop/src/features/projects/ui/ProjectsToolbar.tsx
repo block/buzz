@@ -122,8 +122,8 @@ export function ProjectsToolbar({
     { label: "Activity", value: "all" },
     { label: "Projects", value: "projects" },
     { label: "Repositories", value: "repositories" },
-    { label: "Pull Requests", value: "prs" },
-    { label: "Issues", value: "issues" },
+    { label: "Tasks", value: "issues" },
+    { label: "Reviews", value: "prs" },
   ];
 
   return (

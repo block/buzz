@@ -17,7 +17,11 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Switch } from "@/shared/ui/switch";
-import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import {
+  SettingsOptionGroup,
+  SettingsOptionGroupList,
+  SettingsOptionRow,
+} from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { SoundPicker } from "./SoundPicker";
 
@@ -76,7 +80,7 @@ export function NotificationSettingsCard({
               : "Off"}
       </span>
 
-      <div className="flex flex-col gap-4">
+      <SettingsOptionGroupList>
         <SettingsOptionGroup title="Desktop">
           <SettingsOptionRow>
             <div className="min-w-0">
@@ -169,7 +173,7 @@ export function NotificationSettingsCard({
             </SettingsOptionGroup>
 
             {anyAlertsOn ? (
-              <>
+              <div className="space-y-4">
                 <SettingsOptionGroup title="Alert sounds">
                   {visibleSlots.map((slot) => {
                     const comingSoon = COMING_SOON_SLOTS.has(slot);
@@ -249,7 +253,7 @@ export function NotificationSettingsCard({
                     )}
                   </Button>
                 </div>
-              </>
+              </div>
             ) : null}
           </>
         ) : null}
@@ -281,7 +285,7 @@ export function NotificationSettingsCard({
             />
           </SettingsOptionRow>
         </SettingsOptionGroup>
-      </div>
+      </SettingsOptionGroupList>
 
       {permissionBlocked && (
         <p className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">

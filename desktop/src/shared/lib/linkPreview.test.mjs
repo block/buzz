@@ -188,14 +188,14 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
       href: `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
       provider: "Buzz",
       title: "buzz-world #c3b589fa",
-      typeLabel: "PR",
+      typeLabel: "Review",
     },
   );
   assert.deepEqual(
     parseSupportedLinkPreview(
       `buzz://issue?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
     )?.typeLabel,
-    "issue",
+    "Task",
   );
   assert.deepEqual(
     parseSupportedLinkPreview(`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`),
@@ -209,15 +209,40 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
   );
 });
 
+test("parseSupportedLinkPreview parses buzz:// project deep links", () => {
+  assert.deepEqual(
+    parseSupportedLinkPreview(
+      `buzz://project?owner=${BUZZ_OWNER}&d=buzz-world`,
+    ),
+    {
+      kind: "buzz-project",
+      href: `buzz://project?owner=${BUZZ_OWNER}&d=buzz-world`,
+      provider: "Buzz",
+      title: "buzz-world",
+      typeLabel: "project",
+    },
+  );
+});
+
 test("parseSupportedLinkPreview rejects malformed buzz:// entity links", () => {
   for (const href of [
     `buzz://pr?owner=${BUZZ_OWNER}&d=buzz-world`,
     `buzz://pr?id=short&owner=${BUZZ_OWNER}&d=buzz-world`,
     `buzz://issue?id=${BUZZ_EVENT_ID}&owner=nope&d=buzz-world`,
     `buzz://repo?owner=${BUZZ_OWNER}&d=.hidden`,
+    `buzz://project?owner=${BUZZ_OWNER}&d=.hidden`,
   ]) {
     assert.equal(parseSupportedLinkPreview(href), null, href);
   }
+});
+
+test("extractSupportedLinkPreviews picks up buzz:// project links in prose", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      `tracking here: buzz://project?owner=${BUZZ_OWNER}&d=buzz-world`,
+    ).map((preview) => [preview.kind, preview.typeLabel, preview.title]),
+    [["buzz-project", "project", "buzz-world"]],
+  );
 });
 
 test("extractSupportedLinkPreviews picks up buzz:// links in prose", () => {

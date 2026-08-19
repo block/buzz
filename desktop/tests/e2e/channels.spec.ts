@@ -1869,9 +1869,13 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 });
 
@@ -2384,7 +2388,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Unread update for #random",
+    "Unread update for random",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 });
@@ -2441,7 +2445,11 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await expect(page.getByTestId("message-dm-intro")).toContainText(
     "This is the beginning of your direct message with",
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Unread update for the DM",
   );
@@ -2724,24 +2732,29 @@ test("channel settings only prompt editors to add an empty description", async (
   page,
 }) => {
   await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_MUTATE_CHANNEL__ === "function" &&
+      typeof window.__BUZZ_E2E_INVALIDATE_CHANNELS__ === "function",
+  );
   await page.evaluate(
     async ({ generalChannelId, randomChannelId }) => {
       const bridge = window as Window & {
-        __BUZZ_E2E_INVALIDATE_CHANNELS__?: () => Promise<void>;
-        __BUZZ_E2E_MUTATE_CHANNEL__?: (options: {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__: (options: {
           channelId: string;
           description?: string;
         }) => void;
       };
-      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
         channelId: generalChannelId,
         description: "",
       });
-      bridge.__BUZZ_E2E_MUTATE_CHANNEL__?.({
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
         channelId: randomChannelId,
         description: "",
       });
-      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__();
     },
     {
       generalChannelId: GENERAL_CHANNEL_ID,

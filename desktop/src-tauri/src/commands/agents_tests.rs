@@ -34,6 +34,7 @@ fn bare_agent_record(
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -58,6 +59,7 @@ fn bare_agent_record(
         source_team_persona_slug: None,
         catalog_source: None,
         relay_mesh: None,
+        effort_level: None,
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
@@ -98,8 +100,12 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
 
     let owner = nostr::Keys::generate();
     let agent = nostr::Keys::generate();
-    let event = build_agent_archive_request(&owner, &agent.public_key().to_hex())
-        .expect("build archive request");
+    let event = build_agent_archive_request(
+        &owner,
+        &agent.public_key().to_hex(),
+        Some("persona-reviewer"),
+    )
+    .expect("build archive request");
     let json: serde_json::Value = serde_json::from_str(&event.as_json()).unwrap();
     let tags = json["tags"].as_array().unwrap();
 
@@ -107,6 +113,7 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
     assert_eq!(event.pubkey, owner.public_key());
     assert!(event.verify_id());
     assert!(event.verify_signature());
+    assert_eq!(event.content, r#"{"persona_id":"persona-reviewer"}"#);
     assert!(tags.iter().any(|tag| {
         tag.as_array().is_some_and(|parts| {
             parts.first().and_then(serde_json::Value::as_str) == Some("p")
@@ -314,6 +321,31 @@ fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProf
 #[test]
 fn profile_needs_sync_when_missing() {
     assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
+}
+
+// ── resolve_reconcile_relay: deferred-task relay pinning ────────────────────
+
+#[test]
+fn pinned_reconcile_relay_wins_over_a_post_switch_workspace() {
+    // Round-8 P1: the fire-and-forget reconciliation spawned by a scoped
+    // start may execute after an A→B community switch. The pinned relay —
+    // captured while A was the validated workspace — must win over the
+    // workspace read at execution time, so the kind:0 query/publish can
+    // never land on B under A's authorization.
+    let relay = resolve_reconcile_relay(
+        Some("wss://tenant-a.example"),
+        "",                       // never-pinned record
+        "wss://tenant-b.example", // the switch landed before execution
+    );
+    assert_eq!(relay, "wss://tenant-a.example");
+}
+
+#[test]
+fn unpinned_reconcile_relay_resolves_the_execution_time_workspace() {
+    // No tenant boundary: legacy behavior — follow the live workspace via
+    // effective_agent_relay_url (which ignores the record pin by design).
+    let relay = resolve_reconcile_relay(None, "wss://stale-pin.example", "wss://tenant-b.example");
+    assert_eq!(relay, "wss://tenant-b.example");
 }
 
 #[test]
@@ -617,6 +649,11 @@ fn provider_upgrade_reconciliation_targets_existing_deployments_only_in_marked_b
     assert_eq!(payload["respond_to"], "owner-only");
     assert_eq!(payload["respond_to_allowlist"], serde_json::json!([]));
     assert!(!provider_access::needs_reconciliation_with_policy(
+        &record, false
+    ));
+
+    record.provider_policy_pending = true;
+    assert!(provider_access::needs_reconciliation_with_policy(
         &record, false
     ));
 

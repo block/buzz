@@ -122,6 +122,7 @@ export function ChannelScreen({
     clearMessageRouteTarget,
     openAgentSessionChannelId,
     openAgentSessionPubkey,
+    openProfilePanel,
     openThreadHeadId,
     profilePanelPubkey,
     profilePanelTab,
@@ -585,6 +586,7 @@ export function ChannelScreen({
   const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
     useChannelProfilePanel({
       closeAgentSession: handleCloseAgentSession,
+      openProfilePanel,
       setChannelManagementOpen,
       setExpandedThreadReplyIds,
       setOpenThreadHeadId,
