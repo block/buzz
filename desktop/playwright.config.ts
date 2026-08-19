@@ -112,6 +112,7 @@ export default defineConfig({
         "**/project-inbox.spec.ts",
         "**/projects-v3-screenshots.spec.ts",
         "**/project-issue-comments.spec.ts",
+        "**/projects-empty-state.spec.ts",
         "**/project-pr-review.spec.ts",
         "**/persona-model-combobox-screenshots.spec.ts",
         "**/drafts-screenshots.spec.ts",

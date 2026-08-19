@@ -597,9 +597,10 @@ export function ProjectsView() {
     );
   }
 
-  if (projects.length === 0) {
-    return <EmptyState />;
-  }
+  // Zero projects still renders the full chrome — the create menu lives in the
+  // toolbar, so returning early here would leave no way to create the first
+  // project from the UI.
+  const hasProjects = projects.length > 0;
 
   const projectItems =
     visibleProjects.length === 0 ? (
@@ -855,7 +856,9 @@ export function ProjectsView() {
           </div>
           <div className="mx-auto w-full max-w-6xl">
             <div className="w-full min-w-0 pb-4 pt-4">
-              {filter === "all" ? (
+              {!hasProjects ? (
+                <EmptyState />
+              ) : filter === "all" ? (
                 <ProjectsOverviewPanel
                   metadata={
                     <ProjectsOverviewRail
