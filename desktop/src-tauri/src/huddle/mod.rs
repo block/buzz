@@ -257,7 +257,7 @@ pub async fn start_huddle(
         //    Agents auto-subscribe on membership notification (kind:9000) and may
         //    complete EOSE before guidelines are stored if we post them after.
         //    Best-effort: don't fail the huddle if this fails.
-        let guidelines = agents::voice_mode_guidelines(&parent_channel_id);
+        let guidelines = agents::voice_mode_guidelines(&ephemeral_channel_id, &parent_channel_id);
         if let Ok(guidelines_builder) =
             events::build_huddle_guidelines(&ephemeral_channel_id, &guidelines)
         {
