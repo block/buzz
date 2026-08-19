@@ -17,13 +17,13 @@ use rusqlite::{params, Connection};
 ///
 /// Ordering: M2 (column additions) runs before M1 (index rebuild) so that
 /// the M1 rebuild, which calls `insert_metric_index_row`, always operates
-/// against a schema that includes the cache-read columns. M4 (retention
-/// policy storage) runs last; it is independent of M1–M3.
+/// against a schema that includes the cache-read columns. M4 (`archive_meta`
+/// + scope-age index) runs last; it is independent of M1–M3.
 pub(super) fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
     migrate_add_cache_read_tokens(conn)?;
     migrate_add_cache_write_and_pricing(conn)?;
     migrate_add_harness_to_metric_index(conn)?;
-    migrate_add_retention_policies(conn)
+    migrate_add_archive_meta(conn)
 }
 
 /// M1: add `harness TEXT` column to `agent_metric_index` and rebuild index
@@ -347,18 +347,18 @@ fn migrate_add_cache_write_and_pricing(conn: &Connection) -> Result<(), String> 
 /// unconditionally; the seed is `ON CONFLICT DO NOTHING`. The marker is written
 /// last inside the same transaction, so a crash before COMMIT rolls back every
 /// object and the next open re-runs from scratch.
-fn migrate_add_retention_policies(conn: &Connection) -> Result<(), String> {
+fn migrate_add_archive_meta(conn: &Connection) -> Result<(), String> {
     // Cheap pre-lock guard: steady-state opens (marker already present) never
     // take the write lock. The marker is written last in M4's transaction, so
     // its presence implies the full schema + seed committed.
-    if retention_migration_applied(conn)? {
+    if archive_meta_migration_applied(conn)? {
         return Ok(());
     }
 
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|e| format!("migration M4: begin immediate: {e}"))?;
 
-    let result = migrate_add_retention_policies_locked(conn);
+    let result = migrate_add_archive_meta_locked(conn);
 
     if result.is_ok() {
         conn.execute_batch("COMMIT")
@@ -371,12 +371,12 @@ fn migrate_add_retention_policies(conn: &Connection) -> Result<(), String> {
 }
 
 /// M4 body, run under the `BEGIN IMMEDIATE` write lock held by
-/// `migrate_add_retention_policies`.
-fn migrate_add_retention_policies_locked(conn: &Connection) -> Result<(), String> {
+/// `migrate_add_archive_meta`.
+fn migrate_add_archive_meta_locked(conn: &Connection) -> Result<(), String> {
     // In-lock recheck: a concurrent first-opener may have committed the marker
     // while we were blocked on the write lock. If so, this connection has
     // nothing to do — the winner already created the schema and seeded.
-    if retention_migration_applied(conn)? {
+    if archive_meta_migration_applied(conn)? {
         return Ok(());
     }
 
@@ -437,7 +437,7 @@ fn migrate_add_retention_policies_locked(conn: &Connection) -> Result<(), String
 
     conn.execute(
         "INSERT OR IGNORE INTO archive_migrations (name, applied_at) \
-         VALUES ('add_retention_policies', ?1)",
+         VALUES ('add_archive_meta', ?1)",
         params![now],
     )
     .map_err(|e| format!("migration M4: record marker: {e}"))?;
@@ -447,10 +447,10 @@ fn migrate_add_retention_policies_locked(conn: &Connection) -> Result<(), String
 
 /// Whether the M4 marker is present. Its presence implies the retention schema
 /// and default seed committed (the marker is written last in M4's transaction).
-fn retention_migration_applied(conn: &Connection) -> Result<bool, String> {
+fn archive_meta_migration_applied(conn: &Connection) -> Result<bool, String> {
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_retention_policies'",
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_archive_meta'",
             [],
             |r| r.get(0),
         )

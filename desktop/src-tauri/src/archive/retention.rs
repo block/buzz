@@ -34,7 +34,7 @@ pub const MAX_RETENTION_DAYS: i64 = 36_500;
 // ── Schema (created by migration M4, not the base SCHEMA) ─────────────────────
 
 /// `archive_meta`. Created inside M4 under `BEGIN IMMEDIATE` (see
-/// `store_migrations::migrate_add_retention_policies`). Plain `CREATE TABLE`
+/// `store_migrations::migrate_add_archive_meta`). Plain `CREATE TABLE`
 /// (no `IF NOT EXISTS`): M4 creates it once on a DB that provably lacks it (the
 /// fail-closed guard rejects a pre-existing one), so the clause would be dead
 /// weight. Holds the observer-retention window and the Phase-2 prune timestamp.

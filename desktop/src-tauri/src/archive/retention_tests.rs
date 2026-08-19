@@ -44,7 +44,7 @@ fn build_pre_m4_db(path: &Path) {
 
 fn m4_marker_count(conn: &Connection) -> i64 {
     conn.query_row(
-        "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_retention_policies'",
+        "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_archive_meta'",
         [],
         |r| r.get(0),
     )
