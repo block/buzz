@@ -103,6 +103,34 @@ file-size-check:
     node web/scripts/check-file-sizes.mjs
     node mobile/scripts/check-file-sizes.mjs
 
+# Run the ratchet the way CI runs it: against origin/main, not the merge base.
+#
+# `resolveBaseRef` picks merge-base(origin/main, HEAD) locally but `HEAD^1`
+# under GITHUB_ACTIONS — on a PR that is the *main tip*, with the merge commit
+# as the candidate. Those two bases disagree, and the disagreement is not
+# theoretical: a governed file that main shrank, or one that main and a branch
+# each grew a little, can produce a violation that exists only in the merge.
+# PR #5888 hit exactly that — main at 941 lines, branch tip at 994, both under
+# the 1000-line limit, merge result 1008 — so `just file-size-check` passed and
+# CI would have failed.
+#
+# Merge origin/main into your branch first for an exact answer; the note below
+# fires when you have not, because the working tree is then not the merge
+# result CI measures.
+file-size-check-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    git fetch --quiet origin main
+    if ! git merge-base --is-ancestor origin/main HEAD; then
+        echo "note: origin/main is not merged into HEAD, so the working tree is not the"
+        echo "      merge result CI measures. Merge main in for an exact check; this run"
+        echo "      still catches everything except a violation the merge itself creates."
+    fi
+    export CHECK_FILE_SIZES_BASE=origin/main
+    node desktop/scripts/check-file-sizes.mjs
+    node web/scripts/check-file-sizes.mjs
+    node mobile/scripts/check-file-sizes.mjs
+
 # Format all Rust code
 fmt:
     cargo fmt --all
