@@ -39,6 +39,7 @@ fn nest_skill_contains_safe_mention_workflow() {
     assert!(BUZZ_CLI_SKILL_MD.contains("no follow-up verification command is needed"));
     assert!(BUZZ_CLI_SKILL_MD.contains("Add membership separately only when authorized"));
     assert!(BUZZ_CLI_SKILL_MD.contains("never changes membership automatically"));
+    assert!(BUZZ_CLI_SKILL_MD.contains("--content-file reports/review.md"));
 }
 
 #[test]
