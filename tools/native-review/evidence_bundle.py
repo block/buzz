@@ -13,7 +13,8 @@ from typing import Any
 MAX_VIDEO_EDGE = 2160
 SECRET_KEY = re.compile(r"(?i)(?:auth(?:orization)?|token|secret|password|private[_-]?key|cookie|api[_-]?key)")
 SECRET_HEADER = re.compile(
-    r"(?im)(?P<prefix>^[^\r\n]*?\b(?:authorization|proxy-authorization)\s*:\s*)[^\r\n]*"
+    r"(?im)(?P<prefix>^[^\r\n]*?\b(?:authorization|proxy[-_]authorization)\s*[:=]\s*)"
+    r"[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*"
 )
 SECRET_VALUE = re.compile(
     r"(?i)(?P<name>[\"']?(?:auth|token|secret|password|private[_-]?key|cookie|api[_-]?key)[A-Z0-9_.-]*[\"']?)"

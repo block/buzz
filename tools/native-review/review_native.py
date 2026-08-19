@@ -215,8 +215,15 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
             if not isinstance(action.get("key"), str) or not action["key"]:
                 raise HarnessError(f"{where}: press requires key")
             modifiers = action.get("modifiers", [])
-            if not isinstance(modifiers, list) or not all(isinstance(item, str) and item for item in modifiers):
-                raise HarnessError(f"{where}: press modifiers must be strings")
+            allowed_modifiers = {"command", "control", "option", "shift"}
+            if (
+                not isinstance(modifiers, list)
+                or not all(isinstance(item, str) and item in allowed_modifiers for item in modifiers)
+                or len(set(modifiers)) != len(modifiers)
+            ):
+                raise HarnessError(
+                    f"{where}: press modifiers must be unique command/control/option/shift values"
+                )
         if action_type == "type_text" and not isinstance(action.get("text"), str):
             raise HarnessError(f"{where}: type_text requires text")
         if action_type == "scroll" and (

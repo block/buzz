@@ -131,6 +131,23 @@ class JourneyTests(unittest.TestCase):
             with self.assertRaisesRegex(review_native.HarnessError, "scroll requires locate"):
                 review_native.load_journey(path)
 
+    def test_press_modifiers_match_schema_enum_and_uniqueness(self):
+        source = (MODULE_PATH.parent / "desktop/search-shortcut-dismissal.yaml").read_text()
+        mutations = (
+            ("modifiers: [command]", "modifiers: [command, shift]", None),
+            ("modifiers: [command]", "modifiers: [bogus]", "press modifiers must be unique"),
+            ("modifiers: [command]", "modifiers: [command, command]", "press modifiers must be unique"),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(new=new), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "journey.yaml"
+                path.write_text(source.replace(old, new, 1))
+                if diagnostic is None:
+                    review_native.load_journey(path)
+                else:
+                    with self.assertRaisesRegex(review_native.HarnessError, diagnostic):
+                        review_native.load_journey(path)
+
     def test_driver_timeout_includes_bounded_action_duration(self):
         driver = object.__new__(review_native.Driver)
         driver.process = mock.Mock()

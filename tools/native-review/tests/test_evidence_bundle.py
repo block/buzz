@@ -106,6 +106,14 @@ class EvidenceBundleTests(unittest.TestCase):
                 "{'authorization': '[REDACTED]'}",
             "AUTHORIZATION=Bearer supersecret":
                 "AUTHORIZATION=[REDACTED]",
+            "AUTHORIZATION=Negotiate opaque-secret":
+                "AUTHORIZATION=[REDACTED]",
+            "PROXY_AUTHORIZATION=Custom opaque-secret":
+                "PROXY_AUTHORIZATION=[REDACTED]",
+            "Authorization: Negotiate first-part\n second-secret":
+                "Authorization: [REDACTED]",
+            "Proxy-Authorization: Custom first-part\r\n\tsecond-secret":
+                "Proxy-Authorization: [REDACTED]",
         }
         for source, expected in sources.items():
             with self.subTest(source=source):
