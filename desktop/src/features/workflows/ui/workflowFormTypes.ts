@@ -11,6 +11,12 @@ export const TRIGGER_TYPES = [
 ] as const;
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
 
+export function supportsMessageTextCondition(
+  triggerType: TriggerType,
+): boolean {
+  return triggerType === "message_posted" || triggerType === "diff_posted";
+}
+
 export const SELECTABLE_TRIGGER_TYPES = [
   "message_posted",
   "reaction_added",

@@ -39,10 +39,12 @@ function conditionSummary(condition: MessageTextCondition): string {
 }
 
 export function WorkflowMessageTextCondition({
+  allowAdvanced = true,
   disabled,
   onChange,
   value,
 }: {
+  allowAdvanced?: boolean;
   disabled?: boolean;
   onChange: (value: string) => void;
   value: string;
@@ -105,26 +107,29 @@ export function WorkflowMessageTextCondition({
       <Tabs
         className="space-y-3"
         onValueChange={(nextMode) => {
+          if (!allowAdvanced) return;
           const editorMode = nextMode as EditorMode;
           setMode(editorMode);
           setExpanded(false);
           if (editorMode === "advanced") setAdvancedDraft(value);
         }}
-        value={mode}
+        value={allowAdvanced ? mode : "basic"}
       >
-        <TabsList
-          aria-label="Condition editor mode"
-          className="grid h-9 w-full grid-cols-2 p-0.5"
-        >
-          <TabsTrigger className="h-8" disabled={disabled} value="basic">
-            Basic
-          </TabsTrigger>
-          <TabsTrigger className="h-8" disabled={disabled} value="advanced">
-            Advanced
-          </TabsTrigger>
-        </TabsList>
+        {allowAdvanced ? (
+          <TabsList
+            aria-label="Condition editor mode"
+            className="grid h-9 w-full grid-cols-2 p-0.5"
+          >
+            <TabsTrigger className="h-8" disabled={disabled} value="basic">
+              Basic
+            </TabsTrigger>
+            <TabsTrigger className="h-8" disabled={disabled} value="advanced">
+              Advanced
+            </TabsTrigger>
+          </TabsList>
+        ) : null}
 
-        {mode === "basic" ? (
+        {!allowAdvanced || mode === "basic" ? (
           <div>
             {hasUnsupportedExpression ? (
               <p className="border-b border-border/50 pb-3 text-xs text-muted-foreground">

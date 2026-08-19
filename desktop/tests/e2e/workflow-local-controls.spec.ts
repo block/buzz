@@ -170,6 +170,32 @@ test("round-trips and reopens structured message-text conditions", async ({
   await expect(reopened.getByLabel("Text to match")).toHaveValue(text);
 });
 
+test("hides and clears message-text step conditions for schedule triggers", async ({
+  page,
+}) => {
+  const dialog = await openCreateWorkflow(
+    page,
+    `schedule_step_condition_${Date.now()}`,
+  );
+  await addMessageStep(page, dialog);
+  await dialog.getByRole("button", { name: "Run controls" }).click();
+  await dialog.getByLabel("Text to match").fill("deploy");
+
+  await dialog.getByRole("button", { name: "Trigger: Message Posted" }).click();
+  await selectTrigger(page, dialog, "Schedule");
+  await dialog.getByRole("button", { name: "Step 1: Send Message" }).click();
+  await dialog.getByRole("button", { name: "Run controls" }).click();
+
+  await expect(dialog.getByLabel("Text to match")).toHaveCount(0);
+  await expect(dialog.getByLabel("Timeout (seconds)")).toBeVisible();
+
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const definition = parseYaml(
+    await dialog.getByRole("textbox", { name: "Workflow YAML" }).inputValue(),
+  );
+  expect(definition.steps[0].if).toBeUndefined();
+});
+
 test("keeps advanced and malformed definitions lossless", async ({ page }) => {
   const advanced =
     'str_contains(trigger_text, "deploy") && trigger_author == "abc"';

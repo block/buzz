@@ -51,7 +51,7 @@ async function createWorkflow(
     description?: string;
     enabled?: boolean;
     trigger?: string;
-    stepCondition?: string;
+    stepConditionText?: string;
     stepName?: string;
     stepTimeoutSecs?: string;
   },
@@ -103,11 +103,11 @@ async function createWorkflow(
     await dialog.getByRole("button", { name: "Step details" }).click();
     await dialog.getByLabel("Name (optional)").fill(options.stepName);
   }
-  if (options?.stepCondition || options?.stepTimeoutSecs) {
+  if (options?.stepConditionText || options?.stepTimeoutSecs) {
     await dialog.getByRole("button", { name: "Run controls" }).click();
   }
-  if (options?.stepCondition) {
-    await dialog.getByLabel("Condition (optional)").fill(options.stepCondition);
+  if (options?.stepConditionText) {
+    await dialog.getByLabel("Text to match").fill(options.stepConditionText);
   }
   if (options?.stepTimeoutSecs) {
     await dialog.getByLabel("Timeout (seconds)").fill(options.stepTimeoutSecs);
@@ -262,7 +262,7 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
     enabled: false,
     trigger: "diff_posted",
     stepName: "Notify reviewers",
-    stepCondition: 'str_contains(trigger_text, "src/")',
+    stepConditionText: "src/",
     stepTimeoutSecs: "45",
   });
 
@@ -562,21 +562,19 @@ test("preserves final sequence affordances and responsive inspector behavior", a
   const stepDetails = inspector.getByRole("button", { name: "Step details" });
   await expect(runControls).toHaveAttribute("aria-expanded", "false");
   await expect(stepDetails).toHaveAttribute("aria-expanded", "false");
-  await expect(inspector.getByLabel("Condition (optional)")).toHaveCount(0);
+  await expect(inspector.getByLabel("Text to match")).toHaveCount(0);
   await expect(inspector.getByLabel("Name (optional)")).toHaveCount(0);
 
   await runControls.click();
   await expect(runControls).toHaveAttribute("aria-expanded", "true");
-  await inspector
-    .getByLabel("Condition (optional)")
-    .fill('str_contains(trigger_text, "deploy")');
+  await inspector.getByLabel("Text to match").fill("deploy");
   await inspector.getByLabel("Timeout (seconds)").fill("45");
   await expect(runControls).toContainText("Conditional · 45s");
 
   await stepDetails.click();
   await expect(runControls).toHaveAttribute("aria-expanded", "false");
   await expect(stepDetails).toHaveAttribute("aria-expanded", "true");
-  await expect(inspector.getByLabel("Condition (optional)")).toHaveCount(0);
+  await expect(inspector.getByLabel("Text to match")).toHaveCount(0);
   await inspector.getByLabel("Name (optional)").fill("Notify deployers");
   await expect(stepDetails).toContainText("Notify deployers");
   await expect(inspector.getByLabel("Step ID")).toHaveValue("step_1");

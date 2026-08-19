@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
-import { formStateToYaml, yamlToFormState } from "./workflowFormTypes.ts";
+import {
+  formStateToYaml,
+  supportsMessageTextCondition,
+  yamlToFormState,
+} from "./workflowFormTypes.ts";
 
 function accepted(yaml) {
   const result = yamlToFormState(yaml);
@@ -20,6 +24,14 @@ function normalizeBackendDefaults(value) {
   }
   return copy;
 }
+
+test("message-text conditions are limited to message-bearing triggers", () => {
+  assert.equal(supportsMessageTextCondition("message_posted"), true);
+  assert.equal(supportsMessageTextCondition("diff_posted"), true);
+  assert.equal(supportsMessageTextCondition("reaction_added"), false);
+  assert.equal(supportsMessageTextCondition("webhook"), false);
+  assert.equal(supportsMessageTextCondition("schedule"), false);
+});
 
 const acceptedFixtures = [
   `name: Notify\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify_1\n    action: send_message\n    text: hello\n`,

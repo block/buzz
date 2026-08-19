@@ -37,6 +37,7 @@ import {
   TRIGGER_LABELS,
   formStateToYaml,
   nextStepId,
+  supportsMessageTextCondition,
   yamlToFormState,
 } from "./workflowFormTypes";
 import { defaultScheduleTrigger } from "./workflowSchedule";
@@ -714,6 +715,14 @@ export const WorkflowFormBuilder = React.forwardRef<
                                 onChange={(triggerType) =>
                                   updateFormState({
                                     ...formState,
+                                    steps: supportsMessageTextCondition(
+                                      triggerType,
+                                    )
+                                      ? formState.steps
+                                      : formState.steps.map((step) => ({
+                                          ...step,
+                                          condition: undefined,
+                                        })),
                                     trigger:
                                       triggerType === "schedule"
                                         ? defaultScheduleTrigger()

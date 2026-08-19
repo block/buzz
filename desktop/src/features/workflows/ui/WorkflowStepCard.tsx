@@ -5,9 +5,14 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEditor";
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
-import type { StepFormState, TriggerType } from "./workflowFormTypes";
+import {
+  supportsMessageTextCondition,
+  type StepFormState,
+  type TriggerType,
+} from "./workflowFormTypes";
 
 type StepSetting = "run-controls" | "details";
 
@@ -433,21 +438,14 @@ export function WorkflowStepCard({
           summary={runControlsSummary(step)}
         >
           <div className="space-y-4">
-            <div className="space-y-1.5">
-              <FieldLabel htmlFor={`${prefix}-condition`}>
-                Condition (optional)
-              </FieldLabel>
-              <Input
-                autoCapitalize="off"
+            {supportsMessageTextCondition(triggerType) ? (
+              <WorkflowMessageTextCondition
+                allowAdvanced={false}
                 disabled={disabled}
-                id={`${prefix}-condition`}
-                onChange={(event) =>
-                  onUpdate({ ...step, condition: event.target.value })
-                }
-                placeholder='e.g. str_contains(trigger_text, "deploy")'
+                onChange={(condition) => onUpdate({ ...step, condition })}
                 value={step.condition ?? ""}
               />
-            </div>
+            ) : null}
             <div className="space-y-1.5">
               <FieldLabel htmlFor={`${prefix}-timeout-secs`}>
                 Timeout (seconds)
