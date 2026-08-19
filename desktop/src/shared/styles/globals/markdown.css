@@ -100,25 +100,6 @@
   white-space: normal;
 }
 
-/* Entity and message metadata chips stay compact even when a cached Markdown
- * tree still carries the former wrapping class after a hot update. Channel
- * chips intentionally keep the multiline treatment above. */
-.message-markdown .mention-chip[data-buzz-link-kind],
-.message-markdown .mention-chip[data-message-link] {
-  display: inline-flex;
-  align-items: center;
-  max-width: 16rem;
-  overflow: hidden;
-  overflow-wrap: normal;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.message-markdown .mention-chip[data-buzz-link-kind] > .truncate,
-.message-markdown .mention-chip[data-message-link] > .truncate {
-  min-width: 0;
-}
-
 .message-markdown .mention-chip.buzz-link-unavailable,
 .message-markdown .mention-chip.buzz-link-unavailable:hover {
   background: hsl(var(--secondary));

@@ -80,13 +80,16 @@ function EntityMetadataTooltip({
       ? `${projectName} · ${projectDescription}`
       : projectName
     : null;
-  const context = projectContext
-    ? projectContext
-    : chipRepeatsTitle
-      ? metadata?.description
-      : [resolvedTitle || fallback, metadata?.description]
-          .filter((value): value is string => Boolean(value))
-          .join(" · ");
+  const context =
+    link.type === "issue" && resolvedTitle
+      ? resolvedTitle
+      : projectContext
+        ? projectContext
+        : chipRepeatsTitle
+          ? metadata?.description
+          : [resolvedTitle || fallback, metadata?.description]
+              .filter((value): value is string => Boolean(value))
+              .join(" · ");
   const chip = children(metadata);
   return (
     <TooltipProvider delayDuration={500} skipDelayDuration={0}>
@@ -101,7 +104,11 @@ function EntityMetadataTooltip({
         >
           {context ? (
             <span
-              className="line-clamp-2"
+              className={
+                link.type === "issue"
+                  ? "break-words whitespace-normal"
+                  : "line-clamp-2"
+              }
               data-buzz-tooltip-metadata-content=""
             >
               {context}
@@ -317,7 +324,10 @@ export function renderEntityLinkAnchor({
         href={href}
         icon={presentation.icon}
         aria-label={presentation.ariaLabel}
-        className={cn(metadata === null && "buzz-link-unavailable")}
+        className={cn(
+          "max-w-64 overflow-hidden",
+          metadata === null && "buzz-link-unavailable",
+        )}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
       >

@@ -170,6 +170,7 @@ export function MessageLinkPill({
         icon="message"
         aria-label={`Open message in channel ${channelLabel}`}
         className={cn(
+          "max-w-64 overflow-hidden",
           metadata.state.kind === "unavailable" && "buzz-link-unavailable",
         )}
         interactive={interactive}

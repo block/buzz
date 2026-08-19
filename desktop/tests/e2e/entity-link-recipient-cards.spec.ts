@@ -176,8 +176,15 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const issueContext = issueTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
   );
-  await expect(issueContext).not.toBeEmpty();
-  await expect(issueContext).not.toContainText(ISSUE_SUBJECT);
+  await expect(issueContext).toHaveText(ISSUE_SUBJECT);
+  await expect(issueContext).not.toHaveClass(/line-clamp/);
+  await expect
+    .poll(() =>
+      issueContext.evaluate(
+        (element) => element.scrollHeight <= element.clientHeight,
+      ),
+    )
+    .toBe(true);
   await expect(
     issueTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Issue · relay-tools");
