@@ -54,68 +54,69 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
 /// - Nested reply: `root` is the parent's own root marker; `parent` is unchanged.
 ///
 /// Ensures CLI-sent replies thread correctly using the same NIP-10 logic.
+async fn fetch_event(client: &BuzzClient, event_id: &str) -> Result<serde_json::Value, CliError> {
+    let filter = serde_json::json!({ "ids": [event_id], "limit": 1 });
+    let raw = client.query(&filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    events
+        .as_array()
+        .and_then(|events| events.first())
+        .cloned()
+        .ok_or_else(|| CliError::NotFound(format!("event {event_id} not found")))
+}
+
 async fn resolve_thread_ref(
     client: &BuzzClient,
     parent_event_id: &str,
 ) -> Result<ThreadRef, CliError> {
-    let parent_eid = parse_event_id(parent_event_id)?;
-    let filter = serde_json::json!({ "ids": [parent_event_id], "limit": 1 });
-    let raw = client.query(&filter).await?;
-    let events: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    let event = events
-        .as_array()
-        .and_then(|a| a.first())
-        .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} not found")))?;
+    let event = fetch_event(client, parent_event_id).await?;
+    thread_ref_from_event(parent_event_id, &event)
+}
+
+fn thread_ref_from_event(event_id: &str, event: &serde_json::Value) -> Result<ThreadRef, CliError> {
+    let parent_eid = parse_event_id(event_id)?;
     let tags = event
         .get("tags")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-
-    let root_eid = match find_root_from_tags(&tags) {
-        Some(root_hex) if root_hex != parent_event_id => parse_event_id(&root_hex)?,
+    let root_event_id = match find_root_from_tags(&tags) {
+        Some(root_hex) if root_hex != event_id => parse_event_id(&root_hex)?,
         _ => parent_eid,
     };
-
     Ok(ThreadRef {
-        root_event_id: root_eid,
+        root_event_id,
         parent_event_id: parent_eid,
     })
 }
 
 /// Resolve the channel UUID for an event by querying for it via POST /query.
 /// Extracts the `h` tag value from the returned event's tags.
-async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid, CliError> {
-    let filter = serde_json::json!({
-        "ids": [event_id]
-    });
-    let raw = client.query(&filter).await?;
-    let events: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
-    let arr = events
-        .as_array()
-        .ok_or_else(|| CliError::Other("query response is not an array".into()))?;
-    let event = arr
-        .first()
-        .ok_or_else(|| CliError::Other(format!("event {event_id} not found")))?;
+fn channel_id_from_event(event_id: &str, event: &serde_json::Value) -> Result<Uuid, CliError> {
     let tags = event
         .get("tags")
-        .and_then(|t| t.as_array())
+        .and_then(|tags| tags.as_array())
         .ok_or_else(|| CliError::Other("event missing 'tags' field".into()))?;
-    for tag in tags {
-        if let Some(arr) = tag.as_array() {
-            if arr.first().and_then(|v| v.as_str()) == Some("h") {
-                if let Some(uuid_str) = arr.get(1).and_then(|v| v.as_str()) {
-                    return Uuid::parse_str(uuid_str).map_err(|_| {
-                        CliError::Other(format!("event h-tag is not a valid UUID: {uuid_str}"))
-                    });
-                }
-            }
-        }
-    }
-    Err(CliError::Other(format!(
-        "event {event_id} has no h-tag — cannot determine channel"
-    )))
+    tags.iter()
+        .filter_map(|tag| tag.as_array())
+        .find(|tag| tag.first().and_then(|value| value.as_str()) == Some("h"))
+        .and_then(|tag| tag.get(1))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            CliError::Other(format!(
+                "event {event_id} has no h-tag — cannot determine channel"
+            ))
+        })
+        .and_then(|channel_id| {
+            Uuid::parse_str(channel_id).map_err(|_| {
+                CliError::Other(format!("event h-tag is not a valid UUID: {channel_id}"))
+            })
+        })
+}
+
+async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid, CliError> {
+    let event = fetch_event(client, event_id).await?;
+    channel_id_from_event(event_id, &event)
 }
 
 fn resolve_names_to_pubkeys(
@@ -350,37 +351,14 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
-struct MessageReadOutput<'a> {
-    format: &'a crate::OutputFormat,
-    max_bytes: Option<usize>,
-}
-
-fn print_bounded_output(output: String, max_output_bytes: Option<usize>) -> Result<(), CliError> {
-    if max_output_bytes == Some(0) {
-        return Err(CliError::Usage(
-            "--max-output-bytes must be greater than zero".into(),
-        ));
-    }
-    if let Some(maximum) = max_output_bytes {
-        let emitted_bytes = output.len().saturating_add(1); // println's trailing newline
-        if emitted_bytes > maximum {
-            return Err(CliError::Usage(format!(
-                "output exceeds --max-output-bytes ({emitted_bytes} > {maximum} bytes); lower --limit or increase the cap"
-            )));
-        }
-    }
-    println!("{output}");
-    Ok(())
-}
-
-async fn cmd_get_messages(
+pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
     limit: Option<u32>,
     before: Option<i64>,
     since: Option<i64>,
     kinds: Option<&str>,
-    output: MessageReadOutput<'_>,
+    format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     let limit = limit.unwrap_or(50).min(200);
@@ -410,30 +388,49 @@ async fn cmd_get_messages(
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
     let normalized = normalize_events(&events);
-    print_bounded_output(format_events(&normalized, output.format), output.max_bytes)
+    println!("{}", format_events(&normalized, format));
+    Ok(())
 }
 
-async fn cmd_get_thread(
+pub fn resolve_thread_target(
+    channel_id: &str,
+    event_id: &str,
+    expected_root_id: Option<&str>,
+    selected_event: &serde_json::Value,
+) -> Result<String, CliError> {
+    let expected_channel_id = parse_uuid(channel_id)?;
+    let actual_channel_id = channel_id_from_event(event_id, selected_event)?;
+    if actual_channel_id != expected_channel_id {
+        return Err(CliError::Usage(format!(
+            "event {event_id} does not belong to channel {channel_id}"
+        )));
+    }
+    let root_event_id = thread_ref_from_event(event_id, selected_event)?
+        .root_event_id
+        .to_hex();
+    if expected_root_id.is_some_and(|expected| expected != root_event_id) {
+        return Err(CliError::Usage(
+            "Buzz message link thread root does not match the selected message".into(),
+        ));
+    }
+    Ok(root_event_id)
+}
+
+pub async fn cmd_get_thread(
     client: &BuzzClient,
     channel_id: &str,
     event_id: &str,
+    expected_root_id: Option<&str>,
     limit: Option<u32>,
     depth_limit: Option<u32>,
-    output: MessageReadOutput<'_>,
+    format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
     validate_hex64(event_id)?;
+    let selected_event = fetch_event(client, event_id).await?;
+    let root_event_id =
+        resolve_thread_target(channel_id, event_id, expected_root_id, &selected_event)?;
     let limit = limit.unwrap_or(100).min(500);
 
-    // `--event` may point at any message in the thread, not only its root.
-    // Resolve the selected event's NIP-10 root marker so old links without a
-    // `thread` query parameter still return the containing conversation.
-    let thread_ref = resolve_thread_ref(client, event_id).await?;
-    let root_event_id = thread_ref.root_event_id.to_hex();
-
-    // Two filters ORed in a single HTTP call:
-    // 1. Replies referencing the resolved root via e-tag
-    // 2. The root event itself by ID
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
         "#h": [channel_id],
@@ -445,13 +442,20 @@ async fn cmd_get_thread(
     }
     let root_filter = serde_json::json!({
         "ids": [root_event_id.as_str()],
+        "#h": [channel_id],
         "limit": 1
     });
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
+    events.sort_by_key(|event| {
+        event
+            .get("created_at")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+    });
     let normalized = normalize_events(&events);
-    print_bounded_output(format_events(&normalized, output.format), output.max_bytes)
+    println!("{}", format_events(&normalized, format));
+    Ok(())
 }
 
 pub async fn cmd_search(
@@ -977,7 +981,6 @@ pub async fn dispatch(
             before,
             since,
             kinds,
-            max_output_bytes,
         } => {
             cmd_get_messages(
                 client,
@@ -986,10 +989,7 @@ pub async fn dispatch(
                 before,
                 since,
                 kinds.as_deref(),
-                MessageReadOutput {
-                    format,
-                    max_bytes: max_output_bytes,
-                },
+                format,
             )
             .await
         }
@@ -999,17 +999,15 @@ pub async fn dispatch(
             link,
             limit,
             depth_limit,
-            max_output_bytes,
         } => {
-            let (channel, event) =
+            let (channel, event, expected_root) =
                 match link {
                     Some(link) => {
                         let parsed = crate::links::parse_message_link(&link)?;
-                        let event = parsed.thread_root_id.unwrap_or(parsed.message_id);
-                        (parsed.channel_id, event)
+                        (parsed.channel_id, parsed.message_id, parsed.thread_root_id)
                     }
                     None => match (channel, event) {
-                        (Some(channel), Some(event)) => (channel, event),
+                        (Some(channel), Some(event)) => (channel, event, None),
                         _ => return Err(CliError::Usage(
                             "messages thread requires either --link or both --channel and --event"
                                 .into(),
@@ -1020,12 +1018,10 @@ pub async fn dispatch(
                 client,
                 &channel,
                 &event,
+                expected_root.as_deref(),
                 limit,
                 depth_limit,
-                MessageReadOutput {
-                    format,
-                    max_bytes: max_output_bytes,
-                },
+                format,
             )
             .await
         }
@@ -1054,9 +1050,9 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys, print_bounded_output,
-        resolve_names_to_pubkeys,
+        channel_id_from_event, event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1074,12 +1070,51 @@ mod tests {
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
 
     #[test]
-    fn bounded_output_accepts_at_limit_and_rejects_over_limit_or_zero() {
-        assert!(print_bounded_output("ok".into(), None).is_ok());
-        assert!(print_bounded_output("ok".into(), Some(3)).is_ok());
-        assert!(print_bounded_output("ok".into(), Some(2)).is_err());
-        assert!(print_bounded_output("too large".into(), Some(2)).is_err());
-        assert!(print_bounded_output(String::new(), Some(0)).is_err());
+    fn selected_event_derives_authoritative_channel_and_root() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = json!({
+            "tags": [
+                ["h", channel],
+                ["e", ID_A, "", "root"],
+                ["e", ID_B, "", "reply"],
+            ]
+        });
+
+        assert_eq!(
+            channel_id_from_event(ID_B, &event).unwrap().to_string(),
+            channel
+        );
+        assert_eq!(
+            thread_ref_from_event(ID_B, &event)
+                .unwrap()
+                .root_event_id
+                .to_hex(),
+            ID_A
+        );
+    }
+
+    #[test]
+    fn selected_event_requires_a_valid_channel_tag() {
+        let missing = json!({"tags": []});
+        let malformed = json!({"tags": [["h", "not-a-uuid"]]});
+        assert!(channel_id_from_event(ID_A, &missing).is_err());
+        assert!(channel_id_from_event(ID_A, &malformed).is_err());
+    }
+
+    #[test]
+    fn thread_target_rejects_wrong_channel_or_root_hint() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let other_channel = "123e4567-e89b-12d3-a456-426614174001";
+        let selected = json!({
+            "tags": [["h", channel], ["e", ID_A, "", "root"]]
+        });
+
+        assert!(resolve_thread_target(other_channel, ID_B, Some(ID_A), &selected).is_err());
+        assert!(resolve_thread_target(channel, ID_B, Some(ID_B), &selected).is_err());
+        assert_eq!(
+            resolve_thread_target(channel, ID_B, Some(ID_A), &selected).unwrap(),
+            ID_A
+        );
     }
 
     #[test]

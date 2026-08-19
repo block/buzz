@@ -107,8 +107,9 @@ pub fn exit_code(e: &CliError) -> i32 {
     }
 }
 
-/// Serialize an error to the CLI's stable JSON shape.
-fn error_json(e: &CliError) -> String {
+/// Serialize error to JSON and write to stderr.
+/// Format: {"error": "<category>", "message": "<human-readable detail>", "retryable": <bool>}
+pub fn print_error(e: &CliError) {
     let category = match e {
         CliError::Usage(_) => "user_error",
         CliError::Relay { status, .. } => {
@@ -126,58 +127,17 @@ fn error_json(e: &CliError) -> String {
         CliError::DeliveryUnknown(_) => "delivery_unknown",
         CliError::Other(_) => "error",
     };
-    serde_json::json!({
+    let obj = serde_json::json!({
         "error": category,
         "message": e.to_string(),
         "retryable": is_retryable_error(e),
-    })
-    .to_string()
-}
-
-fn bounded_error_json(e: &CliError, max_output_bytes: Option<usize>) -> String {
-    let json = error_json(e);
-    let exceeded = max_output_bytes.is_some_and(|maximum| json.len().saturating_add(1) > maximum);
-    if !exceeded {
-        return json;
-    }
-
-    // This fixed fallback may itself exceed a caller's unrealistically tiny
-    // budget. Structured JSON has a nonzero minimum size; the guarantee here
-    // is that untrusted relay detail is replaced with a constant-size message.
-    serde_json::json!({
-        "error": "output_limit_exceeded",
-        "message": "error response exceeded --max-output-bytes",
-        "retryable": false,
-    })
-    .to_string()
-}
-
-/// Serialize error to JSON and write it to stderr.
-///
-/// When `max_output_bytes` is set, an oversized error is replaced with a
-/// constant-size structured fallback instead of leaking the relay's full body.
-pub fn print_error(e: &CliError, max_output_bytes: Option<usize>) {
-    eprintln!("{}", bounded_error_json(e, max_output_bytes));
+    });
+    eprintln!("{}", obj);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn oversized_error_is_replaced_with_bounded_structured_fallback() {
-        let error = CliError::Relay {
-            status: 500,
-            body: "x".repeat(10_000),
-        };
-        let original = error_json(&error);
-        assert!(original.len() > 1_000);
-
-        let fallback = bounded_error_json(&error, Some(256));
-        assert!(fallback.len().saturating_add(1) < 256);
-        let parsed: serde_json::Value = serde_json::from_str(&fallback).unwrap();
-        assert_eq!(parsed["error"], "output_limit_exceeded");
-    }
 
     // ---- is_retryable_error ----
 

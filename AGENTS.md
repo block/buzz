@@ -205,14 +205,13 @@ or invoke with the full path.
 thread. Pass the link directly to the CLI:
 
 ```bash
-buzz --require-secure-relay --format compact messages thread \
-  --link '<buzz://message?...>' --max-output-bytes 5242880
+buzz --format compact messages thread --link '<buzz://message?...>'
 ```
 
-The optional `thread` parameter is used as a root hint. Older links without it
-still work because `messages thread` resolves the containing root from the
-selected event. The explicit `--channel <uuid> --event <hex>` form remains
-available for callers that already have separate identifiers.
+The selected message ID is authoritative: `messages thread` verifies its
+channel and derives its containing root. An optional `thread` parameter is
+accepted only when it matches that derived root. The explicit
+`--channel <uuid> --event <hex>` form remains available.
 
 All reads return sig-stripped JSON arrays; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:

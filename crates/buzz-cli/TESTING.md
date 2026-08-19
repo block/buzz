@@ -216,13 +216,11 @@ echo 'Body with `backticks` and $vars stays literal.' \
 buzz messages get --channel "$CHANNEL_ID" | jq .
 buzz messages get --channel "$CHANNEL_ID" --limit 5 | jq .
 
-# messages thread
+# messages thread from the root, a reply, and a canonical link
 buzz messages thread --channel "$CHANNEL_ID" --event "$EVENT_ID" | jq .
-
-# messages thread from a canonical deep link
-buzz --require-secure-relay messages thread \
-  --link "buzz://message?channel=$CHANNEL_ID&id=$EVENT_ID" \
-  --max-output-bytes 5242880 | jq .
+buzz messages thread --channel "$CHANNEL_ID" --event "$REPLY_ID" | jq .
+buzz messages thread \
+  --link "buzz://message?channel=$CHANNEL_ID&id=$REPLY_ID&thread=$EVENT_ID" | jq .
 
 # messages search
 buzz messages search --query "Hello" | jq .
@@ -523,17 +521,6 @@ env -u BUZZ_PRIVATE_KEY \
   cargo run -p buzz-cli -- channels list 2>&1; echo "exit: $?"
 # stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key or set env var)"}
 # exit: 3
-
-# Exit 1: plaintext remote relay when secure transport is required
-BUZZ_RELAY_URL="http://relay.example" \
-  buzz --require-secure-relay channels list 2>&1; echo "exit: $?"
-# stderr category: user_error
-# exit: 1, before any network request
-
-# Exit 1: read output exceeds the caller's explicit budget
-buzz messages get --channel "$CHANNEL_ID" --max-output-bytes 1 2>&1; echo "exit: $?"
-# stderr category: user_error; no partial JSON is emitted
-# exit: 1
 
 # Not-found returns null, not an error (exit 0)
 buzz channels get --channel "00000000-0000-0000-0000-000000000000"

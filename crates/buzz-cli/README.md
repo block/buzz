@@ -34,9 +34,7 @@ buzz messages send --channel <uuid> --content "Reply" --reply-to <event-id> --br
 buzz messages send --channel <uuid> --content - < message.md   # read body from stdin
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
-buzz --require-secure-relay messages thread \
-  --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>' \
-  --max-output-bytes 5242880
+buzz messages thread --link 'buzz://message?channel=<uuid>&id=<event-id>&thread=<root-id>'
 buzz messages search --query "architecture"
 buzz messages search --author <pubkey|npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
@@ -96,11 +94,6 @@ buzz repos protect remove --id my-repo --ref refs/heads/main
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
-
-`--require-secure-relay` is a global opt-in policy: it accepts encrypted remote
-relays and plaintext loopback development, while rejecting credentials,
-fragments, and plaintext remote hosts. `messages get` and `messages thread`
-accept `--max-output-bytes` to fail before emitting an oversized JSON response.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
