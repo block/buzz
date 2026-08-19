@@ -2944,7 +2944,7 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
 });
 
-test("channel settings opens and creates channel workflows", async ({
+test("channel settings opens and creates channel workflows over the channel", async ({
   page,
 }) => {
   await page.goto("/");
@@ -2972,29 +2972,43 @@ test("channel settings opens and creates channel workflows", async ({
     "Welcome responder",
   );
 
+  // Opening a workflow closes the settings sheet and portals the shared editor
+  // over the channel; the channel route stays put behind it.
+  const channelUrl = new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`);
   await sheet.getByTestId("channel-workflow-mock-wf-1").click();
-  await expect(page).toHaveURL(/\/workflows\/mock-wf-1/);
   await expect(
     page.getByRole("dialog", { name: "Edit workflow" }),
   ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
+  await expect(sheet).toHaveCount(0);
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
 
   await page.getByRole("button", { name: "Close" }).click();
-  await page.goto("/");
-  await openChannelManagement(page, "general");
+  await expect(page.getByRole("dialog", { name: "Edit workflow" })).toHaveCount(
+    0,
+  );
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("channel-management-trigger").click();
+  await expect(sheet).toBeVisible();
   await page.getByTestId("channel-workflows-ingress").click();
   await page.getByTestId("channel-workflows-new").click();
 
-  await expect(page).toHaveURL(
-    new RegExp(
-      `/workflows\\?channel=${GENERAL_CHANNEL_ID}&pane=trigger&view=create`,
-    ),
-  );
   await expect(
     page.getByRole("dialog", { name: "Create workflow" }),
   ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
   await expect(
     page.getByRole("combobox", { exact: true, name: "Channel" }),
   ).toContainText("general");
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toHaveCount(0);
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
 async function seedHomeInboxMention(

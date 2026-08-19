@@ -6,14 +6,12 @@ import { toast } from "sonner";
 
 import {
   allWorkflowsQueryKey,
-  useWorkflowQuery,
   workflowListFocusRefetchPolicy,
   workflowQueryKey,
 } from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
-import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
-import { WorkflowUnavailableDialog } from "@/features/workflows/ui/WorkflowUnavailableDialog";
+import { WorkflowEditorHost } from "@/features/workflows/ui/WorkflowEditorHost";
 import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
 import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
 import {
@@ -105,7 +103,6 @@ export function WorkflowsView({
 
   const editorWorkflowId =
     editor && editor.mode !== "create" ? editor.workflowId : null;
-  const editorWorkflowQuery = useWorkflowQuery(editorWorkflowId);
 
   const memberChannels = channels.filter((c) => c.isMember);
   const channelIds = memberChannels.map((c) => c.id).sort();
@@ -230,11 +227,9 @@ export function WorkflowsView({
     [toggleEnabled],
   );
 
-  const editorWorkflow =
-    allWorkflows.find(({ workflow }) => workflow.id === editorWorkflowId)
-      ?.workflow ?? editorWorkflowQuery.data;
-  const canOpenEditor =
-    editor?.mode === "create" || editorWorkflow !== undefined;
+  const editorWorkflowHint = allWorkflows.find(
+    ({ workflow }) => workflow.id === editorWorkflowId,
+  )?.workflow;
 
   return (
     <div
@@ -302,40 +297,17 @@ export function WorkflowsView({
         </div>
       </div>
 
-      {editor && canOpenEditor ? (
-        <WorkflowDialog
-          channels={memberChannels}
-          initialChannelId={
-            editor.mode === "create" ? editor.initialChannelId : undefined
-          }
-          key={
-            editor.mode === "create"
-              ? editor.mode
-              : `${editor.mode}:${editor.workflowId}`
-          }
-          mode={editor.mode === "detail" ? "edit" : editor.mode}
-          onDeleteWorkflow={handleDelete}
-          onDuplicateWorkflow={onDuplicateWorkflow}
-          onEditWorkflow={onEditWorkflow}
-          onEditorPaneChange={onEditorPaneChange}
-          onOpenChange={(open) => {
-            if (!open) onCloseEditor();
-          }}
-          open
-          onTriggerWorkflow={handleTrigger}
-          pane={editor.pane}
-          workflow={editorWorkflow}
-        />
-      ) : editor ? (
-        <WorkflowUnavailableDialog
-          loading={editorWorkflowQuery.isLoading}
-          onOpenChange={(open) => {
-            if (!open) onCloseEditor();
-          }}
-          onRetry={() => void editorWorkflowQuery.refetch()}
-          open
-        />
-      ) : null}
+      <WorkflowEditorHost
+        channels={memberChannels}
+        editor={editor}
+        onClose={onCloseEditor}
+        onDeleteWorkflow={handleDelete}
+        onDuplicateWorkflow={onDuplicateWorkflow}
+        onEditWorkflow={onEditWorkflow}
+        onEditorPaneChange={onEditorPaneChange}
+        onTriggerWorkflow={handleTrigger}
+        workflowHint={editorWorkflowHint}
+      />
 
       <WorkflowDeleteDialog
         onConfirm={handleConfirmDelete}

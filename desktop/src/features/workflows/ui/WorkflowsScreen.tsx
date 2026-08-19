@@ -1,5 +1,9 @@
 import * as React from "react";
 
+import type {
+  WorkflowEditorCreateTarget,
+  WorkflowEditorWorkflowTarget,
+} from "@/features/workflows/ui/WorkflowEditorHost";
 import type { Channel } from "@/shared/api/types";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import type { WorkflowEditorPane } from "./workflowEditorPane";
@@ -9,19 +13,11 @@ const WorkflowsView = React.lazy(async () => {
   return { default: module.WorkflowsView };
 });
 
+/** URL-addressable editor target: a shared editor target plus the history
+ * origin the Workflows route needs to close back to where the user came from. */
 export type WorkflowEditorRoute =
-  | {
-      hasOrigin: boolean;
-      initialChannelId?: string;
-      mode: "create";
-      pane: WorkflowEditorPane;
-    }
-  | {
-      hasOrigin: boolean;
-      mode: "detail" | "duplicate" | "edit";
-      pane: WorkflowEditorPane;
-      workflowId: string;
-    };
+  | (WorkflowEditorCreateTarget & { hasOrigin: boolean })
+  | (WorkflowEditorWorkflowTarget & { hasOrigin: boolean });
 
 type WorkflowsScreenProps = {
   channels: Channel[];

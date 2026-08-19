@@ -15,7 +15,7 @@ export function ChannelWorkflowsSection({
   error: unknown;
   loading: boolean;
   onCreate: () => void;
-  onOpen: (workflowId: string) => void;
+  onOpen: (workflow: Workflow) => void;
   onRetry: () => void;
   workflows: Workflow[];
 }) {
@@ -39,7 +39,7 @@ export function ChannelWorkflowsSection({
               className="flex min-h-16 w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
               data-testid={`channel-workflow-${workflow.id}`}
               key={workflow.id}
-              onClick={() => onOpen(workflow.id)}
+              onClick={() => onOpen(workflow)}
               type="button"
             >
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">

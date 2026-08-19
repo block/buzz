@@ -29,6 +29,7 @@ import {
   formatTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
 import type { Channel, ChannelMember, Workflow } from "@/shared/api/types";
+import { useWorkflowEditorOverlay } from "@/shared/context/WorkflowEditorOverlayContext";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
@@ -106,6 +107,10 @@ export function ChannelManagementSheet({
 }: ChannelManagementSheetProps) {
   const { isDark } = useTheme();
   const { goNewWorkflowForChannel, goWorkflow } = useAppNavigation();
+  const {
+    openNewWorkflow: openNewWorkflowOverlay,
+    openWorkflow: openWorkflowOverlay,
+  } = useWorkflowEditorOverlay();
   const isSplitLayout = layout === "split";
   const auxiliaryPanelMode = getAuxiliaryPanelMode(
     isSplitLayout,
@@ -245,6 +250,32 @@ export function ChannelManagementSheet({
     onOpenChange(next);
   }
 
+  // Workflows open as a modal over the channel the settings sheet belongs to.
+  // The navigation fallbacks only apply where no overlay host is mounted; the
+  // canonical /workflows deep links stay unchanged either way.
+  function handleOpenWorkflow(workflow: Workflow) {
+    handlePanelOpenChange(false);
+
+    if (openWorkflowOverlay) {
+      openWorkflowOverlay(workflow.id, workflow);
+      return;
+    }
+
+    void goWorkflow(workflow.id);
+  }
+
+  function handleCreateWorkflow() {
+    if (!channelId) return;
+    handlePanelOpenChange(false);
+
+    if (openNewWorkflowOverlay) {
+      openNewWorkflowOverlay(channelId);
+      return;
+    }
+
+    void goNewWorkflowForChannel(channelId);
+  }
+
   const currentVisibility = detail?.visibility ?? channel.visibility;
   const currentTtlSeconds = detail?.ttlSeconds ?? null;
   const nextVisibility: "open" | "private" = isPrivateDraft
@@ -358,15 +389,8 @@ export function ChannelManagementSheet({
             channelId={channelId}
             currentPubkey={currentPubkey}
             workflowsQuery={workflowsQuery}
-            onCreateWorkflow={() => {
-              if (!channelId) return;
-              handlePanelOpenChange(false);
-              void goNewWorkflowForChannel(channelId);
-            }}
-            onOpenWorkflow={(workflowId) => {
-              handlePanelOpenChange(false);
-              void goWorkflow(workflowId);
-            }}
+            onCreateWorkflow={handleCreateWorkflow}
+            onOpenWorkflow={handleOpenWorkflow}
             deleteChannelMutation={deleteChannelMutation}
             detailsError={detailsQuery.error}
             handleDeleteChannel={handleDeleteChannel}
@@ -416,15 +440,8 @@ export function ChannelManagementSheet({
               channelId={channelId}
               currentPubkey={currentPubkey}
               workflowsQuery={workflowsQuery}
-              onCreateWorkflow={() => {
-                if (!channelId) return;
-                handlePanelOpenChange(false);
-                void goNewWorkflowForChannel(channelId);
-              }}
-              onOpenWorkflow={(workflowId) => {
-                handlePanelOpenChange(false);
-                void goWorkflow(workflowId);
-              }}
+              onCreateWorkflow={handleCreateWorkflow}
+              onOpenWorkflow={handleOpenWorkflow}
               deleteChannelMutation={deleteChannelMutation}
               detailsError={detailsQuery.error}
               handleDeleteChannel={handleDeleteChannel}
@@ -615,7 +632,7 @@ type ChannelManagementPanelContentProps = {
     refetch: () => Promise<unknown>;
   };
   onCreateWorkflow: () => void;
-  onOpenWorkflow: (workflowId: string) => void;
+  onOpenWorkflow: (workflow: Workflow) => void;
   deleteChannelMutation: ChannelMutation;
   detailsError: unknown;
   handleDeleteChannel: () => Promise<void>;
