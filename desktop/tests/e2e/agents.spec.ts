@@ -2768,8 +2768,9 @@ test("registered reference opens exact profile and remains display-only", async 
   await page.getByTestId("open-agents-view").click();
 
   const card = page.getByTestId(`registered-agent-${pubkey}`);
+  const truncatedPubkey = `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`;
   await expect(
-    card.getByRole("button", { name: new RegExp(pubkey) }),
+    card.getByRole("button", { name: new RegExp(truncatedPubkey) }),
   ).toBeVisible();
   for (const control of [
     "Start",
@@ -2875,8 +2876,9 @@ test("same-name references stay distinct and removing one only unregisters that 
   for (const pubkey of [first, second]) {
     const card = page.getByTestId(`registered-agent-${pubkey}`);
     await expect(card).toContainText(pubkey.slice(-4));
+    const truncatedPubkey = `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`;
     await expect(
-      card.getByRole("button", { name: new RegExp(pubkey) }),
+      card.getByRole("button", { name: new RegExp(truncatedPubkey) }),
     ).toBeVisible();
   }
 

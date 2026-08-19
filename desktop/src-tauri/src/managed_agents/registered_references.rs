@@ -72,6 +72,26 @@ fn normalize_optional(
     Ok(Some(trimmed.to_string()))
 }
 
+fn validate_loaded_reference(reference: &RegisteredAgentReference) -> Result<(), String> {
+    let pubkey = normalize_pubkey(&reference.pubkey)?;
+    if pubkey != reference.pubkey {
+        return Err("stored pubkey is not canonical lowercase hex".to_string());
+    }
+    let label = normalize_optional(reference.label.clone(), LABEL_LIMIT_BYTES, "label")?;
+    if label != reference.label {
+        return Err("stored label is not canonical".to_string());
+    }
+    let role_summary = normalize_optional(
+        reference.role_summary.clone(),
+        ROLE_SUMMARY_LIMIT_BYTES,
+        "roleSummary",
+    )?;
+    if role_summary != reference.role_summary {
+        return Err("stored role summary is not canonical".to_string());
+    }
+    Ok(())
+}
+
 fn load_from_path(path: &Path) -> Result<Vec<RegisteredAgentReference>, String> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -83,6 +103,14 @@ fn load_from_path(path: &Path) -> Result<Vec<RegisteredAgentReference>, String> 
             backup_invalid_store(path);
             format!("failed to parse registered agent references (preserved as .invalid): {error}")
         })?;
+    for reference in &refs {
+        if let Err(error) = validate_loaded_reference(reference) {
+            backup_invalid_store(path);
+            return Err(format!(
+                "invalid registered agent reference (preserved as .invalid): {error}"
+            ));
+        }
+    }
     refs.sort_by(|left, right| left.pubkey.cmp(&right.pubkey));
     if let Some(duplicate) = refs
         .windows(2)
@@ -339,6 +367,53 @@ mod tests {
             fs::read(path.with_extension("json.invalid")).unwrap(),
             bytes
         );
+    }
+
+    #[test]
+    fn noncanonical_store_records_fail_closed_and_preserve_invalid_bytes() {
+        let cases = [
+            ("invalid pubkey", "not-a-key".to_string(), None, None),
+            ("mixed-case pubkey", PUBKEY_A_UPPER.to_string(), None, None),
+            (
+                "whitespace label",
+                PUBKEY_A.to_string(),
+                Some(" padded ".to_string()),
+                None,
+            ),
+            (
+                "overlong role summary",
+                PUBKEY_A.to_string(),
+                None,
+                Some("x".repeat(ROLE_SUMMARY_LIMIT_BYTES + 1)),
+            ),
+        ];
+
+        for (name, pubkey, label, role_summary) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join(STORE_FILENAME);
+            let refs = [RegisteredAgentReference {
+                pubkey,
+                label,
+                role_summary,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            }];
+            let bytes = serde_json::to_vec_pretty(&refs).unwrap();
+            fs::write(&path, &bytes).unwrap();
+
+            let error = load_from_path(&path).unwrap_err();
+
+            assert!(
+                error.contains("invalid registered agent reference"),
+                "{name}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
+            assert_eq!(
+                fs::read(path.with_extension("json.invalid")).unwrap(),
+                bytes,
+                "{name}"
+            );
+        }
     }
 
     #[test]
