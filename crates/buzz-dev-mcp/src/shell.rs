@@ -26,6 +26,10 @@ const READ_CHUNK: usize = 16 * 1024;
 pub struct SharedState {
     pub cwd: PathBuf,
     pub shim: Shim,
+    /// Declared before `session_dir`, and it has to stay that way: fields drop
+    /// in declaration order, and on Windows the lease file must be closed
+    /// before `TempDir` can remove the directory holding it.
+    _session_claim: Option<crate::sweep::DirClaim>,
     pub session_dir: TempDir,
     pub bootstrap_instructions: String,
     /// The shell resolved at construction: `Ok((path, display_name))` when a shell
@@ -41,9 +45,9 @@ impl SharedState {
         let session_dir = tempfile::Builder::new()
             .prefix("buzz-dev-mcp-session-")
             .tempdir()?;
-        // Ownership marker for the startup orphan sweep (#6025) — best-effort,
-        // see crate::sweep docs for why a write failure here is non-fatal.
-        crate::sweep::write_owner_marker(session_dir.path());
+        // Ownership claim for the startup orphan sweep (#6025) — best-effort,
+        // see crate::sweep docs for why a failure here is non-fatal.
+        let session_claim = crate::sweep::claim_dir(session_dir.path());
         // Resolve the shell ONCE using the same PATH the spawn will use.
         // Both the bootstrap dialect hint and every run() call read this result,
         // so they can never disagree. A failed resolution is stored as Err and
@@ -57,6 +61,7 @@ impl SharedState {
         Ok(Self {
             cwd,
             shim,
+            _session_claim: session_claim,
             session_dir,
             bootstrap_instructions,
             resolved_shell,
@@ -199,6 +204,15 @@ pub async fn run(
     // child so the Windows job can take the process handle, which only exists
     // after spawn. Held for the whole run; its Drop is the last-resort reaper.
     let mut kill_group = KillGroup::new(&child, pid);
+    if !kill_group.armed() {
+        // Nothing left ties this command's lifetime to ours, and nothing
+        // records that it is using the shim and session dirs. A later startup
+        // sweep would see a dead owner pid and a free lease and delete both
+        // directories out from under it, so give up the right to reclaim them
+        // instead. Costs disk; never costs a live command its binaries.
+        crate::sweep::surrender_claim(state.shim.dir());
+        crate::sweep::surrender_claim(state.session_dir.path());
+    }
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -729,6 +743,19 @@ impl KillGroup {
     fn disarm(&mut self) {
         self.0 = None;
     }
+
+    /// Whether this command's use of the shim/session dirs stays observable
+    /// after a hard kill of this process.
+    ///
+    /// Always true on Unix, for a reason that has nothing to do with the
+    /// process group: the command inherited the directory lease at spawn
+    /// (`sweep::acquire_lease`), so even a fully orphaned command keeps the
+    /// directories claimed until it exits. Windows does not inherit that
+    /// handle and leans on the job object instead, so there the answer can be
+    /// false.
+    fn armed(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(unix)]
@@ -741,6 +768,10 @@ impl Drop for KillGroup {
 #[cfg(windows)]
 struct KillGroup {
     job: windows_sys::Win32::Foundation::HANDLE,
+    /// Whether the job object was actually established: created, configured
+    /// with KILL_ON_JOB_CLOSE, and holding this child. Every Win32 call in
+    /// `new` can fail, and a job that was not established kills nothing.
+    armed: bool,
 }
 
 // SAFETY: `job` is a raw Win32 HANDLE (`*mut c_void`), which is neither `Send`
@@ -773,28 +804,46 @@ impl KillGroup {
         // anonymous job, a zeroed #[repr(C)] info struct sized by size_of, and
         // the live process handle from `child` (valid while it is running).
         // A null job HANDLE on failure makes every later call a harmless no-op.
-        let job = unsafe {
+        let (job, armed) = unsafe {
             let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if !job.is_null() {
+            if job.is_null() {
+                (job, false)
+            } else {
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
                 // KILL_ON_JOB_CLOSE: when the LAST handle to the job closes,
                 // Windows kills every process still in it. This is both the
                 // explicit-kill mechanism and the Drop-time safety net — and the
                 // reason the job HANDLE must outlive the child (see Drop).
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                SetInformationJobObject(
+                let configured = SetInformationJobObject(
                     job,
                     JobObjectExtendedLimitInformation,
                     std::ptr::addr_of!(info).cast(),
                     size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                );
-                if let Some(handle) = child.raw_handle() {
-                    AssignProcessToJobObject(job, handle as HANDLE);
-                }
+                ) != 0;
+                let assigned = match child.raw_handle() {
+                    Some(handle) => AssignProcessToJobObject(job, handle as HANDLE) != 0,
+                    None => false,
+                };
+                (job, configured && assigned)
             }
-            job
         };
-        Self { job }
+        if !armed {
+            // Not fatal for the command itself — the explicit kill path still
+            // terminates bash directly — but this child is no longer
+            // guaranteed to die with us, which is what the caller needs to
+            // know. See the surrender in `run`.
+            tracing::warn!(
+                "buzz-dev-mcp: could not put the shell command in a job object; \
+                 it may outlive a hard kill of this process"
+            );
+        }
+        Self { job, armed }
+    }
+
+    /// See the Unix twin for the contract.
+    fn armed(&self) -> bool {
+        self.armed
     }
 
     fn kill_immediate(&self) {
@@ -857,6 +906,11 @@ impl KillGroup {
     fn kill_immediate(&self) {}
     async fn kill_graceful(&self) {}
     fn disarm(&mut self) {}
+    /// No kill primitive and no lease on this target, so a spawned command's
+    /// use of the temp dirs is never observable. See the Unix twin.
+    fn armed(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
