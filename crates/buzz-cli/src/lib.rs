@@ -172,8 +172,39 @@ pub enum OutputFormat {
     Compact,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ListenEnvelope {
+    /// Existing flat event objects, one per stdout line
+    #[value(name = "flat")]
+    Flat,
+    /// Versioned v1 event and lifecycle envelopes
+    #[value(name = "v1")]
+    V1,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
+    /// Stream matching relay events as newline-delimited JSON
+    Listen {
+        /// Channel UUID to subscribe to. Repeat for multiple channels.
+        #[arg(long = "channel")]
+        channels: Vec<String>,
+        /// Only receive events that p-tag this CLI identity
+        #[arg(long, default_value_t = false)]
+        mentions_of_me: bool,
+        /// Comma-separated event kinds. Defaults to Buzz message kinds.
+        #[arg(long)]
+        kinds: Option<String>,
+        /// Unix timestamp lower bound for bounded replay; refuses windows above 1,000 events
+        #[arg(long)]
+        since: Option<u64>,
+        /// Output envelope schema
+        #[arg(long, value_enum, default_value_t = ListenEnvelope::Flat)]
+        envelope: ListenEnvelope,
+        /// Disable automatic reconnect with exponential backoff
+        #[arg(long, default_value_t = false)]
+        no_reconnect: bool,
+    },
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
@@ -237,6 +268,9 @@ enum Cmd {
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
+    /// Nostr identity operations (local, no relay connection needed)
+    #[command(subcommand)]
+    Keys(KeysCmd),
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
@@ -832,6 +866,8 @@ pub enum DmsCmd {
 
 #[derive(Subcommand)]
 pub enum UsersCmd {
+    /// Print the active CLI identity without contacting the relay
+    Me,
     /// Look up user profiles by pubkey or name
     Get {
         /// User pubkey(s) to look up (64-char hex). Omit for your own profile
@@ -1858,6 +1894,36 @@ pub enum PackCmd {
     },
 }
 
+/// Local Nostr identity commands.
+///
+/// These run without a relay connection or a pre-existing `BUZZ_PRIVATE_KEY`.
+#[derive(Subcommand)]
+pub enum KeysCmd {
+    /// Generate a new Nostr keypair
+    #[command(
+        after_help = "On Unix, the secret key is written to --out with mode 0600 and is NOT \
+printed unless --stdout is passed. Windows file output fails closed until Buzz can guarantee \
+owner-only ACLs there; use --stdout with a platform secret store. stdout always carries the \
+public half (pubkey, npub).\n\n\
+Examples:\n  \
+buzz keys generate --out ./identity.nsec\n  \
+buzz keys generate --stdout | secret-store write buzz-identity\n\n\
+Verify afterwards with:\n  \
+BUZZ_PRIVATE_KEY=$(cat ./identity.nsec) buzz users me"
+    )]
+    Generate {
+        /// Path to write the secret key to; Unix-only until Windows owner-only ACLs exist
+        #[arg(long)]
+        out: Option<String>,
+        /// Also print the secret key on stdout (for piping into a secret store)
+        #[arg(long)]
+        stdout: bool,
+        /// Overwrite an existing --out file; any client using that identity loses it
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -2000,6 +2066,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
+    // Keys commands are local-only AND must run before the BUZZ_PRIVATE_KEY
+    // requirement below: `keys generate` is how that key comes to exist, so
+    // demanding one first would make the command unreachable.
+    if let Cmd::Keys(sub) = cli.command {
+        return commands::keys::dispatch(sub);
+    }
+
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
@@ -2038,6 +2111,25 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
+        Cmd::Listen {
+            channels,
+            mentions_of_me,
+            kinds,
+            since,
+            envelope,
+            no_reconnect,
+        } => {
+            commands::listen::cmd_listen(
+                &client,
+                channels,
+                mentions_of_me,
+                kinds,
+                since,
+                envelope,
+                !no_reconnect,
+            )
+            .await
+        }
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
@@ -2059,7 +2151,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
-        Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Pack(_) | Cmd::Keys(_) => unreachable!("handled above"),
     }
 }
 
@@ -2153,6 +2245,8 @@ mod tests {
             "emoji",
             "feed",
             "issues",
+            "keys",
+            "listen",
             "media",
             "mem",
             "messages",
@@ -2267,6 +2361,7 @@ mod tests {
             names(&cmd, "users"),
             vec![
                 "get",
+                "me",
                 "presence",
                 "set-presence",
                 "set-profile",
@@ -2336,6 +2431,7 @@ mod tests {
         assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
+        assert_eq!(names(&cmd, "keys"), vec!["generate"]);
         assert_eq!(
             names(&cmd, "moderation"),
             vec![
@@ -2371,7 +2467,7 @@ mod tests {
             ("repos", 5),
             ("social", 7),
             ("upload", 1),
-            ("users", 5),
+            ("users", 6),
             ("workflows", 8),
         ];
 

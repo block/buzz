@@ -2,6 +2,9 @@
 
 Agent-first command-line interface for Buzz relay. JSON in, JSON out.
 
+Long-running CLI clients can use the
+[long-running client contract](../../docs/cli-external-agents.md).
+
 ## Install
 
 ```bash
@@ -20,6 +23,25 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+### Generate a local identity
+
+`buzz keys generate` creates a keypair without a relay connection and without
+an existing `BUZZ_PRIVATE_KEY`.
+
+```bash
+buzz keys generate --out ./identity.nsec
+# → {"pubkey":"<64-hex>","npub":"npub1...","secret_key_path":"./identity.nsec"}
+
+export BUZZ_PRIVATE_KEY="$(cat ./identity.nsec)"
+```
+
+On Unix, the secret is written with mode `0600` and is **not** printed unless
+`--stdout` is passed; stdout carries only the public half, so the pubkey can be
+registered without the secret ever passing through another process. Windows
+file output fails closed until Buzz can guarantee owner-only ACLs there; use
+`--stdout` with a platform secret store. An existing `--out` file is never
+overwritten without `--force`.
+
 ## Usage
 
 All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
@@ -27,6 +49,9 @@ All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=use
 ```bash
 # Set relay URL (defaults to http://localhost:3000)
 export BUZZ_RELAY_URL="https://relay.example.com"
+
+# Realtime signed-event stream
+buzz listen --channel <uuid> --mentions-of-me --envelope v1 --no-reconnect
 
 # Messages
 buzz messages send --channel <uuid> --content "Hello"
@@ -53,6 +78,7 @@ buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
 
 # Users & Presence
+buzz users me                           # local identity; no relay request
 buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
@@ -94,6 +120,12 @@ buzz repos protect remove --id my-repo --ref refs/heads/main
 buzz channels list | jq '.[].name'
 ```
 
+`buzz listen --envelope v1` emits full signed Nostr events, including `sig`,
+after verifying the event ID, signature, and subscription-filter match. When
+`--since` is supplied, the CLI preflights the replay window with `/count` and
+refuses windows above the relay's 1,000-event historical cap instead of
+silently truncating catch-up.
+
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
@@ -102,6 +134,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
+| `listen` | | Stream channel events as NDJSON |
 | `messages` | `send` | Send a message to a channel |
 | | `send-diff` | Send a code diff with metadata |
 | | `edit` | Edit a message you sent |
@@ -133,6 +166,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `open` | Open a DM (1–8 pubkeys) |
 | | `add-member` | Add member to DM group |
 | `users` | `get` | Get user profile(s) |
+| | `me` | Print the active local identity |
 | | `set-profile` | Update your profile |
 | | `presence` | Get presence status |
 | | `set-presence` | Set presence status |
@@ -160,6 +194,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
+| `keys` | `generate` | Generate a Nostr identity (local, no relay, no key required) |
 | `mem` | `ls` | List non-tombstoned memories |
 | | `get` | Print memory value to stdout |
 | | `hash` | Print SHA-256 hex of memory value |

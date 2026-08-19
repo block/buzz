@@ -563,6 +563,11 @@ impl BuzzClient {
         &self.keys
     }
 
+    /// Get the parsed NIP-OA auth tag, if configured.
+    pub fn auth_tag(&self) -> Option<&Tag> {
+        self.auth_tag.as_ref()
+    }
+
     /// Get the relay base URL.
     #[allow(dead_code)]
     pub fn relay_url(&self) -> &str {

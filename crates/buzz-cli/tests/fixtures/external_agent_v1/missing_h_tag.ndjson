@@ -1,0 +1,1 @@
+{"schema_version":1,"type":"event","event":{"id":"1000000000000000000000000000000000000000000000000000000000000008","pubkey":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","kind":40002,"content":"@agent missing channel","created_at":1785100008,"tags":[["p","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]}}
