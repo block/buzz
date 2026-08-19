@@ -641,6 +641,10 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Emit `Audience:` lines in `[Context]` blocks — enables the base
+    /// prompt's terse register on agents-only turns. See
+    /// [`crate::queue::FormatPromptArgs::terse_register`].
+    pub terse_register: bool,
 }
 
 impl AgentPool {
@@ -2402,6 +2406,7 @@ pub async fn run_prompt_task(
                 team_instructions: standing.team_instructions,
                 agent_canvas: standing.agent_canvas,
                 standing_context_sent,
+                terse_register: ctx.terse_register,
             },
         )
     } else {
@@ -7959,6 +7964,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            terse_register: false,
         }
     }
 
