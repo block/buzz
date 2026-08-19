@@ -1075,8 +1075,14 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Install native review Python dependencies
+        run: |
+          python3 -m venv .venv-native-review
+          .venv-native-review/bin/pip install \
+            --require-hashes \
+            -r tools/native-review/requirements.txt
       - name: Test native review harness and driver
-        run: just native-review-test
+        run: PATH="$PWD/.venv-native-review/bin:$PATH" just native-review-test
 
   desktop-build-macos:
     name: Desktop Build (macOS)
