@@ -475,7 +475,25 @@ test("the new agent card opens unified create, catalog, and import flows", async
     mimeType: "application/json",
     name: "imported.agent.json",
   });
-  await expect(page.getByTestId("agent-snapshot-import-dialog")).toBeVisible();
+  const importDialog = page.getByTestId("agent-snapshot-import-dialog");
+  await expect(importDialog).toBeVisible();
+  await expect(page.getByTestId("persona-catalog-dialog")).toHaveCount(0);
+  await waitForAnimations(page);
+  await importDialog.getByTestId("agent-snapshot-import-confirm").click();
+  await expect(async () => {
+    const log = await page.evaluate(
+      () =>
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: { command: string }[];
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__ ?? [],
+    );
+    expect(
+      log.filter((entry) => entry.command === "confirm_agent_snapshot_import")
+        .length,
+    ).toBe(1);
+  }).toPass({ timeout: 5000 });
 });
 
 test("embedded create keeps its draft when discard is cancelled", async ({
