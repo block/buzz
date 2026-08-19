@@ -31,6 +31,7 @@ import 'ime_metrics_settle_observer.dart';
 import 'initial_thread_tail_settle.dart';
 import 'laid_out_viewport.dart';
 import 'jump_to_latest_button.dart';
+import 'jump_to_latest_switcher.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';

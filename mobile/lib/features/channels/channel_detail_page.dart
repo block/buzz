@@ -46,6 +46,7 @@ import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'ime_metrics_settle_observer.dart';
 import 'jump_to_latest_button.dart';
+import 'jump_to_latest_switcher.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
