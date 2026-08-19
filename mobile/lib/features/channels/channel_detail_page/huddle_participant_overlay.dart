@@ -6,47 +6,24 @@ const _huddleParticipantSpotlightRadius = 68.0;
 void _showHuddleParticipantSpotlight({
   required BuildContext context,
   required String pubkey,
-  required UserProfile? profile,
-  required String? fallbackLabel,
-  required bool active,
   required bool isSelf,
 }) {
-  final label = _huddleParticipantLabel(
-    pubkey: pubkey,
-    profile: profile,
-    fallbackLabel: fallbackLabel,
-    isSelf: isSelf,
-  );
   _showHuddleParticipantOverlay(
     context: context,
-    barrierLabel: 'Dismiss $label',
+    barrierLabel: 'Dismiss participant',
     childBuilder: (dialogContext) => _HuddleParticipantSpotlight(
       pubkey: pubkey,
-      profile: profile,
-      label: label,
-      active: active,
+      isSelf: isSelf,
       onDismiss: () => Navigator.of(dialogContext).pop(),
     ),
   );
 }
 
-void _showHuddleParticipantRoster({
-  required BuildContext context,
-  required List<String> pubkeys,
-  required Map<String, UserProfile> profiles,
-  required Map<String, String> fallbackLabels,
-  required Set<String> activeSpeakerPubkeys,
-}) {
-  if (pubkeys.isEmpty) return;
+void _showHuddleParticipantRoster({required BuildContext context}) {
   _showHuddleParticipantOverlay(
     context: context,
     barrierLabel: 'Dismiss participant list',
-    childBuilder: (_) => _HuddleParticipantRoster(
-      pubkeys: pubkeys,
-      profiles: profiles,
-      fallbackLabels: fallbackLabels,
-      activeSpeakerPubkeys: activeSpeakerPubkeys,
-    ),
+    childBuilder: (_) => const _HuddleParticipantRoster(),
   );
 }
 
@@ -144,23 +121,37 @@ class _HuddleParticipantOverlay extends StatelessWidget {
   }
 }
 
-class _HuddleParticipantSpotlight extends StatelessWidget {
+class _HuddleParticipantSpotlight extends ConsumerWidget {
   const _HuddleParticipantSpotlight({
     required this.pubkey,
-    required this.profile,
-    required this.label,
-    required this.active,
+    required this.isSelf,
     required this.onDismiss,
   });
 
   final String pubkey;
-  final UserProfile? profile;
-  final String label;
-  final bool active;
+  final bool isSelf;
   final VoidCallback onDismiss;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final profile = ref.watch(
+      userCacheProvider.select((profiles) => profiles[pubkey]),
+    );
+    final fallbackLabel = ref.watch(
+      agentDirectoryDisplayNamesProvider.select((labels) => labels[pubkey]),
+    );
+    final active = ref.watch(
+      huddleSessionProvider.select(
+        (session) => session.activeSpeakerPubkeys.contains(pubkey),
+      ),
+    );
+    final label = _huddleParticipantLabel(
+      pubkey: pubkey,
+      profile: profile,
+      fallbackLabel: fallbackLabel,
+      isSelf: isSelf,
+    );
+
     return Semantics(
       label: active ? '$label, speaking' : label,
       hint: 'Tap to close participant',
@@ -230,21 +221,28 @@ class _HuddleParticipantSpotlight extends StatelessWidget {
   }
 }
 
-class _HuddleParticipantRoster extends StatelessWidget {
-  const _HuddleParticipantRoster({
-    required this.pubkeys,
-    required this.profiles,
-    required this.fallbackLabels,
-    required this.activeSpeakerPubkeys,
-  });
-
-  final List<String> pubkeys;
-  final Map<String, UserProfile> profiles;
-  final Map<String, String> fallbackLabels;
-  final Set<String> activeSpeakerPubkeys;
+class _HuddleParticipantRoster extends ConsumerWidget {
+  const _HuddleParticipantRoster();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final session = ref.watch(huddleSessionProvider);
+    final localPubkey = session.currentPubkey?.toLowerCase();
+    final pubkeys = session.participantPubkeys
+        .where((pubkey) => pubkey != localPubkey)
+        .skip(_huddleClusterVisibleParticipantCount)
+        .toList(growable: false);
+    if (pubkeys.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) Navigator.of(context).pop();
+      });
+      return const SizedBox.shrink();
+    }
+    final profiles = ref.watch(userCacheProvider);
+    final fallbackLabels = ref.watch(agentDirectoryDisplayNamesProvider);
+    final activeSpeakerPubkeys = ref.watch(
+      huddleSessionProvider.select((session) => session.activeSpeakerPubkeys),
+    );
     final maxListHeight = min(MediaQuery.sizeOf(context).height * 0.55, 416.0);
     final listHeight = min(pubkeys.length * 64.0, maxListHeight);
 

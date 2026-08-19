@@ -4355,6 +4355,11 @@ void main() {
             3: HuddlePeer(pubkey: 'agent', peerIndex: 3),
           },
         );
+        final users = _FakeUserCacheNotifier(const {
+          'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
+          'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+          'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+        });
         final navigator = _RecordingNavigatorObserver();
         String? leftChannelId;
         final hapticCalls = <MethodCall>[];
@@ -4384,11 +4389,7 @@ void main() {
                 createdAt: now,
               ),
             ],
-            users: const {
-              'desktop': UserProfile(pubkey: 'desktop', displayName: 'Miles'),
-              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
-              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
-            },
+            userCacheNotifier: users,
             huddleMembers: [
               ChannelMember(
                 pubkey: 'agent',
@@ -4519,6 +4520,41 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Miles'), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics && widget.properties.label == 'Miles',
+          ),
+          findsNWidgets(2),
+        );
+        transport.emitRemoteAudio();
+        await tester.pump();
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Miles, speaking',
+          ),
+          findsNWidgets(2),
+        );
+        users.replace(
+          const UserProfile(pubkey: 'desktop', displayName: 'Miles Davis'),
+        );
+        await tester.pump();
+        expect(find.text('Miles'), findsNothing);
+        expect(find.text('Miles Davis'), findsOneWidget);
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is Semantics &&
+                widget.properties.label == 'Miles Davis, speaking',
+          ),
+          findsNWidgets(2),
+        );
+        users.replace(
+          const UserProfile(pubkey: 'desktop', displayName: 'Miles'),
+        );
+        await tester.pump();
         expect(find.text('Pollen'), findsNothing);
         expect(find.byKey(const ValueKey('huddle-leave')), findsOneWidget);
         expect(
@@ -5212,13 +5248,12 @@ void main() {
       },
     );
 
-    testWidgets('springs live backing-channel members in and out', (
-      tester,
-    ) async {
+    testWidgets('springs admitted participants in and out', (tester) async {
       const addedMemberPubkey =
           'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       final membersNotifier = _MutableHuddleMembersNotifier(const []);
+      final transport = _HuddleTestTransport();
 
       await tester.pumpWidget(
         _buildTestable(
@@ -5243,7 +5278,7 @@ void main() {
           relaySessionNotifier: _ReconnectingRelaySession(),
           huddleCurrentPubkey: 'self',
           huddleMediaFactory: _HuddleTestMedia.new,
-          huddleTransportFactory: (_) => _HuddleTestTransport(),
+          huddleTransportFactory: (_) => transport,
         ),
       );
       await tester.pumpAndSettle();
@@ -5263,6 +5298,17 @@ void main() {
         ),
       ]);
       await tester.pump();
+      await tester.pump();
+      expect(
+        find.byKey(
+          const ValueKey('huddle-participant-avatar-$addedMemberPubkey'),
+        ),
+        findsNothing,
+      );
+
+      transport.emitPeerJoin(
+        const HuddlePeer(pubkey: addedMemberPubkey, peerIndex: 3),
+      );
       await tester.pump();
 
       final addedMemberScale = find.byKey(
@@ -5308,8 +5354,7 @@ void main() {
         closeTo(1, 0.01),
       );
 
-      membersNotifier.replace(const []);
-      await tester.pump();
+      transport.emitPeerLeave(3);
       await tester.pump();
       expect(
         find.byKey(
@@ -11195,6 +11240,20 @@ final class _HuddleTestTransport implements HuddleTransportClient {
     _states.add(_state);
     _peerEvents.add(
       HuddlePeerEvent(type: HuddlePeerEventType.joined, peer: peer),
+    );
+  }
+
+  void emitPeerLeave(int peerIndex) {
+    final peer = _peers.remove(peerIndex);
+    if (peer == null) return;
+    _state = HuddleTransportState(
+      phase: HuddleTransportPhase.connected,
+      localPeerIndex: _state.localPeerIndex,
+      peers: _peers,
+    );
+    _states.add(_state);
+    _peerEvents.add(
+      HuddlePeerEvent(type: HuddlePeerEventType.left, peer: peer),
     );
   }
 

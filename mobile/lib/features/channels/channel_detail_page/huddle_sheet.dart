@@ -27,12 +27,14 @@ class _HuddleParticipantProfileUpdates extends Notifier<int> {
           ephemeralChannelId: state.ephemeralChannelId,
           currentPubkey: state.currentPubkey,
           participantPubkeys: state.participantPubkeys,
+          wasAdmitted: state.wasAdmitted,
         ),
       ),
     );
-    final members =
-        ref.watch(channelMembersProvider(channelId)).value ??
-        const <ChannelMember>[];
+    final members = session.wasAdmitted
+        ? const <ChannelMember>[]
+        : ref.watch(channelMembersProvider(channelId)).value ??
+              const <ChannelMember>[];
     final relayState = ref.watch(relaySessionProvider);
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.ephemeralChannelId == channelId
@@ -547,7 +549,7 @@ class _MobileHuddleCallPage extends ConsumerWidget {
     final participantPubkeys = _huddleParticipantPubkeys(
       sessionParticipantPubkeys: session.participantPubkeys,
       currentPubkey: localPubkey,
-      members: backingMembers,
+      members: session.wasAdmitted ? const [] : backingMembers,
     );
     final remotePubkeys = participantPubkeys
         .where((pubkey) => pubkey != localPubkey)
@@ -641,21 +643,11 @@ class _MobileHuddleCallPage extends ConsumerWidget {
                       _showHuddleParticipantSpotlight(
                         context: context,
                         pubkey: pubkey,
-                        profile: profiles[pubkey],
-                        fallbackLabel: directoryDisplayNames[pubkey],
-                        active: session.activeSpeakerPubkeys.contains(pubkey),
                         isSelf: isSelf,
                       );
                     },
-                    onOverflowTap: () => _showHuddleParticipantRoster(
-                      context: context,
-                      pubkeys: remotePubkeys
-                          .skip(_huddleClusterVisibleParticipantCount)
-                          .toList(growable: false),
-                      profiles: profiles,
-                      fallbackLabels: directoryDisplayNames,
-                      activeSpeakerPubkeys: session.activeSpeakerPubkeys,
-                    ),
+                    onOverflowTap: () =>
+                        _showHuddleParticipantRoster(context: context),
                   ),
                 ),
                 if (connected)
