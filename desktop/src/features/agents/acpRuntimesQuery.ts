@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 
@@ -9,6 +9,15 @@ import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
  * cache the hot-path `useAcpRuntimesQuery` renders from.
  */
 export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
+
+/**
+ * Separate key for the forced (full re-discovery) fetch. Forced refresh runs on
+ * *this* key, never the shared cheap key, so React Query's `fetchQuery` can
+ * never deduplicate a forced probe onto an in-flight cheap request for the
+ * shared key. The forced result is then written into the shared cache
+ * deliberately (see `refreshAcpRuntimes`).
+ */
+export const acpRuntimesForcedQueryKey = ["acp-runtimes", "forced"] as const;
 
 /**
  * Run a forced (full re-discovery) refresh and write the result into the shared
@@ -21,46 +30,82 @@ export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
  * `invalidateQueries` would only re-run the cheap query path and never
  * re-probe, so the freshly-changed auth/catalog state would not be reflected.
  *
- * `fetchQuery` dedups concurrent callers for this key; the backend coalesces
- * forced runs as a second layer.
+ * The forced fetch runs on its own key so it can never coalesce onto an
+ * in-flight *cheap* request for the shared key (which would satisfy the caller
+ * with cached availability and never run the `{ force: true }` probe). Its
+ * result is then written into the shared cache with `setQueryData` so hot
+ * surfaces rendering `useAcpRuntimesQuery` re-render with the fresh catalog.
+ * Concurrent forced callers still dedup on the forced key; the backend
+ * coalesces overlapping forced runs as a second layer.
  */
-export function refreshAcpRuntimes(
+export async function refreshAcpRuntimes(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
-  return queryClient.fetchQuery({
-    queryKey: acpRuntimesQueryKey,
+  const result = await queryClient.fetchQuery({
+    queryKey: acpRuntimesForcedQueryKey,
     queryFn: () => discoverAcpRuntimes({ force: true }),
     staleTime: 0,
+    gcTime: 0,
   });
+  queryClient.setQueryData(acpRuntimesQueryKey, result);
+  // A hot-surface cheap fetch may already be in flight on the shared key; cancel
+  // it so its (older, cached) result cannot land after and clobber the fresh
+  // forced catalog we just wrote.
+  await queryClient.cancelQueries({ queryKey: acpRuntimesQueryKey });
+  return result;
 }
 
 /**
  * ACP runtimes query for surfaces that need fresh auth/version state: Settings
- * harness panels and onboarding. It reads from the shared cache but suppresses
- * the cheap mount-fetch (`refetchOnMount: false`) so the forced re-discovery it
- * fires on mount is the *only* fetch for this key — otherwise React Query could
- * dedup the forced probe onto an in-flight cheap fetch and the surface would
- * show stale auth. The observer still reflects the forced fetch's loading state
- * (shared query state), and `forceRefresh` drives explicit refresh buttons and
- * sign-in polling.
+ * harness panels and onboarding.
+ *
+ * It reads the shared runtime catalog (`enabled: false`, so it never fires its
+ * own cheap fetch — the forced probe below is the only fetcher) and re-renders
+ * whenever `refreshAcpRuntimes` writes a fresh catalog into that cache. Loading
+ * state is taken from the forced key via `useIsFetching`, so refresh buttons and
+ * the onboarding spinner reflect the forced probe even though the data observer
+ * is disabled. `forceRefresh` drives explicit refresh buttons and sign-in
+ * polling.
+ *
+ * `forceOnMount` (default `true`) is the surface owner's one force-on-mount.
+ * Child rows that share the same surface must pass `forceOnMount: false`: they
+ * consume the shared query state and the `forceRefresh` callback, but must not
+ * mount a *second* force effect. Each mounted force effect is a distinct forced
+ * probe, so an owner + N rows would otherwise re-run the 20–65s pipeline N+1
+ * times on entry (and race the catalog to a later state before the owner's
+ * first result renders).
  */
-export function useAcpRuntimesQueryForced(options?: { enabled?: boolean }) {
+export function useAcpRuntimesQueryForced(options?: {
+  enabled?: boolean;
+  forceOnMount?: boolean;
+}) {
   const enabled = options?.enabled ?? true;
+  const forceOnMount = options?.forceOnMount ?? true;
   const queryClient = useQueryClient();
   const query = useQuery({
-    enabled,
     queryKey: acpRuntimesQueryKey,
     queryFn: () => discoverAcpRuntimes(),
     staleTime: 30 * 60_000,
-    // The mount forceRefresh below is the fetcher; don't also fire a cheap one.
-    refetchOnMount: false,
+    // Read-only observer: the forced refresh is the fetcher for these surfaces,
+    // so this must never fire a cheap fetch (which would race and could
+    // overwrite the fresh forced result with cached data).
+    enabled: false,
+  });
+  const forcedFetchCount = useIsFetching({
+    queryKey: acpRuntimesForcedQueryKey,
   });
   const forceRefresh = React.useCallback(
     () => refreshAcpRuntimes(queryClient),
     [queryClient],
   );
   React.useEffect(() => {
-    if (enabled) void forceRefresh();
-  }, [enabled, forceRefresh]);
-  return { ...query, forceRefresh };
+    if (enabled && forceOnMount) void forceRefresh();
+  }, [enabled, forceOnMount, forceRefresh]);
+  const isFetching = query.isFetching || forcedFetchCount > 0;
+  return {
+    ...query,
+    isFetching,
+    isLoading: isFetching && query.data === undefined,
+    forceRefresh,
+  };
 }

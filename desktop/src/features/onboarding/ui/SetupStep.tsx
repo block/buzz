@@ -109,7 +109,11 @@ function RuntimeStatus({
       runtime.authStatus.status === "logged_out",
   });
   const connectMutation = useConnectAcpRuntimeMutation();
-  const runtimesQuery = useAcpRuntimesQueryForced();
+  // Child rows share the surface owner's forced query state + refresh callback
+  // (`useSetupStepState` owns the single force-on-mount). Each row must not
+  // mount its own force effect, or onboarding entry re-runs discovery once per
+  // row instead of once for the surface.
+  const runtimesQuery = useAcpRuntimesQueryForced({ forceOnMount: false });
   const [isWaitingForSignIn, setIsWaitingForSignIn] = React.useState(false);
   const [didSignInCheckTimeOut, setDidSignInCheckTimeOut] =
     React.useState(false);
