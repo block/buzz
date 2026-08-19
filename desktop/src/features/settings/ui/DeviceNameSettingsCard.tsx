@@ -6,7 +6,10 @@ import {
   deviceIdentityQueryKey,
   useDeviceIdentityQuery,
 } from "@/features/agents/hooks";
-import { setDeviceLabel } from "@/shared/api/tauriDeviceIdentity";
+import {
+  getDeviceNameSuggestion,
+  setDeviceLabel,
+} from "@/shared/api/tauriDeviceIdentity";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
@@ -51,7 +54,33 @@ export function DeviceNameSettingsCard() {
     },
   });
 
+  // The OS host name is only ever *offered*. A device's name starts opaque
+  // (`device-xxxxxxxx`) precisely because host names routinely carry a real
+  // person's name and this label is published world-readable — so the owner
+  // opts in here, seeing the warning above before anything leaves the machine.
+  const [suggestion, setSuggestion] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    void getDeviceNameSuggestion()
+      .then((value) => {
+        if (!cancelled) {
+          setSuggestion(value);
+        }
+      })
+      .catch(() => {
+        // Advisory only — a device with no usable host name simply gets no
+        // suggestion, which is not worth surfacing as an error.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const trimmedLabel = draftLabel.trim();
+  const showSuggestion =
+    suggestion !== null &&
+    suggestion !== savedLabel &&
+    suggestion !== trimmedLabel;
   const saveDisabled =
     trimmedLabel.length === 0 ||
     trimmedLabel === savedLabel ||
@@ -74,6 +103,19 @@ export function DeviceNameSettingsCard() {
               other devices. Published with your agents, so avoid personal
               details.
             </p>
+            {showSuggestion ? (
+              <button
+                className="mt-1 text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                data-testid="device-name-use-hostname"
+                onClick={() => {
+                  setEditedLabel(true);
+                  setDraftLabel(suggestion);
+                }}
+                type="button"
+              >
+                Use this computer's name ({suggestion})
+              </button>
+            ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Input

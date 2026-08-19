@@ -1,6 +1,5 @@
 import * as React from "react";
 import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
-import { useRelayAgentsQuery } from "@/features/agents/hooks";
 import type {
   AgentPersona,
   ManagedAgent,
@@ -62,6 +61,13 @@ type UseEnsureAgentMentionsReadyOptions = {
   getManagedAgentsByPubkey: () => Promise<Map<string, ManagedAgent>>;
   getPersonas: () => Promise<AgentPersona[]>;
   memberPubkeys: ReadonlySet<string>;
+  /**
+   * Looks a pubkey up in the relay directory. The only place a mention that
+   * resolved to another computer's keypair can be named; the caller feeds it
+   * from the `relayAgentsQueryKey` cache React Query already dedupes against
+   * `useMentions`, so this costs no extra fetch.
+   */
+  getRelayAgentByPubkey?: (pubkey: string) => RelayAgent | undefined;
 };
 
 /**
@@ -78,23 +84,9 @@ export function useEnsureAgentMentionsReady({
   attachAgentToChannel,
   getManagedAgentsByPubkey,
   getPersonas,
+  getRelayAgentByPubkey = () => undefined,
   memberPubkeys,
 }: UseEnsureAgentMentionsReadyOptions): EnsureAgentMentionsReady {
-  // Deduped by React Query against the identical `relayAgentsQueryKey`
-  // already in flight from `useMentions`, so this costs no extra fetch. It is
-  // the only place a mention resolved to another computer's keypair can be
-  // named.
-  const relayAgentsQuery = useRelayAgentsQuery();
-  const relayAgentsByPubkey = React.useMemo(
-    () =>
-      new Map<string, RelayAgent>(
-        (relayAgentsQuery.data ?? []).map((agent) => [
-          normalizePubkey(agent.pubkey),
-          agent,
-        ]),
-      ),
-    [relayAgentsQuery.data],
-  );
   return React.useCallback(
     async (
       mentionPubkeys: string[],
@@ -132,7 +124,7 @@ export function useEnsureAgentMentionsReady({
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) {
           const notice = describeUnrunnableMention(
-            relayAgentsByPubkey.get(pubkey),
+            getRelayAgentByPubkey(pubkey),
           );
           if (notice) notices.push(notice);
           continue;
@@ -188,8 +180,8 @@ export function useEnsureAgentMentionsReady({
       attachAgentToChannel,
       getManagedAgentsByPubkey,
       getPersonas,
+      getRelayAgentByPubkey,
       memberPubkeys,
-      relayAgentsByPubkey,
     ],
   );
 }

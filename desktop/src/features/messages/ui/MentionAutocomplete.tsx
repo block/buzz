@@ -271,13 +271,22 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             // Same account on several computers mints one keypair per
             // computer, so identically named agents are usually different
             // devices.
-            const deviceLine = suggestion.isAgent
-              ? describeAgentDevice({
-                  isLocal: suggestion.isLocalAgent === true,
-                  deviceLabel: suggestion.deviceLabel,
-                  hasNameCollision,
-                })
-              : null;
+            // Only speak when we actually know something about the device.
+            // A suggestion carrying neither a label nor a local/remote verdict
+            // (upstream fixtures, teams, pre-feature agents) must stay silent:
+            // guessing "on another device" is the same false statement
+            // describeUnrunnableMention already refuses to make.
+            const hasDeviceKnowledge =
+              suggestion.deviceLabel != null ||
+              suggestion.isLocalAgent !== undefined;
+            const deviceLine =
+              suggestion.isAgent && hasDeviceKnowledge
+                ? describeAgentDevice({
+                    isLocal: suggestion.isLocalAgent === true,
+                    deviceLabel: suggestion.deviceLabel,
+                    hasNameCollision,
+                  })
+                : null;
             const hasMetadataBeforeNpub = Boolean(
               suggestion.kind === "team" ||
                 suggestion.isAgent ||

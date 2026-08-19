@@ -5077,3 +5077,69 @@ test("mentioning another device's agent says so and still sends", async ({
     .poll(() => readOutgoingMentionPubkeys(page, content))
     .toContain(ALICE_OTHER_DEVICE_PUBKEY);
 });
+
+// A provider-backed agent's body runs elsewhere (deployed to a cluster) and
+// outlives the install that deployed it, so its kind:30177 record carries no
+// device at all. The UI must not invent one, and must never tell the user that
+// some particular computer is the only thing that can answer.
+test("a device-less remote agent claims no device and sends without a notice", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@charlie");
+
+  const dropdown = autocomplete(page);
+  const localRow = dropdown.getByTestId(
+    `mention-suggestion-${TEST_IDENTITIES.alice.pubkey}`,
+  );
+  const remoteRow = dropdown.getByTestId(
+    `mention-suggestion-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await expect(localRow).toBeVisible();
+  await expect(remoteRow).toBeVisible();
+  await waitForAnimations(page);
+
+  // The name collides, so the local row earns its device line. The remote row
+  // declares no device, so it may say only the honest, unpinned thing — never
+  // this computer's name, which is what a provider-backed agent used to borrow.
+  await expect(localRow.getByTestId("mention-device-label")).toHaveText(
+    "on this device",
+  );
+  await expect(remoteRow.getByTestId("mention-device-label")).toHaveText(
+    "on another device",
+  );
+  // "this-mac" is the mock bridge's label for THIS install. A provider-backed
+  // agent borrowing it is exactly the bug this test guards.
+  await expect(remoteRow.getByTestId("mention-device-label")).not.toContainText(
+    "this-mac",
+  );
+
+  await remoteRow.click();
+  await page.keyboard.type("are you there");
+  await page.getByTestId("send-message").click();
+
+  const inviteButton = page.getByRole("button", {
+    name: "Invite",
+    exact: true,
+  });
+  if (await inviteButton.isVisible().catch(() => false)) {
+    await inviteButton.click();
+  }
+
+  // No device is known, so no "only that device can reply" guidance can be
+  // true. Saying it anyway is what this assertion exists to prevent.
+  await expect(page.getByText(/Only that device can reply\./)).toHaveCount(0);
+});

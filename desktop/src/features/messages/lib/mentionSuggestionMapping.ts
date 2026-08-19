@@ -21,7 +21,6 @@ export type MentionSuggestionCandidate = {
   role?: ChannelRole | null;
   ownerPubkey?: string | null;
   deviceLabel?: string | null;
-  isManagedAgent?: boolean;
 };
 
 export function mapMentionCandidateToSuggestion(opts: {

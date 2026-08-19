@@ -717,6 +717,7 @@ pub fn run() {
             set_global_agent_config,
             device_identity::get_device_identity,
             device_identity::set_device_label,
+            device_identity::get_device_name_suggestion,
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,
