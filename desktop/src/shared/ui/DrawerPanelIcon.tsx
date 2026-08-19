@@ -1,3 +1,5 @@
+import { motion, useReducedMotion } from "motion/react";
+
 import { cn } from "@/shared/lib/cn";
 
 export function DrawerPanelIcon({
@@ -7,6 +9,9 @@ export function DrawerPanelIcon({
   className?: string;
   side: "left" | "right";
 }) {
+  const prefersReducedMotion = useReducedMotion();
+  const isOpen = side === "left";
+
   return (
     <svg
       aria-hidden="true"
@@ -26,15 +31,18 @@ export function DrawerPanelIcon({
         x="1"
         y="1"
       />
-      <rect
-        className="transition-transform duration-200 ease-out motion-reduce:transition-none"
+      <motion.rect
+        animate={{
+          rx: isOpen ? 2.5 : 1,
+          width: isOpen ? 5 : 2,
+        }}
         fill="currentColor"
         height="14"
-        rx="3"
-        style={{
-          transform: side === "right" ? "translateX(10px)" : "translateX(0)",
+        initial={false}
+        transition={{
+          duration: prefersReducedMotion ? 0 : 0.2,
+          ease: "linear",
         }}
-        width="6"
         x="4"
         y="4"
       />
