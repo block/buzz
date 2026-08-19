@@ -147,6 +147,15 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "The Bumble agent is now called Pollen",
     ],
   },
+  {
+    version: "0.5.17-0",
+    date: "2026-08-18",
+    bullets: [
+      "Buzz uses noticeably less CPU while sitting open, so laptops stay cooler and quieter",
+      "Security update to a networking dependency",
+      "Online/away status is more reliable, which also makes @here more accurate",
+    ],
+  },
 ];
 
 /**
