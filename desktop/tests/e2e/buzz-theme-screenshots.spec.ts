@@ -512,7 +512,7 @@ test("appearance groups theme and preferences into labeled rows", async ({
     preferencesCard.getByTestId("prominent-active-tab-toggle"),
   ).toHaveCount(0);
   await expect(
-    preferencesCard.getByTestId("thread-layout-trigger"),
+    preferencesCard.getByRole("group", { name: "Thread layout" }),
   ).toBeVisible();
   const themeStyleTrigger = themeCard.getByTestId("theme-style-trigger");
   const themeStyleOptions = themeCard.getByTestId("theme-style-options");
@@ -1564,24 +1564,14 @@ test("glass background keeps the content panel solid", async ({ page }) => {
     page.getByTestId("conversation-density-control"),
     page.getByTestId("conversation-density-control-indicator"),
     page.getByTestId("theme-style-trigger"),
-    page.getByTestId("link-preview-style-trigger"),
-    page.getByTestId("thread-layout-trigger"),
+    page.getByTestId("link-preview-style-control"),
+    page.getByTestId("link-preview-style-control-indicator"),
+    page.getByTestId("thread-layout-control"),
+    page.getByTestId("thread-layout-control-indicator"),
   ];
   for (const control of matchingRadiusControls) {
     await expect(control).toHaveCSS("border-radius", "8px");
   }
-  await page.getByTestId("link-preview-style-trigger").click();
-  await expect(page.getByTestId("link-preview-style-menu")).toHaveCSS(
-    "border-radius",
-    "8px",
-  );
-  await page.keyboard.press("Escape");
-  await page.getByTestId("thread-layout-trigger").click();
-  await expect(page.getByTestId("thread-layout-menu")).toHaveCSS(
-    "border-radius",
-    "8px",
-  );
-  await page.keyboard.press("Escape");
   await expect(page.getByTestId("glass-opacity-value")).toHaveCount(0);
   await expect(
     opacitySlider.locator(".buzz-avatar-framing-slider-handle"),

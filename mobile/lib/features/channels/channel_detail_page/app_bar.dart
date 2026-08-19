@@ -1,6 +1,7 @@
 part of '../channel_detail_page.dart';
 
 const _dmHeaderAvatarSize = 32.0;
+const _channelHeaderAvatarSize = 40.0;
 const _dmPresenceDotRatio = 8 / 14;
 
 bool _showsMembersAction(Channel channel) {
@@ -18,16 +19,106 @@ double _scaledTextHeight(BuildContext context, TextStyle style) {
   return scaledFontSize * (style.height ?? 1);
 }
 
-double _dmAppBarTitleContentHeight(BuildContext context) {
-  final titleStyle = context.textTheme.titleSmall;
-  final presenceStyle = context.textTheme.bodyMedium;
-  if (titleStyle == null || presenceStyle == null) {
-    return _dmHeaderAvatarSize;
+double _twoLineAppBarTitleContentHeight(
+  BuildContext context, {
+  required bool isDm,
+}) {
+  final titleStyle = isDm
+      ? context.textTheme.titleSmall
+      : context.textTheme.titleMedium;
+  final subtitleStyle = isDm
+      ? context.textTheme.bodyMedium
+      : context.textTheme.bodySmall;
+  final avatarSize = isDm ? _dmHeaderAvatarSize : _channelHeaderAvatarSize;
+  if (titleStyle == null || subtitleStyle == null) {
+    return avatarSize;
   }
   final textHeight =
       _scaledTextHeight(context, titleStyle) +
-      _scaledTextHeight(context, presenceStyle);
-  return textHeight > _dmHeaderAvatarSize ? textHeight : _dmHeaderAvatarSize;
+      _scaledTextHeight(context, subtitleStyle);
+  return textHeight > avatarSize ? textHeight : avatarSize;
+}
+
+class _ChannelAppBarTitle extends ConsumerWidget {
+  const _ChannelAppBarTitle({required this.channel, required this.onTap});
+
+  final Channel channel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final membersAsync = ref.watch(channelMembersProvider(channel.id));
+    final memberCount = membersAsync.value?.length ?? channel.memberCount;
+    final memberLabel =
+        '$memberCount ${memberCount == 1 ? 'member' : 'members'}';
+
+    return Semantics(
+      button: true,
+      label: 'Open settings for ${channel.name}, $memberLabel',
+      child: Tooltip(
+        message: 'Open channel settings',
+        child: InkWell(
+          key: const ValueKey('channel-header-settings-trigger'),
+          borderRadius: BorderRadius.circular(Radii.md),
+          onTap: onTap,
+          child: Row(
+            children: [
+              Container(
+                key: const ValueKey('channel-header-avatar'),
+                width: _channelHeaderAvatarSize,
+                height: _channelHeaderAvatarSize,
+                decoration: BoxDecoration(
+                  color: context.colors.primaryContainer,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  channelIcon(channel),
+                  size: 20,
+                  color: context.colors.onPrimaryContainer,
+                ),
+              ),
+              const SizedBox(width: Grid.xxs),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(
+                          child: Text(
+                            channel.name,
+                            key: const ValueKey('channel-header-name'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.textTheme.titleMedium,
+                          ),
+                        ),
+                        if (channel.isEphemeral) ...[
+                          const SizedBox(width: Grid.quarter),
+                          _HeaderEphemeralBadge(channel: channel),
+                        ],
+                      ],
+                    ),
+                    Text(
+                      memberLabel,
+                      key: const ValueKey('channel-header-member-count'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.textTheme.bodySmall?.copyWith(
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _MembersButton extends ConsumerWidget {
