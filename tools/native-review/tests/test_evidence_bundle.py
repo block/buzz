@@ -93,7 +93,13 @@ class EvidenceBundleTests(unittest.TestCase):
             '  Authorization: token ghp_indented':
                 '  Authorization: [REDACTED]',
             '{"message":"Authorization: token ghp_embedded", "safe":"visible"}':
-                '{"message":"Authorization: [REDACTED], "safe":"visible"}',
+                '{"message":"Authorization: [REDACTED]',
+            '{"message":"Authorization: Digest username=alice, response=secret"}':
+                '{"message":"Authorization: [REDACTED]',
+            '{"message":"Authorization: Negotiate opaque-secret"}':
+                '{"message":"Authorization: [REDACTED]',
+            'prefix Authorization: Custom opaque-secret suffix':
+                'prefix Authorization: [REDACTED]',
             '{"authorization": "Bearer supersecret"}':
                 '{"authorization": "[REDACTED]"}',
             "{'authorization': 'Bearer supersecret'}":
