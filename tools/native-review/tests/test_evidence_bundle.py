@@ -114,6 +114,22 @@ class EvidenceBundleTests(unittest.TestCase):
                 "Authorization: [REDACTED]",
             "Proxy-Authorization: Custom first-part\r\n\tsecond-secret":
                 "Proxy-Authorization: [REDACTED]",
+            "Cookie: session=secret; refresh=supersecret":
+                "Cookie: [REDACTED]",
+            "COOKIE=session-secret refresh-secret":
+                "COOKIE=[REDACTED]",
+            "PASSWORD=correct horse battery staple":
+                "PASSWORD=[REDACTED]",
+            "token=alpha beta gamma":
+                "token=[REDACTED]",
+            "X-Api-Key: alpha beta":
+                "X-Api-Key: [REDACTED]",
+            "api_key=alpha; beta gamma":
+                "api_key=[REDACTED]",
+            "password=first-part\n second-part\nnext=visible":
+                "password=[REDACTED]\nnext=visible",
+            'prefix token=alpha beta; gamma':
+                'prefix token=[REDACTED]',
         }
         for source, expected in sources.items():
             with self.subTest(source=source):
