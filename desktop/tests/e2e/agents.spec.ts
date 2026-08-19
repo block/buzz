@@ -2708,3 +2708,42 @@ test("duplicate instances move from the agents gallery into the agent profile", 
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toHaveCount(0);
 });
+
+test("register existing agent stays keyless and has no lifecycle controls", async ({
+  page,
+}) => {
+  const pubkey = "a1".repeat(32);
+  await installMockBridge(page, { registeredAgents: [] });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await page.getByRole("button", { name: "Register existing agent" }).click();
+  const dialog = page.getByRole("dialog", { name: "Register existing agent" });
+  await expect(dialog).toContainText(
+    "Registers an existing identity for this device. Buzz will not import its key or run it.",
+  );
+  await dialog.getByTestId("register-existing-agent-pubkey").fill(pubkey);
+  await dialog
+    .getByTestId("register-existing-agent-label")
+    .fill("Outside Goose");
+  await dialog
+    .getByTestId("register-existing-agent-role-summary")
+    .fill("Reviewer");
+  await dialog.getByRole("button", { name: "Register reference" }).click();
+
+  const card = page.getByTestId(`registered-agent-${pubkey}`);
+  await expect(card).toContainText("Outside Goose");
+  await expect(card).toContainText("Reviewer · Externally managed");
+  await expect(card).toContainText(pubkey.slice(-4));
+  await expect(page.getByTestId(`agent-runtime-start-${pubkey}`)).toHaveCount(
+    0,
+  );
+  await expect(card.getByText(pubkey, { exact: true })).toHaveCount(0);
+
+  const commands = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).map((call) => call.command),
+  );
+  expect(commands).toContain("register_existing_agent_reference");
+  expect(commands).not.toContain("create_managed_agent");
+  expect(commands).not.toContain("start_managed_agent");
+});

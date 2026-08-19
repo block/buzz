@@ -12,6 +12,7 @@ import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type { RegisteredAgentReference } from "@/shared/api/tauriRegisteredAgents";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
@@ -20,6 +21,8 @@ import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
+import { RegisteredAgentIdentityCard } from "./RegisteredAgentIdentityCard";
+import { dedupeRegisteredAgentsAgainstManaged } from "../lib/registeredAgentCards";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
@@ -42,6 +45,11 @@ type UnifiedAgentsSectionProps = {
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
   personas: AgentPersona[];
+  registeredReferences: RegisteredAgentReference[];
+  registeredReferencesError: Error | null;
+  isRegisteredReferencesLoading: boolean;
+  isRegisteredReferencePending: boolean;
+  onRemoveRegisteredReference: (reference: RegisteredAgentReference) => void;
   personasError: Error | null;
   personaFeedbackErrorMessage: string | null;
   personaFeedbackNoticeMessage: string | null;
@@ -82,6 +90,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onStartAgent,
     onStartPersona,
     personas,
+    registeredReferences,
+    registeredReferencesError,
+    isRegisteredReferencesLoading,
+    isRegisteredReferencePending,
+    onRemoveRegisteredReference,
     personasError,
     personaFeedbackErrorMessage,
     personaFeedbackNoticeMessage,
@@ -112,7 +125,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
   useFeedbackToasts(actionNoticeMessage, actionErrorMessage);
   useFeedbackToasts(personaFeedbackNoticeMessage, personaFeedbackErrorMessage);
-  const isLoading = isAgentsLoading || isPersonasLoading;
+  const isLoading =
+    isAgentsLoading || isPersonasLoading || isRegisteredReferencesLoading;
+  const visibleRegisteredReferences = React.useMemo(
+    () => dedupeRegisteredAgentsAgainstManaged(registeredReferences, agents),
+    [registeredReferences, agents],
+  );
 
   return (
     <section
@@ -166,6 +184,15 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                 />
               );
             })}
+            {visibleRegisteredReferences.map((reference) => (
+              <RegisteredAgentIdentityCard
+                isPending={isRegisteredReferencePending}
+                key={reference.pubkey}
+                onOpenProfile={onOpenAgentProfile}
+                onRemove={onRemoveRegisteredReference}
+                reference={reference}
+              />
+            ))}
           </div>
 
           {unknown.length > 0 ? (
@@ -213,6 +240,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
           className={`${AGENT_CARD_COLUMN_CLASS} rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive`}
         >
           {personasError.message}
+        </p>
+      ) : null}
+      {registeredReferencesError ? (
+        <p
+          className={`${AGENT_CARD_COLUMN_CLASS} rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive`}
+        >
+          {registeredReferencesError.message}
         </p>
       ) : null}
     </section>

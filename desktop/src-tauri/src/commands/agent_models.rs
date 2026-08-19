@@ -699,8 +699,15 @@ use databricks::{discover_databricks_models, DatabricksAuthIntent};
 
 #[path = "agent_models_update.rs"]
 mod update;
-pub use update::update_managed_agent;
 pub(super) use update::{flush_managed_agent_policy, managed_agent_access_policy_changed};
+
+pub(super) async fn update_managed_agent_unchecked(
+    input: UpdateManagedAgentRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<UpdateManagedAgentResponse, String> {
+    update::update_managed_agent(input, app, state).await
+}
 
 // ── Model normalization ───────────────────────────────────────────────────────
 

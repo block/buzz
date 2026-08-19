@@ -256,6 +256,14 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
     })
 }
 
+/// Check managed-agent ownership without hydrating private keys or touching
+/// runtime state. Command boundaries use this before any lifecycle side effect.
+pub(crate) fn managed_agent_record_exists(app: &AppHandle, pubkey: &str) -> Result<bool, String> {
+    Ok(load_agent_store(app)?
+        .iter()
+        .any(|record| !record.pubkey.is_empty() && record.pubkey == pubkey))
+}
+
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
 /// folded into the same store) are filtered out so every pre-fold call site
 /// keeps seeing exactly the records it always did.
