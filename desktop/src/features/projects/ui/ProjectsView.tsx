@@ -15,7 +15,10 @@ import {
   useProjectsWorkItemsQuery,
 } from "@/features/projects/hooks";
 import { useRepositoryActivitySummariesQuery } from "@/features/projects/repositoryActivityHooks";
-import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
+import {
+  type CreateProjectInput,
+  useCreateProjectMutation,
+} from "@/features/projects/useCreateProject";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import {
@@ -578,6 +581,23 @@ export function ProjectsView() {
     [deleteProjectMutation],
   );
 
+  const handleCreateProject = React.useCallback(
+    async (input: CreateProjectInput) => {
+      const result = await createProjectMutation.mutateAsync(input);
+      if (result.compatibilityWarning) {
+        toast.warning("Created as a standalone project", {
+          description: result.compatibilityWarning,
+        });
+      } else {
+        toast.success(`Project "${result.project.name}" created.`);
+      }
+      // Land on the complete project list after creation.
+      handleRepositoryScopeChange("all");
+      handleFilterChange("projects");
+    },
+    [createProjectMutation, handleFilterChange, handleRepositoryScopeChange],
+  );
+
   if (projectsQuery.isLoading) {
     return <ViewLoadingFallback kind="projects" />;
   }
@@ -598,7 +618,17 @@ export function ProjectsView() {
   }
 
   if (projects.length === 0) {
-    return <EmptyState />;
+    return (
+      <>
+        <EmptyState onCreateProject={() => setCreateProjectOpen(true)} />
+        <CreateProjectDialog
+          isCreating={createProjectMutation.isPending}
+          onCreate={handleCreateProject}
+          onOpenChange={setCreateProjectOpen}
+          open={createProjectOpen}
+        />
+      </>
+    );
   }
 
   const projectItems =
@@ -795,19 +825,7 @@ export function ProjectsView() {
       <div className="absolute right-4 top-4 z-40">{createMenu}</div>
       <CreateProjectDialog
         isCreating={createProjectMutation.isPending}
-        onCreate={async (input) => {
-          const result = await createProjectMutation.mutateAsync(input);
-          if (result.compatibilityWarning) {
-            toast.warning("Created as a standalone project", {
-              description: result.compatibilityWarning,
-            });
-          } else {
-            toast.success(`Project "${result.project.name}" created.`);
-          }
-          // Land on the complete project list after creation.
-          handleRepositoryScopeChange("all");
-          handleFilterChange("projects");
-        }}
+        onCreate={handleCreateProject}
         onOpenChange={setCreateProjectOpen}
         open={createProjectOpen}
       />
