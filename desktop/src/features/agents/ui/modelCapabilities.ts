@@ -358,6 +358,52 @@ export function resolveModelCapabilities(
 export const DATABRICKS_V2_KNOWN_MODELS: ReadonlyArray<string> =
   MANIFEST.databricks_v2_known_models;
 
+export type RegistryLabelRecord = {
+  readonly provider: string;
+  readonly raw_model_id: string;
+  readonly registry_label: string;
+};
+
+export function databricksRegistryLabelForRecords(
+  rawModelId: string,
+  records: ReadonlyArray<RegistryLabelRecord>,
+  familyTokens: ReadonlyArray<string>,
+): string | null {
+  if (!rawModelId.trim()) return null;
+
+  const idLower = rawModelId.toLowerCase();
+  const exact = records.find(
+    (rec) =>
+      rec.provider === "databricks_v2" &&
+      rec.raw_model_id.toLowerCase() === idLower,
+  );
+  if (exact) return exact.registry_label;
+
+  const strippedQuery = stripCatalogPrefix(idLower, familyTokens);
+  if (strippedQuery === idLower) return null;
+  let matchingRecord: RegistryLabelRecord | null = null;
+  for (const rec of records) {
+    if (rec.provider !== "databricks_v2") continue;
+    const strippedRecord = stripCatalogPrefix(
+      rec.raw_model_id.toLowerCase(),
+      familyTokens,
+    );
+    if (strippedRecord === strippedQuery) {
+      if (matchingRecord) return null;
+      matchingRecord = rec;
+    }
+  }
+  return matchingRecord?.registry_label ?? null;
+}
+
+export function databricksRegistryLabel(rawModelId: string): string | null {
+  return databricksRegistryLabelForRecords(
+    rawModelId,
+    MANIFEST.exact_records,
+    MANIFEST.family_tokens,
+  );
+}
+
 /**
  * Databricks endpoint-id → display-name registry, derived at runtime from the
  * manifest's `databricks_v2` exact records (the only exact records that carry a

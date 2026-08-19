@@ -335,7 +335,7 @@ test-unit:
         # buzz-agent model-capabilities corpus: the Rust half of the
         # cross-language drift guard. `model_capabilities.rs` embeds
         # scripts/model-capabilities.json + scripts/normative-corpus.json via
-        # include_str! and replays all 103 vectors as pure in-process tests (no
+        # include_str! and replays the full locked corpus as pure in-process tests (no
         # infra). Enumerated explicitly because nothing in CI runs
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.

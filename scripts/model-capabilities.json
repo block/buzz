@@ -438,6 +438,42 @@
     },
     {
       "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-fable-5",
+      "registry_label": "Claude Fable 5",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-fable-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-opus-4-8",
+      "registry_label": "Claude Opus 4.8",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-opus-4-8",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
       "raw_model_id": "databricks-gpt-5-6-sol",
       "registry_label": "GPT-5.6 Sol",
       "thinking_mode": "none",
