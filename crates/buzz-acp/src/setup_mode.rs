@@ -364,7 +364,13 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     // every message in a channel).
     let rules = build_setup_subscription_rules(&config);
 
-    let channel_filters = crate::config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let dm_channel_ids: std::collections::HashSet<Uuid> = channel_info_map
+        .iter()
+        .filter(|(_, info)| info.channel_type == "dm")
+        .map(|(id, _)| *id)
+        .collect();
+    let channel_filters =
+        crate::config::resolve_channel_filters(&config, &channel_ids, &dm_channel_ids, &rules);
 
     if channel_filters.is_empty() {
         tracing::warn!(
@@ -441,6 +447,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
+            false,
         )
         .await
         .is_some();
@@ -568,7 +575,14 @@ async fn handle_setup_membership(
     if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
         // Subscribe to the newly-joined channel.
         let ids = vec![channel_id];
-        let filters = crate::config::resolve_channel_filters(config, &ids, rules);
+        // No channel-type info on this path — keep the mention requirement
+        // (fail-closed) rather than probing the relay from setup mode.
+        let filters = crate::config::resolve_channel_filters(
+            config,
+            &ids,
+            &std::collections::HashSet::new(),
+            rules,
+        );
         for (cid, filter) in filters {
             if let Err(e) = relay.subscribe_channel(cid, filter).await {
                 tracing::warn!("setup-mode: failed to subscribe to new channel {cid}: {e}");

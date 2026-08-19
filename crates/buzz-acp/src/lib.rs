@@ -1388,6 +1388,21 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
+    // DM channels are exempt from the mention gate in Mentions mode — a DM
+    // addresses the agent implicitly, and not every client auto-adds a `p` tag
+    // (the mobile app only tags explicit @mentions). Kept as a mutable set so
+    // dynamically discovered DMs get the same exemption.
+    let mut dm_channel_ids: std::collections::HashSet<Uuid> =
+        if config.subscribe_mode == SubscribeMode::Mentions {
+            channel_info_map
+                .iter()
+                .filter(|(_, info)| info.channel_type == "dm")
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
             vec![SubscriptionRule {
@@ -1425,7 +1440,8 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters =
+        config::resolve_channel_filters(&config, &channel_ids, &dm_channel_ids, &rules);
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -1919,15 +1935,37 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
-                                        if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
-                                            tracing::warn!("failed to subscribe to new channel {ch}: {e}");
-                                        } else {
-                                            subscribed_channel_ids.insert(ch);
-                                        }
                                     } else {
-                                        tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        // Channel-type lookup so a freshly created DM
+                                        // gets the same mention exemption as DMs found
+                                        // at startup. Fail-closed: on lookup error the
+                                        // channel keeps the mention requirement.
+                                        let is_dm = if config.subscribe_mode == SubscribeMode::Mentions {
+                                            match relay.discover_channels().await {
+                                                Ok(info) => info
+                                                    .get(&ch)
+                                                    .is_some_and(|ci| ci.channel_type == "dm"),
+                                                Err(e) => {
+                                                    tracing::warn!("channel type lookup failed for {ch}: {e} — treating as non-DM");
+                                                    false
+                                                }
+                                            }
+                                        } else {
+                                            false
+                                        };
+                                        if is_dm {
+                                            dm_channel_ids.insert(ch);
+                                        }
+                                        if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, is_dm, &rules) {
+                                            tracing::info!(channel_id = %ch, is_dm, "membership notification: subscribing to new channel");
+                                            if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
+                                                tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                            } else {
+                                                subscribed_channel_ids.insert(ch);
+                                            }
+                                        } else {
+                                            tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        }
                                     }
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
@@ -2116,7 +2154,7 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, dm_channel_ids.contains(&buzz_event.channel_id)).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {

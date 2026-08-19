@@ -1131,9 +1131,15 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
 }
 
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
+///
+/// `dm_channels` lists channels of type `"dm"`. In Mentions mode these are
+/// exempt from the mention gate — a direct message addresses the agent
+/// implicitly, so requiring a `p` tag would silently drop DMs from clients
+/// that don't auto-mention the recipient. All/Config modes ignore the set.
 pub fn resolve_channel_filters(
     config: &Config,
     discovered_channels: &[Uuid],
+    dm_channels: &HashSet<Uuid>,
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
     use buzz_core::kind::{
@@ -1167,7 +1173,7 @@ pub fn resolve_channel_filters(
                     *ch,
                     ChannelFilter {
                         kinds: Some(kinds.clone()),
-                        require_mention,
+                        require_mention: require_mention && !dm_channels.contains(ch),
                     },
                 );
             }
@@ -1233,9 +1239,13 @@ pub fn resolve_channel_filters(
 /// Returns `None` when the channel is outside the agent's configured scope:
 /// - Mentions/All: channel not in `channels_override` (if set)
 /// - Config: no subscription rules match the channel
+///
+/// `is_dm` marks a channel of type `"dm"` — in Mentions mode it is exempt
+/// from the mention gate (see [`resolve_channel_filters`]).
 pub fn resolve_dynamic_channel_filter(
     config: &Config,
     channel_id: Uuid,
+    is_dm: bool,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
     use buzz_core::kind::{
@@ -1266,7 +1276,7 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            require_mention: !config.no_mention_filter && !is_dm,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1399,7 +1409,7 @@ mod tests {
     fn test_mentions_mode_default_kinds() {
         let config = test_config(SubscribeMode::Mentions);
         let channels = vec![Uuid::new_v4(), Uuid::new_v4()];
-        let result = resolve_channel_filters(&config, &channels, &[]);
+        let result = resolve_channel_filters(&config, &channels, &HashSet::new(), &[]);
 
         assert_eq!(result.len(), 2);
         for ch in &channels {
@@ -1417,7 +1427,7 @@ mod tests {
         let mut config = test_config(SubscribeMode::Mentions);
         config.kinds_override = Some(vec![1, 7]);
         let channels = vec![Uuid::new_v4()];
-        let result = resolve_channel_filters(&config, &channels, &[]);
+        let result = resolve_channel_filters(&config, &channels, &HashSet::new(), &[]);
 
         let f = result.get(&channels[0]).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[1, 7]);
@@ -1428,10 +1438,43 @@ mod tests {
         let mut config = test_config(SubscribeMode::Mentions);
         config.no_mention_filter = true;
         let channels = vec![Uuid::new_v4()];
-        let result = resolve_channel_filters(&config, &channels, &[]);
+        let result = resolve_channel_filters(&config, &channels, &HashSet::new(), &[]);
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_mentions_mode_dm_channels_exempt_from_mention() {
+        let config = test_config(SubscribeMode::Mentions);
+        let dm_ch = Uuid::new_v4();
+        let stream_ch = Uuid::new_v4();
+        let dm_channels: HashSet<Uuid> = [dm_ch].into_iter().collect();
+        let result = resolve_channel_filters(&config, &[dm_ch, stream_ch], &dm_channels, &[]);
+
+        assert!(
+            !result.get(&dm_ch).unwrap().require_mention,
+            "DM channels must not require a mention"
+        );
+        assert!(
+            result.get(&stream_ch).unwrap().require_mention,
+            "stream channels still require a mention"
+        );
+    }
+
+    #[test]
+    fn test_dynamic_filter_dm_exempt_from_mention() {
+        let config = test_config(SubscribeMode::Mentions);
+        let ch = Uuid::new_v4();
+
+        let dm = resolve_dynamic_channel_filter(&config, ch, true, &[]).unwrap();
+        assert!(!dm.require_mention, "dynamic DM must not require a mention");
+
+        let stream = resolve_dynamic_channel_filter(&config, ch, false, &[]).unwrap();
+        assert!(
+            stream.require_mention,
+            "dynamic stream channel still requires a mention"
+        );
     }
 
     #[test]
@@ -1630,7 +1673,7 @@ mod tests {
     fn test_all_mode_wildcard() {
         let config = test_config(SubscribeMode::All);
         let channels = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
-        let result = resolve_channel_filters(&config, &channels, &[]);
+        let result = resolve_channel_filters(&config, &channels, &HashSet::new(), &[]);
 
         assert_eq!(result.len(), 3);
         for ch in &channels {
@@ -1648,7 +1691,7 @@ mod tests {
         let mut config = test_config(SubscribeMode::All);
         config.kinds_override = Some(vec![9, 7]);
         let channels = vec![Uuid::new_v4()];
-        let result = resolve_channel_filters(&config, &channels, &[]);
+        let result = resolve_channel_filters(&config, &channels, &HashSet::new(), &[]);
 
         let f = result.get(&channels[0]).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
@@ -1664,7 +1707,7 @@ mod tests {
         config.channels_override = Some(vec![ch_a.to_string(), ch_unknown.to_string()]);
 
         let discovered = vec![ch_a, ch_b];
-        let result = resolve_channel_filters(&config, &discovered, &[]);
+        let result = resolve_channel_filters(&config, &discovered, &HashSet::new(), &[]);
 
         // Only ch_a should be present (intersection of override and discovered).
         assert_eq!(result.len(), 1);
@@ -1684,7 +1727,7 @@ mod tests {
             false,
         )];
 
-        let result = resolve_channel_filters(&config, &[ch], &rules);
+        let result = resolve_channel_filters(&config, &[ch], &HashSet::new(), &rules);
         assert_eq!(result.len(), 1);
         let f = result.get(&ch).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[9]);
@@ -1703,7 +1746,7 @@ mod tests {
             false,
         )];
 
-        let result = resolve_channel_filters(&config, &[ch_a, ch_b], &rules);
+        let result = resolve_channel_filters(&config, &[ch_a, ch_b], &HashSet::new(), &rules);
         assert_eq!(result.len(), 1);
         assert!(result.contains_key(&ch_a));
         assert!(!result.contains_key(&ch_b));
@@ -1719,7 +1762,7 @@ mod tests {
             make_rule("reactions", ChannelScope::All("all".into()), vec![7], false),
         ];
 
-        let result = resolve_channel_filters(&config, &[ch], &rules);
+        let result = resolve_channel_filters(&config, &[ch], &HashSet::new(), &rules);
         let f = result.get(&ch).unwrap();
         // Kinds should be the union: [9, 7].
         let kinds = f.kinds.as_ref().expect("should have merged kinds");
@@ -1739,7 +1782,7 @@ mod tests {
             make_rule("broad", ChannelScope::All("all".into()), vec![], false),
         ];
 
-        let result = resolve_channel_filters(&config, &[ch], &rules);
+        let result = resolve_channel_filters(&config, &[ch], &HashSet::new(), &rules);
         let f = result.get(&ch).unwrap();
         // Once any rule has empty kinds (wildcard), merged result is None (wildcard).
         assert!(f.kinds.is_none(), "wildcard should propagate");
@@ -1758,7 +1801,7 @@ mod tests {
             false,
         )];
 
-        let result = resolve_channel_filters(&config, &[ch], &rules);
+        let result = resolve_channel_filters(&config, &[ch], &HashSet::new(), &rules);
         assert!(result.is_empty());
     }
 
@@ -1772,7 +1815,7 @@ mod tests {
             make_rule("lax", ChannelScope::All("all".into()), vec![7], false),
         ];
 
-        let result = resolve_channel_filters(&config, &[ch], &rules);
+        let result = resolve_channel_filters(&config, &[ch], &HashSet::new(), &rules);
         let f = result.get(&ch).unwrap();
         assert!(!f.require_mention, "most permissive (false) should win");
     }
