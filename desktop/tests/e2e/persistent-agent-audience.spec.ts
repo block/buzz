@@ -136,7 +136,9 @@ test("always addresses multiple agents without closing the mention picker", asyn
   });
   await morgaritaPin.hover();
   await expect(page.getByRole("tooltip")).toContainText("Always address");
-  await expect(page.getByRole("tooltip")).toContainText("Enter");
+  await expect(page.getByRole("tooltip")).toContainText("⌘");
+  await expect(page.getByRole("tooltip")).toContainText("⇧");
+  await expect(page.getByRole("tooltip")).toContainText("↵");
   await morgaritaPin.click();
   await expect(morgaritaPin).toHaveAttribute("aria-pressed", "true");
   await expect(menu).toBeVisible();

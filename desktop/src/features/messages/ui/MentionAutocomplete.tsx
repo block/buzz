@@ -266,25 +266,19 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     </span>
                   </TooltipTrigger>
                   <TooltipContent
-                    className="flex flex-col items-center gap-1.5"
+                    className="flex items-center gap-2"
                     side="top"
                   >
                     <span>Always address</span>
                     {alwaysAddressShortcut ? (
-                      <span className="flex items-center gap-1">
-                        {alwaysAddressShortcut.split("+").map((key, index) => (
-                          <React.Fragment key={key}>
-                            {index > 0 ? (
-                              <span className="text-primary-foreground/50">
-                                +
-                              </span>
-                            ) : null}
-                            <kbd className="rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0.5 font-mono text-2xs text-primary-foreground/70">
-                              {key}
-                            </kbd>
-                          </React.Fragment>
+                      <kbd className="flex items-center gap-0.5 rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0 font-mono text-sm text-primary-foreground/70">
+                        {(alwaysAddressShortcut.includes("+")
+                          ? alwaysAddressShortcut.split("+")
+                          : Array.from(alwaysAddressShortcut)
+                        ).map((key) => (
+                          <span key={key}>{key}</span>
                         ))}
-                      </span>
+                      </kbd>
                     ) : null}
                   </TooltipContent>
                 </Tooltip>
