@@ -80,7 +80,7 @@ function TriggerConfigFields({
             onChange={(event) =>
               onUpdate({ ...trigger, filter: event.target.value })
             }
-            placeholder='e.g. contains(text, "deploy")'
+            placeholder='e.g. str_contains(trigger_text, "deploy")'
             value={trigger.filter ?? ""}
           />
           <p className="text-xs text-muted-foreground">

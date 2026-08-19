@@ -211,6 +211,25 @@ test("disables autocapitalization in the workflow form", async ({ page }) => {
   );
 });
 
+test("shows executable guidance for diff trigger conditions", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+
+  await page.getByRole("button", { name: "Create Workflow" }).click();
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
+  await selectWorkflowChannel(page, dialog);
+  await dialog.getByRole("button", { name: "Trigger event" }).click();
+  await page
+    .getByRole("menuitem", { name: "Diff Posted", exact: true })
+    .click();
+
+  await expect(dialog.getByLabel("Condition (optional)")).toHaveAttribute(
+    "placeholder",
+    'e.g. str_contains(trigger_text, "deploy")',
+  );
+});
+
 test("captures workflow library across responsive viewports", async ({
   page,
 }) => {
