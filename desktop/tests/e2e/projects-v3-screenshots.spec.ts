@@ -541,6 +541,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(agentContext).toBeVisible();
   await expect(agentContext).toContainText("Overview");
   await expect(agentContext).not.toContainText("Buzz /");
+  // The context rail reveals the chat panel with a width transition; measure
+  // only after it settles or the panel's unclipped box overhangs the rail.
+  await waitForAnimations(page);
   const [
     attachedSharedHeaderBackdropBounds,
     tabMenuHeaderBounds,
