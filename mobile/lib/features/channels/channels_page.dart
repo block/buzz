@@ -30,7 +30,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../pairing/pairing_page.dart';
 import '../pairing/pairing_provider.dart';
 import 'channel.dart';
@@ -166,7 +166,8 @@ class ChannelsPage extends HookConsumerWidget {
 
   final WidgetBuilder settingsPageBuilder;
 
-  /// Reports the Settings route's raw animation progress from 0 to 1.
+  /// Reports Settings route progress so its foreground and Home's background
+  /// render from the same timeline.
   final ValueChanged<double> onSettingsTransitionProgress;
 
   /// Notifies this page when its already-selected tab is tapped again.
@@ -346,12 +347,11 @@ class ChannelsPage extends HookConsumerWidget {
                 size: _kTopSectionAvatarSize,
                 onTap: () {
                   unawaited(HapticFeedback.lightImpact());
-                  Navigator.of(context).push(
-                    _SettingsPageRoute(
-                      builder: settingsPageBuilder,
-                      onTransitionProgress: onSettingsTransitionProgress,
-                    ),
+                  final route = _SettingsPageRoute(
+                    builder: settingsPageBuilder,
+                    onTransitionProgress: onSettingsTransitionProgress,
                   );
+                  Navigator.of(context).push(route);
                 },
               ),
             ),
@@ -389,23 +389,34 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
              builder(context),
          transitionsBuilder: _buildSettingsTransition,
          opaque: false,
-         transitionDuration: const Duration(milliseconds: 190),
+         allowSnapshotting: false,
+         transitionDuration: const Duration(milliseconds: 220),
          reverseTransitionDuration: const Duration(milliseconds: 190),
        );
 
   final ValueChanged<double> onTransitionProgress;
 
   Animation<double>? _progressAnimation;
+  bool _hasStartedForwardTransition = false;
 
   @override
   void install() {
     super.install();
     _progressAnimation = animation?..addListener(_reportProgress);
-    _reportProgress();
   }
 
   void _reportProgress() {
-    onTransitionProgress(_progressAnimation?.value ?? 0);
+    final progressAnimation = _progressAnimation;
+    if (progressAnimation == null) return;
+
+    // ProxyAnimation briefly exposes the previous completed value while the
+    // route installs its new controller. Ignore that handoff notification and
+    // begin reporting only once the route is genuinely moving forward.
+    if (!_hasStartedForwardTransition) {
+      if (progressAnimation.status != AnimationStatus.forward) return;
+      _hasStartedForwardTransition = true;
+    }
+    onTransitionProgress(progressAnimation.value);
   }
 
   @override
@@ -422,41 +433,26 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
   ) {
     if (MediaQuery.disableAnimationsOf(context)) return child;
 
-    final incoming = CurvedAnimation(
+    final motion = CurvedAnimation(
       parent: animation,
-      curve: Curves.easeOutCubic,
+      // Keep the complete page on one timeline. A gentler forward ease keeps
+      // the entrance visible without letting scale finish ahead of opacity;
+      // the existing reverse curve preserves the exit motion.
+      curve: Curves.easeOutQuad,
       reverseCurve: Curves.easeOutCubic,
     );
     return FadeTransition(
       key: const ValueKey('settings-transition-opacity'),
-      opacity: _SettingsOpacityAnimation(incoming),
+      opacity: motion,
       child: RepaintBoundary(
         key: const ValueKey('settings-transition-layer'),
         child: ScaleTransition(
-          scale: Tween<double>(begin: 1.04, end: 1).animate(incoming),
+          key: const ValueKey('settings-transition-scale'),
+          scale: Tween<double>(begin: 1.04, end: 1).animate(motion),
           alignment: Alignment.center,
           child: child,
         ),
       ),
     );
-  }
-}
-
-/// Keeps Settings already composed on entry while retaining a complete exit
-/// fade. Reading the parent live also keeps opacity synchronized with scale on
-/// the route's first frame.
-class _SettingsOpacityAnimation extends Animation<double>
-    with AnimationWithParentMixin<double> {
-  _SettingsOpacityAnimation(this.parent);
-
-  @override
-  final Animation<double> parent;
-
-  @override
-  double get value {
-    final progress = parent.value;
-    return parent.status == AnimationStatus.reverse
-        ? progress
-        : 0.8 + (0.2 * progress);
   }
 }

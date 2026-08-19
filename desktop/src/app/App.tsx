@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -61,6 +62,7 @@ import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChang
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
 import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
 import {
@@ -237,6 +239,39 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * Watches the community-scoped identity query and fires once the active
+ * pubkey changes after mount — i.e. an in-app key import through the
+ * relay-scoped onboarding flow, which writes the new identity to the
+ * community query client only. The parent uses the signal to rebuild the
+ * entire community boundary (query client, AppReady subtree, module
+ * singletons via useCommunityInit) so a replacement identity never inherits
+ * the previous identity's cached queries or draft-store bucket.
+ */
+function CommunityIdentityReplacementSentinel({
+  onIdentityReplaced,
+}: {
+  onIdentityReplaced: () => void;
+}) {
+  const identityQuery = useIdentityQuery();
+  const pubkey = identityQuery.data?.pubkey ?? null;
+  const baselinePubkeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!pubkey) return;
+    if (baselinePubkeyRef.current === null) {
+      baselinePubkeyRef.current = pubkey;
+      return;
+    }
+    if (baselinePubkeyRef.current !== pubkey) {
+      baselinePubkeyRef.current = pubkey;
+      onIdentityReplaced();
+    }
+  }, [pubkey, onIdentityReplaced]);
+
+  return null;
+}
+
 function AppReady({
   isSharedIdentity,
   isCommunitySwitch,
@@ -329,9 +364,21 @@ function CommunityApp({
   // ahead of the first apply_workspace call.
   useNestNotifications();
 
-  // Composite key: changes when community ID changes OR when
-  // the active community's config is updated (relayUrl/token).
-  const communityKey = `${activeCommunity?.id ?? "none"}-${reinitKey}`;
+  // Increments when the community-scoped identity is replaced in-app (key
+  // import through the relay onboarding flow). Machine-level identity changes
+  // already reach this component through the currentPubkey prop; this covers
+  // imports that only the community query client observes.
+  const [signerEpoch, bumpSignerEpoch] = useReducer(
+    (epoch: number) => epoch + 1,
+    0,
+  );
+
+  // Composite key: changes when the community ID changes, when the active
+  // community's config is updated (relayUrl/token), or when the signing
+  // identity is replaced. Keying CommunityQueryProvider and AppReady on the
+  // signer guarantees a replacement identity never sees the previous
+  // identity's query cache, React state, or draft-store bucket.
+  const communityKey = `${activeCommunity?.id ?? "none"}-${reinitKey}-${currentPubkey ?? "anonymous"}-${signerEpoch}`;
 
   // Latch once the community key deviates from its cold-boot value: from then
   // on, loading phases are in-app switches and get the quiet gate instead of
@@ -554,6 +601,9 @@ function CommunityApp({
   if (appContent === null && (!transaction || isEnteringCurtain)) {
     appContent = communityApplied ? (
       <CommunityQueryProvider key={communityKey}>
+        <CommunityIdentityReplacementSentinel
+          onIdentityReplaced={bumpSignerEpoch}
+        />
         <CommunityThemeController />
         <AppReady
           isCommunitySwitch={isCommunitySwitch}

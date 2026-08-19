@@ -2,14 +2,13 @@ use std::{
     collections::HashMap,
     io::Write,
     sync::{
-        atomic::{AtomicBool, AtomicU16, AtomicU8},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8},
         Arc, Mutex,
     },
 };
 
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, Manager};
-#[cfg(feature = "mesh-llm")]
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
@@ -32,12 +31,10 @@ pub struct AppState {
     /// response (surfaced as an error) so the auth token never leaves the
     /// validated relay origin.
     pub media_fetch_client: reqwest::Client,
-    /// Workspace-provided relay URL override. Set by `apply_workspace` on app
-    /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
-    /// Set during backend setup when managed agents are eligible for launch
-    /// restore. `apply_workspace` consumes it after installing the workspace
-    /// relay and identity, so agents never start against the fallback relay.
+    pub workspace_apply_lock: Arc<AsyncMutex<()>>,
+    pub workspace_apply_generation: AtomicU64,
+    /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
     pub managed_agent_restore_pending: AtomicBool,
     /// Disabled by agent-managed profiles so agent profile updates survive start/restore.
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
@@ -206,6 +203,8 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
+        workspace_apply_lock: Arc::new(AsyncMutex::new(())),
+        workspace_apply_generation: AtomicU64::new(0),
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
