@@ -504,28 +504,31 @@ for (const theme of ["buzz", "github-light", "catppuccin-mocha"]) {
   });
 }
 
-test("places sidebar search above the primary navigation", async ({ page }) => {
+test("aligns the sidebar search with the channel title outside the Buzz theme", async ({
+  page,
+}) => {
   await loadTheme(page, "github-light");
   await page.getByTestId("channel-general").click();
 
+  const root = page.locator("html");
   const search = page.getByTestId("open-search");
-  const primaryMenu = page.getByTestId("sidebar-primary-menu");
-  const pinnedHeader = page.getByTestId("sidebar-pinned-header");
+  const channelTitle = page.getByTestId("chat-title");
+  await expect(root).not.toHaveAttribute("data-buzz-sidebar", "");
   await expect(search).toBeVisible();
-  await expect(primaryMenu).toBeVisible();
+  await expect(channelTitle).toHaveText("general");
 
-  const [searchBox, menuBox, headerBox] = await Promise.all([
+  const [searchBox, channelTitleBox] = await Promise.all([
     search.boundingBox(),
-    primaryMenu.boundingBox(),
-    pinnedHeader.boundingBox(),
+    channelTitle.boundingBox(),
   ]);
   expect(searchBox).not.toBeNull();
-  expect(menuBox).not.toBeNull();
-  expect(headerBox).not.toBeNull();
-  if (!searchBox || !menuBox || !headerBox) return;
+  expect(channelTitleBox).not.toBeNull();
 
-  expect(searchBox.y).toBeGreaterThanOrEqual(headerBox.y);
-  expect(searchBox.y + searchBox.height).toBeLessThanOrEqual(menuBox.y);
+  if (!searchBox || !channelTitleBox) return;
+
+  const searchCenter = searchBox.y + searchBox.height / 2;
+  const channelTitleCenter = channelTitleBox.y + channelTitleBox.height / 2;
+  expect(Math.abs(searchCenter - channelTitleCenter)).toBeLessThanOrEqual(2);
 });
 
 test("scales the sidebar backward while its chrome closes", async ({
