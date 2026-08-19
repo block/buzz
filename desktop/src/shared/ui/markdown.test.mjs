@@ -657,6 +657,13 @@ test("buzzDeepLinkUrlTransform: preserves buzz://repo entity link href", () => {
   assert.doesNotMatch(html, /href=""/);
 });
 
+test("buzzDeepLinkUrlTransform: preserves buzz://project autolink href", () => {
+  const projectLink = `buzz://project?owner=${OWNER_HEX}&d=onboarding`;
+  const html = renderMarkdown(`<${projectLink}>`);
+  assert.match(html, /href="buzz:\/\/project\?/);
+  assert.doesNotMatch(html, /href=""/);
+});
+
 test("buzzDeepLinkUrlTransform: strips malformed buzz://pr (unknown param)", () => {
   // Strict parser rejects unknown params — transform falls back to default sanitizer.
   const html = renderMarkdown(
