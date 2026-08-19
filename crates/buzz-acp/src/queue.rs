@@ -87,6 +87,9 @@ pub struct FlushBatch {
     /// [`Steer`](CancelReason::Steer) framing if a merge somehow lacks a reason
     /// (see [`MergeFraming::for_reason`]).
     pub cancel_reason: Option<CancelReason>,
+    /// Thread routing resolved while constructing an edit-triggered prompt.
+    /// Terminal failure notices must use the same visible routing authority.
+    pub failure_thread_tags: Option<ThreadTags>,
 }
 
 /// Per-channel event queue with per-channel in-flight enforcement.
@@ -96,6 +99,7 @@ pub struct FlushBatch {
 /// ```text
 /// State:
 ///   queues:               Map<channel_id, VecDeque<QueuedEvent>>  (capped at MAX_PENDING_PER_CHANNEL)
+///   withheld_native_steer: Map<channel_id, Vec<QueuedEvent>>       (native reservations)
 ///   in_flight_channels:   HashSet<Uuid>
 ///   in_flight_deadlines:  Map<channel_id, Instant>                (auto-expire after in_flight_deadline)
 ///   retry_after:          Map<channel_id, Instant>
@@ -106,8 +110,8 @@ pub struct FlushBatch {
 ///   push(event):
 ///     if dedup_mode == Drop AND in_flight_channels.contains(event.channel_id):
 ///       debug log + discard
-///     else if queues[channel].len() >= MAX_PENDING_PER_CHANNEL:
-///       drop oldest (pop_front), warn, push_back new event
+///     else if queued + withheld events for channel reach MAX_PENDING_PER_CHANNEL:
+///       drop oldest queued event, or reject the new event if all slots are withheld
 ///     else:
 ///       queues[event.channel_id].push_back(event)
 ///
@@ -164,6 +168,16 @@ pub struct EventQueue {
     /// by `flush_next` / `has_flushable_work` (recover, not log-and-drop —
     /// the events were never delivered to the agent).
     withheld_native_steer: HashMap<Uuid, Vec<QueuedEvent>>,
+    /// Event ids whose reserved payload has already been accepted by the
+    /// in-flight task's steer transport and is awaiting its acknowledgement.
+    /// Reservations absent from this set are still only being prepared and
+    /// may be safely released before cancel+merge.
+    sent_native_steers: HashMap<Uuid, HashSet<String>>,
+    /// Channels whose prompt task returned while a sent native steer still
+    /// awaits acknowledgement. The acknowledgement is the authority that
+    /// settles delivery, so replacement dispatch must remain fenced until it
+    /// consumes or restores that event.
+    completed_awaiting_native_steer: HashSet<Uuid>,
     /// Duration after which an in-flight channel is auto-expired as orphaned.
     /// Must be strictly greater than `max_turn_duration` so a turn running to
     /// the hard cap returns via `mark_complete` before the backstop fires.
@@ -188,6 +202,8 @@ impl EventQueue {
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
             withheld_native_steer: HashMap::new(),
+            sent_native_steers: HashMap::new(),
+            completed_awaiting_native_steer: HashSet::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
         }
     }
@@ -237,17 +253,39 @@ impl EventQueue {
             );
             return false;
         }
-        let queue = self.queues.entry(event.channel_id).or_default();
-        // Enforce per-channel depth cap: drop oldest to make room.
-        if queue.len() >= MAX_PENDING_PER_CHANNEL {
-            queue.pop_front();
-            tracing::warn!(
-                channel_id = %event.channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "queue depth cap reached — dropped oldest event"
-            );
+        let channel_id = event.channel_id;
+        let withheld = self
+            .withheld_native_steer
+            .get(&channel_id)
+            .map_or(0, Vec::len);
+        let queued = self.queues.get(&channel_id).map_or(0, VecDeque::len);
+        // A native-steer reservation owns its event until its asynchronous
+        // attempt resolves, so it counts toward the per-channel cap too.
+        // Never evict a withheld reservation: its completion may still steer.
+        // If every slot is reserved, reject the new event rather than creating
+        // an unbounded preparation task or violating exact-once delivery.
+        if queued + withheld >= MAX_PENDING_PER_CHANNEL {
+            if self
+                .queues
+                .get_mut(&channel_id)
+                .and_then(VecDeque::pop_front)
+                .is_some()
+            {
+                tracing::warn!(
+                    %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "queue depth cap reached — dropped oldest queued event"
+                );
+            } else {
+                tracing::warn!(
+                    %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "queue depth cap reached by native steer reservations — dropped new event"
+                );
+                return false;
+            }
         }
-        queue.push_back(event);
+        self.queues.entry(channel_id).or_default().push_back(event);
         true
     }
 
@@ -325,6 +363,7 @@ impl EventQueue {
                             events: cancelled,
                             cancelled_events: vec![],
                             cancel_reason,
+                            failure_thread_tags: None,
                         });
                     }
                     None => return None,
@@ -367,7 +406,6 @@ impl EventQueue {
                 received_at: qe.received_at,
             })
             .collect();
-
         // Remove the queue entry if now empty.
         if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
             self.queues.remove(&channel_id);
@@ -395,6 +433,7 @@ impl EventQueue {
             events,
             cancelled_events,
             cancel_reason,
+            failure_thread_tags: None,
         })
     }
 
@@ -409,6 +448,22 @@ impl EventQueue {
     ///
     /// Also cleans up any already-expired `retry_after` entry.
     pub fn mark_complete(&mut self, channel_id: Uuid) {
+        if self.has_sent_native_steer(channel_id) {
+            // A result can win the main loop's select before the native-steer
+            // watcher posts its ack. Keep this channel in-flight: otherwise a
+            // later queued event can start a replacement turn before a neutral
+            // ack restores the older withheld event.
+            self.completed_awaiting_native_steer.insert(channel_id);
+            return;
+        }
+        self.clear_complete(channel_id);
+    }
+
+    /// Clear a channel after its prompt and every sent native steer have
+    /// settled. Kept private so only `mark_complete` and acknowledgement
+    /// settlement can open the replacement-dispatch gate.
+    fn clear_complete(&mut self, channel_id: Uuid) {
+        self.completed_awaiting_native_steer.remove(&channel_id);
         self.in_flight_channels.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
@@ -716,7 +771,8 @@ impl EventQueue {
     /// Also clears any `retry_after` throttle for the channel.
     ///
     /// Returns the visible event IDs that own lifecycle reactions for every
-    /// dropped event so the caller can clean up any 👀 added at queue-push time.
+    /// dropped queued or reserved event. Edit events therefore contribute
+    /// their original target IDs rather than their auxiliary kind:40003 IDs.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
         let mut ids: HashSet<String> = HashSet::new();
         if let Some(events) = self.queues.remove(&channel_id) {
@@ -743,6 +799,11 @@ impl EventQueue {
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
+        self.sent_native_steers.remove(&channel_id);
+        // If the prompt already completed behind a sent-steer acknowledgement
+        // fence, removing the reservation settles that fence immediately.
+        // Otherwise preserve the genuinely running prompt and its deadline.
+        self.settle_sent_native_steer(channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -805,6 +866,78 @@ impl EventQueue {
         true
     }
 
+    /// Return whether this channel has any native-steer reservation in flight.
+    pub fn has_native_steer_reservations(&self, channel_id: Uuid) -> bool {
+        self.withheld_native_steer
+            .get(&channel_id)
+            .is_some_and(|entries| !entries.is_empty())
+    }
+
+    /// Return whether this exact event still owns a native-steer reservation.
+    ///
+    /// Async edit preparation uses this at completion time: deadline recovery,
+    /// membership removal, or any other reservation settlement removes the
+    /// entry, so a late preparation cannot steer a replacement turn.
+    pub fn has_native_steer_reservation(&self, channel_id: Uuid, event_id: &str) -> bool {
+        self.withheld_native_steer
+            .get(&channel_id)
+            .is_some_and(|entries| entries.iter().any(|qe| qe.event.id.to_hex() == event_id))
+    }
+
+    /// Mark an existing reservation as accepted by the steer transport.
+    pub fn mark_native_steer_sent(&mut self, channel_id: Uuid, event_id: &str) {
+        if self.has_native_steer_reservation(channel_id, event_id) {
+            self.sent_native_steers
+                .entry(channel_id)
+                .or_default()
+                .insert(event_id.to_string());
+        }
+    }
+
+    /// Return whether this channel has a sent steer awaiting acknowledgement.
+    pub fn has_sent_native_steer(&self, channel_id: Uuid) -> bool {
+        self.sent_native_steers
+            .get(&channel_id)
+            .is_some_and(|ids| !ids.is_empty())
+    }
+
+    /// Release only reservations that are still in asynchronous preparation.
+    /// Sent steers remain withheld until their acknowledgement settles them.
+    pub fn release_native_steer_preparations(&mut self, channel_id: Uuid) -> usize {
+        let sent = self.sent_native_steers.get(&channel_id);
+        let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) else {
+            return 0;
+        };
+        let mut released = Vec::new();
+        let mut i = 0;
+        while i < entries.len() {
+            let event_id = entries[i].event.id.to_hex();
+            if sent.is_some_and(|ids| ids.contains(&event_id)) {
+                i += 1;
+            } else {
+                released.push(entries.remove(i));
+            }
+        }
+        if entries.is_empty() {
+            self.withheld_native_steer.remove(&channel_id);
+        }
+        let n = released.len();
+        let queue = self.queues.entry(channel_id).or_default();
+        for event in released.into_iter().rev() {
+            queue.push_front(event);
+        }
+        n
+    }
+
+    /// Open a completion fence once the last sent steer has settled.
+    fn settle_sent_native_steer(&mut self, channel_id: Uuid) {
+        if self.completed_awaiting_native_steer.contains(&channel_id)
+            && !self.has_sent_native_steer(channel_id)
+        {
+            self.clear_complete(channel_id);
+        }
+    }
+
     /// Release a single withheld event back to the front of
     /// `queues[channel_id]`, preserving its original `received_at`.
     ///
@@ -826,9 +959,16 @@ impl EventQueue {
             return;
         };
         let qe = entries.remove(pos);
+        if let Some(sent) = self.sent_native_steers.get_mut(&channel_id) {
+            sent.remove(event_id);
+            if sent.is_empty() {
+                self.sent_native_steers.remove(&channel_id);
+            }
+        }
         if entries.is_empty() {
             self.withheld_native_steer.remove(&channel_id);
         }
+        self.settle_sent_native_steer(channel_id);
         // Push to FRONT so original `received_at` keeps the event at the head
         // of the channel's queue. Per-channel cap is enforced below in case
         // a flood of events arrived during the ack window.
@@ -851,6 +991,12 @@ impl EventQueue {
     /// event has been "delivered" via the non-cancelling path and must not
     /// be redelivered via normal dispatch. Idempotent across both stores.
     pub fn remove_event(&mut self, channel_id: Uuid, event_id: &str) {
+        if let Some(sent) = self.sent_native_steers.get_mut(&channel_id) {
+            sent.remove(event_id);
+            if sent.is_empty() {
+                self.sent_native_steers.remove(&channel_id);
+            }
+        }
         if let Some(entries) = self.withheld_native_steer.get_mut(&channel_id) {
             entries.retain(|qe| qe.event.id.to_hex() != event_id);
             if entries.is_empty() {
@@ -863,6 +1009,32 @@ impl EventQueue {
                 self.queues.remove(&channel_id);
             }
         }
+        self.settle_sent_native_steer(channel_id);
+    }
+
+    /// Release every native-steer reservation for `channel_id` to the queue
+    /// front, preserving original FIFO order. Detached edit preparation then
+    /// observes its missing reservation and discards the stale completion.
+    pub fn release_native_steers(&mut self, channel_id: Uuid) -> usize {
+        let Some(entries) = self.withheld_native_steer.remove(&channel_id) else {
+            return 0;
+        };
+        self.sent_native_steers.remove(&channel_id);
+        self.settle_sent_native_steer(channel_id);
+        let n = entries.len();
+        let queue = self.queues.entry(channel_id).or_default();
+        for qe in entries.into_iter().rev() {
+            queue.push_front(qe);
+        }
+        while queue.len() > MAX_PENDING_PER_CHANNEL {
+            queue.pop_back();
+            tracing::warn!(
+                channel_id = %channel_id,
+                limit = MAX_PENDING_PER_CHANNEL,
+                "withheld-steer release overflow — dropped newest event to enforce cap"
+            );
+        }
+        n
     }
 
     /// Bulk-release every withheld event for `channel_id` back to the queue
@@ -879,21 +1051,9 @@ impl EventQueue {
     /// composes to original-FIFO order at the queue front (same discipline
     /// as `requeue_preserve_timestamps` at line 453).
     fn recover_withheld_for_expired_channel(&mut self, channel_id: Uuid) {
-        let Some(entries) = self.withheld_native_steer.remove(&channel_id) else {
+        let n = self.release_native_steers(channel_id);
+        if n == 0 {
             return;
-        };
-        let n = entries.len();
-        let queue = self.queues.entry(channel_id).or_default();
-        for qe in entries.into_iter().rev() {
-            queue.push_front(qe);
-        }
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "withheld-steer recovery overflow — dropped newest event to enforce cap"
-            );
         }
         tracing::warn!(
             channel_id = %channel_id,
@@ -1554,8 +1714,26 @@ pub(crate) fn reaction_target_id(event: &Event) -> String {
 /// Original-message routing recovered for a kind:40003 edit event.
 #[derive(Debug, Clone)]
 pub struct ResolvedEdit {
+    /// Event ID of the verified kind:40003 edit target.
     pub target_event_id: String,
+    /// Thread routing tags parsed from the verified target event.
     pub target_thread_tags: ThreadTags,
+}
+
+impl ResolvedEdit {
+    /// Visible reply destination for notices tied to this edit. Threaded
+    /// originals retain their root/parent; a top-level original becomes both
+    /// so the notice replies to it rather than publishing at channel root.
+    pub fn reply_thread_tags(&self) -> ThreadTags {
+        if self.target_thread_tags.root_event_id.is_some() {
+            return self.target_thread_tags.clone();
+        }
+        ThreadTags {
+            root_event_id: Some(self.target_event_id.clone()),
+            parent_event_id: Some(self.target_event_id.clone()),
+            mentioned_pubkeys: self.target_thread_tags.mentioned_pubkeys.clone(),
+        }
+    }
 }
 
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
@@ -1911,6 +2089,21 @@ pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
     (framing.new_header_single, framing.closing_note)
 }
 
+/// Format the delta delivered through native steering.
+///
+/// Routing and context use the same formatter as ordinary dispatch, while the
+/// native framing remains a concise "weave this into the live turn" envelope.
+pub(crate) fn format_native_steer_prompt(
+    batch: &FlushBatch,
+    args: &FormatPromptArgs<'_>,
+) -> Vec<String> {
+    let (header, closing) = native_steer_framing();
+    let mut sections = format_prompt(batch, args);
+    sections.insert(0, header.to_string());
+    sections.push(closing.to_string());
+    sections
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1956,6 +2149,25 @@ mod tests {
         let event = EventBuilder::new(Kind::Custom(9), content)
             .custom_created_at(Timestamp::from(created_at_secs))
             .tags([])
+            .sign_with_keys(&keys)
+            .unwrap();
+        QueuedEvent {
+            channel_id,
+            event,
+            received_at: Instant::now(),
+            prompt_tag: "test".into(),
+        }
+    }
+
+    fn make_edit_queued_created_at(
+        channel_id: Uuid,
+        target: &str,
+        created_at_secs: u64,
+    ) -> QueuedEvent {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .custom_created_at(Timestamp::from(created_at_secs))
+            .tags([nostr::Tag::parse(["e", target]).unwrap()])
             .sign_with_keys(&keys)
             .unwrap();
         QueuedEvent {
@@ -2161,6 +2373,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2195,6 +2408,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancel_reason: reason,
+            failure_thread_tags: None,
         }
     }
 
@@ -2333,6 +2547,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancel_reason: Some(CancelReason::Steer),
+            failure_thread_tags: None,
         };
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(prompt.contains("New messages — arrived while you were working — 2 events]"));
@@ -2383,6 +2598,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancel_reason: Some(CancelReason::Steer),
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2562,6 +2778,7 @@ mod tests {
             ],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2590,6 +2807,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2613,6 +2831,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -2645,6 +2864,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let prompt = format_prompt(
             &batch,
@@ -2675,6 +2895,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -2702,6 +2923,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // format_prompt no longer accepts or emits base_prompt/system_prompt.
@@ -2726,6 +2948,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let core = "[Agent Memory — core]\nremember this";
@@ -2784,6 +3007,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let canvas = "[Channel Canvas]\ncanvas content";
         let core = "[Agent Memory — core]\nremember this";
@@ -2837,6 +3061,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(
@@ -2875,6 +3100,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let ctx = ConversationContext::Thread {
@@ -3393,6 +3619,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "engineering".into(),
@@ -3425,6 +3652,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3464,6 +3692,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -3492,6 +3721,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ctx = ConversationContext::Thread {
             messages: vec![
@@ -3538,6 +3768,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3589,6 +3820,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -3797,6 +4029,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3864,6 +4097,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let trigger_only_prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -3897,6 +4131,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3946,6 +4181,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3987,6 +4223,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -4011,6 +4248,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -4034,6 +4272,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -4082,6 +4321,25 @@ mod tests {
         let drained: HashSet<String> = q.drain_channel(ch).into_iter().collect();
         assert_eq!(drained, HashSet::from([queued_target, withheld_target]));
         assert!(q.withheld_native_steer.is_empty());
+    }
+
+    #[test]
+    fn drain_channel_returns_visible_reaction_targets_for_queued_and_reserved_edits() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let queued_target = "ab".repeat(32);
+        let reserved_target = "cd".repeat(32);
+
+        q.push(make_edit_queued_created_at(ch, &queued_target, 100));
+        let reserved = make_edit_queued_created_at(ch, &reserved_target, 101);
+        let reserved_id = reserved.event.id.to_hex();
+        q.push(reserved);
+        assert!(q.mark_native_steer_pending(ch, &reserved_id));
+
+        let drained: HashSet<String> = q.drain_channel(ch).into_iter().collect();
+        assert_eq!(drained, HashSet::from([queued_target, reserved_target]));
+        assert!(!q.has_native_steer_reservations(ch));
+        assert_eq!(pending_count(&q), 0);
     }
 
     #[test]
@@ -4138,6 +4396,28 @@ mod tests {
         let drained = q.drain_channel(ch);
         assert_eq!(drained.len(), 1);
         assert!(any_in_flight(&q)); // in-flight unaffected
+    }
+
+    #[test]
+    fn drain_channel_clears_completed_native_steer_fence() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "original turn"));
+        let _batch = q.flush_next().expect("initial prompt in flight");
+
+        let steered = make_edit_queued_created_at(ch, &"cd".repeat(32), 100);
+        let steered_id = steered.event.id.to_hex();
+        q.push(steered);
+        assert!(q.mark_native_steer_pending(ch, &steered_id));
+        q.mark_native_steer_sent(ch, &steered_id);
+        q.mark_complete(ch);
+        assert!(q.is_channel_in_flight(ch));
+
+        q.drain_channel(ch);
+        assert!(
+            !q.is_channel_in_flight(ch),
+            "removal settles a fence whose prompt already completed"
+        );
     }
 
     #[test]
@@ -4467,6 +4747,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // No profile lookup → sender treated as human → human-facing thread
@@ -4509,6 +4790,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -4544,6 +4826,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // Top-level human message (no lookup → human): the reply opens a new
@@ -4573,6 +4856,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -4616,6 +4900,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // Human-facing (no lookup) deep reply: anchor to the thread ROOT to
@@ -4652,6 +4937,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -4694,6 +4980,7 @@ mod tests {
             ],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // Scope derives from the last (threaded) event; human-facing → anchor
@@ -4731,6 +5018,7 @@ mod tests {
             ],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // Last event is top-level and human-facing → opens a new thread
@@ -4757,6 +5045,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         }
     }
 
@@ -4865,6 +5154,26 @@ mod tests {
     /// The withhold is the whole point of the side table — it must close the
     /// `mark_complete` → ack race window.
     #[test]
+    fn test_native_steer_reservations_count_toward_channel_cap() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        for i in 0..MAX_PENDING_PER_CHANNEL {
+            let qe = make_queued(ch, &format!("reserved-{i}"));
+            let event_id = qe.event.id.to_hex();
+            assert!(q.push(qe));
+            assert!(q.mark_native_steer_pending(ch, &event_id));
+        }
+        assert_eq!(q.withheld_native_steer[&ch].len(), MAX_PENDING_PER_CHANNEL);
+        assert!(
+            !q.push(make_queued(ch, "over-cap")),
+            "all cap slots are reserved, so a new event must not create another preparation"
+        );
+        assert_eq!(q.withheld_native_steer[&ch].len(), MAX_PENDING_PER_CHANNEL);
+        assert!(!q.queues.contains_key(&ch));
+    }
+
+    #[test]
     fn test_native_steer_withhold_only_channel_not_flushable() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -4956,6 +5265,8 @@ mod tests {
         q.in_flight_deadlines.insert(ch, Instant::now());
         q.in_flight_batch_sizes.insert(ch, 1);
         assert!(q.mark_native_steer_pending(ch, &event_id));
+        assert!(q.has_native_steer_reservations(ch));
+        assert!(q.has_native_steer_reservation(ch, &event_id));
 
         // Force the in-flight deadline to be in the past, simulating the
         // steer ack never arriving and the read loop hanging long enough
@@ -4973,6 +5284,8 @@ mod tests {
 
         // The withheld event has been moved back to `queues[ch]`.
         assert!(q.withheld_native_steer.is_empty());
+        assert!(!q.has_native_steer_reservations(ch));
+        assert!(!q.has_native_steer_reservation(ch, &event_id));
         assert_eq!(pending_count(&q), 1);
 
         // Normal dispatch delivers it.
@@ -4982,6 +5295,200 @@ mod tests {
         assert_eq!(batch.channel_id, ch);
         assert_eq!(batch.events.len(), 1);
         assert_eq!(batch.events[0].event.id.to_hex(), event_id);
+    }
+
+    #[test]
+    fn recovered_reservation_invalidates_late_native_steer_preparation() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let qe = make_queued(ch, "prepared edit");
+        let event_id = qe.event.id.to_hex();
+        q.push(qe);
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() - Duration::from_secs(1));
+        q.in_flight_batch_sizes.insert(ch, 1);
+        assert!(q.mark_native_steer_pending(ch, &event_id));
+
+        // Deadline recovery releases the reservation and normal dispatch takes
+        // the edit into a replacement turn.
+        let replacement = q.flush_next().expect("recovered edit should dispatch");
+        assert_eq!(replacement.events.len(), 1);
+        assert_eq!(replacement.events[0].event.id.to_hex(), event_id);
+
+        // The detached enrichment completion from the expired turn must not be
+        // allowed to steer that replacement turn with the same edit again.
+        assert!(crate::native_steer_preparation_is_stale(
+            &q,
+            &HashSet::new(),
+            &HashMap::new(),
+            ch,
+            &event_id,
+            0,
+            "expired-turn",
+            Some("replacement-turn"),
+        ));
+    }
+
+    /// Replay arrives newest-first. Chronology must be restored before the
+    /// edit boundary is selected, or the newer ordinary event starts a turn
+    /// before the older edit can recover its original-message routing.
+    #[test]
+    fn replay_orders_before_partitioning_at_edit_boundaries() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let older = make_queued_created_at(ch, "older", 100);
+        let older_id = older.event.id.to_hex();
+        let edit = make_edit_queued_created_at(ch, &"cd".repeat(32), 200);
+        let edit_id = edit.event.id.to_hex();
+        let newer = make_queued_created_at(ch, "newer", 300);
+        let newer_id = newer.event.id.to_hex();
+
+        // Production relay replay order: newest first.
+        q.push(newer);
+        q.push(edit);
+        q.push(older);
+
+        let first = q
+            .flush_next()
+            .expect("older ordinary event dispatches first");
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .map(|event| event.event.id.to_hex())
+                .collect::<Vec<_>>(),
+            vec![older_id],
+        );
+        q.mark_complete(ch);
+        let second = q.flush_next().expect("edit dispatches at its own boundary");
+        assert_eq!(second.events[0].event.id.to_hex(), edit_id);
+        q.mark_complete(ch);
+        let third = q
+            .flush_next()
+            .expect("newer ordinary event remains after edit");
+        assert_eq!(third.events[0].event.id.to_hex(), newer_id);
+    }
+
+    #[test]
+    fn sent_steer_fences_replacement_until_ack_settles() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "original turn"));
+        let _original = q.flush_next().expect("initial prompt in flight");
+
+        let steered = make_edit_queued_created_at(ch, &"cd".repeat(32), 100);
+        let steered_id = steered.event.id.to_hex();
+        let replacement = make_queued_created_at(ch, "later replacement", 200);
+        let replacement_id = replacement.event.id.to_hex();
+        q.push(steered);
+        assert!(q.mark_native_steer_pending(ch, &steered_id));
+        q.mark_native_steer_sent(ch, &steered_id);
+        q.push(replacement);
+
+        // Adversarial select schedule: prompt result is processed before the
+        // delayed neutral acknowledgement. It must not start replacement work.
+        q.mark_complete(ch);
+        assert!(q.is_channel_in_flight(ch));
+        assert!(
+            q.flush_next().is_none(),
+            "sent steer fences replacement dispatch"
+        );
+
+        // Neutral acknowledgement restores the older steered event and opens
+        // the fence atomically, so chronological delivery cannot reverse.
+        q.release_native_steer(ch, &steered_id);
+        let restored = q
+            .flush_next()
+            .expect("neutral ack restores the steer first");
+        assert_eq!(restored.events[0].event.id.to_hex(), steered_id);
+        q.mark_complete(ch);
+        let later = q.flush_next().expect("replacement follows settled steer");
+        assert_eq!(later.events[0].event.id.to_hex(), replacement_id);
+    }
+
+    #[test]
+    fn mixed_batch_stops_before_edit_and_dispatches_edit_separately() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let first = make_queued_at(ch, "first", Duration::from_millis(30));
+        let first_id = first.event.id.to_hex();
+        let edit = edit_event(&"cd".repeat(32));
+        let edit_id = edit.id.to_hex();
+        let later = make_queued_at(ch, "later", Duration::from_millis(10));
+        let later_id = later.event.id.to_hex();
+        q.push(first);
+        q.push(QueuedEvent {
+            channel_id: ch,
+            event: edit,
+            received_at: Instant::now() - Duration::from_millis(20),
+            prompt_tag: "@mention".into(),
+        });
+        q.push(later);
+
+        let first_batch = q.flush_next().expect("pre-edit event should dispatch");
+        assert_eq!(first_batch.events.len(), 1);
+        assert_eq!(first_batch.events[0].event.id.to_hex(), first_id);
+        q.mark_complete(ch);
+
+        let edit_batch = q.flush_next().expect("edit should dispatch separately");
+        assert_eq!(edit_batch.events.len(), 1);
+        assert_eq!(edit_batch.events[0].event.id.to_hex(), edit_id);
+        q.mark_complete(ch);
+
+        let later_batch = q
+            .flush_next()
+            .expect("post-edit event should remain queued");
+        assert_eq!(later_batch.events.len(), 1);
+        assert_eq!(later_batch.events[0].event.id.to_hex(), later_id);
+    }
+
+    #[test]
+    fn releasing_preparations_does_not_release_sent_steer() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let sent = make_queued_at(ch, "sent", Duration::from_millis(20));
+        let sent_id = sent.event.id.to_hex();
+        let later = make_queued_at(ch, "later", Duration::from_millis(10));
+        q.push(sent);
+        assert!(q.mark_native_steer_pending(ch, &sent_id));
+        q.mark_native_steer_sent(ch, &sent_id);
+        q.push(later);
+
+        assert_eq!(q.release_native_steer_preparations(ch), 0);
+        assert!(q.has_native_steer_reservation(ch, &sent_id));
+        assert!(q.has_sent_native_steer(ch));
+        q.remove_event(ch, &sent_id);
+        assert!(!q.has_sent_native_steer(ch));
+        let replacement = q.flush_next().expect("only later event should dispatch");
+        assert_eq!(replacement.events.len(), 1);
+        assert_ne!(replacement.events[0].event.id.to_hex(), sent_id);
+    }
+
+    #[test]
+    fn releasing_pending_preparation_restores_fifo_ahead_of_later_event() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let edit = make_queued_at(ch, "edit", Duration::from_millis(20));
+        let edit_id = edit.event.id.to_hex();
+        let later = make_queued_at(ch, "later", Duration::from_millis(10));
+        let later_id = later.event.id.to_hex();
+        q.push(edit);
+        assert!(q.mark_native_steer_pending(ch, &edit_id));
+        q.push(later);
+
+        // A later event triggers cancel+merge. Releasing the pending edit first
+        // makes both events visible to the next flush in original arrival order;
+        // the detached preparation will be stale because its reservation is gone.
+        assert_eq!(q.release_native_steers(ch), 1);
+        assert!(!q.has_native_steer_reservation(ch, &edit_id));
+        let replacement = q.flush_next().expect("both events should dispatch");
+        let ids: Vec<_> = replacement
+            .events
+            .iter()
+            .map(|event| event.event.id.to_hex())
+            .collect();
+        assert_eq!(ids, vec![edit_id, later_id]);
     }
 
     /// Bulk-release on expiry must preserve original FIFO. The
@@ -5051,6 +5558,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let prompt = format_prompt(
             &batch,
@@ -5080,6 +5588,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let prompt = format_prompt(
             &batch,
@@ -5108,6 +5617,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
@@ -5339,6 +5849,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         }
     }
 
@@ -5421,6 +5932,139 @@ mod tests {
         let edit = edit_event(&original_id);
         let edit_id = edit.id.to_hex();
         let prompt = format_prompt(&one_event_batch(edit), &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains(&format!("--reply-to {original_id}")));
+        assert!(!prompt.contains(&format!("--reply-to {edit_id}")));
+    }
+
+    #[test]
+    fn async_edit_steer_reservation_prevents_normal_redispatch() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let event = edit_event(&"aa".repeat(32));
+        let event_id = event.id.to_hex();
+        q.push(QueuedEvent {
+            channel_id: ch,
+            event,
+            received_at: Instant::now(),
+            prompt_tag: "@mention".into(),
+        });
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(60));
+
+        assert!(q.mark_native_steer_pending(ch, &event_id));
+        q.mark_complete(ch);
+        assert!(
+            q.flush_next().is_none(),
+            "reserved edit must not redispatch"
+        );
+
+        q.release_native_steer(ch, &event_id);
+        let batch = q.flush_next().expect("failed preparation restores edit");
+        assert_eq!(batch.events[0].event.id.to_hex(), event_id);
+    }
+
+    #[test]
+    fn removed_channel_discards_late_async_edit_steer_preparation() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let event = edit_event(&"ab".repeat(32));
+        let event_id = event.id.to_hex();
+        q.push(QueuedEvent {
+            channel_id: ch,
+            event,
+            received_at: Instant::now(),
+            prompt_tag: "@mention".into(),
+        });
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(60));
+
+        assert!(q.mark_native_steer_pending(ch, &event_id));
+        q.drain_channel(ch);
+        let removed_channels = HashSet::from([ch]);
+        let membership_generations = HashMap::new();
+        assert!(crate::native_steer_preparation_is_stale(
+            &q,
+            &removed_channels,
+            &membership_generations,
+            ch,
+            &event_id,
+            0,
+            "expired-turn",
+            Some("replacement-turn"),
+        ));
+
+        // A late preparation is discarded by the main loop. Its reservation
+        // was already drained, so release cannot resurrect stale work.
+        q.release_native_steer(ch, &event_id);
+        q.mark_complete(ch);
+        assert!(q.flush_next().is_none());
+    }
+
+    #[test]
+    fn removed_then_readded_channel_discards_late_async_edit_preparation() {
+        let ch = Uuid::new_v4();
+        let event_id = "ab".repeat(32);
+        let q = EventQueue::new(DedupMode::Queue);
+        // Preparation was reserved during the original membership period.
+        let prepared_generation = 0;
+        let mut membership_generations = HashMap::from([(ch, prepared_generation)]);
+        let mut removed_channels = HashSet::from([ch]);
+
+        // Re-add makes the channel usable again but must not validate work
+        // which was prepared before the intervening removal.
+        removed_channels.remove(&ch);
+        *membership_generations.get_mut(&ch).unwrap() += 1;
+
+        assert!(crate::native_steer_preparation_is_stale(
+            &q,
+            &removed_channels,
+            &membership_generations,
+            ch,
+            &event_id,
+            prepared_generation,
+            "pre-removal-turn",
+            Some("replacement-turn"),
+        ));
+    }
+
+    #[test]
+    fn native_steer_edit_uses_original_thread_anchor() {
+        let original_id = "66".repeat(32);
+        let root_id = "77".repeat(32);
+        let batch = one_event_batch(edit_event(&original_id));
+        let edit_id = batch.events[0].event.id.to_hex();
+        let prompt = format_native_steer_prompt(
+            &batch,
+            &FormatPromptArgs {
+                resolved_edit: Some(&ResolvedEdit {
+                    target_event_id: original_id,
+                    target_thread_tags: ThreadTags {
+                        root_event_id: Some(root_id.clone()),
+                        parent_event_id: Some("88".repeat(32)),
+                        mentioned_pubkeys: vec![],
+                    },
+                }),
+                ..Default::default()
+            },
+        )
+        .join("\n");
+
+        assert!(prompt.contains(&format!("--reply-to {root_id}")));
+        assert!(!prompt.contains(&format!("--reply-to {edit_id}")));
+        let (header, closing) = native_steer_framing();
+        assert!(prompt.contains(header));
+        assert!(prompt.contains(closing));
+    }
+
+    #[test]
+    fn native_steer_edit_fetch_failure_anchors_target_never_auxiliary_event() {
+        let original_id = "99".repeat(32);
+        let batch = one_event_batch(edit_event(&original_id));
+        let edit_id = batch.events[0].event.id.to_hex();
+        let prompt = format_native_steer_prompt(&batch, &FormatPromptArgs::default()).join("\n");
+
         assert!(prompt.contains(&format!("--reply-to {original_id}")));
         assert!(!prompt.contains(&format!("--reply-to {edit_id}")));
     }
@@ -5581,6 +6225,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         }
     }
 

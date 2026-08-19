@@ -1547,9 +1547,100 @@ struct RespawnResult {
 /// Carries enough identity to operate on the right withheld event in
 /// `EventQueue::withheld_native_steer`: `channel_id` is the routing key,
 /// `event_id` is the hex id of the single event the steer carried.
+struct NativeSteerPrepared {
+    channel_id: Uuid,
+    /// Membership generation captured when this edit was reserved. A removal
+    /// advances the generation even if the agent is subsequently re-added.
+    membership_generation: u64,
+    /// Turn that owned the channel when preparation started. Membership alone
+    /// is insufficient: the turn can complete and a replacement can start in
+    /// the same membership generation while enrichment is outstanding.
+    originating_turn_id: String,
+    event: nostr::Event,
+    prompt_blocks: Vec<String>,
+}
+
+/// Async edit enrichment may finish after channel membership changed or after
+/// its queue reservation was recovered/consumed. Such prepared work is stale:
+/// it must never be forwarded into a removed/later membership period or into a
+/// replacement turn that already received the recovered edit.
+#[allow(clippy::too_many_arguments)]
+fn native_steer_preparation_is_stale(
+    queue: &EventQueue,
+    removed_channels: &HashSet<Uuid>,
+    membership_generations: &HashMap<Uuid, u64>,
+    channel_id: Uuid,
+    event_id: &str,
+    prepared_generation: u64,
+    originating_turn_id: &str,
+    current_turn_id: Option<&str>,
+) -> bool {
+    removed_channels.contains(&channel_id)
+        || native_steer_ack_is_stale(membership_generations, channel_id, prepared_generation)
+        || current_turn_id != Some(originating_turn_id)
+        || !queue.has_native_steer_reservation(channel_id, event_id)
+}
+
+fn native_steer_ack_is_stale(
+    membership_generations: &HashMap<Uuid, u64>,
+    channel_id: Uuid,
+    sent_generation: u64,
+) -> bool {
+    membership_generations
+        .get(&channel_id)
+        .copied()
+        .unwrap_or(0)
+        != sent_generation
+}
+
+/// Reserve an edit before its asynchronous enrichment starts, returning the
+/// membership generation that completion must still match.
+fn reserve_native_edit_preparation(
+    queue: &mut EventQueue,
+    membership_generations: &HashMap<Uuid, u64>,
+    channel_id: Uuid,
+    event_id: &str,
+) -> Option<u64> {
+    queue
+        .mark_native_steer_pending(channel_id, event_id)
+        .then(|| {
+            membership_generations
+                .get(&channel_id)
+                .copied()
+                .unwrap_or(0)
+        })
+}
+
+/// Apply the queue and membership state transition for a channel removal.
+/// The generation deliberately advances even if a later add restores access.
+fn remove_channel_for_membership_change(
+    queue: &mut EventQueue,
+    removed_channels: &mut HashSet<Uuid>,
+    membership_generations: &mut HashMap<Uuid, u64>,
+    channel_id: Uuid,
+) -> Vec<String> {
+    let drained_ids = queue.drain_channel(channel_id);
+    removed_channels.insert(channel_id);
+    let generation = membership_generations.entry(channel_id).or_default();
+    *generation = generation.wrapping_add(1);
+    drained_ids
+}
+
+/// Restore current membership without validating work prepared before removal.
+fn readd_channel_after_membership_change(removed_channels: &mut HashSet<Uuid>, channel_id: Uuid) {
+    removed_channels.remove(&channel_id);
+}
+
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    /// Visible message that owns lifecycle reactions for this delivery. Edits
+    /// react on their original target rather than on the auxiliary edit event.
+    reaction_event_id: String,
+    /// Membership generation in which the steer was sent. Late acknowledgements
+    /// from an earlier membership epoch must have no queue, ledger, or fallback
+    /// effects after removal/re-add.
+    membership_generation: u64,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -2320,6 +2411,10 @@ async fn tokio_main() -> Result<()> {
     //      `IN_FLIGHT_DEADLINE_SECS` expires.
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
     let (typing_tx, mut typing_rx) = mpsc::unbounded_channel::<(Uuid, String, ThreadTags)>();
+    // Edit-aware native steer enrichment performs bounded REST lookups. Keep it
+    // off the relay select arm, then return the immutable prompt payload here
+    // for queue/pool mutation on the main loop.
+    let (native_steer_tx, mut native_steer_rx) = mpsc::unbounded_channel::<NativeSteerPrepared>();
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
@@ -2372,6 +2467,9 @@ async fn tokio_main() -> Result<()> {
     // causal invalidation is needed, add a monotonic epoch counter per channel
     // and capture it in TaskMeta at dispatch time.
     let mut removed_channels: HashSet<Uuid> = HashSet::new();
+    // Incremented on removal, rather than reset on re-add, so asynchronous
+    // edit preparation cannot cross a membership boundary.
+    let mut membership_generations: HashMap<Uuid, u64> = HashMap::new();
 
     //
     // One SlotCircuit per agent slot. crash_times entries are pruned to the last
@@ -2395,6 +2493,7 @@ async fn tokio_main() -> Result<()> {
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
         Typing(Uuid, String, ThreadTags),
+        NativeSteerPrepared(NativeSteerPrepared),
         Wake(u32, Result<AgentPool, String>),
     }
 
@@ -2469,9 +2568,14 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &membership_generations,
+                    &typing_tx,
+                    &mut last_activity,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2521,9 +2625,14 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
-            {
+            for (channel_id, thread_tags) in dispatch_pending(
+                &mut pool,
+                &mut queue,
+                &ctx,
+                &membership_generations,
+                &typing_tx,
+                &mut last_activity,
+            ) {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -2558,6 +2667,9 @@ async fn tokio_main() -> Result<()> {
                 }
                 Some((channel_id, turn_id, scope)) = typing_rx.recv() => {
                     Some(PoolEvent::Typing(channel_id, turn_id, scope))
+                }
+                Some(prepared) = native_steer_rx.recv() => {
+                    Some(PoolEvent::NativeSteerPrepared(prepared))
                 }
                 Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
                     Some(PoolEvent::Wake(attempt, result))
@@ -2685,7 +2797,7 @@ async fn tokio_main() -> Result<()> {
                                 if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
                                     // Clear removal tracking so sessions are not
                                     // stripped for a legitimately re-added channel.
-                                    removed_channels.remove(&ch);
+                                    readd_channel_after_membership_change(&mut removed_channels, ch);
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
@@ -2709,7 +2821,12 @@ async fn tokio_main() -> Result<()> {
                                     // removed channel. Events already in-flight will
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
-                                    let drained_ids = queue.drain_channel(ch);
+                                    let drained_ids = remove_channel_for_membership_change(
+                                        &mut queue,
+                                        &mut removed_channels,
+                                        &mut membership_generations,
+                                        ch,
+                                    );
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2717,7 +2834,6 @@ async fn tokio_main() -> Result<()> {
                                     };
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
-                                    removed_channels.insert(ch);
                                     typing_channels.remove(&ch);
                                     // Best-effort: clean up 👀 on drained events.
                                     // Note: the relay revokes membership before
@@ -2792,9 +2908,13 @@ async fn tokio_main() -> Result<()> {
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
+                                        let fired = signal_current_membership_task(
                                             &mut pool,
                                             buzz_event.channel_id,
+                                            membership_generations
+                                                .get(&buzz_event.channel_id)
+                                                .copied()
+                                                .unwrap_or(0),
                                             ControlSignal::Cancel,
                                         );
                                         if !fired {
@@ -2830,9 +2950,13 @@ async fn tokio_main() -> Result<()> {
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
+                                        let fired = signal_current_membership_task(
                                             &mut pool,
                                             buzz_event.channel_id,
+                                            membership_generations
+                                                .get(&buzz_event.channel_id)
+                                                .copied()
+                                                .unwrap_or(0),
                                             ControlSignal::Rotate,
                                         );
                                         if fired {
@@ -2986,19 +3110,139 @@ async fn tokio_main() -> Result<()> {
                                     // to the universal cancel+merge `Steer`
                                     // signal so the event still reaches the
                                     // agent.
-                                    let native_attempted = matches!(signal, ControlSignal::Steer)
-                                        && try_native_steer(
-                                            &mut pool,
-                                            &mut queue,
+                                    let native_attempted = if matches!(signal, ControlSignal::Steer)
+                                    {
+                                        let is_edit =
+                                            queue::edit_target_id(&event_for_steer).is_some();
+                                        if queue.has_native_steer_reservations(
                                             buzz_event.channel_id,
-                                            event_for_steer,
-                                            prompt_tag_for_steer,
-                                            &steer_ack_tx,
-                                        );
+                                        ) {
+                                            let released = queue.release_native_steer_preparations(
+                                                buzz_event.channel_id,
+                                            );
+                                            let sent_steer_pending = queue.has_sent_native_steer(
+                                                buzz_event.channel_id,
+                                            );
+                                            tracing::debug!(
+                                                channel_id = %buzz_event.channel_id,
+                                                released,
+                                                sent_steer_pending,
+                                                "native steer reservation already pending; released preparations and retained sent steers"
+                                            );
+                                            // A sent steer must settle before later work can
+                                            // cancel or replace its turn. Treat it as an
+                                            // accepted native attempt so the later event stays
+                                            // queued; the ack arm will settle the reservation
+                                            // and drive fallback/dispatch as needed.
+                                            sent_steer_pending
+                                        } else if is_edit
+                                            && pool.native_steer_available(
+                                                buzz_event.channel_id,
+                                                membership_generations
+                                                    .get(&buzz_event.channel_id)
+                                                    .copied()
+                                                    .unwrap_or(0),
+                                            )
+                                        {
+                                            let event_id = event_for_steer.id.to_hex();
+                                            let channel_id = buzz_event.channel_id;
+                                            match reserve_native_edit_preparation(
+                                                &mut queue,
+                                                &membership_generations,
+                                                channel_id,
+                                                &event_id,
+                                            ) {
+                                                Some(membership_generation) => {
+                                                    // No await or other pool mutation occurs
+                                                    // between the availability check and this
+                                                    // capture. Still fail closed if the task
+                                                    // disappears: release the preparation so
+                                                    // the caller's cancel+merge fallback owns
+                                                    // delivery rather than aborting the harness.
+                                                    if let Some(originating_turn_id) = pool
+                                                        .native_steer_turn_id(
+                                                            channel_id,
+                                                            membership_generation,
+                                                        )
+                                                    {
+                                                        let tx = native_steer_tx.clone();
+                                                        let ctx = Arc::clone(&ctx);
+                                                        tokio::spawn(async move {
+                                                            let prompt_blocks = pool::format_native_steer_prompt(
+                                                                channel_id,
+                                                                event_for_steer.clone(),
+                                                                prompt_tag_for_steer,
+                                                                &ctx,
+                                                            )
+                                                            .await;
+                                                            let _ = tx.send(NativeSteerPrepared {
+                                                                channel_id,
+                                                                membership_generation,
+                                                                originating_turn_id,
+                                                                event: event_for_steer,
+                                                                prompt_blocks,
+                                                            });
+                                                        });
+                                                        true
+                                                    } else {
+                                                        queue.release_native_steer(
+                                                            channel_id,
+                                                            &event_id,
+                                                        );
+                                                        tracing::debug!(
+                                                            %channel_id,
+                                                            %event_id,
+                                                            "native edit steer turn disappeared during reservation; falling back to cancel+merge"
+                                                        );
+                                                        false
+                                                    }
+                                                }
+                                                None => {
+                                                    tracing::warn!(
+                                                        %channel_id,
+                                                        %event_id,
+                                                        "native edit steer preparation could not reserve queued event; falling back to cancel+merge"
+                                                    );
+                                                    false
+                                                }
+                                            }
+                                        } else if is_edit {
+                                            tracing::debug!(
+                                                channel_id = %buzz_event.channel_id,
+                                                "native edit steer unavailable before preparation; falling back to cancel+merge"
+                                            );
+                                            false
+                                        } else {
+                                            let prompt_blocks =
+                                                pool::format_native_steer_prompt_sync(
+                                                    buzz_event.channel_id,
+                                                    &event_for_steer,
+                                                    &prompt_tag_for_steer,
+                                                );
+                                            try_native_steer(
+                                                &mut pool,
+                                                &mut queue,
+                                                buzz_event.channel_id,
+                                                event_for_steer,
+                                                prompt_blocks,
+                                                membership_generations
+                                                    .get(&buzz_event.channel_id)
+                                                    .copied()
+                                                    .unwrap_or(0),
+                                                &steer_ack_tx,
+                                            )
+                                        }
+                                    } else {
+                                        false
+                                    };
                                     if !native_attempted {
-                                        signal_in_flight_task(
+                                        signal_current_membership_task(
                                             &mut pool,
                                             buzz_event.channel_id,
+                                            membership_generations
+                                                .get(&buzz_event.channel_id)
+                                                .copied()
+                                                .unwrap_or(0),
                                             signal,
                                         );
                                     }
@@ -3006,8 +3250,8 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
-                                {
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &membership_generations, &typing_tx, &mut last_activity)
+                                                        {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
                             }
@@ -3106,8 +3350,8 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
-                        {
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &membership_generations, &typing_tx, &mut last_activity)
+                                        {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     } else if pool.any_idle() {
@@ -3180,6 +3424,7 @@ async fn tokio_main() -> Result<()> {
                     *result,
                     &mut heartbeat_in_flight,
                     &removed_channels,
+                    &membership_generations,
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
@@ -3195,6 +3440,7 @@ async fn tokio_main() -> Result<()> {
                     &config,
                     &mut heartbeat_in_flight,
                     &removed_channels,
+                    &membership_generations,
                     &mut typing_channels,
                     &mut crash_history,
                     &respawn_tx,
@@ -3204,9 +3450,14 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &membership_generations,
+                    &typing_tx,
+                    &mut last_activity,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3219,6 +3470,7 @@ async fn tokio_main() -> Result<()> {
                     join_error,
                     &mut heartbeat_in_flight,
                     &removed_channels,
+                    &membership_generations,
                     &mut typing_channels,
                     &mut crash_history,
                     &respawn_tx,
@@ -3229,9 +3481,14 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &membership_generations,
+                    &typing_tx,
+                    &mut last_activity,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3244,11 +3501,100 @@ async fn tokio_main() -> Result<()> {
                     scope,
                 );
             }
+            Some(PoolEvent::NativeSteerPrepared(NativeSteerPrepared {
+                channel_id,
+                membership_generation,
+                originating_turn_id,
+                event,
+                prompt_blocks,
+            })) => {
+                let event_id = event.id.to_hex();
+                let current_turn_id = pool
+                    .channel_turn_id(channel_id, membership_generation)
+                    .map(str::to_owned);
+                if native_steer_preparation_is_stale(
+                    &queue,
+                    &removed_channels,
+                    &membership_generations,
+                    channel_id,
+                    &event_id,
+                    membership_generation,
+                    &originating_turn_id,
+                    current_turn_id.as_deref(),
+                ) {
+                    tracing::debug!(
+                        %channel_id,
+                        %event_id,
+                        "discarding native steer prepared after its reservation became stale"
+                    );
+                    // If only the owning turn changed, the reserved edit still
+                    // needs normal delivery. Release it and steer/cancel the
+                    // replacement turn rather than either injecting it into
+                    // that turn or leaving it orphaned in the side table.
+                    if !removed_channels.contains(&channel_id)
+                        && !native_steer_ack_is_stale(
+                            &membership_generations,
+                            channel_id,
+                            membership_generation,
+                        )
+                        && queue.has_native_steer_reservation(channel_id, &event_id)
+                    {
+                        release_prepared_native_steer_fallback(
+                            &mut pool,
+                            &mut queue,
+                            channel_id,
+                            &event_id,
+                            &ctx,
+                            &membership_generations,
+                            &typing_tx,
+                            &mut last_activity,
+                            &mut typing_channels,
+                        );
+                    }
+                    continue;
+                }
+                if !try_native_steer(
+                    &mut pool,
+                    &mut queue,
+                    channel_id,
+                    event.clone(),
+                    prompt_blocks,
+                    membership_generation,
+                    &steer_ack_tx,
+                ) {
+                    release_prepared_native_steer_fallback(
+                        &mut pool,
+                        &mut queue,
+                        channel_id,
+                        &event.id.to_hex(),
+                        &ctx,
+                        &membership_generations,
+                        &typing_tx,
+                        &mut last_activity,
+                        &mut typing_channels,
+                    );
+                }
+            }
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                reaction_event_id,
+                membership_generation,
                 ack,
             })) => {
+                if native_steer_ack_is_stale(
+                    &membership_generations,
+                    channel_id,
+                    membership_generation,
+                ) {
+                    tracing::debug!(
+                        %channel_id,
+                        %event_id,
+                        membership_generation,
+                        "discarding native steer acknowledgement from stale membership generation"
+                    );
+                    continue;
+                }
                 // Mid-turn steer attempt resolved (either transport:
                 // `_goose/unstable/session/steer` or `_session/steering`).
                 // Locked semantics (Eva + Max + Perci, unanimous on Option X):
@@ -3374,6 +3720,11 @@ async fn tokio_main() -> Result<()> {
                 }
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
+                    let rest = ctx.rest_client.clone();
+                    tokio::spawn(async move {
+                        pool::reaction_remove(&rest, &reaction_event_id, "👀").await;
+                        pool::reaction_remove(&rest, &reaction_event_id, "💬").await;
+                    });
                 }
                 if release_withheld {
                     queue.release_native_steer(channel_id, &event_id);
@@ -3384,7 +3735,12 @@ async fn tokio_main() -> Result<()> {
                     // front of `queues[channel_id]`, so the cancel
                     // will pick it up as part of the merged batch and
                     // re-prompt the agent.
-                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                    signal_current_membership_task(
+                        &mut pool,
+                        channel_id,
+                        membership_generation,
+                        ControlSignal::Steer,
+                    );
                 }
                 // After releasing a withheld event, give dispatch a chance
                 // to re-flush. If the prompt is still in flight, the
@@ -3393,9 +3749,14 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
-                {
+                for (channel_id, thread_tags) in dispatch_pending(
+                    &mut pool,
+                    &mut queue,
+                    &ctx,
+                    &membership_generations,
+                    &typing_tx,
+                    &mut last_activity,
+                ) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -3425,6 +3786,7 @@ async fn tokio_main() -> Result<()> {
                             &mut pool,
                             &mut queue,
                             &ctx,
+                            &membership_generations,
                             &typing_tx,
                             &mut last_activity,
                         ) {
@@ -3715,14 +4077,41 @@ fn signal_in_flight_task(
     channel_id: uuid::Uuid,
     mode: ControlSignal,
 ) -> bool {
-    let entry = pool
-        .task_map_mut()
-        .values_mut()
-        .find(|m| m.channel_id == Some(channel_id));
+    signal_in_flight_task_matching(pool, channel_id, None, mode)
+}
+
+/// Send a control signal only to a task dispatched in `membership_generation`.
+/// A task left running across remove/re-add belongs to an earlier generation
+/// and must not be cancelled or steered by work from the new membership epoch.
+fn signal_current_membership_task(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    membership_generation: u64,
+    mode: ControlSignal,
+) -> bool {
+    signal_in_flight_task_matching(pool, channel_id, Some(membership_generation), mode)
+}
+
+fn signal_in_flight_task_matching(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    membership_generation: Option<u64>,
+    mode: ControlSignal,
+) -> bool {
+    let entry = pool.task_map_mut().values_mut().find(|meta| {
+        meta.channel_id == Some(channel_id)
+            && membership_generation
+                .is_none_or(|generation| meta.membership_generation == Some(generation))
+    });
 
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
-            tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
+            tracing::info!(
+                channel = %channel_id,
+                membership_generation,
+                ?mode,
+                "control signal sent to in-flight task"
+            );
             let _ = tx.send(mode);
             return true;
         }
@@ -3743,8 +4132,8 @@ fn signal_in_flight_task(
 /// Returns `true` if the native attempt was accepted by the read loop
 /// (capacity-1 mpsc `try_send` succeeded, event withheld synchronously,
 /// ack watcher spawned). On `true` the caller MUST NOT issue the
-/// universal cancel+merge `ControlSignal::Steer` fallback — the watcher
-/// will issue it from the ack arm if the native attempt fails.
+/// universal cancel+merge fallback. If the native attempt fails, the watcher
+/// issues that fallback only to a task from the same membership generation.
 ///
 /// Returns `false` if `pool.send_steer` failed (no in-flight task,
 /// `steer_tx` already full from a prior in-flight steer, or read loop
@@ -3754,64 +4143,39 @@ fn signal_in_flight_task(
 ///
 /// The withheld event is NOT released here on `false` because no withhold
 /// was established: `mark_native_steer_pending` only runs on `Ok(())`.
+fn native_steer_reaction_target(event: &nostr::Event) -> String {
+    queue::reaction_target_id(event)
+}
+
 fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     channel_id: uuid::Uuid,
     event: nostr::Event,
-    prompt_tag: String,
+    prompt_blocks: Vec<String>,
+    membership_generation: u64,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
-    // Build the steer body: framing strings come from
-    // `queue::native_steer_framing()` (Eva's drift-proof requirement —
-    // native and cancel+merge fallback share these so the agent gets the
-    // same orientation regardless of transport). The single event block
-    // is rendered by `queue::format_event_block`, the same function
-    // `queue::format_prompt` uses internally for `[Buzz event: …]`
-    // sections, so the rendering also cannot drift.
-    //
-    // Passing `None` for `channel_info` / `profile_lookup` is intentional:
-    // native steer is a *delta* into a live turn — the agent already saw
-    // channel context and the actor's profile in the original prompt,
-    // duplicating it here would defeat the point of non-cancelling
-    // steering (which is to inject only what's new).
-    let (header, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
-    let be = queue::BatchEvent {
-        event,
-        prompt_tag: prompt_tag.clone(),
-        received_at: std::time::Instant::now(),
-    };
-    let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+    let reaction_event_id = native_steer_reaction_target(&event);
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
-        prompt_blocks: vec![body],
+        prompt_blocks,
         ack_tx,
     };
 
-    match pool.send_steer(channel_id, request) {
+    match pool.send_steer(channel_id, membership_generation, request) {
         Ok(()) => {
-            // Withhold the queued event synchronously BEFORE spawning
-            // the watcher: this closes the race where `mark_complete`
-            // clears `in_flight_channels` and a stray `flush_next` could
-            // re-deliver the event via normal dispatch. See
-            // `EventQueue::mark_native_steer_pending` docs at queue.rs:606.
+            // Ordinary events are withheld after send. Edit preparation reserves
+            // its event before leaving the main loop, so this is idempotent.
             let withheld = queue.mark_native_steer_pending(channel_id, &event_id_hex);
+            queue.mark_native_steer_sent(channel_id, &event_id_hex);
             if !withheld {
-                // Race: the event was already drained out of the queue
-                // before we got here (e.g. a concurrent flush picked it
-                // up). The steer is on the wire; if it succeeds the
-                // agent gets it via the native path AND normal
-                // dispatch — duplicate delivery is benign (agent gets
-                // the same message twice). Log so this is visible if it
-                // ever happens in production.
-                tracing::warn!(
+                tracing::debug!(
                     channel = %channel_id,
                     event_id = %event_id_hex,
-                    "native steer accepted by read loop but event was not in queue to withhold \
-                     — possible duplicate delivery if steer succeeds"
+                    "native steer event was already reserved during async preparation"
                 );
             }
             let ack_tx_clone = steer_ack_tx.clone();
@@ -3821,6 +4185,8 @@ fn try_native_steer(
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    reaction_event_id,
+                    membership_generation,
                     ack,
                 });
             });
@@ -3834,6 +4200,45 @@ fn try_native_steer(
             );
             false
         }
+    }
+}
+
+/// Recover a prepared edit whose native steer could not be accepted. The edit
+/// was withheld before asynchronous preparation, so release it, request the
+/// universal cancel+merge fallback, and immediately try dispatch in case the
+/// original turn already ended.
+#[allow(clippy::too_many_arguments)]
+fn release_prepared_native_steer_fallback(
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    channel_id: Uuid,
+    event_id: &str,
+    ctx: &Arc<PromptContext>,
+    membership_generations: &HashMap<Uuid, u64>,
+    typing_tx: &mpsc::UnboundedSender<(Uuid, String, ThreadTags)>,
+    last_activity: &mut tokio::time::Instant,
+    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+) {
+    queue.release_native_steer(channel_id, event_id);
+    let membership_generation = membership_generations
+        .get(&channel_id)
+        .copied()
+        .unwrap_or(0);
+    signal_current_membership_task(
+        pool,
+        channel_id,
+        membership_generation,
+        ControlSignal::Steer,
+    );
+    for (channel_id, thread_tags) in dispatch_pending(
+        pool,
+        queue,
+        ctx,
+        membership_generations,
+        typing_tx,
+        last_activity,
+    ) {
+        typing_channels.insert(channel_id, thread_tags);
     }
 }
 
@@ -3860,6 +4265,7 @@ fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
+    membership_generations: &HashMap<Uuid, u64>,
     typing_tx: &mpsc::UnboundedSender<(Uuid, String, ThreadTags)>,
     last_activity: &mut tokio::time::Instant,
 ) -> Vec<(Uuid, ThreadTags)> {
@@ -3936,6 +4342,12 @@ fn dispatch_pending(
             pool::TaskMeta {
                 agent_index,
                 channel_id: Some(channel_id),
+                membership_generation: Some(
+                    membership_generations
+                        .get(&channel_id)
+                        .copied()
+                        .unwrap_or(0),
+                ),
                 turn_id,
                 recoverable_batch,
                 control_tx: Some(control_tx),
@@ -3989,17 +4401,23 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
 /// dead-letter path so neither duplicates the tokio::spawn block.
+fn failure_notice_thread_tags(batch: &FlushBatch) -> ThreadTags {
+    batch.failure_thread_tags.clone().unwrap_or_else(|| {
+        batch
+            .events
+            .last()
+            .map(|be| queue::parse_thread_tags(&be.event))
+            .unwrap_or_default()
+    })
+}
+
 fn spawn_failure_notice(
     rest_client: Option<&relay::RestClient>,
     batch: &FlushBatch,
     content: String,
 ) {
     if let Some(rest) = rest_client {
-        let thread_tags = batch
-            .events
-            .last()
-            .map(|be| queue::parse_thread_tags(&be.event))
-            .unwrap_or_default();
+        let thread_tags = failure_notice_thread_tags(batch);
         let rest = rest.clone();
         let channel_id = batch.channel_id;
         tokio::spawn(async move {
@@ -4016,6 +4434,7 @@ fn handle_prompt_result(
     mut result: PromptResult,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
+    membership_generations: &HashMap<Uuid, u64>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
@@ -4024,15 +4443,29 @@ fn handle_prompt_result(
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
-    let successful_steer_deliveries = pool
+    let task_meta = pool
         .task_map()
         .values()
-        .find(|meta| meta.agent_index == agent_index)
+        .find(|meta| meta.agent_index == agent_index);
+    let successful_steer_deliveries = task_meta
         .map(|meta| meta.successful_steer_deliveries.clone())
         .unwrap_or_default();
+    let task_membership_is_current = task_meta
+        .and_then(|meta| meta.channel_id.zip(meta.membership_generation))
+        .is_none_or(|(channel_id, generation)| {
+            membership_generations
+                .get(&channel_id)
+                .copied()
+                .unwrap_or(0)
+                == generation
+        });
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
+    // Membership removal records invalidation against checked-out ownership,
+    // not current membership. Apply it before acknowledging successful steer
+    // delivery so remove/re-add cannot resurrect the earlier epoch's session.
+    pool.invalidate_checked_out_sessions(&mut result.agent);
     if let PromptSource::Channel(channel_id) = &result.source {
         // The task may have invalidated this session before returning. Never
         // resurrect delivery state for a dead session; its replacement must
@@ -4064,9 +4497,10 @@ fn handle_prompt_result(
     // every retry starts at attempt 1 — defeating exponential backoff and
     // dead-letter protection.
     if let Some(batch) = result.batch.take() {
-        // Don't requeue batches for channels the agent was removed from —
-        // those events are stale and should be silently dropped.
-        if !removed_channels.contains(&batch.channel_id) {
+        // Don't requeue batches from a removed membership generation. Re-add
+        // clears the current removal marker, but the task generation remains
+        // stale and its pre-removal work must not cross into the new epoch.
+        if !removed_channels.contains(&batch.channel_id) && task_membership_is_current {
             if matches!(
                 result.outcome,
                 PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
@@ -4160,9 +4594,10 @@ fn handle_prompt_result(
             tracing::debug!(
                 channel_id = %batch.channel_id,
                 events = batch.events.len(),
-                "dropping failed batch for removed channel"
+                task_membership_is_current,
+                "dropping failed batch from removed or stale membership generation"
             );
-            hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
+            hard_timeout_fate_suffix = Some(" — batch dropped (channel membership changed)");
         }
     }
 
@@ -4405,6 +4840,7 @@ fn recover_panicked_agent(
     join_error: tokio::task::JoinError,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
+    membership_generations: &HashMap<Uuid, u64>,
     typing_channels: &mut HashMap<Uuid, ThreadTags>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
@@ -4417,11 +4853,17 @@ fn recover_panicked_agent(
         return;
     };
     let i = meta.agent_index;
+    // The panicked ownership can never return its `OwnedAgent`; do not let its
+    // pending membership invalidations leak into a fresh process reusing slot i.
+    pool.discard_checked_out_session_invalidations(i);
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
-            if !removed_channels.contains(&ch) {
+            if !removed_channels.contains(&ch)
+                && meta.membership_generation
+                    == Some(membership_generations.get(&ch).copied().unwrap_or(0))
+            {
                 // Dead-letter on exhaustion is logged inside requeue(); a
                 // panic path has no outcome to report, so no notice here.
                 let _ = queue.requeue(batch);
@@ -4503,6 +4945,7 @@ fn drain_ready_join_results(
     config: &Config,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
+    membership_generations: &HashMap<Uuid, u64>,
     typing_channels: &mut HashMap<Uuid, ThreadTags>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
@@ -4519,6 +4962,7 @@ fn drain_ready_join_results(
                 join_error,
                 heartbeat_in_flight,
                 removed_channels,
+                membership_generations,
                 typing_channels,
                 crash_history,
                 respawn_tx,
@@ -4575,6 +5019,7 @@ fn dispatch_heartbeat(
         pool::TaskMeta {
             agent_index,
             channel_id: None,
+            membership_generation: None,
             turn_id,
             recoverable_batch: None,
             control_tx: None,
@@ -5372,6 +5817,7 @@ mod owner_control_command_tests {
             pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                membership_generation: Some(0),
                 turn_id: turn_id.into(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -5400,6 +5846,69 @@ mod owner_control_command_tests {
     }
 
     #[tokio::test]
+    async fn post_readd_signal_does_not_reach_prior_membership_task() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let old_generation = 4;
+        let current_generation = 5;
+        let (old_control_tx, mut old_control_rx) = tokio::sync::oneshot::channel();
+
+        let old_abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            old_abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                membership_generation: Some(old_generation),
+                turn_id: "pre-removal-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(old_control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(!signal_current_membership_task(
+            &mut pool,
+            channel_id,
+            current_generation,
+            ControlSignal::Steer,
+        ));
+        assert!(matches!(
+            old_control_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let (current_control_tx, current_control_rx) = tokio::sync::oneshot::channel();
+        let current_abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            current_abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 1,
+                channel_id: Some(channel_id),
+                membership_generation: Some(current_generation),
+                turn_id: "post-readd-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(current_control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(signal_current_membership_task(
+            &mut pool,
+            channel_id,
+            current_generation,
+            ControlSignal::Steer,
+        ));
+        assert_eq!(current_control_rx.await.unwrap(), ControlSignal::Steer);
+        assert!(matches!(
+            old_control_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
     async fn signal_in_flight_task_sends_rotate_once() {
         let mut pool = AgentPool::from_slots(vec![]);
         let channel_id = Uuid::new_v4();
@@ -5412,6 +5921,7 @@ mod owner_control_command_tests {
             pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
@@ -7538,6 +8048,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                membership_generation: None,
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7577,6 +8088,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7610,6 +8122,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                membership_generation: None,
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7649,6 +8162,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7725,6 +8239,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                membership_generation: None,
                 turn_id: "test-turn-id".into(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7763,6 +8278,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7790,6 +8306,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7826,6 +8343,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7867,6 +8385,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                membership_generation: None,
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -7899,6 +8418,7 @@ mod error_outcome_emission_tests {
             join_error,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut typing_channels,
             &mut crash_history,
             &respawn_tx,
@@ -7960,6 +8480,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    membership_generation: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -7993,6 +8514,7 @@ mod error_outcome_emission_tests {
                 result,
                 &mut heartbeat_in_flight,
                 &removed_channels,
+                &HashMap::new(),
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
@@ -8038,6 +8560,7 @@ mod error_outcome_emission_tests {
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
+                failure_thread_tags: None,
             }
         };
 
@@ -8052,6 +8575,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    membership_generation: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -8084,6 +8608,7 @@ mod error_outcome_emission_tests {
                 result,
                 &mut heartbeat_in_flight,
                 &removed_channels,
+                &HashMap::new(),
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
@@ -8145,6 +8670,7 @@ mod error_outcome_emission_tests {
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
+                failure_thread_tags: None,
             }
         };
 
@@ -8158,6 +8684,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    membership_generation: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
@@ -8190,6 +8717,7 @@ mod error_outcome_emission_tests {
                 result,
                 &mut heartbeat_in_flight,
                 &removed_channels,
+                &HashMap::new(),
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
@@ -8235,6 +8763,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8265,6 +8794,7 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let result = PromptResult {
             agent,
@@ -8282,6 +8812,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8330,6 +8861,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8359,6 +8891,7 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let result = PromptResult {
             agent,
@@ -8376,6 +8909,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8437,6 +8971,7 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: Some(CancelReason::Steer),
+            failure_thread_tags: None,
         };
 
         let agent = dummy_agent(0).await;
@@ -8447,6 +8982,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8492,6 +9028,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8587,6 +9124,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8625,6 +9163,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8760,6 +9299,7 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         let auth_error = acp::AcpError::AgentError {
@@ -8776,6 +9316,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8808,6 +9349,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8846,6 +9388,7 @@ mod error_outcome_emission_tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // Usage-credits error — AgentError but NOT an auth error.
@@ -8862,6 +9405,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                membership_generation: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
@@ -8894,6 +9438,7 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -9161,5 +9706,283 @@ mod observer_payload_trim_tests {
         assert!(leaf.starts_with('…'));
         assert!(leaf.ends_with('…'));
         assert!(leaf.contains("[elided"));
+    }
+}
+
+#[cfg(test)]
+mod native_edit_membership_lifecycle_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    fn edit_event(target: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .tags([nostr::Tag::parse(["e", target]).expect("target tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("signed edit")
+    }
+
+    async fn dummy_agent(index: usize) -> OwnedAgent {
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[], false)
+                .await
+                .expect("spawn inert agent"),
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "unknown".into(),
+            protocol_version: 1,
+            goose_system_prompt_supported: None,
+        }
+    }
+
+    fn prompt_context() -> Arc<PromptContext> {
+        let keys = Keys::generate();
+        let rest_client = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://127.0.0.1:0".into(),
+            keys: keys.clone(),
+            auth_tag_json: None,
+        };
+        Arc::new(PromptContext {
+            mcp_servers: vec![],
+            initial_message: None,
+            idle_timeout: Duration::from_secs(60),
+            max_turn_duration: Duration::from_secs(120),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: DedupMode::Queue,
+            system_prompt: None,
+            session_title: None,
+            team_instructions: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: ".".into(),
+            channel_info: pool::ChannelInfoResolver::new(HashMap::new(), rest_client.clone()),
+            rest_client,
+            context_message_limit: 0,
+            max_turns_per_session: 0,
+            permission_mode: config::PermissionMode::Default,
+            agent_keys: keys,
+            agent_owner_pubkey: None,
+            memory_enabled: false,
+            harness_name: "goose".into(),
+            relay_url: "ws://127.0.0.1:0".into(),
+        })
+    }
+
+    #[test]
+    fn native_steer_edit_cleans_reactions_on_original_target() {
+        let target = "ab".repeat(32);
+        assert_eq!(native_steer_reaction_target(&edit_event(&target)), target);
+    }
+
+    #[test]
+    fn failure_notice_prefers_resolved_edit_thread_routing() {
+        let channel_id = Uuid::new_v4();
+        let root = "cd".repeat(32);
+        let parent = "ef".repeat(32);
+        let resolved = ThreadTags {
+            root_event_id: Some(root.clone()),
+            parent_event_id: Some(parent.clone()),
+            mentioned_pubkeys: vec![],
+        };
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![queue::BatchEvent {
+                event: edit_event(&"ab".repeat(32)),
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+            failure_thread_tags: Some(resolved),
+        };
+
+        let actual = failure_notice_thread_tags(&batch);
+        assert_eq!(actual.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(actual.parent_event_id.as_deref(), Some(parent.as_str()));
+    }
+
+    #[tokio::test]
+    async fn prepared_native_steer_rejection_releases_and_dispatches_immediately() {
+        let channel_id = Uuid::new_v4();
+        let event = edit_event(&"ab".repeat(32));
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "@mention".into(),
+        }));
+        assert!(queue.mark_native_steer_pending(channel_id, &event_id));
+
+        // The original turn completed while edit enrichment ran. The native
+        // transport rejection must synchronously release and re-dispatch the
+        // edit; no maintenance tick may be needed to observe the work.
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut last_activity = tokio::time::Instant::now();
+        let mut typing_channels = HashMap::new();
+        let (typing_tx, _typing_rx) = mpsc::unbounded_channel();
+        release_prepared_native_steer_fallback(
+            &mut pool,
+            &mut queue,
+            channel_id,
+            &event_id,
+            &prompt_context(),
+            &HashMap::new(),
+            &typing_tx,
+            &mut last_activity,
+            &mut typing_channels,
+        );
+
+        assert!(
+            !typing_channels.contains_key(&channel_id),
+            "edit typing waits for the prompt task's resolved routing scope"
+        );
+        assert_eq!(
+            pool.task_map().len(),
+            1,
+            "released edit dispatched exactly once"
+        );
+        assert!(
+            queue.flush_next().is_none(),
+            "dispatch consumed the released edit"
+        );
+    }
+
+    #[test]
+    fn unreservable_edit_leaves_universal_fallback_work_queued() {
+        let channel_id = Uuid::new_v4();
+        let event = edit_event(&"ab".repeat(32));
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let generations = HashMap::new();
+
+        assert_eq!(
+            reserve_native_edit_preparation(&mut queue, &generations, channel_id, &event_id),
+            None,
+            "a missing queue entry must not panic or claim a native attempt"
+        );
+        assert!(queue.flush_next().is_none());
+    }
+
+    #[test]
+    fn sent_steer_ack_is_discarded_across_remove_then_readd() {
+        let channel_id = Uuid::new_v4();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut generations = HashMap::new();
+        let sent_generation = generations.get(&channel_id).copied().unwrap_or(0);
+        let mut removed_channels = HashSet::new();
+
+        remove_channel_for_membership_change(
+            &mut queue,
+            &mut removed_channels,
+            &mut generations,
+            channel_id,
+        );
+        readd_channel_after_membership_change(&mut removed_channels, channel_id);
+
+        assert!(native_steer_ack_is_stale(
+            &generations,
+            channel_id,
+            sent_generation
+        ));
+        assert!(
+            !removed_channels.contains(&channel_id),
+            "staleness survives re-add for both successful and failed late acks"
+        );
+    }
+
+    #[test]
+    fn prepared_edit_is_stale_after_replacement_turn_starts() {
+        let channel_id = Uuid::new_v4();
+        let event = edit_event(&"ab".repeat(32));
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "@mention".into(),
+        }));
+        let generations = HashMap::new();
+        let generation =
+            reserve_native_edit_preparation(&mut queue, &generations, channel_id, &event_id)
+                .expect("edit reservation");
+
+        assert!(native_steer_preparation_is_stale(
+            &queue,
+            &HashSet::new(),
+            &generations,
+            channel_id,
+            &event_id,
+            generation,
+            "originating-turn",
+            Some("replacement-turn"),
+        ));
+        assert!(
+            queue.has_native_steer_reservation(channel_id, &event_id),
+            "replacement-turn staleness preserves the reservation for fallback delivery"
+        );
+    }
+
+    #[test]
+    fn late_prepared_edit_is_discarded_across_remove_then_readd() {
+        let channel_id = Uuid::new_v4();
+        let event = edit_event(&"ab".repeat(32));
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        assert!(queue.push(QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "@mention".into(),
+        }));
+
+        // This is the production reservation/capture boundary used before the
+        // detached REST preparation task is spawned.
+        let mut generations = HashMap::new();
+        let prepared_generation =
+            reserve_native_edit_preparation(&mut queue, &generations, channel_id, &event_id)
+                .expect("accepted edit is reserved before preparation");
+
+        // These are the production removal and re-add transitions. Removal
+        // drains the reservation and advances generation; re-add restores
+        // access without revalidating old prepared work.
+        let mut removed_channels = HashSet::new();
+        let drained = remove_channel_for_membership_change(
+            &mut queue,
+            &mut removed_channels,
+            &mut generations,
+            channel_id,
+        );
+        assert_eq!(
+            drained,
+            vec!["ab".repeat(32)],
+            "removal returns the reserved edit's visible reaction target"
+        );
+        readd_channel_after_membership_change(&mut removed_channels, channel_id);
+
+        // This is the completion-arm guard. A false result would enter
+        // try_native_steer or its release/fallback path; stale completion must
+        // instead be discarded, leaving neither queued nor withheld work to
+        // steer, release, or resurrect.
+        assert!(native_steer_preparation_is_stale(
+            &queue,
+            &removed_channels,
+            &generations,
+            channel_id,
+            &event_id,
+            prepared_generation,
+            "originating-turn",
+            Some("originating-turn"),
+        ));
+        queue.release_native_steer(channel_id, &event_id);
+        assert!(queue.flush_next().is_none());
     }
 }

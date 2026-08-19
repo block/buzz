@@ -60,6 +60,9 @@ pub struct SuccessfulSteerDelivery {
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Membership generation in which this channel task was dispatched.
+    /// Heartbeat tasks have no channel generation.
+    pub membership_generation: Option<u64>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -299,6 +302,10 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// Channels whose sessions must be invalidated when a currently checked-out
+    /// agent returns. Unlike current membership, this survives a remove/re-add
+    /// race so a session from the earlier membership epoch cannot be reused.
+    checked_out_session_invalidations: HashMap<usize, HashSet<Uuid>>,
 }
 
 /// Result returned by a completed prompt task.
@@ -659,6 +666,7 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            checked_out_session_invalidations: HashMap::new(),
         }
     }
 
@@ -741,8 +749,60 @@ impl AgentPool {
             .any(|meta| meta.channel_id == Some(channel_id) && meta.turn_id == turn_id)
     }
 
+    /// Return whether the current-generation channel task can accept a native
+    /// steer now.
+    ///
+    /// Membership generation is part of task ownership: after remove/re-add,
+    /// a still-running task from the prior generation must not accept new work.
+    ///
+    /// This is a main-loop preflight for edit enrichment: avoid withholding an
+    /// edit and performing REST work when the task has no steer transport or
+    /// its capacity-one request slot is already occupied. Availability can
+    /// still change while enrichment runs, so callers must retain the normal
+    /// send-time fallback.
+    pub fn native_steer_available(&self, channel_id: Uuid, membership_generation: u64) -> bool {
+        self.native_steer_turn_id(channel_id, membership_generation)
+            .is_some()
+    }
+
+    /// Return the exact turn currently accepting native steers for this
+    /// channel membership. Async preparation captures this identity so a late
+    /// completion cannot cross into a replacement turn in the same generation.
+    pub fn native_steer_turn_id(
+        &self,
+        channel_id: Uuid,
+        membership_generation: u64,
+    ) -> Option<String> {
+        self.task_map
+            .values()
+            .find(|meta| {
+                meta.channel_id == Some(channel_id)
+                    && meta.membership_generation == Some(membership_generation)
+            })
+            .filter(|meta| {
+                meta.control_tx.is_some()
+                    && meta
+                        .steer_tx
+                        .as_ref()
+                        .is_some_and(|tx| !tx.is_closed() && tx.capacity() > 0)
+            })
+            .map(|meta| meta.turn_id.clone())
+    }
+
+    /// Return the identity of the task currently owning this channel epoch.
+    pub fn channel_turn_id(&self, channel_id: Uuid, membership_generation: u64) -> Option<&str> {
+        self.task_map
+            .values()
+            .find(|meta| {
+                meta.channel_id == Some(channel_id)
+                    && meta.membership_generation == Some(membership_generation)
+            })
+            .map(|meta| meta.turn_id.as_str())
+    }
+
     /// Try to send a goose-native steer request to the in-flight task for
-    /// `channel_id`.
+    /// `channel_id` in `membership_generation`. A task from an earlier
+    /// remove/re-add generation is treated as completed for this request.
     ///
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
@@ -766,13 +826,22 @@ impl AgentPool {
     pub fn send_steer(
         &mut self,
         channel_id: Uuid,
+        membership_generation: u64,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|m| {
+                m.channel_id == Some(channel_id)
+                    && m.membership_generation == Some(membership_generation)
+            })
             .ok_or(SteerError::PromptCompleted)?;
+        if meta.control_tx.is_none() {
+            return Err(SteerError::Transport(
+                "turn cancellation already committed".into(),
+            ));
+        }
         let tx = meta
             .steer_tx
             .as_ref()
@@ -867,7 +936,29 @@ impl AgentPool {
                 }
             }
         }
+        for meta in self.task_map.values() {
+            self.checked_out_session_invalidations
+                .entry(meta.agent_index)
+                .or_default()
+                .insert(channel_id);
+        }
         count
+    }
+
+    /// Discard membership invalidations belonging to an agent ownership that
+    /// terminated without returning its `OwnedAgent` (for example, a panic).
+    pub fn discard_checked_out_session_invalidations(&mut self, agent_index: usize) {
+        self.checked_out_session_invalidations.remove(&agent_index);
+    }
+
+    /// Apply and consume membership-epoch invalidations recorded while this
+    /// agent was checked out.
+    pub fn invalidate_checked_out_sessions(&mut self, agent: &mut OwnedAgent) {
+        if let Some(channels) = self.checked_out_session_invalidations.remove(&agent.index) {
+            for channel_id in channels {
+                agent.state.invalidate_channel(&channel_id);
+            }
+        }
     }
 
     /// Idle-path model switch: set `desired_model` on the idle agent for
@@ -1777,7 +1868,7 @@ fn send_prompt_result(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_task(
     mut agent: OwnedAgent,
-    batch: Option<FlushBatch>,
+    mut batch: Option<FlushBatch>,
     prompt_text: Option<String>,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
@@ -1868,6 +1959,14 @@ pub async fn run_prompt_task(
         })
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    // Establish the edit target as the failure-routing floor before any
+    // fallible session setup. Once the original event is resolved below this
+    // is refined to its visible thread, but session/new and initial-message
+    // failures must never fall back to the invisible edit event or channel root.
+    if let Some(ref mut batch) = batch {
+        initialize_edit_failure_routing(batch);
+    }
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -2347,7 +2446,7 @@ pub async fn run_prompt_task(
             )
         };
         vec![text]
-    } else if let Some(ref b) = batch {
+    } else if let Some(ref mut b) = batch {
         // Resolve edit routing once inside the prompt task. This keeps the
         // network lookup off the shared relay loop and gives typing, prompt,
         // reply, reaction, and failure routing one authority.
@@ -2361,6 +2460,10 @@ pub async fn run_prompt_task(
                 let _ = tx.send((b.channel_id, turn_id.clone(), scope));
             }
         }
+        b.failure_thread_tags = resolved_edit
+            .as_ref()
+            .map(crate::queue::ResolvedEdit::reply_thread_tags)
+            .or_else(|| b.failure_thread_tags.clone());
 
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
@@ -3350,6 +3453,18 @@ fn typing_scope_for_event(
         .unwrap_or_else(|| crate::queue::parse_thread_tags(event))
 }
 
+/// Establish failure routing for an edit batch without network access.
+/// Resolution may later refine this target fallback to the original thread.
+fn initialize_edit_failure_routing(batch: &mut FlushBatch) {
+    batch.failure_thread_tags = batch.events.last().and_then(|event| {
+        crate::queue::edit_target_id(&event.event).map(|target_event_id| crate::queue::ThreadTags {
+            root_event_id: Some(target_event_id.clone()),
+            parent_event_id: Some(target_event_id),
+            mentioned_pubkeys: Vec::new(),
+        })
+    });
+}
+
 /// Resolve a kind:40003 edit through its original event for reply routing.
 /// Failure deliberately falls back to the edit target id in `format_prompt`.
 pub(crate) async fn resolve_edit_routing(
@@ -3389,6 +3504,91 @@ pub(crate) async fn resolve_edit_routing(
         target_event_id,
         target_thread_tags: crate::queue::parse_thread_tags(&original),
     })
+}
+
+pub(crate) fn format_native_steer_prompt_sync(
+    channel_id: Uuid,
+    event: &nostr::Event,
+    prompt_tag: &str,
+) -> Vec<String> {
+    let (header, closing) = crate::queue::native_steer_framing();
+    let event = crate::queue::BatchEvent {
+        event: event.clone(),
+        prompt_tag: prompt_tag.to_string(),
+        received_at: std::time::Instant::now(),
+    };
+    vec![format!(
+        "{header}\n\n[Buzz event: {prompt_tag}]\n{}\n\n{closing}",
+        crate::queue::format_event_block(channel_id, None, &event, None)
+    )]
+}
+
+/// Resolve an edit-aware native-steer delta through the same routing and
+/// context boundary as ordinary batch dispatch. This keeps successful native
+/// steering from exposing the invisible kind:40003 event as a reply anchor.
+pub(crate) async fn format_native_steer_prompt(
+    channel_id: Uuid,
+    event: nostr::Event,
+    prompt_tag: String,
+    ctx: &PromptContext,
+) -> Vec<String> {
+    let batch = FlushBatch {
+        channel_id,
+        events: vec![crate::queue::BatchEvent {
+            event,
+            prompt_tag,
+            received_at: std::time::Instant::now(),
+        }],
+        cancelled_events: Vec::new(),
+        cancel_reason: None,
+        failure_thread_tags: None,
+    };
+    if crate::queue::edit_target_id(&batch.events[0].event).is_none() {
+        let (header, closing) = crate::queue::native_steer_framing();
+        let event = &batch.events[0];
+        return vec![format!(
+            "{header}\n\n[Buzz event: {}]\n{}\n\n{closing}",
+            event.prompt_tag,
+            crate::queue::format_event_block(channel_id, None, event, None)
+        )];
+    }
+    let channel_info = ctx.channel_info.resolve(channel_id).await;
+    let resolved_edit = resolve_edit_routing(&batch.events[0].event, &ctx.rest_client).await;
+    let conversation_context = if ctx.context_message_limit > 0 {
+        match resolved_edit
+            .as_ref()
+            .and_then(|edit| edit.target_thread_tags.root_event_id.as_deref())
+        {
+            Some(root_id) => {
+                fetch_thread_context(
+                    channel_id,
+                    root_id,
+                    ctx.context_message_limit,
+                    ctx.agent_keys.public_key(),
+                    &ctx.rest_client,
+                )
+                .await
+            }
+            None => fetch_conversation_context(&batch, &channel_info, ctx).await,
+        }
+    } else {
+        None
+    };
+    let profile_lookup =
+        fetch_prompt_profile_lookup(&batch, conversation_context.as_ref(), &ctx.rest_client).await;
+
+    crate::queue::format_native_steer_prompt(
+        &batch,
+        &crate::queue::FormatPromptArgs {
+            channel_info: channel_info.as_ref(),
+            conversation_context: conversation_context.as_ref(),
+            profile_lookup: profile_lookup.as_ref(),
+            resolved_edit: resolved_edit.as_ref(),
+            has_system_prompt_support: true,
+            standing_context_sent: true,
+            ..Default::default()
+        },
+    )
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.
@@ -4859,6 +5059,105 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn native_steer_rejects_task_from_prior_membership_generation() {
+        let channel_id = Uuid::new_v4();
+        let old_generation = 4;
+        let current_generation = 5;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        let (control_tx, _control_rx) = tokio::sync::oneshot::channel();
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                membership_generation: Some(old_generation),
+                turn_id: "pre-removal-turn".into(),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+                steer_tx: Some(steer_tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(pool.native_steer_available(channel_id, old_generation));
+        assert!(!pool.native_steer_available(channel_id, current_generation));
+
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+        let request = SteerRequest {
+            prompt_blocks: vec!["post-readd work".into()],
+            ack_tx,
+        };
+        assert!(matches!(
+            pool.send_steer(channel_id, current_generation, request),
+            Err(SteerError::PromptCompleted)
+        ));
+        assert!(steer_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn native_steer_rejects_task_after_cancellation_is_committed() {
+        let channel_id = Uuid::new_v4();
+        let generation = 2;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                membership_generation: Some(generation),
+                turn_id: "cancelling-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: Some(steer_tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(!pool.native_steer_available(channel_id, generation));
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+        let request = SteerRequest {
+            prompt_blocks: vec!["late edit".into()],
+            ack_tx,
+        };
+        assert!(matches!(
+            pool.send_steer(channel_id, generation, request),
+            Err(SteerError::Transport(message)) if message.contains("cancellation")
+        ));
+        assert!(steer_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn edit_failure_routing_is_initialized_before_resolution() {
+        let target = "ab".repeat(32);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .tags([Tag::parse(["e", target.as_str()]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mut batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+            failure_thread_tags: None,
+        };
+
+        initialize_edit_failure_routing(&mut batch);
+
+        let routing = batch.failure_thread_tags.expect("edit target fallback");
+        assert_eq!(routing.root_event_id.as_deref(), Some(target.as_str()));
+        assert_eq!(routing.parent_event_id.as_deref(), Some(target.as_str()));
+    }
+
     #[test]
     fn public_session_forwards_channel_origin_to_mcp() {
         let channel_id = Uuid::new_v4();
@@ -5984,6 +6283,7 @@ mod tests {
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -6232,6 +6532,7 @@ done"#
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
+                failure_thread_tags: None,
             };
             run_prompt_task(
                 agent,
@@ -6319,6 +6620,7 @@ done"#
                 received_at: std::time::Instant::now(),
             }],
             cancel_reason: Some(crate::queue::CancelReason::Steer),
+            failure_thread_tags: None,
         };
         let next_batch = FlushBatch {
             channel_id,
@@ -6329,6 +6631,7 @@ done"#
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // Return both merged events as DM history. They must be excluded from
@@ -6485,6 +6788,7 @@ done"#
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         };
 
         // The local REST bridge returns the already-delivered steer as DM
@@ -6916,6 +7220,21 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     #[test]
+    fn panicked_ownership_invalidations_do_not_reach_reused_slot() {
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let channel_id = Uuid::new_v4();
+        pool.checked_out_session_invalidations
+            .entry(0)
+            .or_default()
+            .insert(channel_id);
+
+        // Panic recovery discards the dead ownership before a replacement can
+        // reuse slot 0.
+        pool.discard_checked_out_session_invalidations(0);
+        assert!(!pool.checked_out_session_invalidations.contains_key(&0));
+    }
+
+    #[test]
     fn test_removed_channels_cleaned_via_invalidate_channel() {
         // Simulates handle_prompt_result: channels removed while agent
         // was checked out should have both sessions and turn_counts stripped.
@@ -6978,6 +7297,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             }],
             cancelled_events: vec![],
             cancel_reason: None,
+            failure_thread_tags: None,
         }
     }
 
