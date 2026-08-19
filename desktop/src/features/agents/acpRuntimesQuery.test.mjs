@@ -7,10 +7,11 @@
  *      request. React Query's fetchQuery deduplicates on the shared query key,
  *      so a cheap fetch already running would otherwise satisfy the forced
  *      refresh with cached data and the forced { force: true } probe would
- *      never run. The fix cancels the in-flight query first; this test holds a
- *      cheap request pending, fires refreshAcpRuntimes(), resolves the cheap
- *      request, and asserts a distinct { force: true } native call happened and
- *      the shared cache holds the forced result.
+ *      never run. The fix runs the forced probe on a separate key, writes its
+ *      result into the shared cache, then cancels the in-flight cheap query.
+ *      This test holds a cheap request pending, fires refreshAcpRuntimes(),
+ *      resolves the cheap request, and asserts a distinct { force: true } native
+ *      call happened and the shared cache holds the forced result.
  *
  *  (2) useAcpRuntimesQueryForced({ forceOnMount: false }) must consume shared
  *      state without mounting its own force effect. Onboarding mounts the hook
