@@ -636,7 +636,8 @@ class BuzzContainerRuntime:
         """Persist why the snapshot failed; the caller only sees a bool."""
         try:
             (trial_dir / "buzz-evidence-error.txt").write_text(reason, encoding="utf-8")
-        except OSError:  # noqa: S110 — diagnostics only
+        except OSError:
+            # Diagnostics only — never mask the failure we are reporting.
             pass
 
     async def _collect_observed_channels(
