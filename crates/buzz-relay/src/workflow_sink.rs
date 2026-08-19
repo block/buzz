@@ -836,7 +836,8 @@ mod integration_tests {
             .await
             .expect("send reply");
 
-        // The reply event carries NIP-10 root+reply e-tags pointing at the root.
+        // A direct reply carries a single NIP-10 reply e-tag at the root (no
+        // root marker), matching SDK `thread_tags`.
         let reply_id_bytes = nostr::EventId::from_hex(&reply_hex)
             .expect("reply id")
             .as_bytes()

@@ -26,8 +26,10 @@ pub struct ThreadMarkers {
 impl ThreadMarkers {
     /// Collapse the `root`/`reply` markers into a reply's `(root_id, parent_id)`.
     ///
-    /// This is the single definition of the NIP-10 resolution rule that every
-    /// consumer (relay ingest, ACP anchoring, CLI reply threading) shares:
+    /// This is the single definition of the NIP-10 resolution rule shared by
+    /// the consumers that classify a reply's own root/parent (relay ingest, ACP
+    /// anchoring). The CLI does not use it — it derives a *parent's* ancestry
+    /// via `root.or(reply)`, which is a different question.
     ///
     /// - `root` + `reply` → `(root, reply)` — a nested reply names both.
     /// - `reply` only → `(reply, reply)` — a direct reply to the root; the
