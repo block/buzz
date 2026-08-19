@@ -30,6 +30,7 @@ import {
   PROJECT_EVENT_VISUALS,
   type ProjectEventKind,
 } from "./ProjectEventTypeIcon";
+import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
 
 type ActivityKind = ProjectEventKind;
 
@@ -87,7 +88,10 @@ type ProjectsActivityFeedProps = {
 const ACTIVITY_LIMIT = 30;
 
 function contentPreview(content: string) {
-  return markdownToPlainText(content).replace(/\s+/g, " ").trim().slice(0, 280);
+  return truncateByCharacters(
+    markdownToPlainText(content).replace(/\s+/g, " ").trim(),
+    280,
+  );
 }
 
 function buildActivityItems({

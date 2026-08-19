@@ -33,6 +33,10 @@ import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
 import { truncatePubkey } from "@/shared/lib/pubkey";
+import {
+  countCharacters,
+  truncateByCharacters,
+} from "@/shared/lib/truncateByCharacters";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
 type HuddleState = {
@@ -92,8 +96,8 @@ function customEmojiShortcode(emoji: string): string | null {
 
 function clampReactionName(name: string): string {
   const trimmed = name.trim();
-  if (trimmed.length <= HUDDLE_REACTION_NAME_MAX) return trimmed;
-  return `${trimmed.slice(0, HUDDLE_REACTION_NAME_MAX - 1).trimEnd()}…`;
+  if (countCharacters(trimmed) <= HUDDLE_REACTION_NAME_MAX) return trimmed;
+  return `${truncateByCharacters(trimmed, HUDDLE_REACTION_NAME_MAX - 1).trimEnd()}…`;
 }
 
 function fallbackNameForPubkey(pubkey?: string | null): string {

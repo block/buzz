@@ -27,6 +27,7 @@ import {
 } from "@/shared/ui/mentionChip";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { truncateByCharacters } from "@/shared/lib/truncateByCharacters";
 
 type TopbarSearchProps = {
   channelLabels?: Record<string, string>;
@@ -77,12 +78,11 @@ function truncateResultText(content: string, maxLength = 96) {
   if (trimmed.length === 0) {
     return "No message body.";
   }
-
-  if (trimmed.length <= maxLength) {
+  const kept = truncateByCharacters(trimmed, maxLength);
+  if (kept.length === trimmed.length) {
     return trimmed;
   }
-
-  return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
+  return `${truncateByCharacters(trimmed, maxLength - 3).trimEnd()}...`;
 }
 
 function formatRelativeTime(unixSeconds: number) {
