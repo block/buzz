@@ -1,5 +1,5 @@
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
-use nostr::PublicKey;
+use nostr::{Event, PublicKey};
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
@@ -329,11 +329,69 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
+fn parse_query_events(raw: &str) -> Result<Vec<serde_json::Value>, CliError> {
+    serde_json::from_str(raw)
+        .map_err(|e| CliError::Other(format!("failed to parse messages query response: {e}")))
+}
+
+fn event_created_at(event: &serde_json::Value) -> u64 {
+    event
+        .get("created_at")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+}
+
+fn event_id(event: &serde_json::Value) -> &str {
+    event
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
+fn sort_events_oldest_first(events: &mut [serde_json::Value]) {
+    events.sort_by(|left, right| {
+        event_created_at(left)
+            .cmp(&event_created_at(right))
+            .then_with(|| event_id(left).cmp(event_id(right)))
+    });
+}
+
+fn sort_events_newest_first(events: &mut [serde_json::Value]) {
+    events.sort_by(|left, right| {
+        event_created_at(right)
+            .cmp(&event_created_at(left))
+            .then_with(|| event_id(left).cmp(event_id(right)))
+    });
+}
+
+fn verify_raw_events(events: &[serde_json::Value]) -> Result<(), CliError> {
+    for (index, raw_event) in events.iter().enumerate() {
+        let event: Event = serde_json::from_value(raw_event.clone()).map_err(|e| {
+            CliError::Other(format!(
+                "malformed messages query response: event {index} is not a complete Nostr event: {e}"
+            ))
+        })?;
+        event.verify().map_err(|e| {
+            CliError::Other(format!(
+                "malformed messages query response: event {index} failed cryptographic verification: {e}"
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn format_events(
+    events: &[serde_json::Value],
+    format: &crate::OutputFormat,
+) -> Result<String, CliError> {
     match format {
         crate::OutputFormat::Compact => {
+            let normalized = normalize_events(events);
             let events: Vec<serde_json::Value> =
-                serde_json::from_str(normalized).unwrap_or_default();
+                serde_json::from_str(&normalized).map_err(|e| {
+                    CliError::Other(format!("failed to format normalized message events: {e}"))
+                })?;
             let compact: Vec<serde_json::Value> = events
                 .iter()
                 .map(|e| {
@@ -344,9 +402,16 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
                     })
                 })
                 .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+            serde_json::to_string(&compact)
+                .map_err(|e| CliError::Other(format!("failed to serialize message events: {e}")))
         }
-        crate::OutputFormat::Json => normalized.to_string(),
+        crate::OutputFormat::Json => Ok(normalize_events(events)),
+        crate::OutputFormat::Raw => {
+            verify_raw_events(events)?;
+            serde_json::to_string(events).map_err(|e| {
+                CliError::Other(format!("failed to serialize raw message events: {e}"))
+            })
+        }
     }
 }
 
@@ -384,10 +449,9 @@ pub async fn cmd_get_messages(
     }
 
     let resp = client.query(&filter).await?;
-    let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
-    let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
+    let mut events = parse_query_events(&resp)?;
+    sort_events_oldest_first(&mut events);
+    println!("{}", format_events(&events, format)?);
     Ok(())
 }
 
@@ -420,10 +484,9 @@ pub async fn cmd_get_thread(
         "limit": 1
     });
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
-    let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
-    let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
+    let mut events = parse_query_events(&resp)?;
+    sort_events_oldest_first(&mut events);
+    println!("{}", format_events(&events, format)?);
     Ok(())
 }
 
@@ -461,16 +524,13 @@ pub async fn cmd_search(
         filter["since"] = serde_json::json!(s);
     }
     let resp = client.query(&filter).await?;
-    let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    let mut events = parse_query_events(&resp)?;
     // The full-text path returns relevance order; a pure author/time query has
     // no relevance, so present newest-first like `messages get`.
     if query.is_none() {
-        events.sort_by_key(|e| {
-            std::cmp::Reverse(e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0))
-        });
+        sort_events_newest_first(&mut events);
     }
-    let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
+    println!("{}", format_events(&events, format)?);
     Ok(())
 }
 
@@ -993,13 +1053,14 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        event_mention_pubkeys, find_root_from_tags, format_events, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        parse_query_events, resolve_names_to_pubkeys, sort_events_oldest_first,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
+    use nostr::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1011,6 +1072,105 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    fn signed_message(keys: &Keys, created_at: u64, content: &str) -> Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([Tag::parse(["h", "11111111-1111-4111-8111-111111111111"]).unwrap()])
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn raw_format_round_trips_complete_signed_events_deterministically() {
+        let keys = Keys::generate();
+        let mut signed = [
+            signed_message(&keys, 123, "first"),
+            signed_message(&keys, 123, "second"),
+        ];
+        signed.sort_by_key(|event| event.id);
+        let mut second = serde_json::to_value(&signed[1]).unwrap();
+        second["relay_extension"] = json!({ "preserved": true });
+        let mut events = vec![second, serde_json::to_value(&signed[0]).unwrap()];
+
+        sort_events_oldest_first(&mut events);
+        let raw = format_events(&events, &crate::OutputFormat::Raw).unwrap();
+        let round_trip: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap();
+
+        assert_eq!(round_trip, events);
+        assert_eq!(round_trip[0]["id"], signed[0].id.to_hex());
+        assert_eq!(round_trip[0]["sig"], signed[0].sig.to_string());
+        assert_eq!(round_trip[1]["id"], signed[1].id.to_hex());
+        assert_eq!(round_trip[1]["sig"], signed[1].sig.to_string());
+        assert_eq!(round_trip[1]["relay_extension"]["preserved"], true);
+    }
+
+    #[test]
+    fn raw_format_rejects_empty_object() {
+        assert!(format_events(&[json!({})], &crate::OutputFormat::Raw).is_err());
+    }
+
+    #[test]
+    fn raw_format_rejects_missing_signature() {
+        let mut raw =
+            serde_json::to_value(signed_message(&Keys::generate(), 123, "message")).unwrap();
+        raw.as_object_mut().unwrap().remove("sig");
+
+        assert!(format_events(&[raw], &crate::OutputFormat::Raw).is_err());
+    }
+
+    #[test]
+    fn raw_format_rejects_bad_event_schema() {
+        let mut raw =
+            serde_json::to_value(signed_message(&Keys::generate(), 123, "message")).unwrap();
+        raw["tags"] = json!("not-an-array");
+
+        assert!(format_events(&[raw], &crate::OutputFormat::Raw).is_err());
+    }
+
+    #[test]
+    fn raw_format_rejects_mismatched_event_id() {
+        let mut raw =
+            serde_json::to_value(signed_message(&Keys::generate(), 123, "message")).unwrap();
+        raw["id"] = json!("0".repeat(64));
+
+        assert!(format_events(&[raw], &crate::OutputFormat::Raw).is_err());
+    }
+
+    #[test]
+    fn raw_format_rejects_invalid_signature() {
+        let mut raw =
+            serde_json::to_value(signed_message(&Keys::generate(), 123, "message")).unwrap();
+        raw["sig"] = json!("0".repeat(128));
+
+        assert!(format_events(&[raw], &crate::OutputFormat::Raw).is_err());
+    }
+
+    #[test]
+    fn normalized_json_still_omits_signatures() {
+        let event = json!({
+            "id": ID_A,
+            "pubkey": PK_VALID_A,
+            "created_at": 123,
+            "kind": 9,
+            "tags": [["h", "11111111-1111-4111-8111-111111111111"]],
+            "content": "message",
+            "sig": "1".repeat(128),
+        });
+
+        let output = format_events(&[event], &crate::OutputFormat::Json).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+
+        assert!(rows[0].get("sig").is_none());
+    }
+
+    #[test]
+    fn malformed_query_json_is_an_error() {
+        let error = parse_query_events("{not-json").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("failed to parse messages query response"));
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {

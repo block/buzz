@@ -90,7 +90,7 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
-    /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
+    /// Output format: 'json' (default), 'compact' (reduced fields), or 'raw' (complete signed events where supported).
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
@@ -170,6 +170,9 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
+    /// Complete signed Nostr events for supported event read commands
+    #[value(name = "raw")]
+    Raw,
 }
 
 #[derive(Subcommand)]
@@ -754,6 +757,9 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+        /// Return full kind-7 events, oldest first, instead of aggregate counts
+        #[arg(long)]
+        events: bool,
     },
 }
 
@@ -2141,6 +2147,33 @@ mod tests {
             "--emoji alone must not imply a status"
         );
         assert!(Cli::try_parse_from(["buzz", "users", "set-status", "--clear"]).is_ok());
+    }
+
+    #[test]
+    fn reactions_get_accepts_full_events_flag() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "reactions",
+            "get",
+            "--event",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--events",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn messages_get_accepts_raw_format() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "--format",
+            "raw",
+            "messages",
+            "get",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+        ])
+        .is_ok());
     }
 
     #[test]

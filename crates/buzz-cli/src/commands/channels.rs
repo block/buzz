@@ -106,6 +106,11 @@ pub async fn cmd_list_channels(
             serde_json::to_string(&compact).unwrap_or_default()
         }
         crate::OutputFormat::Json => serde_json::to_string(&channels).unwrap_or_default(),
+        crate::OutputFormat::Raw => {
+            return Err(CliError::Usage(
+                "--format raw is not supported by channels list".into(),
+            ));
+        }
     };
     println!("{output}");
     Ok(())
