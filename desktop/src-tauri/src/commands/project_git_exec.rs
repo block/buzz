@@ -6,7 +6,7 @@
 
 use crate::{app_state::AppState, managed_agents::resolve_command};
 use nostr::{Keys, ToBech32};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -51,13 +51,13 @@ pub(crate) struct GitAuthConfig {
     allow_file_transport: bool,
 }
 
-fn read_pipe_lossy(pipe: Option<impl Read>) -> String {
+fn read_pipe(pipe: Option<impl Read>) -> Vec<u8> {
     let Some(mut pipe) = pipe else {
-        return String::new();
+        return Vec::new();
     };
     let mut bytes = Vec::new();
     let _ = pipe.read_to_end(&mut bytes);
-    String::from_utf8_lossy(&bytes).to_string()
+    bytes
 }
 
 pub(crate) fn run_git(
@@ -65,6 +65,32 @@ pub(crate) fn run_git(
     cwd: Option<&std::path::Path>,
     auth: &GitAuthConfig,
 ) -> Result<String, String> {
+    run_git_bytes(args, cwd, auth).map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+}
+
+pub(crate) fn run_git_bytes(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    auth: &GitAuthConfig,
+) -> Result<Vec<u8>, String> {
+    run_git_bytes_inner(args, cwd, auth, None)
+}
+
+pub(crate) fn run_git_bytes_with_input(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    auth: &GitAuthConfig,
+    input: &[u8],
+) -> Result<Vec<u8>, String> {
+    run_git_bytes_inner(args, cwd, auth, Some(input))
+}
+
+fn run_git_bytes_inner(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    auth: &GitAuthConfig,
+    input: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     let mut command = Command::new(&auth.git_path);
     command.args(args);
     if let Some(cwd) = cwd {
@@ -77,7 +103,11 @@ pub(crate) fn run_git(
         LOCAL_GIT_TIMEOUT
     };
     configure_git_auth(&mut command, auth, needs_credentials);
-    command.stdin(Stdio::null());
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     crate::util::configure_no_window(&mut command);
@@ -90,8 +120,19 @@ pub(crate) fn run_git(
     // deadlock on a full pipe while we poll for exit below.
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let stdout_thread = std::thread::spawn(move || read_pipe_lossy(stdout_pipe));
-    let stderr_thread = std::thread::spawn(move || read_pipe_lossy(stderr_pipe));
+    let stdout_thread = std::thread::spawn(move || read_pipe(stdout_pipe));
+    let stderr_thread = std::thread::spawn(move || read_pipe(stderr_pipe));
+    let stdin_thread = input.map(|input| {
+        let input = input.to_vec();
+        let mut stdin = child.stdin.take();
+        std::thread::spawn(move || {
+            stdin
+                .as_mut()
+                .ok_or_else(|| "git stdin was not available".to_string())?
+                .write_all(&input)
+                .map_err(|error| format!("failed to write git stdin: {error}"))
+        })
+    });
 
     let started = Instant::now();
     let status = loop {
@@ -103,6 +144,9 @@ pub(crate) fn run_git(
                     let _ = child.wait();
                     let _ = stdout_thread.join();
                     let _ = stderr_thread.join();
+                    if let Some(stdin_thread) = stdin_thread {
+                        let _ = stdin_thread.join();
+                    }
                     return Err(format!("git timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -110,6 +154,9 @@ pub(crate) fn run_git(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(stdin_thread) = stdin_thread {
+                    let _ = stdin_thread.join();
+                }
                 return Err(format!("failed to wait for git: {error}"));
             }
         }
@@ -117,14 +164,22 @@ pub(crate) fn run_git(
 
     let stdout = stdout_thread.join().unwrap_or_default();
     let stderr = stderr_thread.join().unwrap_or_default();
+    let stdin_result = stdin_thread
+        .map(|thread| {
+            thread
+                .join()
+                .map_err(|_| "git stdin writer panicked".to_string())?
+        })
+        .transpose();
     if !status.success() {
-        let stderr = stderr.trim().to_string();
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         return Err(if stderr.is_empty() {
             format!("git exited with status {status}")
         } else {
             stderr
         });
     }
+    stdin_result?;
     Ok(stdout)
 }
 
