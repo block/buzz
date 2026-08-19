@@ -272,6 +272,7 @@ export function WorkflowDialog({
   const yamlDefinitionRef = React.useRef(yamlDefinition);
   const allowNavigationRef = React.useRef(false);
   const proceedingNavigationRef = React.useRef(false);
+  const pendingEditorTransitionRef = React.useRef<(() => void) | null>(null);
 
   const createMutation = useCreateWorkflowMutation(selectedChannelId);
   const updateMutation = useUpdateWorkflowMutation(
@@ -373,6 +374,18 @@ export function WorkflowDialog({
       }
     }
   }, [navigationBlocker.status, savedWebhookInfo]);
+
+  const requestEditorTransition = React.useCallback(
+    (transition: () => void) => {
+      if (isDirty) {
+        pendingEditorTransitionRef.current = transition;
+        setDiscardConfirmationOpen(true);
+        return;
+      }
+      transition();
+    },
+    [isDirty],
+  );
 
   const handleOpenChange = React.useCallback(
     (nextOpen: boolean) => {
@@ -581,8 +594,16 @@ export function WorkflowDialog({
                       mutation.isPending || !canEditWorkflowName
                     }
                     onDelete={() => onDeleteWorkflow(workflowSnapshot)}
-                    onDuplicate={() => onDuplicateWorkflow(workflowSnapshot.id)}
-                    onEdit={() => onEditWorkflow(workflowSnapshot.id)}
+                    onDuplicate={() =>
+                      requestEditorTransition(() =>
+                        onDuplicateWorkflow(workflowSnapshot.id),
+                      )
+                    }
+                    onEdit={() =>
+                      requestEditorTransition(() =>
+                        onEditWorkflow(workflowSnapshot.id),
+                      )
+                    }
                     onToggleEnabled={handleToggleWorkflowEnabled}
                     onTrigger={() => onTriggerWorkflow(workflowSnapshot.id)}
                   />
@@ -735,6 +756,9 @@ export function WorkflowDialog({
       <AlertDialog
         onOpenChange={(nextOpen) => {
           setDiscardConfirmationOpen(nextOpen);
+          if (!nextOpen) {
+            pendingEditorTransitionRef.current = null;
+          }
           if (
             !nextOpen &&
             navigationBlocker.status === "blocked" &&
@@ -761,7 +785,15 @@ export function WorkflowDialog({
             <AlertDialogAction asChild>
               <Button
                 onClick={() => {
+                  const pendingEditorTransition =
+                    pendingEditorTransitionRef.current;
+                  pendingEditorTransitionRef.current = null;
                   setDiscardConfirmationOpen(false);
+                  if (pendingEditorTransition) {
+                    allowNavigationRef.current = true;
+                    pendingEditorTransition();
+                    return;
+                  }
                   if (navigationBlocker.status === "blocked") {
                     proceedingNavigationRef.current = true;
                     navigationBlocker.proceed();

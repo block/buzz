@@ -2991,7 +2991,37 @@ test("channel settings opens and creates channel workflows over the channel", as
   await expect(sheet).toHaveCount(0);
   await expect(page.getByTestId("message-timeline")).toBeVisible();
 
+  const overlayEditor = page.getByRole("dialog", { name: "Edit workflow" });
+  await overlayEditor.getByRole("tab", { name: "YAML" }).click();
+  const overlayYaml = overlayEditor.getByRole("textbox", {
+    name: "Workflow YAML",
+  });
+  await overlayYaml.fill(
+    (await overlayYaml.inputValue()).replace(
+      "Welcome responder",
+      "Unsaved welcome responder",
+    ),
+  );
+  await overlayEditor.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Duplicate" }).click();
+  const discardConfirmation = page.getByRole("alertdialog", {
+    name: "Discard changes?",
+  });
+  await expect(discardConfirmation).toBeVisible();
+  await discardConfirmation
+    .getByRole("button", { name: "Keep editing" })
+    .click();
+  await expect(overlayEditor).toBeVisible();
+  await expect(overlayYaml).toContainText("Unsaved welcome responder");
+  await expect(
+    page.getByRole("dialog", { name: "Duplicate workflow" }),
+  ).toHaveCount(0);
+
   await page.getByRole("button", { name: "Close" }).click();
+  await page
+    .getByRole("alertdialog", { name: "Discard changes?" })
+    .getByRole("button", { name: "Discard changes" })
+    .click();
   await expect(page.getByRole("dialog", { name: "Edit workflow" })).toHaveCount(
     0,
   );
