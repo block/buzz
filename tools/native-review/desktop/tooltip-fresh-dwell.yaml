@@ -41,12 +41,15 @@ steps:
       - {id: message-insert-mention}
       - {role: button, name: "Mention someone"}
     act: {type: move_pointer}
-    expect: {enabled: true}
+    expect:
+      not_exists: {role: tooltip, name: "Mention someone"}
+    measure_start: tooltip_open_latency
   - name: complete_dwell
-    act: {type: wait, duration_ms: 550}
+    act: {type: wait, duration_ms: 0}
     expect:
       exists: {role: tooltip, name: "Mention someone"}
-    timeout_ms: 1000
+    expect_not_before_ms: 400
+    timeout_ms: 250
     measure: tooltip_open_latency
   - name: leave_trigger
     locate:

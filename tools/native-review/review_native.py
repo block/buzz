@@ -33,7 +33,7 @@ PRODUCTION_BUNDLE_IDS = {"xyz.block.buzz.app", "xyz.block.sprout.app"}
 PRODUCTION_KEYRINGS = {"buzz-desktop", "sprout-desktop"}
 SECRET_NAME = re.compile(r"(AUTH|TOKEN|SECRET|PASSWORD|PRIVATE_KEY|COOKIE)", re.I)
 ALLOWED_TOP = {"schema_version", "flow", "platforms", "fixture", "record", "steps", "cleanup"}
-ALLOWED_STEP = {"name", "locate", "act", "expect", "expect_for", "timeout_ms", "measure"}
+ALLOWED_STEP = {"name", "locate", "act", "expect", "expect_for", "expect_not_before_ms", "timeout_ms", "measure_start", "measure"}
 ACTION_FIELDS = {
     "activate": ({"type"}, {"type"}),
     "click": ({"type"}, {"type"}),
@@ -125,7 +125,8 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
     steps = journey["steps"]
     if not isinstance(steps, list) or not steps:
         raise HarnessError("journey requires at least one step")
-    seen_metrics: set[str] = set()
+    started_metrics: set[str] = set()
+    completed_metrics: set[str] = set()
     for index, step in enumerate(steps):
         where = f"steps[{index}]"
         if not isinstance(step, dict) or set(step) - ALLOWED_STEP or not {"name", "act", "expect"} <= set(step):
@@ -160,16 +161,34 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
         timeout = step.get("timeout_ms", 5000)
         if not bounded_integer(timeout, 1, 60000):
             raise HarnessError(f"{where}.timeout_ms must be 1..60000")
+        lower_bound = step.get("expect_not_before_ms")
+        if lower_bound is not None and not bounded_integer(lower_bound, 1, 30000):
+            raise HarnessError(f"{where}.expect_not_before_ms must be 1..30000")
+        metric_start = step.get("measure_start")
+        if metric_start is not None:
+            if not isinstance(metric_start, str) or not METRIC_NAME.fullmatch(metric_start):
+                raise HarnessError(f"{where}.measure_start must be a lowercase metric identifier")
+            if metric_start in started_metrics:
+                raise HarnessError(f"{where}.measure_start duplicates {metric_start}")
+            started_metrics.add(metric_start)
         metric = step.get("measure")
+        if lower_bound is not None and metric is None:
+            raise HarnessError(f"{where}.expect_not_before_ms requires measure")
         if metric is not None:
             if not isinstance(metric, str) or not METRIC_NAME.fullmatch(metric):
                 raise HarnessError(f"{where}.measure must be a lowercase metric identifier")
-            if metric in seen_metrics:
+            if metric not in started_metrics:
+                raise HarnessError(f"{where}.measure requires an earlier measure_start for {metric}")
+            if metric in completed_metrics:
                 raise HarnessError(f"{where}.measure duplicates {metric}")
-            seen_metrics.add(metric)
+            completed_metrics.add(metric)
+            if lower_bound is None:
+                raise HarnessError(f"{where}.measure requires expect_not_before_ms")
     cleanup = journey["cleanup"]
-    if not isinstance(cleanup, dict) or set(cleanup) != {"terminate_app", "remove_state"} or not all(isinstance(v, bool) for v in cleanup.values()):
-        raise HarnessError("cleanup requires boolean terminate_app and remove_state")
+    if not isinstance(cleanup, dict) or set(cleanup) != {"terminate_app", "remove_state"}:
+        raise HarnessError("cleanup requires terminate_app and remove_state")
+    if cleanup != {"terminate_app": True, "remove_state": True}:
+        raise HarnessError("cleanup is mandatory: terminate_app and remove_state must both be true")
     return journey
 
 
@@ -501,6 +520,26 @@ def wait_expectation(driver: Driver, expectation: dict[str, Any], timeout_ms: in
         time.sleep(0.025)
 
 
+def wait_expectation_not_before(driver: Driver, expectation: dict[str, Any], start_ns: int,
+                                lower_bound_ms: int, timeout_ms: int) -> int:
+    """Return first observed satisfaction, rejecting early and late transitions."""
+    lower_ns = start_ns + lower_bound_ms * 1_000_000
+    deadline_ns = lower_ns + timeout_ms * 1_000_000
+    while True:
+        now_ns = time.monotonic_ns()
+        if expectation_holds(driver, expectation):
+            if now_ns < lower_ns:
+                raise HarnessError(
+                    f"postcondition occurred before {lower_bound_ms}ms lower bound: {expectation}"
+                )
+            return now_ns
+        if now_ns >= deadline_ns:
+            raise HarnessError(
+                f"postcondition not met within {lower_bound_ms + timeout_ms}ms window: {expectation}"
+            )
+        time.sleep(0.025)
+
+
 def capture_step(driver: Driver, run_dir: pathlib.Path, slug: str, record: dict[str, Any]) -> dict[str, str]:
     artifacts: dict[str, str] = {}
     if record["screenshots"]:
@@ -532,6 +571,40 @@ def cleanup_review_state(run_dir: pathlib.Path, isolation: dict[str, str],
             errors.append(f"review identity removal failed: {exc}")
     if errors:
         raise HarnessError("; ".join(errors))
+
+
+def terminate_process(process: subprocess.Popen[str]) -> tuple[list[str], bool]:
+    """Terminate and reap the app, reporting whether state reset is safe."""
+    errors: list[str] = []
+    process.terminate()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            errors.append("Tauri launcher did not exit after SIGKILL; isolated state was preserved")
+            return errors, False
+        else:
+            errors.append("Tauri launcher required SIGKILL")
+    return errors, True
+
+
+def cleanup_process_and_state(process: subprocess.Popen[str] | None, run_dir: pathlib.Path,
+                              isolation: dict[str, str], fixture: dict[str, Any] | None) -> list[str]:
+    """Stop the app before resetting state; preserve state if exit is unconfirmed."""
+    errors: list[str] = []
+    exited = True
+    if process:
+        termination_errors, exited = terminate_process(process)
+        errors.extend(termination_errors)
+    if exited:
+        try:
+            cleanup_review_state(run_dir, isolation, fixture)
+        except Exception as exc:
+            errors.append(str(exc))
+    return errors
 
 
 def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -> pathlib.Path:
@@ -567,18 +640,29 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
             video = run_dir / "video.mp4"
             driver.request("record_start", path=str(video))
             receipt["artifacts"]["video"] = "video.mp4"
+        measurement_starts: dict[str, int] = {}
         for index, step in enumerate(journey["steps"]):
             slug = f"{index + 1:02d}-{re.sub(r'[^a-z0-9-]', '-', step['name'].lower())}"
             step_start = time.monotonic_ns()
             selected = None
             step_receipt: dict[str, Any] = {"name": step["name"], "status": "failed", "started_monotonic_ns": step_start}
             receipt["steps"].append(step_receipt)
+            observation_ns = None
             try:
                 if step.get("locate"):
                     selected = locate_required(driver, step["locate"], step.get("timeout_ms", 5000))
                     step_receipt["locator"] = selected.get("locator")
                 driver.request("act", action=step["act"], element=selected)
-                wait_expectation(driver, step["expect"], step.get("timeout_ms", 5000))
+                if metric_start := step.get("measure_start"):
+                    measurement_starts[metric_start] = time.monotonic_ns()
+                if lower_bound_ms := step.get("expect_not_before_ms"):
+                    metric = step["measure"]
+                    observation_ns = wait_expectation_not_before(
+                        driver, step["expect"], measurement_starts[metric],
+                        lower_bound_ms, step.get("timeout_ms", 5000),
+                    )
+                else:
+                    wait_expectation(driver, step["expect"], step.get("timeout_ms", 5000))
                 if sustained := step.get("expect_for"):
                     until = time.monotonic() + sustained["duration_ms"] / 1000
                     while time.monotonic() < until:
@@ -590,8 +674,11 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
                 step_receipt["finished_monotonic_ns"] = time.monotonic_ns()
                 step_receipt["duration_ms"] = (step_receipt["finished_monotonic_ns"] - step_start) / 1_000_000
                 if metric := step.get("measure"):
-                    step_receipt["measurement"] = metric
-                    receipt["measurements"][metric] = {"value": step_receipt["duration_ms"], "unit": "ms"}
+                    marker = measurement_starts.get(metric)
+                    if marker is not None:
+                        value = ((observation_ns or step_receipt["finished_monotonic_ns"]) - marker) / 1_000_000
+                        step_receipt["measurement"] = metric
+                        receipt["measurements"][metric] = {"value": value, "unit": "ms"}
                 step_receipt["artifacts"] = capture_step(driver, run_dir, slug, journey["record"])
         if journey["record"]["video"] == "window":
             driver.request("record_stop")
@@ -617,17 +704,7 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
                 driver.close()
             except Exception as exc:
                 cleanup_errors.append(f"native driver cleanup failed: {exc}")
-        if process and journey["cleanup"]["terminate_app"]:
-            process.terminate()
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill(); cleanup_errors.append("Tauri launcher required SIGKILL")
-        if journey["cleanup"]["remove_state"]:
-            try:
-                cleanup_review_state(run_dir, isolation, fixture)
-            except Exception as exc:
-                cleanup_errors.append(str(exc))
+        cleanup_errors.extend(cleanup_process_and_state(process, run_dir, isolation, fixture))
         receipt["cleanup"] = {"status": "failed" if cleanup_errors else "passed", "errors": cleanup_errors}
         if cleanup_errors:
             receipt["status"] = "failed"

@@ -195,8 +195,12 @@ class JourneyTests(unittest.TestCase):
     def test_duplicate_metric_is_rejected(self):
         source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
         source = source.replace(
-            "    timeout_ms: 15000\n  - name: settle_pointer_before_fresh_dwell",
-            "    timeout_ms: 15000\n    measure: tooltip_open_latency\n  - name: settle_pointer_before_fresh_dwell",
+            "    measure: tooltip_open_latency\n  - name: leave_trigger",
+            "    measure: tooltip_open_latency\n  - name: duplicate_measurement\n"
+            "    act: {type: wait, duration_ms: 0}\n"
+            "    expect:\n      exists: {role: tooltip, name: \"Mention someone\"}\n"
+            "    expect_not_before_ms: 400\n    measure: tooltip_open_latency\n"
+            "  - name: leave_trigger",
         )
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "invalid.yaml"
@@ -239,6 +243,92 @@ class JourneyTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 server.server_close()
+
+
+    def test_forced_termination_is_reaped_before_cleanup(self):
+        process = mock.Mock()
+        process.wait.side_effect = [review_native.subprocess.TimeoutExpired("app", 15), 0]
+        errors, exited = review_native.terminate_process(process)
+        self.assertTrue(exited)
+        self.assertEqual(errors, ["Tauri launcher required SIGKILL"])
+        self.assertEqual(
+            [call[0] for call in process.method_calls],
+            ["terminate", "wait", "kill", "wait"],
+        )
+
+    def test_unconfirmed_exit_preserves_isolated_state(self):
+        process = mock.Mock()
+        process.wait.side_effect = [
+            review_native.subprocess.TimeoutExpired("app", 15),
+            review_native.subprocess.TimeoutExpired("app", 5),
+        ]
+        with mock.patch.object(review_native, "cleanup_review_state") as cleanup:
+            errors = review_native.cleanup_process_and_state(
+                process, pathlib.Path("/tmp/run"), {}, None)
+        cleanup.assert_not_called()
+        self.assertEqual(
+            errors,
+            ["Tauri launcher did not exit after SIGKILL; isolated state was preserved"],
+        )
+        self.assertEqual(
+            [call[0] for call in process.method_calls],
+            ["terminate", "wait", "kill", "wait"],
+        )
+
+    def test_cleanup_cannot_be_disabled(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        source = source.replace("terminate_app: true", "terminate_app: false")
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "invalid.yaml"
+            path.write_text(source)
+            with self.assertRaisesRegex(review_native.HarnessError, "cleanup is mandatory"):
+                review_native.load_journey(path)
+
+    def test_lower_bound_requires_measurement(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        source = source.replace("    measure: tooltip_open_latency\n", "", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "invalid.yaml"
+            path.write_text(source)
+            with self.assertRaisesRegex(review_native.HarnessError, "requires measure"):
+                review_native.load_journey(path)
+
+    def test_measurement_requires_causal_start_and_lower_bound(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        mutations = [
+            ("    measure_start: tooltip_open_latency\n", "", "earlier measure_start"),
+            ("    expect_not_before_ms: 400\n", "", "requires expect_not_before_ms"),
+        ]
+        for old, new, error in mutations:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "invalid.yaml"
+                path.write_text(source.replace(old, new, 1))
+                with self.assertRaisesRegex(review_native.HarnessError, error):
+                    review_native.load_journey(path)
+
+    def test_lower_bound_rejects_early_and_late_postconditions(self):
+        driver = mock.Mock()
+        expectation = {"exists": {"id": "tooltip"}}
+        driver.request.return_value = {"ok": True, "element": {"locator": {"id": "tooltip"}}}
+        with mock.patch.object(review_native.time, "monotonic_ns", return_value=100_000_000):
+            with self.assertRaisesRegex(review_native.HarnessError, "before 400ms"):
+                review_native.wait_expectation_not_before(
+                    driver, expectation, start_ns=0, lower_bound_ms=400, timeout_ms=250)
+
+        driver.request.return_value = {"ok": True, "element": None}
+        with mock.patch.object(review_native.time, "monotonic_ns", return_value=650_000_000):
+            with self.assertRaisesRegex(review_native.HarnessError, "not met"):
+                review_native.wait_expectation_not_before(
+                    driver, expectation, start_ns=0, lower_bound_ms=400, timeout_ms=250)
+
+    def test_lower_bound_records_first_valid_observation(self):
+        driver = mock.Mock()
+        expectation = {"exists": {"id": "tooltip"}}
+        driver.request.return_value = {"ok": True, "element": {"locator": {"id": "tooltip"}}}
+        with mock.patch.object(review_native.time, "monotonic_ns", return_value=500_000_000):
+            observed = review_native.wait_expectation_not_before(
+                driver, expectation, start_ns=0, lower_bound_ms=400, timeout_ms=250)
+        self.assertEqual(observed, 500_000_000)
 
     def test_measurement_receipt_shape_is_durable(self):
         duration_ms = 12.5

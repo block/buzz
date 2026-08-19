@@ -12,7 +12,8 @@ exact-SHA run receipt. It is a targeted review lane, not a replacement for
   service, HOME, WebKit/app-data state, and artifact directory.
 - The launcher environment is allowlisted before the ephemeral key is added;
   inherited tokens and production keys never enter the reviewed process.
-- Production bundle IDs, keyring services, and remote relays fail closed.
+- Production bundle IDs, keyring services, remote relays, and cleanup opt-outs fail closed.
+- Global pointer and keyboard input is emitted only while the spawned review app is frontmost.
 - This protects reviewer state from accidents. It is **not** containment for
   hostile code; use a dedicated macOS user or disposable VM for untrusted PRs.
 
@@ -21,7 +22,7 @@ exact-SHA run receipt. It is a targeted review lane, not a replacement for
 ```bash
 just native-review-doctor
 just native-review-desktop tools/native-review/desktop/tooltip-fresh-dwell.yaml
-python3 -m unittest discover -s tools/native-review/tests -p 'test_*.py'
+just native-review-test
 ```
 
 The desktop command expects the isolated `buzz-harness` relay on port 3030

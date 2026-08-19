@@ -8,7 +8,7 @@
   "properties": {
     "schema_version": {"const": 1},
     "flow": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
-    "platforms": {"type": "array", "minItems": 1, "items": {"enum": ["macos"]}},
+    "platforms": {"type": "array", "minItems": 1, "maxItems": 1, "uniqueItems": true, "items": {"enum": ["macos"]}},
     "fixture": {"enum": ["local_review_channel"]},
     "record": {
       "type": "object", "additionalProperties": false,
@@ -24,6 +24,7 @@
       "items": {
         "type": "object", "additionalProperties": false,
         "required": ["name", "act", "expect"],
+        "allOf": [{"if": {"required": ["expect_not_before_ms"]}, "then": {"required": ["measure"]}}],
         "properties": {
           "name": {"type": "string", "minLength": 1},
           "locate": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/locator"}},
@@ -38,6 +39,8 @@
             }
           },
           "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 60000},
+          "measure_start": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+          "expect_not_before_ms": {"type": "integer", "minimum": 1, "maximum": 30000},
           "measure": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}
         }
       }
@@ -45,7 +48,7 @@
     "cleanup": {
       "type": "object", "additionalProperties": false,
       "required": ["terminate_app", "remove_state"],
-      "properties": {"terminate_app": {"type": "boolean"}, "remove_state": {"type": "boolean"}}
+      "properties": {"terminate_app": {"const": true}, "remove_state": {"const": true}}
     }
   },
   "$defs": {

@@ -61,6 +61,36 @@ enum DriverError: Error, CustomStringConvertible {
     }
 }
 
+struct CaptureCadence {
+    private(set) var frame: Int64 = 0
+
+    var presentationTime: CMTime { CMTime(value: frame, timescale: 15) }
+
+    mutating func advance() { frame += 1 }
+}
+
+func targetIsFrontmost(pid: pid_t, frontmostPID: () -> pid_t? = {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier
+}) -> Bool {
+    frontmostPID() == pid
+}
+
+func requireTargetIsFrontmost(pid: pid_t, frontmostPID: () -> pid_t? = {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier
+}) throws {
+    guard targetIsFrontmost(pid: pid, frontmostPID: frontmostPID) else {
+        throw DriverError.message("refusing global input because target pid \(pid) is not frontmost")
+    }
+}
+
+func postGlobalEvent(_ event: CGEvent?, pid: pid_t, frontmostPID: () -> pid_t? = {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier
+}, post: (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }) throws {
+    try requireTargetIsFrontmost(pid: pid, frontmostPID: frontmostPID)
+    guard let event else { throw DriverError.message("failed to create global input event") }
+    post(event)
+}
+
 func enableWebViewAccessibility(_ app: AXUIElement) {
     // WebKit does not materialize its remote accessibility tree for ordinary
     // automation clients until manual/enhanced accessibility is requested.
@@ -325,13 +355,13 @@ final class WindowRecorder: @unchecked Sendable {
         captureTask = Task.detached { [weak self] in
             guard let self else { return }
             let start = ContinuousClock.now
-            var frame: Int64 = 0
+            var cadence = CaptureCadence()
             while !Task.isCancelled {
-                let target = start.advanced(by: .milliseconds(Int(frame * 1000 / 15)))
+                let target = start.advanced(by: .milliseconds(Int(cadence.frame * 1000 / 15)))
                 try? await Task.sleep(until: target)
                 if Task.isCancelled { break }
                 autoreleasepool {
-                    defer { frame += 1 }
+                    defer { cadence.advance() }
                     guard writerInput.isReadyForMoreMediaData,
                           let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
                           let pool = pixelAdaptor.pixelBufferPool else { return }
@@ -347,8 +377,7 @@ final class WindowRecorder: @unchecked Sendable {
                                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
                     context.interpolationQuality = .high
                     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-                    let time = CMTime(value: frame, timescale: 15)
-                    if !pixelAdaptor.append(buffer, withPresentationTime: time) {
+                    if !pixelAdaptor.append(buffer, withPresentationTime: cadence.presentationTime) {
                         self.captureError = assetWriter.error ?? DriverError.message("failed to append window video frame")
                     }
                 }
@@ -461,14 +490,23 @@ struct BuzzNativeDriver {
                         guard let action = request["action"] as? [String: Any], let type = action["type"] as? String else { throw DriverError.message("act requires action.type") }
                         if type == "activate" {
                             guard let running = NSRunningApplication(processIdentifier: pid) else { throw DriverError.message("target app is no longer running") }
-                            running.activate(options: [.activateIgnoringOtherApps])
+                            guard running.activate(options: [.activateIgnoringOtherApps]) else {
+                                throw DriverError.message("target app refused activation")
+                            }
+                            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+                            while !targetIsFrontmost(pid: pid), ContinuousClock.now < deadline {
+                                try await Task.sleep(for: .milliseconds(25))
+                            }
+                            try requireTargetIsFrontmost(pid: pid)
                         } else if type == "wait" {
                             try await Task.sleep(for: .milliseconds(action["duration_ms"] as? Int ?? 0))
                         } else if type == "press" {
+                            try requireTargetIsFrontmost(pid: pid)
                             let code = try keyCode(action["key"] as? String ?? "")
-                            CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)?.post(tap: .cghidEventTap)
-                            CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap)
+                            try postGlobalEvent(CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true), pid: pid)
+                            try postGlobalEvent(CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false), pid: pid)
                         } else {
+                            try requireTargetIsFrontmost(pid: pid)
                             guard let (_, used) = selected else {
                                 throw DriverError.message("action requires a freshly selected element with current bounds")
                             }
@@ -493,15 +531,15 @@ struct BuzzNativeDriver {
                                 for index in 1...steps {
                                     let fraction = Double(index) / Double(steps)
                                     let next = CGPoint(x: start.x + (point.x - start.x) * fraction, y: start.y + (point.y - start.y) * fraction)
-                                    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: next, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                    try postGlobalEvent(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: next, mouseButton: .left), pid: pid)
                                     try await Task.sleep(for: .milliseconds(duration / steps))
                                 }
                             } else if type == "move_pointer" {
-                                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                try postGlobalEvent(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left), pid: pid)
                             } else if type == "click" {
-                                CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-                                CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-                                CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+                                try postGlobalEvent(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left), pid: pid)
+                                try postGlobalEvent(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left), pid: pid)
+                                try postGlobalEvent(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left), pid: pid)
                             } else { throw DriverError.message("unsupported action: \(type)") }
                         }
                         response(["ok": true])
