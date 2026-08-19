@@ -57,7 +57,7 @@ test("top-level project lists align dates and overflow actions", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await expect(
-    page.getByRole("heading", { level: 1, name: "Projects" }),
+    page.getByRole("heading", { level: 2, name: "Projects", exact: true }),
   ).toBeVisible();
 
   async function trailingPositions(
@@ -106,28 +106,6 @@ test("top-level project lists align dates and overflow actions", async ({
   const projectPositions = await trailingPositions(projectRow);
   await expect(projectRow.getByTestId("projects-row-context")).toBeVisible();
   await expect(projectRow.getByTestId("projects-row-people")).toBeVisible();
-  await expect(
-    page
-      .getByTestId("project-row-buzz")
-      .getByTestId("projects-row-description"),
-  ).toBeVisible();
-  await expect(
-    page
-      .getByTestId("project-row-buzz")
-      .getByTestId("projects-row-description"),
-  ).toContainText(/Buzz community platform/);
-  const projectDescriptionBox = await page
-    .getByTestId("project-row-buzz")
-    .getByTestId("projects-row-description")
-    .boundingBox();
-  const projectDateBox = await projectRow
-    .getByTestId("projects-row-date")
-    .boundingBox();
-  expect(projectDescriptionBox).not.toBeNull();
-  expect(projectDateBox).not.toBeNull();
-  expect(
-    Math.abs((projectDescriptionBox?.y ?? 0) - (projectDateBox?.y ?? 0)),
-  ).toBeLessThanOrEqual(4);
 
   await page.getByTestId("projects-section-repositories").click();
   await page.getByRole("button", { name: "Filter repositories" }).click();
@@ -480,7 +458,13 @@ test("multi-repository projects switch the active repository", async ({
     },
   );
   await projectRow.click();
-  await expect(page).toHaveURL(/\/projects\//);
+  await expect(page).not.toHaveURL(/\/projects\//);
+  await expect(projectRow).toHaveAttribute("aria-expanded", "false");
+  await expect(relayToolsRepository).toBeHidden();
+
+  await projectRow.click();
+  await expect(page).not.toHaveURL(/\/projects\//);
+  await expect(projectRow).toHaveAttribute("aria-expanded", "true");
   await expect(relayToolsRepository).toBeVisible();
   const projectSidebarMetrics = await sidebarScrollContent.evaluate(
     (element) => {
@@ -506,7 +490,7 @@ test("multi-repository projects switch the active repository", async ({
     return element.scrollTop;
   });
   await projectRow.click();
-  await expect(page).toHaveURL(/\/projects\//);
+  await expect(page).not.toHaveURL(/\/projects\//);
   await expect(projectRow).toHaveAttribute("aria-expanded", "true");
   await expect
     .poll(() =>
