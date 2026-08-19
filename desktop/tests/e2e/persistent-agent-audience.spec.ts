@@ -119,7 +119,7 @@ async function installAudienceFixtures(
   });
 }
 
-test("always mentions multiple agents from the mention picker", async ({
+test("always addresses multiple agents without closing the mention picker", async ({
   page,
 }) => {
   await installAudienceFixtures(page);
@@ -131,9 +131,15 @@ test("always mentions multiple agents from the mention picker", async ({
 
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
-  await menu.getByRole("button", { name: "Always mention Morgarita" }).click();
-  await expect(menu).toHaveCount(0);
-  await expect(input).toHaveText("");
+  const morgaritaSwitch = menu.getByRole("switch", {
+    name: "Always address Morgarita",
+  });
+  await morgaritaSwitch.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Always address");
+  await morgaritaSwitch.click();
+  await expect(morgaritaSwitch).toBeChecked();
+  await expect(menu).toBeVisible();
+  await expect(input).toHaveText("@Mor");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
   await expect(
     composer.getByRole("button", {
@@ -142,11 +148,13 @@ test("always mentions multiple agents from the mention picker", async ({
   ).toHaveCount(1);
 
   await input.fill("@Vog");
-  await composer
-    .getByTestId("mention-autocomplete")
-    .getByRole("button", { name: "Always mention Vogue" })
-    .click();
-  await expect(input).toHaveText("");
+  const vogueSwitch = menu.getByRole("switch", {
+    name: "Always address Vogue",
+  });
+  await vogueSwitch.click();
+  await expect(vogueSwitch).toBeChecked();
+  await expect(menu).toBeVisible();
+  await expect(input).toHaveText("@Vog");
   await expect(
     composer.getByRole("button", { name: "Stop always mentioning Vogue" }),
   ).toHaveCount(1);
