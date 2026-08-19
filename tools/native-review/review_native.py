@@ -458,14 +458,19 @@ def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: 
     process = subprocess.Popen([str(app_binary)], cwd=ROOT, env=env, stdout=log,
                                stderr=subprocess.STDOUT, text=True)
     log.close()
-    deadline = time.monotonic() + 60
+    return process, app_binary, process.pid
+
+
+def wait_for_native_process(process: subprocess.Popen[str], run_dir: pathlib.Path,
+                            timeout_seconds: float = 60) -> None:
+    """Confirm the spawned app stays alive and resolves to the expected executable."""
+    deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise HarnessError(f"Tauri exited during launch; see {run_dir / 'logs/app.log'}")
         if run(["ps", "-p", str(process.pid), "-o", "comm="], check=False).stdout.rstrip().endswith("/buzz-desktop"):
-            return process, app_binary, process.pid
+            return
         time.sleep(0.25)
-    process.terminate()
     raise HarnessError("timed out waiting for native Buzz process")
 
 
@@ -526,14 +531,18 @@ def wait_expectation_not_before(driver: Driver, expectation: dict[str, Any], sta
     lower_ns = start_ns + lower_bound_ms * 1_000_000
     deadline_ns = lower_ns + timeout_ms * 1_000_000
     while True:
-        now_ns = time.monotonic_ns()
         if expectation_holds(driver, expectation):
-            if now_ns < lower_ns:
+            observed_ns = time.monotonic_ns()
+            if observed_ns < lower_ns:
                 raise HarnessError(
                     f"postcondition occurred before {lower_bound_ms}ms lower bound: {expectation}"
                 )
-            return now_ns
-        if now_ns >= deadline_ns:
+            if observed_ns > deadline_ns:
+                raise HarnessError(
+                    f"postcondition not met within {lower_bound_ms + timeout_ms}ms window: {expectation}"
+                )
+            return observed_ns
+        if time.monotonic_ns() >= deadline_ns:
             raise HarnessError(
                 f"postcondition not met within {lower_bound_ms + timeout_ms}ms window: {expectation}"
             )
@@ -632,6 +641,7 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
         fixture = prepare_fixture(run_dir, isolation)
         probe_server, probe_url = semantic_probe_server(run_dir / "state" / "semantic.json")
         process, app_binary, app_pid = build_and_launch(run_dir, isolation, fixture, probe_url)
+        wait_for_native_process(process, run_dir)
         receipt["provenance"]["artifact_path"] = str(app_binary)
         receipt["provenance"]["artifact_sha256"] = sha256(app_binary)
         driver = Driver(build_driver(), app_pid, run_dir / "state" / "semantic.json")

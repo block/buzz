@@ -24,11 +24,40 @@ final class BuzzNativeDriverTests: XCTestCase {
     XCTAssertEqual(posts, 1)
   }
 
-  func testCaptureCadenceAdvancesAcrossBackpressureSkip() {
+  func testPointerInputRequiresTargetWindowBounds() throws {
+    let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+                        mouseCursorPosition: CGPoint(x: 25, y: 25), mouseButton: .left)
+    var posts = 0
+    try postGlobalPointerEvent(
+      event, at: CGPoint(x: 25, y: 25), pid: 42,
+      frontmostPID: { 42 }, targetBounds: { _ in CGRect(x: 0, y: 0, width: 50, height: 50) }
+    ) { _ in posts += 1 }
+    XCTAssertEqual(posts, 1)
+    XCTAssertThrowsError(
+      try postGlobalPointerEvent(
+        event, at: CGPoint(x: 75, y: 25), pid: 42,
+        frontmostPID: { 42 }, targetBounds: { _ in CGRect(x: 0, y: 0, width: 50, height: 50) }
+      ) { _ in posts += 1 }
+    )
+    XCTAssertEqual(posts, 1)
+  }
+
+  func testCaptureTickAdvancesAcrossBackpressureSkipThenUsesAdvancedPTS() {
     var cadence = CaptureCadence()
-    XCTAssertEqual(cadence.presentationTime, CMTime(value: 0, timescale: 15))
-    cadence.advance()  // frame skipped because writer was not ready
+    var appended = [CMTime]()
+
+    XCTAssertTrue(captureTick(cadence: &cadence, isReady: false) { time in
+      appended.append(time)
+      return true
+    })
     XCTAssertEqual(cadence.frame, 1)
-    XCTAssertEqual(cadence.presentationTime, CMTime(value: 1, timescale: 15))
+    XCTAssertTrue(appended.isEmpty)
+
+    XCTAssertTrue(captureTick(cadence: &cadence, isReady: true) { time in
+      appended.append(time)
+      return true
+    })
+    XCTAssertEqual(cadence.frame, 2)
+    XCTAssertEqual(appended, [CMTime(value: 1, timescale: 15)])
   }
 }

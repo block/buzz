@@ -245,6 +245,45 @@ class JourneyTests(unittest.TestCase):
                 server.server_close()
 
 
+    def test_launch_timeout_preserves_process_for_confirmed_cleanup(self):
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.side_effect = [review_native.subprocess.TimeoutExpired("app", 15), 0]
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(review_native.time, "monotonic", side_effect=[0, 0, 1]), \
+             mock.patch.object(review_native.time, "sleep"), \
+             mock.patch.object(review_native, "run", return_value=mock.Mock(stdout="not-buzz")), \
+             mock.patch.object(review_native, "cleanup_review_state") as reset:
+            with self.assertRaisesRegex(review_native.HarnessError, "timed out"):
+                review_native.wait_for_native_process(process, pathlib.Path(directory), timeout_seconds=0.5)
+            errors = review_native.cleanup_process_and_state(
+                process, pathlib.Path(directory), {}, None)
+        self.assertEqual(errors, ["Tauri launcher required SIGKILL"])
+        self.assertEqual(
+            [call[0] for call in process.method_calls],
+            ["poll", "terminate", "wait", "kill", "wait"],
+        )
+        reset.assert_called_once()
+
+    def test_launch_timeout_preserves_state_when_exit_cannot_be_confirmed(self):
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            review_native.subprocess.TimeoutExpired("app", 15),
+            review_native.subprocess.TimeoutExpired("app", 5),
+        ]
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(review_native.time, "monotonic", side_effect=[0, 0, 1]), \
+             mock.patch.object(review_native.time, "sleep"), \
+             mock.patch.object(review_native, "run", return_value=mock.Mock(stdout="not-buzz")), \
+             mock.patch.object(review_native, "cleanup_review_state") as reset:
+            with self.assertRaisesRegex(review_native.HarnessError, "timed out"):
+                review_native.wait_for_native_process(process, pathlib.Path(directory), timeout_seconds=0.5)
+            errors = review_native.cleanup_process_and_state(
+                process, pathlib.Path(directory), {}, None)
+        self.assertEqual(errors, ["Tauri launcher did not exit after SIGKILL; isolated state was preserved"])
+        reset.assert_not_called()
+
     def test_forced_termination_is_reaped_before_cleanup(self):
         process = mock.Mock()
         process.wait.side_effect = [review_native.subprocess.TimeoutExpired("app", 15), 0]
@@ -318,6 +357,15 @@ class JourneyTests(unittest.TestCase):
         driver.request.return_value = {"ok": True, "element": None}
         with mock.patch.object(review_native.time, "monotonic_ns", return_value=650_000_000):
             with self.assertRaisesRegex(review_native.HarnessError, "not met"):
+                review_native.wait_expectation_not_before(
+                    driver, expectation, start_ns=0, lower_bound_ms=400, timeout_ms=250)
+
+    def test_lower_bound_samples_observation_after_driver_query(self):
+        driver = mock.Mock()
+        expectation = {"exists": {"id": "tooltip"}}
+        driver.request.return_value = {"ok": True, "element": {"locator": {"id": "tooltip"}}}
+        with mock.patch.object(review_native.time, "monotonic_ns", return_value=660_000_000):
+            with self.assertRaisesRegex(review_native.HarnessError, "not met within 650ms"):
                 review_native.wait_expectation_not_before(
                     driver, expectation, start_ns=0, lower_bound_ms=400, timeout_ms=250)
 

@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://buzz.local/native-review/journey.schema.json",
   "title": "Buzz native review journey",
+  "description": "Structural authoring schema. The harness runtime additionally enforces cross-step metric invariants: every measure must reference a unique, earlier measure_start with the same name.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "flow", "platforms", "fixture", "record", "steps", "cleanup"],
