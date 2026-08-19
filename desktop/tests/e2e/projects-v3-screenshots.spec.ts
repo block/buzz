@@ -499,20 +499,24 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     "Hide project context",
   );
   await expect(terminalIcon).toBeVisible();
+  // The icon is an inline SVG drawn with currentColor, so it must inherit
+  // the toggle button's text color to stay tinted with button state.
   expect(
-    await terminalIcon.evaluate((element) => {
-      const style = getComputedStyle(element);
-      return {
-        backgroundColor: style.backgroundColor,
-        maskImage: style.maskImage || style.webkitMaskImage,
-        parentColor: getComputedStyle(element.parentElement ?? element).color,
-      };
-    }),
+    await terminalIcon.evaluate((element) => ({
+      color: getComputedStyle(element).color,
+      strokesCurrentColor: Array.from(element.querySelectorAll("rect")).some(
+        (rect) =>
+          rect.getAttribute("stroke") === "currentColor" ||
+          rect.getAttribute("fill") === "currentColor",
+      ),
+      tagName: element.tagName.toLowerCase(),
+    })),
   ).toMatchObject({
-    backgroundColor: await terminalButton.evaluate(
+    color: await terminalButton.evaluate(
       (element) => getComputedStyle(element).color,
     ),
-    maskImage: expect.not.stringMatching(/^none$/),
+    strokesCurrentColor: true,
+    tagName: "svg",
   });
   const [repositoryTabBounds, chatTabBounds] = await Promise.all([
     repositoryPanelTab.boundingBox(),
