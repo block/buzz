@@ -14,6 +14,7 @@ import {
 } from "@/shared/constants/kinds";
 import {
   getTextPayload,
+  toRelayFrames,
   type ConnectionState,
   type LiveSubscriptionReadiness,
   type PendingEvent,
@@ -107,11 +108,9 @@ export class RelayClient {
       this.resetConnection(error);
     },
   });
-
   setVisibleChannelId(id: string | null) {
     this.visibleChannelId = id;
   }
-
   disconnect() {
     const error = new Error("Relay disconnected for community switch.");
 
@@ -531,16 +530,17 @@ export class RelayClient {
     );
     const generation = ++this.connectionGeneration;
     const inbound = createRelayInboundBuffer(
-      (message) => this.handleWsMessage(message, generation),
+      async (delivery) => {
+        for (const message of toRelayFrames(delivery))
+          await this.handleWsMessage(message, generation);
+      },
       (error) => {
-        if (generation !== this.connectionGeneration) return;
-        this.resetConnection(
-          this.normalizeRelayError(error, "Relay connection errored."),
-        );
+        if (generation === this.connectionGeneration)
+          this.recoverFromSocketFailure(error, "Relay connection errored.");
       },
     );
-    this.onMessageChannel = new Channel<unknown>((message) =>
-      inbound.receive(message),
+    this.onMessageChannel = new Channel<unknown>((delivery) =>
+      inbound.receive(delivery),
     );
     try {
       if (!this.relayUrl) {

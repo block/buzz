@@ -92,14 +92,37 @@ class _ThreadMessage extends HookConsumerWidget {
       );
     }
 
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final highlightController = useAnimationController(
+      duration: _landingHighlightTransitionDuration,
+    );
+    final highlightProgress = useAnimation(highlightController);
+    useEffect(() {
+      if (reducedMotion) {
+        highlightController.value = isHighlighted ? 1 : 0;
+      } else {
+        unawaited(
+          highlightController.animateTo(
+            isHighlighted ? 1 : 0,
+            duration: _landingHighlightTransitionDuration,
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+      return null;
+    }, [highlightController, isHighlighted, reducedMotion]);
+    final highlightColor = highlightProgress == 0
+        ? Colors.transparent
+        : context.colors.primary.withValues(
+            alpha: _landingHighlightOpacity * highlightProgress,
+          );
+
     return Padding(
       padding: EdgeInsets.only(top: showAuthor ? Grid.xs : 0),
       child: DecoratedBox(
         key: ValueKey('thread-message-${message.id}'),
         decoration: BoxDecoration(
-          color: isHighlighted
-              ? context.colors.primary.withValues(alpha: 0.12)
-              : Colors.transparent,
+          color: highlightColor,
           borderRadius: BorderRadius.circular(Radii.md),
         ),
         child: Material(

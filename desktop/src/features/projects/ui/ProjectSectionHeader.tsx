@@ -18,7 +18,7 @@ export function ProjectSectionHeader({
 }) {
   return (
     <header
-      className="flex min-h-12 items-center gap-3 border-border/50 border-b px-4 py-2"
+      className="flex min-h-12 items-center gap-3 px-4 py-2"
       data-testid="project-section-header"
     >
       <Icon

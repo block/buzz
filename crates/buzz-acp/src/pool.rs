@@ -1657,8 +1657,8 @@ fn workspace_section(cwd: &str) -> Option<String> {
             "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
              files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
              `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
-             here. This is where you already are; do not search `$HOME` or other \
-             directories for them."
+             here. This is where you already are, so start here rather than scanning \
+             `$HOME`. Any specific path the user names is fine to read."
         ))
     } else {
         None

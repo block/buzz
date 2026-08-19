@@ -8,6 +8,10 @@ import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
+import {
+  type TerminalContextOverride,
+  TerminalContextOverrideProvider,
+} from "@/app/TerminalContextOverrideContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
 import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
@@ -57,7 +61,8 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
-import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
+import { useArchiveSync } from "@/features/local-archive/useArchiveSync";
+import { useArchiveAgentMetricsBridge } from "@/features/local-archive/useArchiveAgentMetricsBridge";
 import { useObserverArchiveReconciliation } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
@@ -205,6 +210,9 @@ export function AppShell() {
   // useArchiveSync must wait for reconciliation, or listeners could open
   // before kind 24200 is guaranteed present in the subscription.
   useArchiveSync(observerReconciled);
+  // The archive batch now persists in Rust, so the agent-metrics invalidation
+  // signal arrives as a Tauri event rather than an in-process call.
+  useArchiveAgentMetricsBridge();
   // Kind 44200 is relay-persisted (durable) and stays deferred: missed
   // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
@@ -312,6 +320,8 @@ export function AppShell() {
     selectedView,
     sidebarChannels,
   ]);
+  const [terminalContextOverride, setTerminalContextOverride] =
+    React.useState<TerminalContextOverride | null>(null);
   const { activeChannel, terminalContext } = useTerminalContext({
     channelId: selectedChannelId,
     channels,
@@ -319,6 +329,14 @@ export function AppShell() {
     pubkey: identityQuery.data?.pubkey,
     relayUrl: communitiesHook.activeCommunity?.relayUrl,
   });
+  const effectiveTerminalContext = terminalContextOverride
+    ? {
+        ...terminalContext,
+        channelId: terminalContextOverride.channelId,
+        channelName: terminalContextOverride.channelName,
+        threadId: null,
+      }
+    : terminalContext;
   const managedChannel = React.useMemo(() => {
     const targetChannelId = managedChannelId ?? selectedChannelId;
     return targetChannelId
@@ -637,7 +655,7 @@ export function AppShell() {
   useAppShellLifecycleEffects({
     desktopBadgeEnabled: !isHuddleRoom,
     homeBadgeCountExcludingHighPriority,
-    unreadChannelIds,
+    topLevelUnreadChannelIds,
     unreadChannelNotificationCount,
   });
   // Dispatch `buzz://` deep links only from the main window; the companion is dedicated to its active Huddle route.
@@ -893,15 +911,21 @@ export function AppShell() {
                         onUnstarChannel={unstarChannel}
                       />
                     ) : null}
-                    <AppShellChannelSurface
-                      hasCommunityRail={hasCommunityRail}
-                      isHuddleRoom={isHuddleRoom}
-                      isHuddleRoomStarting={isHuddleRoomStarting}
-                      mainInsetRef={mainInsetRef}
-                      terminal={<TerminalBootstrap {...terminalContext} />}
+                    <TerminalContextOverrideProvider
+                      onChange={setTerminalContextOverride}
                     >
-                      <Outlet />
-                    </AppShellChannelSurface>
+                      <AppShellChannelSurface
+                        hasCommunityRail={hasCommunityRail}
+                        isHuddleRoom={isHuddleRoom}
+                        isHuddleRoomStarting={isHuddleRoomStarting}
+                        mainInsetRef={mainInsetRef}
+                        terminal={
+                          <TerminalBootstrap {...effectiveTerminalContext} />
+                        }
+                      >
+                        <Outlet />
+                      </AppShellChannelSurface>
+                    </TerminalContextOverrideProvider>
                     {!isHuddleRoom ? (
                       <RelayConnectionOverlay
                         card={relayConnectionCard}
