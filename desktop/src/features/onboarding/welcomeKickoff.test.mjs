@@ -10,6 +10,7 @@ import {
   createWelcomeKickoffCoordinator,
   mergeKickoffEvents,
   resolveWelcomeAgentSet,
+  resolveWelcomeAgentSetForRelay,
   selectWelcomeKickoffIntroTeammates,
   waitForWelcomeKickoffBeat,
   waitForWelcomeTeammatesOnline,
@@ -39,6 +40,19 @@ test("resolveWelcomeAgentSet orders agents by stable persona identity", () => {
     teammates: [honey, pollen],
   });
   assert.equal(resolveWelcomeAgentSet([fizz, honey]), null);
+});
+
+test("resolveWelcomeAgentSetForRelay reuses identities from another relay", () => {
+  assert.deepEqual(
+    resolveWelcomeAgentSetForRelay(
+      [pollen, fizz, honey],
+      "ws://localhost:3001",
+    ),
+    {
+      lead: fizz,
+      teammates: [honey, pollen],
+    },
+  );
 });
 
 test("opener uses current agent names and requests bounded simultaneous intros", () => {

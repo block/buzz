@@ -106,18 +106,17 @@ export function pickWelcomeGuideAgentForRelay(
   );
 }
 
-/** Find the preferred managed instance for one starter persona and relay. */
+/** Find the preferred managed instance for one starter persona. */
 export function pickWelcomeTeamStarterAgentForRelay(
   agents: ManagedAgent[],
   starter: WelcomeTeamStarterDefinition,
-  relayUrl?: string | null,
+  _relayUrl?: string | null,
 ) {
   return pickAgentByStatus(
     agents.filter(
       (agent) =>
         agent.teamId === WELCOME_TEAM_ID &&
-        agent.personaId === starter.personaId &&
-        isAgentScopedToRelay(agent, relayUrl),
+        agent.personaId === starter.personaId,
     ),
   );
 }
@@ -317,7 +316,7 @@ export function welcomeTeammateAccessUpdate(
 /**
  * Ensure the complete built-in Welcome Team is ready for kickoff.
  * The team itself is Rust-seeded; this only activates personas, creates any
- * missing relay-scoped instances, and adds all three to Welcome as bots.
+ * missing instances, and adds all three to Welcome as bots.
  */
 async function provisionWelcomeTeam(
   channelId: string,

@@ -331,26 +331,32 @@ test("starter matching uses persona identity rather than display name", () => {
   );
 });
 
-test("starter matching is relay scoped and normalizes trailing slashes", () => {
+test("starter matching reuses the same identity across relays", () => {
   const pollen = WELCOME_TEAM_STARTERS[2];
-  const otherRelay = makeAgent({
+  const existing = makeAgent({
     personaId: pollen.personaId,
-    relayUrl: RELAY_B,
-    status: "running",
-  });
-  const matchingRelay = makeAgent({
-    personaId: pollen.personaId,
-    relayUrl: `${RELAY_A}/`,
-    pubkey: PUB_B,
+    relayUrl: RELAY_A,
   });
 
   assert.equal(
-    pickWelcomeTeamStarterAgentForRelay(
-      [otherRelay, matchingRelay],
-      pollen,
-      RELAY_A,
-    ),
-    matchingRelay,
+    pickWelcomeTeamStarterAgentForRelay([existing], pollen, RELAY_B),
+    existing,
+  );
+});
+
+test("starter matching prefers status across relays", () => {
+  const fizz = WELCOME_TEAM_STARTERS[0];
+  const stopped = makeAgent({ personaId: fizz.personaId, relayUrl: RELAY_B });
+  const running = makeAgent({
+    personaId: fizz.personaId,
+    relayUrl: RELAY_A,
+    pubkey: PUB_B,
+    status: "running",
+  });
+
+  assert.equal(
+    pickWelcomeTeamStarterAgentForRelay([stopped, running], fizz),
+    running,
   );
 });
 

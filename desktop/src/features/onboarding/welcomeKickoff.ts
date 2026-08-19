@@ -144,22 +144,11 @@ export function resolveWelcomeAgentSet(
   };
 }
 
-function normalizeRelayUrl(relayUrl?: string | null) {
-  return relayUrl?.trim().replace(/\/+$/, "") ?? null;
-}
-
-function resolveWelcomeAgentSetForRelay(
+export function resolveWelcomeAgentSetForRelay(
   agents: readonly ManagedAgent[],
-  relayUrl?: string | null,
+  _relayUrl?: string | null,
 ) {
-  const normalizedRelayUrl = normalizeRelayUrl(relayUrl);
-  return resolveWelcomeAgentSet(
-    agents.filter(
-      (agent) =>
-        !normalizedRelayUrl ||
-        normalizeRelayUrl(agent.relayUrl) === normalizedRelayUrl,
-    ),
-  );
+  return resolveWelcomeAgentSet(agents);
 }
 
 export function buildWelcomeKickoffOpener(
