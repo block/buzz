@@ -571,6 +571,29 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+/// Explain why a message body is unsendable, or `None` when it is fine.
+///
+/// The SDK builder rejects blank bodies too, but only the CLI knows *how* the
+/// content was supplied, and the stdin case is the one that actually bites:
+/// agent shells run every command with stdin on `/dev/null`, so a `--content -`
+/// that lost its upstream pipe reads `""`. Without this, that published an
+/// unreadable empty message and still exited 0, so the caller believed it had
+/// spoken. Media messages are exempt — an attachment with no caption is not
+/// blank, its payload is in the imeta tag.
+fn blank_content_message(content: &str, from_stdin: bool, no_files: bool) -> Option<&'static str> {
+    if !no_files || !content.trim().is_empty() {
+        return None;
+    }
+    Some(if from_stdin {
+        "--content - read nothing from stdin; pipe the message body in \
+         (e.g. `printf 'text\\n' | buzz messages send ... --content -`) \
+         or pass the text directly with --content"
+    } else {
+        "--content must not be empty; a blank message renders as an unreadable \
+         empty row (attach --files to send media without a caption)"
+    })
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -579,8 +602,12 @@ pub async fn cmd_send_message(
     // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
+    let from_stdin = p.content == "-";
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    if let Some(message) = blank_content_message(&p.content, from_stdin, p.files.is_empty()) {
+        return Err(CliError::Usage(message.into()));
+    }
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -993,8 +1020,8 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        blank_content_message, event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1005,6 +1032,51 @@ mod tests {
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    // --- blank_content_message ---
+
+    #[test]
+    fn blank_content_allows_normal_body() {
+        assert!(blank_content_message("hello", false, true).is_none());
+    }
+
+    // Regression: an agent shell runs commands with stdin on /dev/null, so a
+    // `--content -` missing its upstream pipe read "" and published a blank
+    // message with exit code 0 — a silent failure the caller never saw.
+    #[test]
+    fn blank_content_from_stdin_names_the_missing_pipe() {
+        let message = blank_content_message("", true, true).expect("empty stdin must be rejected");
+        assert!(
+            message.contains("stdin"),
+            "stdin case must name stdin, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn blank_content_from_argv_does_not_blame_stdin() {
+        let message = blank_content_message("", false, true).expect("empty argv must be rejected");
+        assert!(
+            !message.contains("stdin"),
+            "argv case must not mention stdin, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn blank_content_rejects_whitespace_only_body() {
+        for blank in ["   ", "\n", "\t\n  \r\n"] {
+            assert!(
+                blank_content_message(blank, false, true).is_some(),
+                "whitespace-only body {blank:?} must be rejected"
+            );
+        }
+    }
+
+    // A caption-less attachment is not blank.
+    #[test]
+    fn blank_content_allows_empty_body_with_files() {
+        assert!(blank_content_message("", false, false).is_none());
+        assert!(blank_content_message("", true, false).is_none());
+    }
 
     // Three real pubkeys (lowercase 64-char hex) used by parse_member_pubkeys tests.
     // See the test's own comment on what `PublicKey::from_hex` actually validates.
