@@ -3,7 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/rendering.dart' show ScrollDirection, SemanticsAction;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -16,6 +16,7 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
+import 'package:buzz/features/channels/members_sheet.dart';
 import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
@@ -957,7 +958,7 @@ void main() {
       expect(find.text('Members unavailable'), findsOneWidget);
     });
 
-    testWidgets('one-member channel shows Add first without a See all row', (
+    testWidgets('small channel keeps member administration reachable', (
       tester,
     ) async {
       await tester.pumpWidget(
@@ -969,6 +970,12 @@ void main() {
               role: 'owner',
               joinedAt: DateTime(2025),
               displayName: 'Self',
+            ),
+            ChannelMember(
+              pubkey: 'alice',
+              role: 'member',
+              joinedAt: DateTime(2025),
+              displayName: 'Alice',
             ),
           ],
         ),
@@ -985,9 +992,12 @@ void main() {
       final memberRow = find.byKey(
         const ValueKey('channel-details-member-self'),
       );
+      final seeAllRow = find.byKey(
+        const ValueKey('channel-details-members-row'),
+      );
       expect(addRow, findsOneWidget);
       expect(memberRow, findsOneWidget);
-      expect(find.text('See all'), findsNothing);
+      expect(seeAllRow, findsOneWidget);
       expect(
         tester.widget<Text>(find.text('Add members')).style,
         Theme.of(tester.element(addRow)).textTheme.bodyLarge,
@@ -996,6 +1006,102 @@ void main() {
         tester.getTopLeft(addRow).dy,
         lessThan(tester.getTopLeft(memberRow).dy),
       );
+
+      await tester.ensureVisible(seeAllRow);
+      await tester.pumpAndSettle();
+      await tester.tap(seeAllRow);
+      await tester.pumpAndSettle();
+      expect(find.byType(MembersSheet), findsOneWidget);
+
+      await tester.tap(find.byIcon(LucideIcons.ellipsis));
+      await tester.pumpAndSettle();
+      expect(find.text('Role'), findsOneWidget);
+      expect(find.text('Remove from channel'), findsOneWidget);
+    });
+
+    testWidgets('action tiles expose button and enabled semantics', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_buildTestable(messages: const []));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      final starSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('channel-details-star-action')),
+      );
+      expect(starSemantics.label, 'Star channel');
+      expect(starSemantics.flagsCollection.isButton, isTrue);
+      expect(
+        starSemantics.flagsCollection.isEnabled.toString(),
+        'Tristate.isTrue',
+      );
+      expect(
+        starSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+
+      final editSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('channel-details-edit-action')),
+      );
+      expect(editSemantics.label, 'Edit');
+      expect(editSemantics.flagsCollection.isButton, isTrue);
+      expect(
+        editSemantics.flagsCollection.isEnabled.toString(),
+        'Tristate.isFalse',
+      );
+      expect(
+        editSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        isFalse,
+      );
+    });
+
+    testWidgets('action tiles grow together for large text on a narrow page', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          textScaler: const TextScaler.linear(2),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      final starAction = find.byKey(
+        const ValueKey('channel-details-star-action'),
+      );
+      final muteAction = find.byKey(
+        const ValueKey('channel-details-mute-action'),
+      );
+      final editAction = find.byKey(
+        const ValueKey('channel-details-edit-action'),
+      );
+      expect(find.text('Star channel'), findsOneWidget);
+      expect(find.text('Mute channel'), findsOneWidget);
+      expect(find.text('Edit'), findsOneWidget);
+      expect(tester.getSize(starAction).height, greaterThan(84));
+      expect(
+        tester.getSize(muteAction).height,
+        tester.getSize(starAction).height,
+      );
+      expect(
+        tester.getSize(editAction).height,
+        tester.getSize(starAction).height,
+      );
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets('previews five members before an icon-free See all row', (
@@ -4795,6 +4901,12 @@ void main() {
           .getRect(find.byKey(const ValueKey('channel-details-star-action')))
           .top;
       expect(firstActionTop - descriptionBottom, closeTo(Grid.sm, 0.5));
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('channel-details-star-action')))
+            .height,
+        68 + (Grid.xxs * 2),
+      );
 
       final firstActionBottom = tester
           .getRect(find.byKey(const ValueKey('channel-details-star-action')))

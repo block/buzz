@@ -295,36 +295,39 @@ class ChannelDetailsPage extends HookConsumerWidget {
               Grid.gutter,
               _channelDetailsSectionPadding,
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: BuzzActionTile(
-                    key: const ValueKey('channel-details-star-action'),
-                    icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
-                    label: isStarred ? 'Unstar' : 'Star channel',
-                    onTap: toggleStar,
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: BuzzActionTile(
+                      key: const ValueKey('channel-details-star-action'),
+                      icon: isStarred ? LucideIcons.starOff : LucideIcons.star,
+                      label: isStarred ? 'Unstar' : 'Star channel',
+                      onTap: toggleStar,
+                    ),
                   ),
-                ),
-                const SizedBox(width: Grid.xxs),
-                Expanded(
-                  child: BuzzActionTile(
-                    key: const ValueKey('channel-details-mute-action'),
-                    icon: isMuted ? LucideIcons.bell : LucideIcons.bellOff,
-                    label: isMuted ? 'Unmute' : 'Mute channel',
-                    onTap: toggleMute,
+                  const SizedBox(width: Grid.xxs),
+                  Expanded(
+                    child: BuzzActionTile(
+                      key: const ValueKey('channel-details-mute-action'),
+                      icon: isMuted ? LucideIcons.bell : LucideIcons.bellOff,
+                      label: isMuted ? 'Unmute' : 'Mute channel',
+                      onTap: toggleMute,
+                    ),
                   ),
-                ),
-                const SizedBox(width: Grid.xxs),
-                Expanded(
-                  child: BuzzActionTile(
-                    key: const ValueKey('channel-details-edit-action'),
-                    icon: LucideIcons.pencil,
-                    label: 'Edit',
-                    isEnabled: canEdit,
-                    onTap: openManageChannel,
+                  const SizedBox(width: Grid.xxs),
+                  Expanded(
+                    child: BuzzActionTile(
+                      key: const ValueKey('channel-details-edit-action'),
+                      icon: LucideIcons.pencil,
+                      label: 'Edit',
+                      isEnabled: canEdit,
+                      onTap: openManageChannel,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           AppListCard(
@@ -382,15 +385,14 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     avatarUrl:
                         userCache[member.pubkey.toLowerCase()]?.avatarUrl,
                   ),
-                if (members.length > previewMembers.length)
-                  AppListRowRaw(
-                    key: const ValueKey('channel-details-members-row'),
-                    leading: const SizedBox.square(dimension: 40),
-                    title: Text('See all', style: context.textTheme.bodyLarge),
-                    trailing: const _ChannelDetailsChevron(),
-                    onTap: openMembers,
-                    verticalPadding: Grid.xxs,
-                  ),
+                AppListRowRaw(
+                  key: const ValueKey('channel-details-members-row'),
+                  leading: const SizedBox.square(dimension: 40),
+                  title: Text('See all', style: context.textTheme.bodyLarge),
+                  trailing: const _ChannelDetailsChevron(),
+                  onTap: openMembers,
+                  verticalPadding: Grid.xxs,
+                ),
               ],
             ],
           ),

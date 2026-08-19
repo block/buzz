@@ -40,42 +40,52 @@ class BuzzActionTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final canTap = isEnabled && !isLoading;
-    return GestureDetector(
-      onTap: canTap
-          ? () {
-              unawaited(HapticFeedback.lightImpact());
-              onTap();
-            }
-          : null,
-      behavior: HitTestBehavior.opaque,
-      child: Opacity(
-        opacity: isEnabled ? 1 : 0.5,
-        child: Container(
-          width: double.infinity,
-          height: 68 + (Grid.xxs * 2),
-          decoration: BoxDecoration(
-            color: context.colors.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(Radii.dialog),
-          ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (isLoading)
-                BuzzLoadingIndicator(
-                  size: 22,
-                  color: context.colors.onSurface,
-                  semanticLabel: loadingSemanticLabel ?? label,
-                )
-              else
-                Icon(icon, size: 22, color: context.colors.onSurface),
-              const SizedBox(height: Grid.xxs),
-              Text(
-                label,
-                style: context.textTheme.labelMedium?.copyWith(
-                  color: context.colors.onSurface,
+    void handleTap() {
+      unawaited(HapticFeedback.lightImpact());
+      onTap();
+    }
+
+    return Semantics(
+      button: true,
+      enabled: canTap,
+      label: isLoading ? loadingSemanticLabel ?? label : label,
+      onTap: canTap ? handleTap : null,
+      excludeSemantics: true,
+      child: GestureDetector(
+        onTap: canTap ? handleTap : null,
+        excludeFromSemantics: true,
+        behavior: HitTestBehavior.opaque,
+        child: Opacity(
+          opacity: isEnabled ? 1 : 0.5,
+          child: Container(
+            width: double.infinity,
+            constraints: const BoxConstraints(minHeight: 68 + (Grid.xxs * 2)),
+            padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+            decoration: BoxDecoration(
+              color: context.colors.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(Radii.dialog),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (isLoading)
+                  BuzzLoadingIndicator(
+                    size: 22,
+                    color: context.colors.onSurface,
+                    semanticLabel: loadingSemanticLabel ?? label,
+                  )
+                else
+                  Icon(icon, size: 22, color: context.colors.onSurface),
+                const SizedBox(height: Grid.xxs),
+                Text(
+                  label,
+                  textAlign: TextAlign.center,
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onSurface,
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
