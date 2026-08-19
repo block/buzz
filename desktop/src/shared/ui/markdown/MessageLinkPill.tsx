@@ -170,13 +170,12 @@ export function MessageLinkPill({
         icon="message"
         aria-label={`Open message in channel ${channelLabel}`}
         className={cn(
-          "max-w-64",
           metadata.state.kind === "unavailable" && "buzz-link-unavailable",
         )}
         interactive={interactive}
         onOpenLink={() => onOpenMessageLink(link)}
       >
-        <span className="truncate">
+        <span className="min-w-0 truncate">
           {channelLabel}
           {inlineContext ? ` · ${inlineContext}` : null}
         </span>

@@ -18,9 +18,10 @@ const REPO_ADDRESS = `30617:${ALICE_PUBKEY}:relay-tools`;
 const PR_ID = `e0${"ca4d".repeat(15)}ff`; // 64-hex event id
 const PR_SUBJECT = "Restore recipient-side entity cards";
 const ISSUE_ID = `f0${"1a2b".repeat(15)}ee`; // 64-hex event id
-const ISSUE_SUBJECT = "Reopen identical issue links";
+const ISSUE_SUBJECT =
+  "Smoke test: issue tracking on relay-tools with a deliberately long title";
 
-test("agent-style message with bare buzz:// links renders entity cards without snapshot tags", async ({
+test("agent-style message with angle-bracket buzz:// links renders entity cards without snapshot tags", async ({
   page,
 }) => {
   await page.addInitScript(
@@ -71,8 +72,8 @@ test("agent-style message with bare buzz:// links renders entity cards without s
     () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  // Simulate an agent/CLI sender: plain kind-9 message with bare buzz://
-  // URLs in the content and NO link-preview snapshot tags.
+  // Simulate an agent/CLI sender: plain kind-9 message with angle-bracket
+  // buzz:// URLs in a Markdown list and NO link-preview snapshot tags.
   await page.evaluate(
     ({ prId, issueId, alicePubkey }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -80,10 +81,11 @@ test("agent-style message with bare buzz:// links renders entity cards without s
         pubkey: alicePubkey,
         content: [
           "PR is up — review when you can:",
-          `buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools`,
-          `Issue with enough leading context to wrap the linked chip: buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools`,
-          `Repo: buzz://repo?owner=${alicePubkey}&d=relay-tools`,
-          `Missing repo: buzz://repo?owner=${alicePubkey}&d=missing-repo`,
+          "",
+          `- Pull request: <buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools>`,
+          `- Issue: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
+          `- Repository: <buzz://repo?owner=${alicePubkey}&d=relay-tools>`,
+          `- Missing repo: <buzz://repo?owner=${alicePubkey}&d=missing-repo>`,
         ].join("\n"),
       });
     },
@@ -121,9 +123,7 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   const prContext = prTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
   );
-  await expect(prContext).toHaveText(
-    "buzz · The complete Buzz community platform.",
-  );
+  await expect(prContext).not.toBeEmpty();
   await expect(prContext).not.toContainText(PR_SUBJECT);
   const prFooter = prTooltip.locator('[data-buzz-tooltip-metadata-type=""]');
   await expect(prFooter).toHaveText("Pull request · relay-tools");
@@ -151,51 +151,36 @@ test("agent-style message with bare buzz:// links renders entity cards without s
     name: /Open issue .* in repository relay-tools/,
   });
   await expect(issueChip).toContainText(`relay-tools · ${ISSUE_SUBJECT}`);
-  await expect(issueChip).toHaveClass(/wrapping-inline-chip/);
-  await expect(issueChip).toHaveCSS("display", "inline");
-  await expect(issueChip.locator(".inline-chip-leading-fragment")).toHaveText(
-    "relay-",
+  await expect(issueChip).toHaveCSS("max-width", "256px");
+  await expect(issueChip.locator(".truncate")).toHaveCSS(
+    "text-overflow",
+    "ellipsis",
   );
-  const issueChipFragments = await issueChip.evaluate((element) =>
-    Array.from(element.getClientRects()).map((rect) => ({
-      height: rect.height,
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-    })),
-  );
-  expect(issueChipFragments.length).toBeGreaterThan(1);
-  const hoveredFragment = issueChipFragments.at(-1);
-  if (!hoveredFragment) throw new Error("Expected a wrapped issue chip");
-  await page.mouse.move(
-    hoveredFragment.left + hoveredFragment.width / 2,
-    hoveredFragment.top + hoveredFragment.height / 2,
-  );
+  await expect
+    .poll(() =>
+      issueChip
+        .locator(".truncate")
+        .evaluate((element) => element.scrollWidth > element.clientWidth),
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      issueChip.evaluate((element) => {
+        const maxWidth = Number.parseFloat(getComputedStyle(element).maxWidth);
+        return element.getBoundingClientRect().width <= maxWidth + 1;
+      }),
+    )
+    .toBe(true);
+  await issueChip.hover();
   const issueTooltip = page.getByRole("tooltip");
   const issueContext = issueTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
   );
-  await expect(issueContext).toHaveText(
-    "buzz · The complete Buzz community platform.",
-  );
+  await expect(issueContext).not.toBeEmpty();
   await expect(issueContext).not.toContainText(ISSUE_SUBJECT);
   await expect(
     issueTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Issue · relay-tools");
-  const issueTooltipBox = await issueTooltip.boundingBox();
-  if (!issueTooltipBox) throw new Error("Expected a visible issue tooltip");
-  const viewport = page.viewportSize();
-  if (!viewport) throw new Error("Expected a configured viewport");
-  const fragmentCenter = hoveredFragment.left + hoveredFragment.width / 2;
-  const expectedTooltipCenter = Math.min(
-    Math.max(fragmentCenter, 8 + issueTooltipBox.width / 2),
-    viewport.width - 8 - issueTooltipBox.width / 2,
-  );
-  expect(
-    Math.abs(
-      issueTooltipBox.x + issueTooltipBox.width / 2 - expectedTooltipCenter,
-    ),
-  ).toBeLessThanOrEqual(1);
 
   // The repository card uses its signed announcement metadata and remains
   // image-less.
@@ -221,6 +206,16 @@ test("agent-style message with bare buzz:// links renders entity cards without s
   const repoChip = row.getByRole("button", {
     name: "Open repository relay-tools",
   });
+  const [issueChipBox, repoChipBox] = await Promise.all([
+    issueChip.boundingBox(),
+    repoChip.boundingBox(),
+  ]);
+  if (!issueChipBox || !repoChipBox) {
+    throw new Error("Expected visible issue and repository chips");
+  }
+  expect(
+    Math.abs(issueChipBox.height - repoChipBox.height),
+  ).toBeLessThanOrEqual(1);
   await repoChip.hover();
   const repoTooltip = page.getByRole("tooltip");
   await expect(

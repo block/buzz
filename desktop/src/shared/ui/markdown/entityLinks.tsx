@@ -320,9 +320,8 @@ export function renderEntityLinkAnchor({
         className={cn(metadata === null && "buzz-link-unavailable")}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
-        wrapping
       >
-        {label}
+        <span className="min-w-0 truncate">{label}</span>
       </BuzzLinkChip>
     );
   };
