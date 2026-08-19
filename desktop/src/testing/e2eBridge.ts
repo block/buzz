@@ -1282,6 +1282,8 @@ declare global {
     __BUZZ_E2E_PROJECT_QUERY_FILTERS__?: MockFilter[];
     /** Optional local repository snapshot returned for project branch tests. */
     __BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__?: unknown;
+    /** Optional bounded file contents returned by repository content reads. */
+    __BUZZ_E2E_PROJECT_REPO_FILE_CONTENTS__?: Record<string, string | null>;
     __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
       local_path: string | null;
       local_branch: string | null;
@@ -12023,6 +12025,13 @@ export function maybeInstallE2eTauriMocks() {
         };
       case "get_project_local_repo_snapshot":
         return window.__BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__ ?? null;
+      case "get_project_repo_file_content":
+      case "get_project_local_repo_file_content": {
+        const path = (payload as { path?: string } | undefined)?.path;
+        return path
+          ? (window.__BUZZ_E2E_PROJECT_REPO_FILE_CONTENTS__?.[path] ?? null)
+          : null;
+      }
       case "get_project_repo_diff":
         return {
           additions: 27,

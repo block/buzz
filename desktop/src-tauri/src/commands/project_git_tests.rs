@@ -1,7 +1,17 @@
+use super::super::project_git_file_content::validate_repo_file_path;
 use super::*;
 
 #[test]
 fn parse_ls_tree_keeps_paths_after_eager_preview_limit() {
+    let repo_dir = tempfile::tempdir().expect("create temporary repository");
+    std::fs::create_dir(repo_dir.path().join("src")).expect("create source directory");
+    std::fs::write(repo_dir.path().join("README.md"), "# Deferred README")
+        .expect("write deferred README");
+    std::fs::write(
+        repo_dir.path().join("src/application.rs"),
+        "fn deferred() {}",
+    )
+    .expect("write deferred source file");
     let hidden_entries = (0..MAX_EAGER_FILE_PREVIEWS)
         .map(|index| {
             format!(
@@ -12,21 +22,41 @@ fn parse_ls_tree_keeps_paths_after_eager_preview_limit() {
         .collect::<Vec<_>>()
         .join("\n");
     let output = format!(
-        "{hidden_entries}\n100644 blob {} 12\tsrc/application.rs",
-        "b".repeat(40)
+        "{hidden_entries}\n100644 blob {} 17\tREADME.md\n100644 blob {} 16\tsrc/application.rs",
+        "b".repeat(40),
+        "c".repeat(40)
     );
 
-    let files = parse_ls_tree(
-        std::path::Path::new("/path/does/not/exist"),
-        &output,
-        &std::collections::HashMap::new(),
-    );
+    let files = parse_ls_tree(repo_dir.path(), &output, &std::collections::HashMap::new());
 
-    assert_eq!(files.len(), MAX_EAGER_FILE_PREVIEWS + 1);
+    assert_eq!(files.len(), MAX_EAGER_FILE_PREVIEWS + 2);
+    let readme = files
+        .iter()
+        .find(|file| file.path == "README.md")
+        .expect("README metadata remains visible");
+    assert_eq!(readme.preview_content, None);
+    assert_eq!(
+        read_preview_content(repo_dir.path(), &readme.path, readme.size).as_deref(),
+        Some("# Deferred README")
+    );
     assert_eq!(
         files.last().map(|file| file.path.as_str()),
         Some("src/application.rs")
     );
+    let source = files.last().expect("source metadata remains visible");
+    assert_eq!(source.preview_content, None);
+    assert_eq!(
+        read_preview_content(repo_dir.path(), &source.path, source.size).as_deref(),
+        Some("fn deferred() {}")
+    );
+}
+
+#[test]
+fn repo_file_paths_reject_traversal_and_absolute_paths() {
+    assert!(validate_repo_file_path("src/application.rs").is_ok());
+    assert!(validate_repo_file_path("../outside.txt").is_err());
+    assert!(validate_repo_file_path("src/../outside.txt").is_err());
+    assert!(validate_repo_file_path("/absolute.txt").is_err());
 }
 
 #[test]

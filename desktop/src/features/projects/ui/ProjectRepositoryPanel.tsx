@@ -27,7 +27,10 @@ import type {
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
 import {
+  formatFileSize,
+  formatLastChangedAt,
   nextRepositoryEntryLimit,
+  pluralize,
   relativeTime,
   REPOSITORY_ENTRY_PAGE_SIZE,
 } from "@/features/projects/lib/projectsViewHelpers";
@@ -49,27 +52,10 @@ import {
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
-
-function pluralize(count: number, singular: string) {
-  return `${count} ${singular}${count === 1 ? "" : "s"}`;
-}
-
-export function formatLastChangedAt(timestamp: number | null) {
-  if (!timestamp) return "—";
-  return new Date(timestamp * 1_000).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatFileSize(size: number | null) {
-  if (size === null) return "—";
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
+import {
+  type RepositoryFileContentSource,
+  useRepositoryFileContent,
+} from "./useRepositoryFileContent";
 
 function normalizeAuthorLookupValue(value: string | null | undefined) {
   return value?.trim().toLowerCase() ?? "";
@@ -549,11 +535,14 @@ function BreadcrumbButton({
 
 function FileContentPanel({
   file,
+  fileContentSource,
   onOpenPath,
 }: {
   file: ProjectRepoFile;
+  fileContentSource?: RepositoryFileContentSource;
   onOpenPath: (path: string) => void;
 }) {
+  const fileContent = useRepositoryFileContent(file, fileContentSource);
   const language = languageForPath(file.path);
   const pathSegments = file.path.split("/").filter(Boolean);
   const fileName = pathSegments[pathSegments.length - 1] ?? file.path;
@@ -592,24 +581,27 @@ function FileContentPanel({
       <div className="border-border/50 border-b bg-muted/10 px-4 py-2 text-2xs text-muted-foreground sm:hidden">
         Last changed {formatLastChangedAt(file.lastChangedAt)}
       </div>
-      {file.previewContent ? (
+      {fileContent.isLoading ? (
+        <BuzzLoadingState label="Loading file" />
+      ) : fileContent.content ? (
         <pre className="overflow-x-auto bg-background/60 p-4">
           {language ? (
             <SyntaxHighlightedCode
               className="whitespace-pre-wrap break-words text-xs leading-relaxed"
-              code={file.previewContent}
+              code={fileContent.content}
               language={language}
             />
           ) : (
             <code className="block min-w-full whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground">
-              {file.previewContent}
+              {fileContent.content}
             </code>
           )}
         </pre>
       ) : (
         <div className="p-6 text-sm text-muted-foreground">
-          Preview unavailable for this file. Large and binary files only show
-          metadata.
+          {fileContent.error
+            ? "Could not load this file. Try again after refreshing the repository."
+            : "Preview unavailable for this file. Large and binary files only show metadata."}
         </div>
       )}
     </div>
@@ -618,6 +610,7 @@ function FileContentPanel({
 
 export function RepositoryFilesPanel({
   files,
+  fileContentSource,
   snapshot,
   isLoading,
   error,
@@ -628,6 +621,7 @@ export function RepositoryFilesPanel({
   unavailableMessage,
 }: {
   files: ProjectRepoFile[];
+  fileContentSource?: RepositoryFileContentSource;
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
@@ -792,6 +786,7 @@ export function RepositoryFilesPanel({
     return (
       <FileContentPanel
         file={selectedFile}
+        fileContentSource={fileContentSource}
         onOpenPath={(path) => {
           setSelectedFile(null);
           openPath(path);
