@@ -38,40 +38,50 @@ Future<void> _presentMessageReactionPopover({
   required Rect anchorRect,
   required EdgeInsets spotlightPadding,
 }) async {
-  unawaited(HapticFeedback.mediumImpact());
-  final reduceMotion = MediaQuery.disableAnimationsOf(context);
-  final dialogRoute = RawDialogRoute<void>(
-    barrierDismissible: true,
-    barrierLabel: 'Dismiss reaction picker',
-    barrierColor: Colors.transparent,
-    transitionDuration: reduceMotion ? Duration.zero : _reactionPopoverDuration,
-    transitionBuilder: (context, animation, secondaryAnimation, child) => child,
-    pageBuilder: (dialogContext, animation, secondaryAnimation) =>
-        _MessageReactionPopover(
-          anchorRect: anchorRect,
-          spotlightPadding: spotlightPadding,
-          animation: animation,
-          message: message,
-          pageContext: context,
-          pageRef: ref,
-        ),
-  );
-  var routePushed = false;
-  messageActionBackdropActive.value = true;
+  if (_messageActionPresentationInFlight) return;
+  _messageActionPresentationInFlight = true;
+
   try {
-    // Remove UIKit glass views from Flutter's platform-view overlay before the
-    // backdrop filter paints, otherwise they leave sharp rectangular holes.
-    await WidgetsBinding.instance.endOfFrame;
-    if (!context.mounted) return;
-    final popResult = Navigator.of(
-      context,
-      rootNavigator: true,
-    ).push(dialogRoute);
-    routePushed = true;
-    await popResult;
+    unawaited(HapticFeedback.mediumImpact());
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final dialogRoute = RawDialogRoute<void>(
+      barrierDismissible: true,
+      barrierLabel: 'Dismiss reaction picker',
+      barrierColor: Colors.transparent,
+      transitionDuration: reduceMotion
+          ? Duration.zero
+          : _reactionPopoverDuration,
+      transitionBuilder: (context, animation, secondaryAnimation, child) =>
+          child,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) =>
+          _MessageReactionPopover(
+            anchorRect: anchorRect,
+            spotlightPadding: spotlightPadding,
+            animation: animation,
+            message: message,
+            pageContext: context,
+            pageRef: ref,
+          ),
+    );
+    var routePushed = false;
+    messageActionBackdropActive.value = true;
+    try {
+      // Remove UIKit glass views from Flutter's platform-view overlay before the
+      // backdrop filter paints, otherwise they leave sharp rectangular holes.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!context.mounted) return;
+      final popResult = Navigator.of(
+        context,
+        rootNavigator: true,
+      ).push(dialogRoute);
+      routePushed = true;
+      await popResult;
+    } finally {
+      if (routePushed) await dialogRoute.completed;
+      messageActionBackdropActive.value = false;
+    }
   } finally {
-    if (routePushed) await dialogRoute.completed;
-    messageActionBackdropActive.value = false;
+    _messageActionPresentationInFlight = false;
   }
 }
 

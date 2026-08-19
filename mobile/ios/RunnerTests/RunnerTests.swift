@@ -554,7 +554,7 @@ class RunnerTests: XCTestCase {
     )
   }
 
-  func testCategoryTrackerKeepsSelectionWhenPreferenceFrameIsIncomplete() {
+  func testCategoryTrackerReleasesSelectionWhenOldHeaderIsMissing() {
     XCTAssertEqual(
       NativeEmojiCategoryTracker.selectedSectionID(
         order: ["people", "nature", "flags"],
@@ -562,7 +562,7 @@ class RunnerTests: XCTestCase {
         viewportTop: 0,
         currentSelection: "nature"
       ),
-      "nature"
+      "people"
     )
   }
 

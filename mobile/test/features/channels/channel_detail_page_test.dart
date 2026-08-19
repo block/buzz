@@ -1453,6 +1453,61 @@ void main() {
       expect(messageActionBackdropActive.value, isFalse);
     });
 
+    testWidgets('reaction-only popovers serialize concurrent long presses', (
+      tester,
+    ) async {
+      addTearDown(() => messageActionBackdropActive.value = false);
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _systemMsg(
+              id: 'concurrent-reaction',
+              payload: {
+                'type': 'member_joined',
+                'actor': 'alice',
+                'target': 'alice',
+              },
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final target = find.byKey(
+        const ValueKey('system-message-row-concurrent-reaction'),
+      );
+      final center = tester.getCenter(target);
+      final firstGesture = await tester.startGesture(center, pointer: 1);
+      final secondGesture = await tester.startGesture(center, pointer: 2);
+      await tester.pump(const Duration(milliseconds: 501));
+      await firstGesture.up();
+      await secondGesture.up();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('reaction-popover-tray')),
+        findsOneWidget,
+      );
+      expect(messageActionBackdropActive.value, isTrue);
+
+      Navigator.of(
+        tester.element(find.byKey(const ValueKey('reaction-popover-tray'))),
+      ).pop();
+      await tester.pumpAndSettle();
+      expect(messageActionBackdropActive.value, isFalse);
+
+      await tester.longPress(target);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('reaction-popover-tray')),
+        findsOneWidget,
+        reason: 'The presentation latch must release after dismissal.',
+      );
+    });
+
     testWidgets('reaction popover grows right from a fixed left edge', (
       tester,
     ) async {

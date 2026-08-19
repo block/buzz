@@ -466,7 +466,10 @@ enum NativeEmojiCategoryTracker {
     // retain it through that small boundary jitter. A real upward scroll moves
     // its header clearly back into the viewport and then releases the latch.
     guard let currentTop = offsets[currentSelection] else {
-      return currentSelection
+      // A LazyVStack can discard the old pinned header after a fast upward
+      // fling. Once an earlier header is a valid candidate, absence of the old
+      // header is evidence to release the latch rather than retain it forever.
+      return candidate
     }
     if currentTop <= viewportTop + 8 {
       return currentSelection

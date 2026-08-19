@@ -15,7 +15,7 @@ const _iosNativeMessageActionSurfaceChannel = MethodChannel(
   'buzz/native_message_action_surface',
 );
 
-bool _messageActionsPresentationInFlight = false;
+bool _messageActionPresentationInFlight = false;
 bool? _iosNativeMessageActionSurfaceSupported;
 
 Future<bool> _supportsIosNativeMessageActionSurface() async {
@@ -113,8 +113,8 @@ Future<bool> _showMessageActionsPopover({
   required VoidCallback? restoreComposerFocus,
   required bool shouldRestoreComposerFocus,
 }) async {
-  if (_messageActionsPresentationInFlight) return true;
-  _messageActionsPresentationInFlight = true;
+  if (_messageActionPresentationInFlight) return true;
+  _messageActionPresentationInFlight = true;
 
   try {
     final actions = _buildPopoverMessageActions(
@@ -215,7 +215,7 @@ Future<bool> _showMessageActionsPopover({
     }
     return true;
   } finally {
-    _messageActionsPresentationInFlight = false;
+    _messageActionPresentationInFlight = false;
   }
 }
 
