@@ -190,6 +190,23 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goNewWorkflowForChannel = React.useCallback(
+    (channelId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows",
+          search: {
+            channel: channelId,
+            pane: "trigger",
+            view: "create",
+          },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goEditWorkflow = React.useCallback(
     (workflowId: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -379,6 +396,7 @@ export function useAppNavigation() {
     goHome,
     goNewMessage,
     goNewWorkflow,
+    goNewWorkflowForChannel,
     goProject,
     goProjects,
     goPulse,

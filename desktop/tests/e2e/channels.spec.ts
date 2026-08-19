@@ -2944,6 +2944,59 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
 });
 
+test("channel settings opens and creates channel workflows", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await invokeMockCommand(page, "create_workflow", {
+    channelId: GENERAL_CHANNEL_ID,
+    yamlDefinition:
+      "name: Welcome responder\ntrigger:\n  on: message_posted\nsteps:\n  - id: reply\n    run: send_message\n    with:\n      text: Welcome\n",
+  });
+  await openChannelManagement(page, "general");
+
+  const sheet = page.getByTestId("channel-management-sheet");
+  const canvasBox = await sheet
+    .getByTestId("channel-canvas-ingress")
+    .boundingBox();
+  const workflowsBox = await sheet
+    .getByTestId("channel-workflows-ingress")
+    .boundingBox();
+  expect(canvasBox).not.toBeNull();
+  expect(workflowsBox).not.toBeNull();
+  expect(canvasBox?.y).toBeLessThan(workflowsBox?.y);
+
+  await sheet.getByTestId("channel-workflows-ingress").click();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
+  await sheet.getByTestId("channel-workflow-mock-wf-1").click();
+  await expect(page).toHaveURL(/\/workflows\/mock-wf-1/);
+  await expect(
+    page.getByRole("dialog", { name: "Edit workflow" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await page.getByTestId("channel-workflows-ingress").click();
+  await page.getByTestId("channel-workflows-new").click();
+
+  await expect(page).toHaveURL(
+    new RegExp(
+      `/workflows\\?channel=${GENERAL_CHANNEL_ID}&pane=trigger&view=create`,
+    ),
+  );
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("combobox", { exact: true, name: "Channel" }),
+  ).toContainText("general");
+});
+
 async function seedHomeInboxMention(
   page: import("@playwright/test").Page,
   itemId: string,

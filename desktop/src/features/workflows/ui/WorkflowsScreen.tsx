@@ -12,6 +12,7 @@ const WorkflowsView = React.lazy(async () => {
 export type WorkflowEditorRoute =
   | {
       hasOrigin: boolean;
+      initialChannelId?: string;
       mode: "create";
       pane: WorkflowEditorPane;
     }

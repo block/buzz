@@ -12,6 +12,7 @@ import { LazyWorkflowsRouteScreen } from "./lazyWorkflowsRouteScreen";
 export const Route = createFileRoute("/workflows")({
   component: WorkflowsRouteComponent,
   validateSearch: (search: Record<string, unknown>) => ({
+    channel: typeof search.channel === "string" ? search.channel : undefined,
     pane: serializeWorkflowEditorPane(parseWorkflowEditorPane(search.pane)),
     view: search.view === "create" ? search.view : undefined,
   }),
@@ -21,7 +22,7 @@ function WorkflowsRouteComponent() {
   usePreviewFeatureWarning("workflows");
   const navigate = Route.useNavigate();
   const location = useLocation();
-  const { pane, view } = Route.useSearch();
+  const { channel, pane, view } = Route.useSearch();
   const hasOrigin =
     (location.state as { workflowEditorHasOrigin?: unknown } | undefined)
       ?.workflowEditorHasOrigin === true;
@@ -33,6 +34,7 @@ function WorkflowsRouteComponent() {
           view === "create"
             ? {
                 hasOrigin,
+                initialChannelId: channel,
                 mode: "create",
                 pane: parseWorkflowEditorPane(pane),
               }
@@ -43,6 +45,7 @@ function WorkflowsRouteComponent() {
             replace: true,
             resetScroll: false,
             search: {
+              channel,
               pane: serializeWorkflowEditorPane(nextPane),
               view,
             },

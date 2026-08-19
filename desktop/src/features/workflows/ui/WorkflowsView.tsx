@@ -305,6 +305,9 @@ export function WorkflowsView({
       {editor && canOpenEditor ? (
         <WorkflowDialog
           channels={memberChannels}
+          initialChannelId={
+            editor.mode === "create" ? editor.initialChannelId : undefined
+          }
           key={
             editor.mode === "create"
               ? editor.mode

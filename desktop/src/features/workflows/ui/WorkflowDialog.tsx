@@ -53,6 +53,7 @@ type DialogMode = "create" | "edit" | "duplicate";
 
 type WorkflowDialogProps = {
   channels: Channel[];
+  initialChannelId?: string;
   mode: DialogMode;
   onDeleteWorkflow: (workflow: Workflow) => void;
   onDuplicateWorkflow: (workflowId: string) => void;
@@ -245,6 +246,7 @@ function WorkflowNameEditor({
 
 export function WorkflowDialog({
   channels,
+  initialChannelId,
   mode,
   onDeleteWorkflow,
   onDuplicateWorkflow,
@@ -262,7 +264,11 @@ export function WorkflowDialog({
   const channelId =
     mode === "edit" && workflowSnapshot?.channelId
       ? workflowSnapshot.channelId
-      : "";
+      : mode === "create" &&
+          initialChannelId &&
+          channels.some((channel) => channel.id === initialChannelId)
+        ? initialChannelId
+        : "";
 
   const [selectedChannelId, setSelectedChannelId] = React.useState(channelId);
   const [yamlDefinition, setYamlDefinition] = React.useState(() =>
