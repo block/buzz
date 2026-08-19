@@ -28,8 +28,8 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/skeleton.dart';
 import '../profile/presence_cache_provider.dart';
 import '../profile/profile_provider.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import '../forum/forum_posts_view.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
@@ -275,9 +275,10 @@ class ChannelDetailPage extends HookConsumerWidget {
         !resolvedChannel.isForum &&
         isConnectionInProgress &&
         !messagesNotifier.hasLoadedMessages;
-    final appBarTitleContentHeight = resolvedChannel.isDm
-        ? _dmAppBarTitleContentHeight(context)
-        : 0.0;
+    final appBarTitleContentHeight = _twoLineAppBarTitleContentHeight(
+      context,
+      isDm: resolvedChannel.isDm,
+    );
     final readTimestamp = _channelReadTimestamp(
       channel: resolvedChannel,
       messagesState: messagesState,
@@ -343,70 +344,70 @@ class ChannelDetailPage extends HookConsumerWidget {
                 channel: resolvedChannel,
                 currentPubkey: currentPubkey,
               )
-            : Row(
-                children: [
-                  SizedBox.square(
-                    dimension: 22,
-                    child: Center(
-                      child: Icon(channelIcon(resolvedChannel), size: 18),
-                    ),
-                  ),
-                  const SizedBox(width: Grid.half),
-                  Expanded(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: Text(
-                            resolveDmChannelDisplayLabel(
-                              resolvedChannel,
-                              currentPubkey: currentPubkey,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        if (resolvedChannel.isEphemeral) ...[
-                          const SizedBox(width: Grid.quarter),
-                          _HeaderEphemeralBadge(channel: resolvedChannel),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-        actions: [
-          if (showsComposer)
-            _HuddleButton(
-              channel: resolvedChannel,
-              events: [...messagesState.value ?? const [], ...huddleLifecycle],
-            ),
-          if (_showsMembersAction(resolvedChannel))
-            _MembersButton(
-              channelId: resolvedChannel.id,
-              channel: resolvedChannel,
-              currentPubkey: currentPubkey,
-            ),
-          IconButton(
-            color: context.colors.primary,
-            onPressed: () async {
-              final shouldClose = await showChannelActionsSheet(
-                context: context,
+            : _ChannelAppBarTitle(
                 channel: resolvedChannel,
-                isUnread: false,
-                sectionId: ref
-                    .read(channelSectionsProvider)
-                    .store
-                    .assignments[resolvedChannel.id],
-              );
-              if (shouldClose == true && context.mounted) {
-                Navigator.of(context).pop();
-              }
-            },
-            tooltip: 'Channel actions',
-            icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
-          ),
-        ],
+                onTap: () async {
+                  final shouldClose = await showChannelDetailsPage(
+                    context: context,
+                    channel: resolvedChannel,
+                    currentPubkey: currentPubkey,
+                    onMemberTap: showUserProfileSheet,
+                    sectionId: ref
+                        .read(channelSectionsProvider)
+                        .store
+                        .assignments[resolvedChannel.id],
+                  );
+                  if (shouldClose == true && context.mounted) {
+                    Navigator.of(context).pop();
+                  }
+                },
+              ),
+        actions: resolvedChannel.isDm
+            ? [
+                if (showsComposer)
+                  _HuddleButton(
+                    channel: resolvedChannel,
+                    events: [
+                      ...messagesState.value ?? const [],
+                      ...huddleLifecycle,
+                    ],
+                  ),
+                if (_showsMembersAction(resolvedChannel))
+                  _MembersButton(
+                    channelId: resolvedChannel.id,
+                    channel: resolvedChannel,
+                    currentPubkey: currentPubkey,
+                  ),
+                IconButton(
+                  color: context.colors.primary,
+                  onPressed: () async {
+                    final shouldClose = await showChannelActionsSheet(
+                      context: context,
+                      channel: resolvedChannel,
+                      isUnread: false,
+                      sectionId: ref
+                          .read(channelSectionsProvider)
+                          .store
+                          .assignments[resolvedChannel.id],
+                    );
+                    if (shouldClose == true && context.mounted) {
+                      Navigator.of(context).pop();
+                    }
+                  },
+                  tooltip: 'Channel actions',
+                  icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
+                ),
+              ]
+            : [
+                if (showsComposer)
+                  _HuddleButton(
+                    channel: resolvedChannel,
+                    events: [
+                      ...messagesState.value ?? const [],
+                      ...huddleLifecycle,
+                    ],
+                  ),
+              ],
       ),
       body: Stack(
         fit: StackFit.expand,

@@ -203,6 +203,28 @@ void main() {
   });
 
   group('build channel lifecycle tags', () {
+    test('channel edits match desktop kind 9002 tags', () {
+      expect(
+        buildUpdateChannelTags(
+          channelId: 'channel-id',
+          name: '  ###general  ',
+          description: ' Team updates ',
+        ),
+        [
+          ['h', 'channel-id'],
+          ['name', 'general'],
+          ['about', 'Team updates'],
+        ],
+      );
+    });
+
+    test('channel edits reject a hash-only name', () {
+      expect(
+        () => buildUpdateChannelTags(channelId: 'channel-id', name: ' ### '),
+        throwsArgumentError,
+      );
+    });
+
     test('archive matches kind 9002 tags', () {
       expect(buildSetChannelArchivedTags('channel-id', archived: true), [
         ['h', 'channel-id'],
@@ -360,6 +382,49 @@ void main() {
       expect(session.historyQueryCount, 1);
     });
   });
+
+  test(
+    'stale channel actions cannot publish after a community switch',
+    () async {
+      final session = RelaySessionNotifier();
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final staleActions = container.read(channelActionsProvider);
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://other-community.example', nsec: null);
+
+      final operations = <Future<void> Function()>[
+        () =>
+            staleActions.updateChannel(channelId: _channelId, name: 'renamed'),
+        () => staleActions.archiveChannel(_channelId),
+        () => staleActions.unarchiveChannel(_channelId),
+        () => staleActions.deleteChannel(_channelId),
+        () => staleActions.setCanvas(channelId: _channelId, content: 'canvas'),
+        () => staleActions.changeMemberRole(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+          role: 'admin',
+        ),
+        () => staleActions.removeMember(
+          channelId: _channelId,
+          pubkey: _memberPubkey,
+        ),
+        () => staleActions.leaveChannel(_channelId),
+      ];
+
+      for (final operation in operations) {
+        await expectLater(operation(), throwsA(isA<StateError>()));
+      }
+    },
+  );
 
   group('channelMembersProvider', () {
     test('waits for the relay connection before fetching members', () async {
@@ -609,6 +674,17 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
   }) async {
     historyQueryCount++;
     return const [];
+  }
+}
+
+class _FixedRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() =>
+      RelayConfig(baseUrl: 'https://first-community.example', nsec: null);
+
+  @override
+  void update({required String baseUrl, String? nsec}) {
+    state = RelayConfig(baseUrl: baseUrl, nsec: nsec);
   }
 }
 

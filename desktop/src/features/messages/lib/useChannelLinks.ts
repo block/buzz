@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
+import type { Channel } from "@/shared/api/types";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 
 export type ChannelSuggestion = {
@@ -11,6 +12,37 @@ export type ChannelSuggestion = {
 };
 
 const CHANNEL_QUERY_DEBOUNCE_MS = 120;
+
+/**
+ * Archived channels must stay resolvable in historical links (rendered from
+ * the unfiltered ChannelNavigationContext list), but are dead ends for new
+ * `#channel` references — exclude them here, at generation time, rather than
+ * from the shared channel list.
+ */
+function isChannelSuggestable(
+  channel: Pick<Channel, "channelType" | "archivedAt">,
+): boolean {
+  return channel.channelType !== "dm" && channel.archivedAt === null;
+}
+
+/** Exported for unit testing. */
+export function selectChannelSuggestions(
+  channels: Channel[],
+  query: string,
+): ChannelSuggestion[] {
+  const lowerQuery = query.toLowerCase();
+  return channels
+    .filter(
+      (ch) =>
+        isChannelSuggestable(ch) && ch.name.toLowerCase().includes(lowerQuery),
+    )
+    .slice(0, 8)
+    .map((ch) => ({
+      id: ch.id,
+      name: ch.name,
+      channelType: ch.channelType as "stream" | "forum",
+    }));
+}
 
 export function useChannelLinks() {
   const { channels } = useChannelNavigation();
@@ -27,7 +59,7 @@ export function useChannelLinks() {
 
   /** Channel names (original casing) for overlay highlighting. */
   const knownChannelNames = React.useMemo<string[]>(
-    () => channels.filter((ch) => ch.channelType !== "dm").map((ch) => ch.name),
+    () => channels.filter(isChannelSuggestable).map((ch) => ch.name),
     [channels],
   );
 
@@ -56,19 +88,7 @@ export function useChannelLinks() {
     if (channelQuery === null) {
       return [];
     }
-
-    const lowerQuery = channelQuery.toLowerCase();
-    return channels
-      .filter(
-        (ch) =>
-          ch.channelType !== "dm" && ch.name.toLowerCase().includes(lowerQuery),
-      )
-      .slice(0, 8)
-      .map((ch) => ({
-        id: ch.id,
-        name: ch.name,
-        channelType: ch.channelType as "stream" | "forum",
-      }));
+    return selectChannelSuggestions(channels, channelQuery);
   }, [channels, channelQuery]);
 
   const isChannelOpen = channelQuery !== null && channelSuggestions.length > 0;
