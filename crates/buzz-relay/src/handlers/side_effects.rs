@@ -1203,9 +1203,10 @@ pub async fn emit_group_discovery_events(
     // Re-capture membership behind the writer lock immediately before the
     // authoritative 39002 replacement. Metadata/admin snapshots retain their
     // existing behavior; only membership publication needs this freshness fence.
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes();
     let mut member_snapshot = state
         .db
-        .lock_member_snapshot(tenant.community(), channel_id)
+        .lock_member_snapshot(tenant.community(), channel_id, &relay_pubkey)
         .await?;
     let stored_members =
         store_group_members_event(tenant, state, channel_id, &mut member_snapshot).await?;
@@ -3131,7 +3132,7 @@ pub async fn reconcile_large_channel_member_snapshots(
             // roster A after another relay commits and publishes roster B.
             let mut member_snapshot = state
                 .db
-                .lock_member_snapshot(candidate.community_id, channel_id)
+                .lock_member_snapshot(candidate.community_id, channel_id, &relay_pubkey.to_bytes())
                 .await?;
             let tenant = TenantContext::resolved(candidate.community_id, candidate.host.clone());
             let stored_members =

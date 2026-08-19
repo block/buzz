@@ -68,7 +68,7 @@ use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
 
-fn event_replacement_lock_key(
+pub(crate) fn event_replacement_lock_key(
     community_id: CommunityId,
     kind: i32,
     pubkey: &[u8],
@@ -2396,8 +2396,9 @@ impl Db {
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
+        relay_pubkey: &[u8],
     ) -> Result<channel::LockedMemberSnapshot> {
-        channel::lock_member_snapshot(&self.pool, community_id, channel_id).await
+        channel::lock_member_snapshot(&self.pool, community_id, channel_id, relay_pubkey).await
     }
 
     /// Adds a member to a channel.
@@ -5521,9 +5522,10 @@ mod tests {
         let community_uuid = Uuid::new_v4();
         let channel = Uuid::new_v4();
         let keys = Keys::generate();
-        seed_community_channel(&pool, community_uuid, channel, &keys).await;
+        let owner_keys = Keys::generate();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
         let community = CommunityId::from_uuid(community_uuid);
-        let member = Keys::generate().public_key().to_hex();
+        let member = owner_keys.public_key().to_hex();
         let tags = || {
             vec![
                 Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
@@ -5585,6 +5587,128 @@ mod tests {
                 .await
                 .expect("count rolled-back event");
         assert_eq!(new_rows, 0, "new roster must roll back with its index");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_legacy_roster_cannot_replace_new_locked_snapshot() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (setup_pool, scratch_name) = create_scratch_db(&admin, "mixed_roster_writer").await;
+        let base_url = admin_url().await;
+        let slash = base_url.rfind('/').expect("database URL has path segment");
+        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect(&scratch_url)
+            .await
+            .expect("connect one-connection scratch pool");
+        setup_pool.close().await;
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = Uuid::new_v4();
+        let relay_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_bytes();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
+
+        // This is the old pod's unlocked capture A. It remains in process memory
+        // while canonical membership advances and the new pod publishes B.
+        let base = Timestamp::now().as_secs();
+        let roster = |members: &[&[u8]], timestamp| {
+            let tags =
+                std::iter::once(Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"))
+                    .chain(members.iter().map(|member| {
+                        Tag::parse(["p", hex::encode(member).as_str(), "", "member"])
+                            .expect("p tag")
+                    }))
+                    .collect::<Vec<_>>();
+            EventBuilder::new(Kind::Custom(39002), "")
+                .tags(tags)
+                .custom_created_at(Timestamp::from(timestamp))
+                .sign_with_keys(&relay_keys)
+                .expect("sign roster")
+        };
+        let stale_a = roster(&[owner.as_slice()], base + 2);
+
+        let newcomer = Keys::generate().public_key().to_bytes();
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'member', $4)",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(newcomer.as_slice())
+        .bind(owner.as_slice())
+        .execute(&pool)
+        .await
+        .expect("commit newer canonical membership");
+
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        let mut snapshot = db
+            .lock_member_snapshot(community, channel, &relay_pubkey)
+            .await
+            .expect("new writer captures locked roster B");
+        let fresh_b = roster(&[owner.as_slice(), newcomer.as_slice()], base + 1);
+        assert!(
+            snapshot
+                .replace_member_event(community, channel, &fresh_b)
+                .await
+                .expect("new writer publishes B")
+                .1
+        );
+        snapshot
+            .release()
+            .await
+            .expect("commit B and release locks");
+
+        // The legacy canonical path takes the replacement key, soft-deletes B,
+        // then attempts its newer-timestamp stale A. Migration 0032 rejects the
+        // INSERT; transaction rollback must restore B. A one-connection pool
+        // proves the lock order does not turn this compatibility path into a
+        // self-deadlock.
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            db.replace_addressable_event(community, &stale_a, Some(channel)),
+        )
+        .await
+        .expect("legacy replacement must not deadlock")
+        .expect_err("stale captured roster A must be rejected");
+        assert!(
+            matches!(
+                error,
+                DbError::Sqlx(sqlx::Error::Database(ref db_error))
+                    if db_error.code().as_deref() == Some("23514")
+            ),
+            "expected roster fence check violation, got {error:?}"
+        );
+
+        let live_ids: Vec<Vec<u8>> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
+             AND kind=39002 AND pubkey=$3 AND deleted_at IS NULL",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(relay_pubkey.as_slice())
+        .fetch_all(&pool)
+        .await
+        .expect("load live roster heads");
+        assert_eq!(live_ids, vec![fresh_b.id.as_bytes().to_vec()]);
+        let stale_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community_uuid)
+                .bind(stale_a.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rejected stale roster");
+        assert_eq!(stale_rows, 0, "stale roster insert must roll back");
 
         drop_scratch_db(&admin, pool, &scratch_name).await;
     }

@@ -625,7 +625,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1036,6 +1036,18 @@ mod tests {
         assert_eq!(migrations[29].version, 30);
         let deletion_recovery = migrations[29].sql.as_str();
         assert!(deletion_recovery.contains("SET LOCAL lock_timeout = '5s'"));
+
+        // Mixed-version channel-roster fence: old canonical replacement writers
+        // acquire their replacement key before INSERT; this trigger then takes
+        // the membership key and validates the exact active p-tag set.
+        assert_eq!(migrations[31].version, 32);
+        let roster_fence = migrations[31].sql.as_str();
+        assert!(roster_fence.contains("CREATE TRIGGER trg_events_guard_channel_roster_snapshot"));
+        assert!(roster_fence.contains("NEW.kind <> 39002"));
+        assert!(roster_fence.contains("'buzz_channel_membership:'"));
+        assert!(roster_fence.contains("cm.removed_at IS NULL"));
+        assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
+        assert!(roster_fence.contains("ERRCODE = '23514'"));
     }
 
     #[test]

@@ -371,6 +371,9 @@ async fn acquire_channel_membership_lock(
 pub struct LockedMemberSnapshot {
     /// Canonical active members captured behind the lock.
     pub members: Vec<MemberRecord>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    relay_pubkey: Vec<u8>,
     tx: Transaction<'static, Postgres>,
 }
 
@@ -403,7 +406,20 @@ impl LockedMemberSnapshot {
         channel_id: Uuid,
         event: &nostr::Event,
     ) -> Result<(buzz_core::StoredEvent, bool)> {
+        if community_id != self.community_id
+            || channel_id != self.channel_id
+            || event.pubkey.to_bytes().as_slice() != self.relay_pubkey.as_slice()
+        {
+            return Err(DbError::InvalidData(
+                "member snapshot replacement does not match its locked coordinate".into(),
+            ));
+        }
         let kind = buzz_core::kind::event_kind_i32(event);
+        if kind != 39002 {
+            return Err(DbError::InvalidData(
+                "member snapshot replacement requires kind 39002".into(),
+            ));
+        }
         let pubkey = event.pubkey.to_bytes();
         let created_at_secs = event.created_at.as_secs() as i64;
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
@@ -479,8 +495,23 @@ pub async fn lock_member_snapshot(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
+    relay_pubkey: &[u8],
 ) -> Result<LockedMemberSnapshot> {
     let mut tx = pool.begin().await?;
+    // Match the canonical replacement writer's lock order. Old binaries take
+    // this key before INSERT; migration 0032 then takes the membership key in
+    // the INSERT trigger. Taking both in that order avoids mixed-version
+    // duplicate heads without introducing a lock-order inversion.
+    let replacement_lock = crate::event_replacement_lock_key(
+        community_id,
+        39002,
+        relay_pubkey,
+        Some(channel_id.as_bytes()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(replacement_lock)
+        .execute(&mut *tx)
+        .await?;
     acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
     let rows = sqlx::query(
         r#"
@@ -499,7 +530,13 @@ pub async fn lock_member_snapshot(
         .into_iter()
         .map(row_to_member_record)
         .collect::<Result<Vec<_>>>()?;
-    Ok(LockedMemberSnapshot { members, tx })
+    Ok(LockedMemberSnapshot {
+        members,
+        community_id,
+        channel_id,
+        relay_pubkey: relay_pubkey.to_vec(),
+        tx,
+    })
 }
 
 /// Add a member to a channel.
@@ -2275,16 +2312,17 @@ mod tests {
                 .chain((0..1_501).map(|n| serde_json::json!(["p", format!("{n:064x}")])))
                 .collect();
 
-        // A historical duplicate live row can exist from earlier replacement
-        // bugs. Candidate selection must apply NIP-16 head ordering instead of
-        // producing one candidate per row or accepting this older complete row.
+        // Insert canonical-looking history first, then corrupt the newest row
+        // with UPDATE to model a stale snapshot that predates migration 0032's
+        // INSERT fence. New stale snapshots cannot be inserted once that fence
+        // is deployed.
         sqlx::query(
             r#"
             INSERT INTO events
                 (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag)
             VALUES
                 ($1, $2, $3, NOW() - INTERVAL '1 minute', 39002, $4, '', $5, $6, $7),
-                ($1, $8, $3, NOW(), 39002, $9, '', $5, $6, $7)
+                ($1, $8, $3, NOW(), 39002, $4, '', $5, $6, $7)
             "#,
         )
         .bind(community_id)
@@ -2295,10 +2333,21 @@ mod tests {
         .bind(channel.id)
         .bind(channel.id.to_string())
         .bind(random_pubkey())
-        .bind(serde_json::Value::Array(stale_tags))
         .execute(&pool)
         .await
-        .expect("insert historical complete and live stale snapshots");
+        .expect("insert historical duplicate snapshots");
+        sqlx::query(
+            "UPDATE events SET tags = $1 WHERE community_id = $2 AND channel_id = $3 \
+             AND kind = 39002 AND pubkey = $4 AND created_at = (SELECT MAX(created_at) \
+             FROM events WHERE community_id = $2 AND channel_id = $3 AND kind = 39002 AND pubkey = $4)",
+        )
+        .bind(serde_json::Value::Array(stale_tags))
+        .bind(community_id)
+        .bind(channel.id)
+        .bind(&relay_pubkey)
+        .execute(&pool)
+        .await
+        .expect("simulate pre-fence stale live snapshot");
 
         // The same channel UUID in another tenant is deliberately valid. A
         // complete snapshot there must not mask this tenant's stale head.
@@ -2911,11 +2960,16 @@ mod tests {
             .connect(TEST_DB_URL)
             .await
             .expect("connect one-connection pool");
-        let mut snapshot = lock_member_snapshot(&snapshot_pool, community, channel.id)
-            .await
-            .expect("capture locked roster");
-        assert_eq!(snapshot.members.len(), 1);
         let relay_keys = Keys::generate();
+        let mut snapshot = lock_member_snapshot(
+            &snapshot_pool,
+            community,
+            channel.id,
+            &relay_keys.public_key().to_bytes(),
+        )
+        .await
+        .expect("capture locked roster");
+        assert_eq!(snapshot.members.len(), 1);
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
             .tags(vec![
                 nostr::Tag::parse(["d", &channel.id.to_string()]).expect("d tag"),
