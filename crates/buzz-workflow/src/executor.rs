@@ -629,6 +629,21 @@ pub async fn dispatch_action(
                         )));
                     }
 
+                    // Same contract for the correlation id. Definition-time
+                    // validation now accepts a `{{...}}` placeholder here, so
+                    // the UUID guarantee the action documents can only be
+                    // enforced after resolution. Without this a resolved
+                    // non-UUID reached the sink and went out on the `task`
+                    // tag, breaking correlation for every reader.
+                    if let Some(tid) = task_id.as_deref() {
+                        let tid = tid.trim();
+                        if tid.parse::<Uuid>().is_err() {
+                            return Err(WorkflowError::InvalidDefinition(format!(
+                                "AssignAgent: resolved task_id '{tid}' is not a valid UUID"
+                            )));
+                        }
+                    }
+
                     let wf_run = engine
                         .db
                         .get_workflow_run(community_id, run_id)
@@ -2003,6 +2018,12 @@ mod tests {
             "New incident: {{trigger.text}}",
             Some("{{trigger.message_id}}"),
         );
+        // A realistic trigger id: the action documents `task_id` as a
+        // correlation UUID and the executor now enforces that on the resolved
+        // value, so a fixture resolving to "event-id-hex" would assert a shape
+        // the run rejects — which is precisely what hid the validate/resolve
+        // mismatch before.
+        ctx.message_id = "11111111-2222-3333-4444-555555555555".to_owned();
         let resolved = resolve_step_templates(&step, &ctx, &outputs).unwrap();
         match resolved {
             ActionDef::AssignAgent {
@@ -2014,10 +2035,56 @@ mod tests {
                 // Static agent_pubkey is preserved verbatim.
                 assert_eq!(agent_pubkey, AGENT_HEX_FIXTURE);
                 assert_eq!(text, "New incident: P1 in prod");
-                assert_eq!(task_id.as_deref(), Some("event-id-hex"));
+                assert_eq!(
+                    task_id.as_deref(),
+                    Some("11111111-2222-3333-4444-555555555555")
+                );
             }
             other => panic!("unexpected resolved action: {other:?}"),
         }
+    }
+
+    /// The step above must also be *saveable*. `parse_yaml` always calls
+    /// `validate()`, so a templated routing field that validation rejects can
+    /// never reach the executor that resolves it — the definition and the
+    /// runtime have to agree on the accepted shapes.
+    #[test]
+    fn assign_agent_templated_channel_and_task_id_pass_definition_validation() {
+        let step = Step {
+            id: "assign".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::AssignAgent {
+                agent_pubkey: AGENT_HEX_FIXTURE.to_owned(),
+                text: "New incident".to_owned(),
+                channel: Some("{{trigger.channel_id}}".to_owned()),
+                task_id: Some("{{trigger.message_id}}".to_owned()),
+            },
+        };
+        crate::schema::validate_action(&step.id, &step.action)
+            .expect("templated channel/task_id must be saveable");
+    }
+
+    /// A literal that is neither a UUID nor a template is still rejected —
+    /// widening the shape check must not turn it into a rubber stamp.
+    #[test]
+    fn assign_agent_rejects_a_literal_non_uuid_task_id() {
+        let step = Step {
+            id: "assign".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::AssignAgent {
+                agent_pubkey: AGENT_HEX_FIXTURE.to_owned(),
+                text: "New incident".to_owned(),
+                channel: None,
+                task_id: Some("not-a-uuid".to_owned()),
+            },
+        };
+        let err = crate::schema::validate_action(&step.id, &step.action)
+            .expect_err("a literal non-UUID task_id must not validate");
+        assert!(err.to_string().contains("task_id"), "got: {err}");
     }
 
     #[test]

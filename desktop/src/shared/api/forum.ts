@@ -74,6 +74,9 @@ function fromRawForumPost(
         sig: post.sig,
       },
       relaySelfPubkey,
+      // Workflow messages attribute their owner via `actor`; without this the
+      // resolver falls back to the first `p` tag, which is now the assignee.
+      preferActorTag: true,
     }),
     content: post.content,
     kind: post.kind,
@@ -108,6 +111,8 @@ function fromRawThreadReply(
         sig: reply.sig,
       },
       relaySelfPubkey,
+      // See fromRawForumPost: attribution comes from `actor`, not `p`.
+      preferActorTag: true,
     }),
     content: reply.content,
     kind: reply.kind,

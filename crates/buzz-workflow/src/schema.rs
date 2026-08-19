@@ -149,10 +149,12 @@ pub enum ActionDef {
     /// Unlike [`ActionDef::SendMessage`], which reverse-parses `@Name` from
     /// prose against channel membership (ambiguous names silently wake no one;
     /// renames silently rewrite the target), `assign_agent` binds dispatch to
-    /// the target's hex pubkey. The relay sink emits exactly two `p` tags on
-    /// the resulting message: the workflow owner (attribution) and
-    /// `agent_pubkey` (wake). The message body is never scanned for narrative
-    /// names.
+    /// the target's hex pubkey. The relay sink emits exactly **one** `p` tag on
+    /// the resulting message — `agent_pubkey`, the sole wake target. The
+    /// workflow owner is attributed via the `actor` tag instead: ACP wakes on
+    /// any `p` tag matching an agent's pubkey, so p-tagging the owner woke them
+    /// as a second agent whenever an agent owned the workflow. The message body
+    /// is never scanned for narrative names.
     ///
     /// `agent_pubkey` accepts either a static 64-char lowercase hex pubkey or a
     /// single `{{...}}` template placeholder (e.g. `{{trigger.author}}`).
@@ -166,12 +168,14 @@ pub enum ActionDef {
         agent_pubkey: String,
         /// Task text posted to the channel (supports template variables).
         text: String,
-        /// Optional channel UUID override. Must equal the workflow's channel
-        /// when the workflow is bound to one (matches `send_message`).
+        /// Optional channel UUID override, or a single `{{...}}` template that
+        /// resolves to one. Must equal the workflow's channel when the workflow
+        /// is bound to one (matches `send_message`).
         #[serde(default)]
         channel: Option<String>,
         /// Optional caller-supplied correlation id for downstream tracking.
-        /// Must be a valid UUID when set.
+        /// A UUID, or a single `{{...}}` template that resolves to one — the
+        /// resolved value is re-checked before dispatch.
         #[serde(default)]
         task_id: Option<String>,
     },
@@ -278,7 +282,7 @@ impl WorkflowDef {
 /// for every step. Rejects malformed inputs that would otherwise only surface
 /// as a runtime failure — for `assign_agent` this is the identity-safety line:
 /// a workflow that mistypes an agent pubkey should never save.
-fn validate_action(step_id: &str, action: &ActionDef) -> Result<(), WorkflowError> {
+pub(crate) fn validate_action(step_id: &str, action: &ActionDef) -> Result<(), WorkflowError> {
     if let ActionDef::AssignAgent {
         agent_pubkey,
         text,
@@ -297,19 +301,34 @@ fn validate_action(step_id: &str, action: &ActionDef) -> Result<(), WorkflowErro
                  or a single {{{{...}}}} template placeholder (got '{agent_pubkey}')"
             )));
         }
+        // `channel` and `task_id` are template-resolved at run time, exactly
+        // like `agent_pubkey`, so the definition-time check accepts either a
+        // literal UUID or a single `{{...}}` placeholder. Requiring a literal
+        // here made a workflow the executor was written to run unsaveable:
+        // `parse_yaml` always validates, so a templated routing field could
+        // never reach the executor that resolves it. The resolved values are
+        // re-checked before dispatch — `resolve_action_channel` re-parses the
+        // channel, and the executor re-parses `task_id`.
         if let Some(ch) = channel {
             let trimmed = ch.trim();
-            if !trimmed.is_empty() && trimmed.parse::<uuid::Uuid>().is_err() {
+            if !trimmed.is_empty()
+                && !is_single_template(trimmed)
+                && trimmed.parse::<uuid::Uuid>().is_err()
+            {
                 return Err(WorkflowError::InvalidDefinition(format!(
-                    "assign_agent step '{step_id}': channel override '{ch}' is not a valid UUID"
+                    "assign_agent step '{step_id}': channel override '{ch}' must be a valid UUID \
+                     or a single {{{{...}}}} template placeholder"
                 )));
             }
         }
         if let Some(tid) = task_id {
             let trimmed = tid.trim();
-            if trimmed.is_empty() || trimmed.parse::<uuid::Uuid>().is_err() {
+            if trimmed.is_empty()
+                || (!is_single_template(trimmed) && trimmed.parse::<uuid::Uuid>().is_err())
+            {
                 return Err(WorkflowError::InvalidDefinition(format!(
-                    "assign_agent step '{step_id}': task_id '{tid}' must be a valid UUID when set"
+                    "assign_agent step '{step_id}': task_id '{tid}' must be a valid UUID or a \
+                     single {{{{...}}}} template placeholder when set"
                 )));
             }
         }

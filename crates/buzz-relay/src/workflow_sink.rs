@@ -155,7 +155,13 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
 /// is exactly how the missing `buzz:workflow-owner` tag went unnoticed.
 ///
 /// The set is:
-/// - `p` (owner) — attribution, matching `send_message`.
+/// - `actor` (owner) — attribution, matching `send_message`. Attribution
+///   deliberately does not ride on a `p` tag: ACP wakes on *any* `p` tag
+///   matching an agent's pubkey, so p-tagging the owner woke them as a second
+///   agent whenever an agent owned the workflow — which defeats the
+///   single-assignee contract this action exists to provide. `actor` is the
+///   relay-trusted attribution channel `effective_message_author` already
+///   prefers, leaving `p` to mean "wake" and nothing else.
 /// - `h` — the destination channel.
 /// - `buzz:workflow` — marks the event as workflow-emitted (prevents recursive
 ///   triggering).
@@ -167,7 +173,7 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
 ///   rejects under `owner-only` — the mode official desktop builds hard-clamp
 ///   — so the assignee never wakes and the action cannot do the one thing it
 ///   exists for. Mention `p` tags are explicitly *not* used for attribution.
-/// - `p` (assignee) — the wake, omitted when the owner is the assignee.
+/// - `p` (assignee) — **exactly one**, the sole wake target.
 /// - `task` — optional correlation id, trimmed, omitted when empty.
 fn assign_agent_tags(
     author_pubkey_hex: &str,
@@ -176,23 +182,22 @@ fn assign_agent_tags(
     task_id: Option<&str>,
 ) -> Result<Vec<Tag>, ActionSinkError> {
     let mut tags = vec![
-        Tag::parse(["p", author_pubkey_hex])
-            .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+        Tag::parse(["actor", author_pubkey_hex])
+            .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
         Tag::parse(["h", channel_id_canonical])
             .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
         Tag::parse(["buzz:workflow", "true"])
             .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
         Tag::parse(["buzz:workflow-owner", author_pubkey_hex])
             .map_err(|e| ActionSinkError::EventBuild(format!("workflow owner tag: {e}")))?,
+        // The one and only wake target. No dedup against the owner is needed
+        // now that the owner is attributed via `actor` rather than `p`: a
+        // self-assignment is a genuine assignment and must still wake.
+        // No reverse-parse of `@Name` mentions in `text` either — that is the
+        // failure mode assign_agent exists to avoid.
+        Tag::parse(["p", agent_pk_hex])
+            .map_err(|e| ActionSinkError::EventBuild(format!("assignee p tag: {e}")))?,
     ];
-    // No reverse-parse of `@Name` mentions in `text` — that is the failure
-    // mode assign_agent exists to avoid.
-    if agent_pk_hex != author_pubkey_hex {
-        tags.push(
-            Tag::parse(["p", agent_pk_hex])
-                .map_err(|e| ActionSinkError::EventBuild(format!("assignee p tag: {e}")))?,
-        );
-    }
     // Emit the trimmed id, not the caller's string: definition-time validation
     // checks `tid.trim()` but stores the original, so a padded `task_id` would
     // otherwise put whitespace on the wire and break correlation for every
@@ -312,7 +317,13 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - `actor` tag attributes the message to the workflow owner.
+            //      Attribution deliberately does NOT ride on a `p` tag: ACP
+            //      wakes on *any* `p` tag matching an agent's pubkey, so
+            //      p-tagging the owner woke them as a second agent whenever an
+            //      agent owned the workflow. `actor` is the relay-trusted
+            //      attribution channel `effective_message_author` already
+            //      prefers, so `p` can mean "wake" and nothing else.
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - `buzz:workflow-owner` tag names the workflow owner explicitly,
@@ -321,8 +332,8 @@ impl ActionSink for RelayActionSink {
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
             let mut tags = vec![
-                Tag::parse(["p", &author_pubkey_hex])
-                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["actor", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
                 Tag::parse(["buzz:workflow", "true"])
@@ -353,6 +364,9 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
+            // The owner is attributed via `actor`, never p-tagged, so they are
+            // not woken by their own workflow's output even if the text names
+            // them. Skipping them here keeps that true.
             for mentioned in resolve_mention_pubkeys(&text, &named_members) {
                 if mentioned == author_pubkey_hex {
                     continue;
@@ -817,21 +831,36 @@ mod tests {
             vec!["true"],
             "exactly one buzz:workflow marker — the gate rejects duplicates"
         );
-        assert_eq!(tag_values(&tags, "p"), vec![owner.as_str(), agent.as_str()]);
+        // Exactly one `p` tag: the assignee. ACP wakes on any `p` matching an
+        // agent's pubkey, so an owner `p` here would wake the owner as a
+        // second agent whenever an agent owns the workflow.
+        assert_eq!(
+            tag_values(&tags, "p"),
+            vec![agent.as_str()],
+            "the assignee must be the only wake target"
+        );
+        assert_eq!(
+            tag_values(&tags, "actor"),
+            vec![owner.as_str()],
+            "owner attribution rides on `actor`, which effective_message_author prefers"
+        );
     }
 
-    /// Owner == assignee collapses the wake `p` tag, but attribution must
-    /// survive: the owner tag is what the author gate reads.
+    /// A workflow may assign its own owner. That is a genuine assignment and
+    /// must still wake them — the owner is only excluded from `p` when they are
+    /// *not* the assignee, and attribution is unaffected either way because it
+    /// rides on `actor`.
     #[test]
-    fn assign_agent_self_assignment_keeps_the_owner_tag() {
+    fn assign_agent_self_assignment_still_wakes_the_owner() {
         let owner = pk('c');
         let tags = assign_agent_tags(&owner, "chan-1", &owner, None).expect("tags build");
 
         assert_eq!(
             tag_values(&tags, "p"),
             vec![owner.as_str()],
-            "no duplicate p"
+            "self-assignment is an assignment: exactly one wake, no duplicate"
         );
+        assert_eq!(tag_values(&tags, "actor"), vec![owner.as_str()]);
         assert_eq!(
             tag_values(&tags, "buzz:workflow-owner"),
             vec![owner.as_str()]
@@ -1001,9 +1030,24 @@ mod integration_tests {
             .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
             .collect();
 
+        // Attribution moved off `p` and onto `actor`: ACP wakes on any `p`
+        // matching an agent's pubkey, so p-tagging the owner woke them as an
+        // extra agent whenever an agent owned the workflow.
+        let actor_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("actor"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(
+            actor_targets,
+            vec![author_hex.as_str()],
+            "author must be attributed via the actor tag; got {actor_targets:?}"
+        );
         assert!(
-            p_tag_targets.contains(&author_hex.as_str()),
-            "author should still be attributed via p tag; got {p_tag_targets:?}"
+            !p_tag_targets.contains(&author_hex.as_str()),
+            "author must NOT be p-tagged — that wakes them as a second agent; got {p_tag_targets:?}"
         );
         assert!(
             p_tag_targets.contains(&agent_hex.as_str()),
@@ -1137,11 +1181,26 @@ mod integration_tests {
             .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
             .collect();
 
-        // Exactly two `p` tags — owner + selected agent — in that order.
+        // Exactly ONE `p` tag: the selected agent. The owner is attributed via
+        // `actor`, not `p` — ACP wakes on any `p` matching an agent's pubkey,
+        // so an owner `p` woke them as a second agent and broke the
+        // single-assignee contract this action exists to provide.
         assert_eq!(
             p_tag_targets,
-            vec![author_hex.as_str(), winnie_a_hex.as_str()],
-            "p-tag set must be exactly {{owner, selected}}; got {p_tag_targets:?}"
+            vec![winnie_a_hex.as_str()],
+            "the assignee must be the sole wake target; got {p_tag_targets:?}"
+        );
+        let actor_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("actor"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(
+            actor_targets,
+            vec![author_hex.as_str()],
+            "owner must be attributed via actor; got {actor_targets:?}"
         );
         // The other same-name member must NOT wake.
         assert!(
