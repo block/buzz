@@ -1651,12 +1651,22 @@ fn framed_system_prompt(
 /// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
 /// to `/` on failure): a `/`-rooted workspace line would actively encourage the
 /// `$HOME`-wide scan this section exists to prevent.
+///
+/// Absoluteness is delegated to `Path::is_absolute`, which is target-aware, so a
+/// Windows nest (`C:\Users\me\.buzz`) qualifies. A leading-slash test matched no
+/// Windows path at all, so agents there ran with no workspace grounding and were
+/// never told where `PLANS/` and friends live. `is_absolute` is also false for
+/// the `/` fallback on Windows, but the explicit check stays for Unix.
 fn workspace_section(cwd: &str) -> Option<String> {
-    if cwd != "/" && cwd.starts_with('/') {
+    if cwd != "/" && std::path::Path::new(cwd).is_absolute() {
+        // Joined rather than interpolated with a literal `/` so a Windows nest
+        // reads `C:\Users\me\.buzz\REPOS` instead of a mixed-separator path.
+        let repos = std::path::Path::new(cwd).join("REPOS");
+        let repos = repos.display();
         Some(format!(
             "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
              files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
-             `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
+             `OUTBOX/` — and any repositories you clone (under `{repos}`) live \
              here. This is where you already are; do not search `$HOME` or other \
              directories for them."
         ))
@@ -4982,15 +4992,22 @@ mod tests {
         assert!(framed_system_prompt("/", None, None).is_none());
     }
 
+    /// An absolute cwd for the target under test. Absoluteness is target-aware,
+    /// so a hardcoded Unix path would assert nothing on Windows.
+    #[cfg(windows)]
+    const SAMPLE_ABS_CWD: &str = "C:\\Users\\me\\.buzz";
+    #[cfg(unix)]
+    const SAMPLE_ABS_CWD: &str = "/Users/me/.buzz";
+
     #[test]
     fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
-        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
+        let framed = framed_system_prompt(SAMPLE_ABS_CWD, Some("base text"), None)
             .expect("base yields Some");
         assert!(
             framed.starts_with("[Workspace]\n"),
             "workspace section must lead: {framed}"
         );
-        assert!(framed.contains("`/Users/me/.buzz`"));
+        assert!(framed.contains(&format!("`{SAMPLE_ABS_CWD}`")));
         assert!(
             framed.contains("\n\n[Base]\nbase text"),
             "base must follow the workspace section: {framed}"
@@ -5001,7 +5018,7 @@ mod tests {
     fn test_framed_system_prompt_persona_only_omits_workspace() {
         // The workspace section grounds the base prompt's layout; a persona-only
         // agent never received that layout, so no [Workspace] anchor is emitted.
-        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
+        let framed = framed_system_prompt(SAMPLE_ABS_CWD, None, Some("persona text"))
             .expect("persona yields Some");
         assert_eq!(framed, "[System]\npersona text");
     }
@@ -5011,6 +5028,36 @@ mod tests {
         // The "/" fallback must never be named — it would invite a $HOME scan.
         let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
         assert_eq!(framed, "[Base]\nbase text");
+    }
+
+    #[test]
+    fn test_workspace_section_grounds_an_absolute_cwd_and_joins_repos() {
+        // Regression guard: the absoluteness test used to be `starts_with('/')`,
+        // which no Windows path satisfies, so agents there were handed no
+        // workspace grounding at all.
+        let section = workspace_section(SAMPLE_ABS_CWD).expect("an absolute cwd must be grounded");
+        assert!(section.contains(&format!("`{SAMPLE_ABS_CWD}`")));
+
+        let repos = std::path::Path::new(SAMPLE_ABS_CWD).join("REPOS");
+        assert!(
+            section.contains(&format!("`{}`", repos.display())),
+            "REPOS must use the native separator: {section}"
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_workspace_section_rejects_a_drive_relative_windows_cwd() {
+        // `C:foo` is relative to the drive's current directory, not absolute.
+        assert!(workspace_section("C:foo").is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_workspace_section_rejects_a_windows_path_on_unix() {
+        // Target-aware by design: a Windows path reaching a Unix harness is not
+        // a usable working directory there.
+        assert!(workspace_section("C:\\Users\\me\\.buzz").is_none());
     }
 
     #[test]
