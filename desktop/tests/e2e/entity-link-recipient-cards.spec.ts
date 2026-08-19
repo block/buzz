@@ -151,7 +151,11 @@ test("agent-style message with bare buzz:// links renders entity cards without s
     name: /Open issue .* in repository relay-tools/,
   });
   await expect(issueChip).toContainText(`relay-tools · ${ISSUE_SUBJECT}`);
-  await expect(issueChip).toHaveClass(/max-w-64/);
+  await expect(issueChip).toHaveClass(/wrapping-inline-chip/);
+  await expect(issueChip).toHaveCSS("display", "inline");
+  await expect(issueChip.locator(".inline-chip-leading-fragment")).toHaveText(
+    "relay-",
+  );
   await issueChip.hover();
   const issueTooltip = page.getByRole("tooltip");
   const issueContext = issueTooltip.locator(

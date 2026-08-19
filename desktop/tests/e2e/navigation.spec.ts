@@ -523,6 +523,11 @@ test("message links to visible root messages open the thread panel", async ({
     name: "Open channel random",
   });
   await expect(randomChannelLink).toBeVisible();
+  await expect(randomChannelLink).toHaveClass(/wrapping-inline-chip/);
+  await expect(randomChannelLink).toHaveCSS("display", "inline");
+  await expect(
+    randomChannelLink.locator(".inline-chip-leading-fragment"),
+  ).toHaveText("r");
   await expect(randomChannelLink).not.toHaveAttribute("title");
   await randomChannelLink.hover();
   const channelTooltip = page.getByRole("tooltip");
@@ -648,7 +653,9 @@ test("message links explain when preview metadata is unavailable", async ({
     .getByTestId("message-row")
     .filter({ hasText: "Missing preview" })
     .last();
-  const missingMessageLink = linkMessage.locator("button[data-message-link]");
+  const missingMessageLink = linkMessage.getByRole("button", {
+    name: "Open message in channel general",
+  });
   await expect(missingMessageLink).toHaveAccessibleName(
     "Open message in channel general",
   );

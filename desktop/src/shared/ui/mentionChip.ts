@@ -2,6 +2,9 @@ export const MENTION_CHIP_BASE_CLASSES = "mention-chip";
 
 export const MENTION_CHIP_HOVER_CLASSES = "mention-chip-hover";
 
+/** Allows a long chip to fragment into separately decorated line boxes. */
+export const WRAPPING_INLINE_CHIP_CLASSES = "wrapping-inline-chip";
+
 export type InlineChipIconKind =
   | "agent"
   | "human"

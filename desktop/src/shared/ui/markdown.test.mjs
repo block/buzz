@@ -1099,18 +1099,20 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
     ),
   );
 
+  const visibleText = html.replace(/<[^>]+>/g, "");
   assert.equal((html.match(/data-buzz-link=""/g) ?? []).length, 6);
   assert.equal((html.match(/inline-chip-icon-message/g) ?? []).length, 2);
-  assert.equal((html.match(/>engineering</g) ?? []).length, 3);
+  assert.equal((visibleText.match(/engineering/g) ?? []).length, 3);
   assert.equal((html.match(/data-message-link=""/g) ?? []).length, 2);
   assert.equal((html.match(/data-channel-deep-link=""/g) ?? []).length, 1);
   assert.match(html, /inline-chip-icon-channel/);
-  assert.match(html, />engineering</);
+  assert.match(html, /wrapping-inline-chip/);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>e</);
   assert.match(html, /inline-chip-icon-pr/);
   assert.match(html, /inline-chip-icon-issue/);
   assert.match(html, /inline-chip-icon-repo/);
-  assert.equal((html.match(/>buzz-world · c3b589fa</g) ?? []).length, 2);
-  assert.match(html, />buzz-world</);
+  assert.equal((visibleText.match(/buzz-world · c3b589fa/g) ?? []).length, 2);
+  assert.match(visibleText, /buzz-world/);
 });
 
 test("authored Buzz permalink labels remain ordinary links", () => {
@@ -1209,7 +1211,9 @@ test("channel references replace the authored hash with the channel icon", () =>
   );
 
   assert.match(html, /inline-chip-icon-channel/);
-  assert.match(html, />engineering</);
+  assert.match(html, /wrapping-inline-chip/);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>e</);
+  assert.match(html.replace(/<[^>]+>/g, ""), /engineering/);
   assert.doesNotMatch(html, />#engineering</);
 });
 
@@ -1286,8 +1290,14 @@ test("renderEntityLinkAnchor renders Buzz entity links as chips", () => {
   });
   const html = renderToStaticMarkup(el);
   assert.match(html, /data-buzz-link=""/);
-  assert.match(html, /<button/);
+  assert.match(html, /<span/);
+  assert.match(html, /role="button"/);
+  assert.match(html, /tabindex="0"/);
+  assert.match(html, /wrapping-inline-chip/);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>buzz-</);
+  assert.doesNotMatch(html, /\btruncate\b/);
   assert.doesNotMatch(html, /<a/);
+  assert.doesNotMatch(html, /<button/);
 });
 
 test("renderEntityLinkAnchor keeps chip styling when interaction is disabled", () => {

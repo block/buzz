@@ -313,11 +313,12 @@ export function renderEntityLinkAnchor({
         href={href}
         icon={presentation.icon}
         aria-label={presentation.ariaLabel}
-        className={cn("max-w-64", metadata === null && "buzz-link-unavailable")}
+        className={cn(metadata === null && "buzz-link-unavailable")}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
+        wrapping
       >
-        <span className="truncate">{label}</span>
+        {label}
       </BuzzLinkChip>
     );
   };

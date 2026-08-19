@@ -154,6 +154,7 @@ export function ChannelDeepLinkAnchor({
         aria-label={`Open channel ${label}`}
         interactive={interactive}
         onOpenLink={() => onOpenChannel(parsed.value.channelId)}
+        wrapping
       >
         {label}
       </BuzzLinkChip>
@@ -204,6 +205,7 @@ export function MarkdownChannelDeepLink({
         aria-label={`Open channel ${label}`}
         interactive={interactive}
         onOpenLink={() => onOpenChannel(parsed.value.channelId)}
+        wrapping
       >
         {label}
       </BuzzLinkChip>
@@ -239,6 +241,7 @@ export function MarkdownChannelReference({
         onOpenLink={() => {
           if (channel) onOpenChannel(channel.id);
         }}
+        wrapping
       >
         {channelName}
       </BuzzLinkChip>

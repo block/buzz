@@ -87,6 +87,19 @@
   color: hsl(var(--primary));
 }
 
+.message-markdown .mention-chip.wrapping-inline-chip {
+  display: inline;
+  line-height: calc(
+    1em +
+    var(--inline-chip-padding-block-start) +
+    var(--inline-chip-padding-block-end) +
+    0.25rem
+  );
+  overflow-wrap: anywhere;
+  text-align: left;
+  white-space: normal;
+}
+
 .message-markdown .mention-chip.buzz-link-unavailable,
 .message-markdown .mention-chip.buzz-link-unavailable:hover {
   background: hsl(var(--secondary));
@@ -143,6 +156,7 @@
 .message-markdown.inbox-preview-markdown .inline-code-chip,
 .message-markdown.inbox-preview-markdown :not(pre) > code {
   display: inline;
+  line-height: 1;
   overflow: visible;
   overflow-wrap: normal;
   text-overflow: clip;
@@ -170,6 +184,30 @@
   background: currentColor;
   pointer-events: none;
   transform: translateY(-50%);
+}
+
+.message-markdown .wrapping-inline-chip.inline-chip-with-icon {
+  padding-left: var(--inline-chip-padding-inline);
+}
+
+.message-markdown .wrapping-inline-chip.inline-chip-with-icon::before {
+  display: none;
+}
+
+.message-markdown .inline-chip-leading-fragment.inline-chip-with-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding-left: calc(
+    var(--inline-chip-icon-size) +
+    var(--inline-chip-icon-gap)
+  );
+  white-space: nowrap;
+}
+
+.message-markdown .inline-chip-leading-fragment.inline-chip-with-icon::before {
+  display: block;
+  left: 0;
 }
 
 .message-markdown .inline-chip-icon-message::before {
