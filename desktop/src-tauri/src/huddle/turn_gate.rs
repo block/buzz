@@ -1,5 +1,6 @@
 //! Pure decision gate between VAD silence and the existing STT flush path.
 
+#[cfg_attr(not(test), allow(dead_code))] // Constructed by the optional classifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TurnDecision {
     Hold,

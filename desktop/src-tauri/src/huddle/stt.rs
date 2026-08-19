@@ -31,6 +31,8 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
+use super::turn_gate::{action_after_vad_silence, SilenceAction, TurnDecision};
+
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
 /// Bounded audio queue capacity.
@@ -213,6 +215,12 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
+/// Experimental Smart Turn gate. Default off until the local model path is
+/// integrated and measured.
+fn huddle_smart_turn_enabled() -> bool {
+    std::env::var("BUZZ_HUDDLE_SMART_TURN").is_ok_and(|v| v == "1")
+}
+
 fn stt_worker(
     model_dir: PathBuf,
     audio_rx: Receiver<Vec<u8>>,
@@ -293,6 +301,8 @@ fn stt_worker(
     // computed at. Valid only while no new voiced frame has arrived since.
     let speculative_enabled = stt_speculative_decode();
     let mut speculative: Option<(String, usize)> = None;
+    // A missing classifier decision fails open to today's flush behavior.
+    let smart_turn_enabled = huddle_smart_turn_enabled();
 
     // ── 5. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
@@ -356,6 +366,7 @@ fn stt_worker(
                     &mut in_speech,
                     &mut voiced_frames,
                     flush_frames,
+                    smart_turn_enabled,
                     (speculative_enabled, &mut speculative),
                     &recognizer,
                     &text_tx,
@@ -418,6 +429,7 @@ fn process_16k_samples(
     in_speech: &mut bool,
     voiced_frames: &mut usize,
     flush_frames: usize,
+    smart_turn_enabled: bool,
     speculative: (bool, &mut Option<(String, usize)>),
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
@@ -484,21 +496,61 @@ fn process_16k_samples(
             // A manually open microphone behaves like normal VAD. A held
             // shortcut keeps the utterance grouped until key release.
             if vad_flush_allowed && *silence_frames >= flush_frames {
-                // End of utterance — transcribe (or emit the speculative decode).
-                match speculative.take() {
-                    Some((text, decoded_at)) if decoded_at == *voiced_frames => {
-                        send_transcript(text, text_tx);
-                    }
-                    _ => flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx),
-                }
-                speech_buf.clear();
-                *silence_frames = 0;
-                *in_speech = false;
-                *voiced_frames = 0;
+                on_silence_threshold(
+                    smart_turn_enabled,
+                    vad_flush_allowed,
+                    None,
+                    speech_buf,
+                    silence_frames,
+                    in_speech,
+                    voiced_frames,
+                    |speech, voiced| {
+                        // End of utterance — transcribe (or emit the speculative decode).
+                        match speculative.take() {
+                            Some((text, decoded_at)) if decoded_at == voiced => {
+                                send_transcript(text, text_tx);
+                            }
+                            _ => flush_to_stt(speech, voiced, recognizer, text_tx),
+                        }
+                    },
+                );
             }
         }
         // If not in speech and not accumulating, just discard the frame.
     }
+}
+
+/// Apply the Smart Turn decision at the existing VAD silence threshold.
+///
+/// The callback keeps Parakeet outside the test seam: it runs before the
+/// utterance state is reset on `Flush` and is never called on `Keep`.
+#[allow(clippy::too_many_arguments)]
+fn on_silence_threshold(
+    flag_on: bool,
+    vad_flush_allowed: bool,
+    decision: Option<TurnDecision>,
+    speech_buf: &mut Vec<f32>,
+    silence_frames: &mut usize,
+    in_speech: &mut bool,
+    voiced_frames: &mut usize,
+    flush: impl FnOnce(&[f32], usize),
+) -> SilenceAction {
+    let action = action_after_vad_silence(flag_on, vad_flush_allowed, decision);
+    match action {
+        SilenceAction::Keep => {
+            // Re-arm the gate after a complete silence window. Preserve the
+            // utterance so resumed speech extends the same recording.
+            *silence_frames = 0;
+        }
+        SilenceAction::Flush => {
+            flush(speech_buf, *voiced_frames);
+            speech_buf.clear();
+            *silence_frames = 0;
+            *in_speech = false;
+            *voiced_frames = 0;
+        }
+    }
+    action
 }
 
 /// Run sherpa-onnx on the accumulated speech buffer and send the text.
@@ -570,7 +622,10 @@ use super::drain_until_shutdown;
 
 #[cfg(test)]
 mod tests {
-    use super::{has_enough_voiced_audio, vad_flush_allowed, MIN_VOICED_FRAMES};
+    use super::{
+        has_enough_voiced_audio, on_silence_threshold, vad_flush_allowed, MIN_VOICED_FRAMES,
+    };
+    use crate::huddle::turn_gate::{SilenceAction, TurnDecision};
 
     #[test]
     fn short_vad_blips_do_not_reach_the_recognizer() {
@@ -592,5 +647,61 @@ mod tests {
         assert!(!vad_flush_allowed(true, true, true));
         // Manually open mic with the shortcut up: normal VAD behavior.
         assert!(vad_flush_allowed(true, true, false));
+    }
+
+    #[test]
+    fn g3_1_hold_then_more_samples_extends_the_same_buffer() {
+        let mut speech_buf = vec![0.25; 512];
+        let held_len = speech_buf.len();
+        let mut silence_frames = 19;
+        let mut in_speech = true;
+        let mut voiced_frames = MIN_VOICED_FRAMES;
+
+        let action = on_silence_threshold(
+            true,
+            true,
+            Some(TurnDecision::Hold),
+            &mut speech_buf,
+            &mut silence_frames,
+            &mut in_speech,
+            &mut voiced_frames,
+            |_, _| panic!("HOLD must not flush"),
+        );
+
+        assert_eq!(action, SilenceAction::Keep);
+        assert_eq!(silence_frames, 0);
+        assert!(in_speech);
+        assert_eq!(voiced_frames, MIN_VOICED_FRAMES);
+        speech_buf.extend_from_slice(&[0.5; 256]);
+        assert_eq!(speech_buf.len(), held_len + 256);
+    }
+
+    #[test]
+    fn flag_off_or_missing_decision_preserves_today_flush_and_reset() {
+        for (flag_on, decision) in [(false, Some(TurnDecision::Hold)), (true, None)] {
+            let mut speech_buf = vec![0.25; 512];
+            let mut silence_frames = 19;
+            let mut in_speech = true;
+            let mut voiced_frames = MIN_VOICED_FRAMES;
+            let mut flushed = None;
+
+            let action = on_silence_threshold(
+                flag_on,
+                true,
+                decision,
+                &mut speech_buf,
+                &mut silence_frames,
+                &mut in_speech,
+                &mut voiced_frames,
+                |speech, voiced| flushed = Some((speech.len(), voiced)),
+            );
+
+            assert_eq!(action, SilenceAction::Flush);
+            assert_eq!(flushed, Some((512, MIN_VOICED_FRAMES)));
+            assert!(speech_buf.is_empty());
+            assert_eq!(silence_frames, 0);
+            assert!(!in_speech);
+            assert_eq!(voiced_frames, 0);
+        }
     }
 }
