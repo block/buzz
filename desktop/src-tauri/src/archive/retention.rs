@@ -45,7 +45,6 @@ CREATE TABLE archive_meta (
 );
 ";
 
-/// Covering index for the retention prune candidate scan, seeking on the
 /// Covering index for the Phase-2 retention prune candidate scan. V4 prunes
 /// one global observer window, so the scan filters `(identity_pubkey,
 /// relay_url, archived_at < cutoff)` and joins `archived_events` for
