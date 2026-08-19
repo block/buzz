@@ -279,10 +279,10 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     name: "Fetch",
     exact: true,
   });
-  await expect(peopleSection).toHaveCSS("border-top-width", "1px");
+  await expect(peopleSection).toHaveCSS("border-top-width", "0px");
   await expect(detailsHeading.locator("..")).toHaveCSS(
     "border-top-width",
-    "1px",
+    "0px",
   );
   expect(
     await repositoryHeading.evaluate(
@@ -305,9 +305,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     (peopleSectionBounds?.y ?? 0) -
       ((actionsSectionBounds?.y ?? 0) + (actionsSectionBounds?.height ?? 0)),
   ).toBe(8);
-  expect(
-    (detailsHeadingBounds?.y ?? 0) - (peopleSectionBounds?.y ?? 0) - 1,
-  ).toBe(8);
+  expect((detailsHeadingBounds?.y ?? 0) - (peopleSectionBounds?.y ?? 0)).toBe(
+    8,
+  );
   const people = repositoryActionsPanel.getByTestId(
     "project-repository-person",
   );
@@ -658,7 +658,10 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     agentChatPanel.getByText("A persisted threaded agent response."),
   ).toBeVisible();
   await chatPanelTab.click();
-  await expect(agentChatPanel).toHaveCount(0);
+  // The rail collapses but retains the panel so conversation state survives
+  // toggling; assert the collapsed rail instead of a full unmount.
+  await expect(contextRail).toHaveCSS("width", "0px");
+  await expect(contextRail).toHaveAttribute("aria-hidden", "true");
   await expect(chatPanelTab).toHaveAttribute("aria-label", "Show project chat");
   await chatPanelTab.click();
   await expect(
@@ -685,11 +688,18 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     ]);
   expect(attachedContentSurfaceBounds).not.toBeNull();
   await expect(appContentSurface).toHaveCSS("box-shadow", "none");
-  expect(attachedContentSurfaceBounds?.x).toBe(projectContentPodBounds?.x);
-  expect(attachedContentSurfaceBounds?.y).toBe(projectContentPodBounds?.y);
-  expect(attachedContentSurfaceBounds?.height).toBe(
-    projectContentPodBounds?.height,
-  );
+  // The detached pod fills the surface minus its hairline top/left inset and
+  // the 8px bottom gutter (ml-px mt-px mb-2 on the pod wrapper).
+  expect(
+    (projectContentPodBounds?.x ?? 0) - (attachedContentSurfaceBounds?.x ?? 0),
+  ).toBe(1);
+  expect(
+    (projectContentPodBounds?.y ?? 0) - (attachedContentSurfaceBounds?.y ?? 0),
+  ).toBe(1);
+  expect(
+    (attachedContentSurfaceBounds?.height ?? 0) -
+      (projectContentPodBounds?.height ?? 0),
+  ).toBe(9);
   const viewportSize = page.viewportSize();
   expect(collapsedMainPaneBounds).not.toBeNull();
   expect(viewportSize).not.toBeNull();
@@ -868,7 +878,7 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     repositoryActionsPanel
       .getByTestId("project-repository-people")
       .locator(".."),
-  ).toHaveCSS("border-top-width", "1px");
+  ).toHaveCSS("border-top-width", "0px");
   await expect(
     repositoryActionsPanel.getByRole("heading", {
       name: "Task activity",
