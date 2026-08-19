@@ -747,6 +747,8 @@ test("moves agent actions into an overflow menu in a narrow view", async ({
   });
 
   await expect(page.getByTestId("agent-defaults-button")).toBeVisible();
+  // The app-wide default renders text-base at 16px with Tailwind's 1.5
+  // line-height ratio, producing a 24px one-line scroll height.
   await expect(
     page.getByText("Set up and manage your agents.", { exact: true }),
   ).toHaveJSProperty("scrollHeight", 24);
@@ -2287,7 +2289,9 @@ test("people sharing blocks a timeout before encoding or upload", async ({
   });
 
   await page.getByTestId("persona-share-send").click();
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible();
+  await expect(
+    page.getByText("You are currently timed out and cannot send messages."),
+  ).toBeVisible();
 
   const commands = await readAgentShareCommands(page);
   expect(
@@ -2332,7 +2336,11 @@ test("people sharing rechecks destination eligibility after encoding", async ({
     return testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   });
 
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible({
+  await expect(
+    page.getByText(
+      "The selected destination is no longer available. Please pick another.",
+    ),
+  ).toBeVisible({
     timeout: 5_000,
   });
   const commands = await readAgentShareCommands(page);

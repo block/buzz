@@ -102,6 +102,19 @@ export function sortEvents(events: RelayEvent[]) {
   });
 }
 
+/**
+ * Splits a native websocket delivery into individual frames.
+ *
+ * The native plugin coalesces inbound frames into one IPC delivery, so a
+ * delivery is an array of frames. Older single-frame deliveries stay valid:
+ * `getTextPayload` rejects arrays, so every consumer must unwrap here rather
+ * than per-client — an un-unwrapped consumer drops batched frames silently
+ * instead of failing.
+ */
+export function toRelayFrames(message: unknown): unknown[] {
+  return Array.isArray(message) ? message : [message];
+}
+
 export function getTextPayload(message: unknown) {
   if (typeof message === "string") {
     return message;

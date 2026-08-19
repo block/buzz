@@ -549,7 +549,24 @@ export function useStartManagedAgentMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (pubkey: string) => startManagedAgent(pubkey),
+    // Accepts a bare pubkey, or an object carrying the tenant scope a
+    // long-lived callback captured before its first await (the backend
+    // fails closed on a mid-flight community/identity switch).
+    mutationFn: (
+      input:
+        | string
+        | {
+            pubkey: string;
+            expectedRelayUrl?: string;
+            expectedSignerPubkey?: string;
+          },
+    ) =>
+      typeof input === "string"
+        ? startManagedAgent(input)
+        : startManagedAgent(input.pubkey, {
+            expectedRelayUrl: input.expectedRelayUrl,
+            expectedSignerPubkey: input.expectedSignerPubkey,
+          }),
     onSuccess: (updated) => {
       queryClient.setQueryData<ManagedAgent[]>(
         managedAgentsQueryKey,

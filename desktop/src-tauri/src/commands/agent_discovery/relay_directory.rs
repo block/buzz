@@ -9,6 +9,41 @@ use crate::{
 
 const RELAY_DIRECTORY_PAGE_SIZE: usize = 500;
 const RELAY_FILTER_BATCH_SIZE: usize = 10;
+/// Per-rebuild ceiling on directory-rebuild `/query` requests in flight at once.
+/// The rebuild fans dozens of exact-author batches across the relay; issuing
+/// them serially dominated agent-mention send latency (~6 s for ~100
+/// candidates). A bounded window collapses that to a few round trips while
+/// keeping the request rate well under the relay's admission gate, which
+/// back-pressures any 429 anyway. Each rebuild builds one semaphore and shares
+/// it across every phase, so a single rebuild's runtime-directory and
+/// owner-profile phases — which run concurrently under one `try_join!` — never
+/// exceed it together. (Overlapping rebuilds each hold their own budget.)
+const RELAY_DIRECTORY_MAX_CONCURRENCY: usize = 8;
+
+/// Run one `query_relay` request per `RELAY_FILTER_BATCH_SIZE` chunk of
+/// `filters`, each acquiring a permit from `semaphore` so the total in-flight
+/// request count stays within the shared ceiling even when several batch sets
+/// run concurrently. Returned events are concatenated; order is unspecified —
+/// every caller keys the events by pubkey downstream, so ordering is irrelevant.
+async fn query_filter_batches(
+    state: &AppState,
+    semaphore: &tokio::sync::Semaphore,
+    filters: &[serde_json::Value],
+    error_label: &str,
+) -> Result<Vec<nostr::Event>, String> {
+    let pages = futures_util::future::try_join_all(filters.chunks(RELAY_FILTER_BATCH_SIZE).map(
+        |batch| async move {
+            let _permit = semaphore.acquire().await.map_err(|error| {
+                format!("{error_label}: directory concurrency semaphore closed: {error}")
+            })?;
+            query_relay(state, batch)
+                .await
+                .map_err(|error| format!("{error_label}: {error}"))
+        },
+    ))
+    .await?;
+    Ok(pages.into_iter().flatten().collect())
+}
 
 fn exact_author_filters(pubkeys: &[String], kind: u16) -> Vec<serde_json::Value> {
     pubkeys
@@ -129,24 +164,26 @@ async fn list_relay_agents_for_selection(
         return Ok(Vec::new());
     }
 
-    let mut directory_events = Vec::new();
-    let mut profile_events = Vec::new();
     let directory_filters = exact_author_filters(&candidate_pubkeys, 10100);
     let profile_filters = exact_author_filters(&candidate_pubkeys, 0);
-    for filter_offset in (0..candidate_pubkeys.len()).step_by(RELAY_FILTER_BATCH_SIZE) {
-        let filter_end = (filter_offset + RELAY_FILTER_BATCH_SIZE).min(candidate_pubkeys.len());
-        let (directory, profiles) = tokio::join!(
-            query_relay(state, &directory_filters[filter_offset..filter_end]),
-            query_relay(state, &profile_filters[filter_offset..filter_end]),
-        );
-        directory_events.extend(
-            directory
-                .map_err(|error| format!("relay agent runtime-directory query failed: {error}"))?,
-        );
-        profile_events.extend(
-            profiles.map_err(|error| format!("relay agent owner-profile query failed: {error}"))?,
-        );
-    }
+    // One semaphore per rebuild caps `/query` requests across this rebuild's
+    // phases, so its runtime-directory and owner-profile phases below stay
+    // within the ceiling even though `try_join!` runs them concurrently.
+    let semaphore = tokio::sync::Semaphore::new(RELAY_DIRECTORY_MAX_CONCURRENCY);
+    let (directory_events, profile_events) = tokio::try_join!(
+        query_filter_batches(
+            state,
+            &semaphore,
+            &directory_filters,
+            "relay agent runtime-directory query failed",
+        ),
+        query_filter_batches(
+            state,
+            &semaphore,
+            &profile_filters,
+            "relay agent owner-profile query failed",
+        ),
+    )?;
 
     // Only the agent's signed NIP-OA profile can name the owner coordinate to
     // query. Each exact `(owner, d=agent)` filter returns at most one current
@@ -161,14 +198,13 @@ async fn list_relay_agents_for_selection(
         retain_verified_owner(&mut verified_owners, &viewer_pubkey);
     }
     let managed_filters = managed_policy_filters(&candidate_pubkeys, &verified_owners);
-    let mut managed_agent_events = Vec::new();
-    for filters in managed_filters.chunks(RELAY_FILTER_BATCH_SIZE) {
-        managed_agent_events.extend(
-            query_relay(state, filters)
-                .await
-                .map_err(|error| format!("relay agent managed-policy query failed: {error}"))?,
-        );
-    }
+    let managed_agent_events = query_filter_batches(
+        state,
+        &semaphore,
+        &managed_filters,
+        "relay agent managed-policy query failed",
+    )
+    .await?;
 
     let mut agents = nostr_convert::relay_agents_from_directory_events(
         &directory_events,

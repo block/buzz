@@ -373,7 +373,7 @@ pub async fn restore_managed_agents_on_launch(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    let mut successfully_spawned: Vec<String> = Vec::new();
+    let mut successfully_spawned: Vec<(String, String)> = Vec::new();
 
     for (pubkey, outcome) in spawn_results {
         match outcome {
@@ -404,8 +404,15 @@ pub async fn restore_managed_agents_on_launch(
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(key, super::ManagedAgentPairRuntime::starting(*process));
-                successfully_spawned.push(pubkey);
+                runtimes.insert(
+                    key.clone(),
+                    super::ManagedAgentPairRuntime::starting(*process),
+                );
+                // Carry the spawn key's relay into profile reconciliation so
+                // the background task queries/publishes on the relay this
+                // spawn was actually keyed to — not whatever workspace is
+                // active when the task eventually executes.
+                successfully_spawned.push((pubkey, key.relay_url.clone()));
             }
             SpawnOutcome::Failed(error) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
@@ -425,7 +432,7 @@ pub async fn restore_managed_agents_on_launch(
     let reconcile_items: Vec<(String, crate::commands::ProfileReconcileData)> =
         successfully_spawned
             .iter()
-            .filter_map(|pubkey| {
+            .filter_map(|(pubkey, spawn_relay)| {
                 let record = records.iter().find(|r| r.pubkey == *pubkey)?;
                 // Resolve the effective harness for the avatar-fallback
                 // derivation (the snapshot may be empty/stale for an inherited
@@ -438,7 +445,10 @@ pub async fn restore_managed_agents_on_launch(
                         private_key_nsec: record.private_key_nsec.clone(),
                         name: record.name.clone(),
                         relay_url: record.relay_url.clone(),
-                        target_relay_url: None,
+                        // Pin the relay this spawn was keyed to (see the
+                        // successfully_spawned push above) so the deferred
+                        // task cannot resolve a post-switch workspace.
+                        target_relay_url: Some(spawn_relay.clone()),
                         avatar_url: record.avatar_url.clone(),
                         auth_tag: record.auth_tag.clone(),
                         pubkey: record.pubkey.clone(),

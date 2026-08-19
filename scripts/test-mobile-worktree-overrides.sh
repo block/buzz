@@ -7,7 +7,8 @@
 #     display-only label sanitized to [A-Za-z0-9._-].
 #   - the tracked iOS/Android build files keep production identity, only
 #     consume the overrides in debug configurations, and let a developer's
-#     AppOverrides.xcconfig take precedence over the worktree defaults.
+#     AppOverrides.xcconfig / AppOverrides.properties take precedence over the
+#     worktree defaults.
 #   - scripts/mobile-worktree-clean.sh only ever targets suffixed installs,
 #     never the production app ids.
 set -euo pipefail
@@ -157,6 +158,11 @@ grep -q 'resValue("string", "app_name", "Buzz")' "$gradle" \
 grep -q 'worktreeLabel.matches' "$gradle" \
   && pass "Gradle validates the worktree label before use" \
   || fail "Gradle must validate the worktree label against a safe pattern"
+grep -q 'AppOverrides.properties' "$gradle" \
+  && grep -q 'debugAppName' "$gradle" \
+  && grep -q 'debugIdSuffix' "$gradle" \
+  && pass "Android developer overrides can replace the debug name and identity" \
+  || fail "Gradle must support debug-only AppOverrides.properties"
 
 # Extract a brace-balanced block: everything from the first line matching $2
 # to the line where its braces close. Unlike a /start/,/}/ awk range, nested
@@ -181,9 +187,10 @@ printf '%s\n' "$sneaky" | extract_block - 'release \{' | grep -q 'worktreeSneaky
   || fail "release-block extractor must not stop at the first nested close brace"
 
 # The worktree suffix/label must only appear inside the debug build type.
-extract_block "$gradle" 'buildTypes \{' | extract_block - 'release \{' | grep -q 'worktree' \
-  && fail "release build type must not reference worktree identity" \
-  || pass "release build type does not reference worktree identity"
+release_block="$(extract_block "$gradle" 'buildTypes \{' | extract_block - 'release \{')"
+printf '%s\n' "$release_block" | grep -Eq 'worktree|debugAppName|debugIdSuffix' \
+  && fail "release build type must not reference debug identity overrides" \
+  || pass "release build type does not reference debug identity overrides"
 
 git -C "$repo_root" check-ignore -q mobile/ios/Flutter/WorktreeOverrides.xcconfig \
   && pass "iOS override file is gitignored" \
@@ -191,6 +198,9 @@ git -C "$repo_root" check-ignore -q mobile/ios/Flutter/WorktreeOverrides.xcconfi
 git -C "$repo_root" check-ignore -q mobile/android/worktree.properties \
   && pass "Android override file is gitignored" \
   || fail "mobile/android/worktree.properties must be gitignored"
+git -C "$repo_root" check-ignore -q mobile/android/AppOverrides.properties \
+  && pass "Android developer override file is gitignored" \
+  || fail "mobile/android/AppOverrides.properties must be gitignored"
 grep -Eq '^\s+\./scripts/mobile-worktree-overrides\.sh$' "$repo_root/Justfile" \
   && pass "just mobile-dev applies the worktree identity" \
   || fail "Justfile mobile-dev must run scripts/mobile-worktree-overrides.sh"

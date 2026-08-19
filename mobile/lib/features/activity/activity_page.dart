@@ -27,8 +27,8 @@ import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import 'activity_provider.dart';
 import 'compose_drafts_provider.dart';
 import 'inbox_item.dart';
@@ -220,6 +220,8 @@ class ActivityPage extends HookConsumerWidget {
             channel: channel,
             initialMessageId: target.id,
             initialThreadRootId: threadRootId,
+            initialThreadRouteBehavior:
+                InitialThreadRouteBehavior.replaceCurrentRoute,
           ),
         ),
       );
@@ -240,6 +242,8 @@ class ActivityPage extends HookConsumerWidget {
           builder: (_) => ChannelDetailPage(
             channel: channel,
             initialThreadRootId: draft.threadHeadId,
+            initialThreadRouteBehavior:
+                InitialThreadRouteBehavior.replaceCurrentRoute,
           ),
         ),
       );
