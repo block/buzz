@@ -410,37 +410,6 @@ impl RestClient {
         .await
     }
 
-    /// Fetch the relay's own signing pubkey from the public NIP-11 `/info`
-    /// document (the `self` field, hex, normalized to lowercase).
-    ///
-    /// Used by the inbound author gate to recognize relay-signed workflow
-    /// messages (`buzz:workflow`-tagged kind:9 events authored by the relay
-    /// keypair) and gate them on their *attributed* author instead.
-    ///
-    /// Returns `None` when the document is unreachable, unparseable, or has
-    /// no valid `self` field (e.g. the relay runs with an ephemeral key).
-    /// Callers must treat `None` as "no relay-signed exemption" — fail closed
-    /// to the plain author gate, never guess a pubkey.
-    pub async fn fetch_relay_self(&self) -> Option<String> {
-        let url = format!("{}/info", self.base_url);
-        let resp = self
-            .http
-            .get(&url)
-            .header("Accept", "application/nostr+json")
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let doc: Value = resp.json().await.ok()?;
-        let self_hex = doc.get("self")?.as_str()?;
-        if self_hex.len() != 64 || !self_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-        Some(self_hex.to_ascii_lowercase())
-    }
-
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.
     ///
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
