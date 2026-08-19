@@ -54,6 +54,7 @@ function agent(overrides = {}) {
     name: "Instance",
     personaId: "persona-1",
     status: "stopped",
+    backend: { type: "local" },
     model: null,
     modelSource: "global",
     lastError: null,

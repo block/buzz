@@ -3,6 +3,7 @@ import type {
   Channel,
   ManagedAgent,
   PresenceLookup,
+  PresenceStatus,
   RelayAgent,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -35,9 +36,26 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
-export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+/**
+ * Conversational liveness. Provider deployment bookkeeping is deliberately
+ * not a health signal; relay presence is the only live axis for remote agents.
+ */
+export function isManagedAgentLive(
+  agent: ManagedAgent,
+  presenceStatus?: PresenceStatus | null,
+) {
   if (agent.backend.type === "provider") {
-    return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+    return presenceStatus === "online" || presenceStatus === "away";
+  }
+  return isManagedAgentActive(agent);
+}
+
+export function getManagedAgentPrimaryActionLabel(
+  agent: ManagedAgent,
+  presenceStatus?: PresenceStatus | null,
+) {
+  if (agent.backend.type === "provider") {
+    return isManagedAgentLive(agent, presenceStatus) ? "Shutdown" : "Deploy";
   }
 
   if (isManagedAgentActive(agent)) {

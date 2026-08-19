@@ -23,7 +23,7 @@ use crate::gc;
 use crate::naming::AgentIdentity;
 use crate::observe::{self, StartupObservation};
 use chrono::{DateTime, Utc};
-use k8s_openapi::api::core::v1::{Pod, Secret};
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, Secret};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -58,6 +58,13 @@ pub trait Substrate {
     /// literal `kubectl create namespace <name>` command and MUST NOT fall
     /// back to `default` (`:1002-1005`).
     async fn ensure_namespace(&self, namespace: &str) -> Result<(), String>;
+
+    /// Create or verify the identity-owned persistent workspace claim. `None`
+    /// keeps the legacy ephemeral workspace and performs no substrate write.
+    async fn ensure_workspace_claim(
+        &self,
+        claim: Option<&PersistentVolumeClaim>,
+    ) -> Result<(), String>;
 
     /// Most-recent read of the pods matching this identity's selector, plus
     /// the apiserver's clock from the same call's HTTP `Date` header. `None`
@@ -444,6 +451,13 @@ pub async fn deploy(
             }
 
             Action::Create => {
+                // A running v1 pod remains a strict zero-mutation no-op. Only
+                // the create edge may introduce or verify the durable claim.
+                let workspace_claim = crate::pod::build_workspace_claim(identity, cfg);
+                substrate
+                    .ensure_workspace_claim(workspace_claim.as_ref())
+                    .await?;
+
                 let generation = crate::naming::new_generation();
                 let secret_name = identity.secret_name(&generation);
 
@@ -568,6 +582,19 @@ mod tests {
             }
         }
 
+        async fn ensure_workspace_claim(
+            &self,
+            claim: Option<&PersistentVolumeClaim>,
+        ) -> Result<(), String> {
+            if let Some(claim) = claim {
+                self.log(format!(
+                    "ensure_workspace_claim {}",
+                    claim.metadata.name.as_deref().unwrap_or_default()
+                ));
+            }
+            Ok(())
+        }
+
         async fn list_pods(
             &self,
             _selector: &str,
@@ -684,6 +711,8 @@ mod tests {
             resources: Resources::default(),
             inactivity_seconds: Some(7200),
             service_account: None,
+            workspace_storage: None,
+            workspace_storage_class: None,
         }
     }
 
@@ -806,6 +835,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn persistent_workspace_is_ensured_before_the_pod_is_created() {
+        let id = identity();
+        let mut cfg = config();
+        cfg.workspace_storage = Some("20Gi".into());
+        let fake = Fake::default();
+        fake.on_poll.borrow_mut().push({
+            let name = id.pod_name();
+            Box::new(move |pods: &mut BTreeMap<String, Pod>| {
+                if let Some(pod) = pods.get_mut(&name) {
+                    pod.status = Some(PodStatus {
+                        phase: Some("Running".into()),
+                        container_statuses: Some(vec![ContainerStatus {
+                            name: crate::observe::CONTAINER_NAME.into(),
+                            state: Some(running()),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    });
+                }
+            })
+        });
+
+        assert_eq!(run(&fake, &id, &cfg).unwrap(), id.pod_name());
+        let calls = fake.mutations();
+        let claim_at = calls
+            .iter()
+            .position(|call| call.starts_with("ensure_workspace_claim"))
+            .expect("workspace claim was not ensured");
+        let pod_at = calls
+            .iter()
+            .position(|call| call.starts_with("create_pod"))
+            .expect("pod was not created");
+        assert!(claim_at < pod_at, "pod preceded its claim: {calls:?}");
+        assert_eq!(
+            calls[claim_at],
+            format!("ensure_workspace_claim {}", id.workspace_claim_name())
+        );
+    }
+
     /// The strict no-op row: a started pod returns its id having mutated
     /// nothing at all. Asserted on the *call log*, not on final state — a
     /// delete-then-recreate would leave identical final state.
@@ -820,6 +889,26 @@ mod tests {
             fake.mutations(),
             [format!("ensure_namespace {}", cfg.namespace)],
             "the no-op row mutated something"
+        );
+    }
+
+    #[test]
+    fn started_ephemeral_pod_does_not_create_a_newly_requested_claim() {
+        let id = identity();
+        let running_cfg = config();
+        let fake = Fake::default().with_pod(our_pod(&id, &running_cfg, Some(running())));
+        let mut desired_cfg = running_cfg.clone();
+        desired_cfg.workspace_storage = Some("20Gi".into());
+
+        assert_eq!(
+            run(&fake, &id, &desired_cfg).unwrap(),
+            id.pod_name(),
+            "running v1 pod should remain the active generation"
+        );
+        assert_eq!(
+            fake.mutations(),
+            [format!("ensure_namespace {}", desired_cfg.namespace)],
+            "a running generation must not introduce its successor's claim"
         );
     }
 
@@ -1536,6 +1625,12 @@ mod tests {
         impl Substrate for GcDenied {
             async fn ensure_namespace(&self, ns: &str) -> Result<(), String> {
                 self.0.ensure_namespace(ns).await
+            }
+            async fn ensure_workspace_claim(
+                &self,
+                claim: Option<&PersistentVolumeClaim>,
+            ) -> Result<(), String> {
+                self.0.ensure_workspace_claim(claim).await
             }
             async fn list_pods(
                 &self,

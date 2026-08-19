@@ -1,7 +1,7 @@
 //! `provider_config` parsing and the `info` config schema
 //! (spec §`provider_config` v1 fields, `docs/remote-agents.md:1384-1389`).
 //!
-//! Nine fields, all optional except `image` (required at parse time; the
+//! Eleven fields, all optional except `image` (required at parse time; the
 //! schema offers the published sprig image as a prefill default — §Image).
 //! No credential field exists, by I2: cluster auth comes from ambient
 //! kubeconfig resolution and nothing else (`:196-198`).
@@ -71,6 +71,12 @@ pub struct ProviderConfig {
     /// `None` when `inactivity_seconds` was 0 — refused in v1, see [`parse`].
     pub inactivity_seconds: Option<u64>,
     pub service_account: Option<String>,
+    /// Requested capacity for an identity-owned persistent workspace claim.
+    /// `None` preserves the v1 `emptyDir` behavior.
+    pub workspace_storage: Option<String>,
+    /// Optional StorageClass for the persistent workspace claim. Rejected
+    /// unless [`workspace_storage`](Self::workspace_storage) is also set.
+    pub workspace_storage_class: Option<String>,
 }
 
 /// Read an optional non-empty string field. Rejects non-string scalars rather
@@ -165,6 +171,14 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         Some(n) => Some(n),
     };
 
+    let workspace_storage = optional_string(cfg, "workspace_storage")?;
+    let workspace_storage_class = optional_string(cfg, "workspace_storage_class")?;
+    if workspace_storage.is_none() && workspace_storage_class.is_some() {
+        return Err(
+            "provider_config.workspace_storage_class requires workspace_storage".to_string(),
+        );
+    }
+
     Ok(ProviderConfig {
         context: optional_string(cfg, "context")?,
         namespace,
@@ -172,6 +186,8 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
         resources,
         inactivity_seconds,
         service_account: optional_string(cfg, "service_account")?,
+        workspace_storage,
+        workspace_storage_class,
     })
 }
 
@@ -236,6 +252,16 @@ pub fn config_schema() -> serde_json::Value {
                 "type": "string",
                 "title": "Service account",
                 "description": "Scheduling/RBAC identity only. No API token is mounted."
+            },
+            "workspace_storage": {
+                "type": "string",
+                "title": "Persistent workspace size",
+                "description": "Optional Kubernetes storage request such as 20Gi. When set, Buzz creates one identity-owned claim that survives pod replacement. Leave empty for an ephemeral workspace."
+            },
+            "workspace_storage_class": {
+                "type": "string",
+                "title": "Workspace storage class",
+                "description": "Optional StorageClass for the persistent workspace claim. Leave empty to use the cluster default."
             }
         },
         "required": ["namespace", "image"]
@@ -265,6 +291,8 @@ mod tests {
         assert_eq!(c.inactivity_seconds, Some(DEFAULT_INACTIVITY_SECONDS));
         assert_eq!(c.context, None);
         assert_eq!(c.service_account, None);
+        assert_eq!(c.workspace_storage, None);
+        assert_eq!(c.workspace_storage_class, None);
     }
 
     #[test]
@@ -386,6 +414,25 @@ mod tests {
     }
 
     #[test]
+    fn persistent_workspace_fields_are_parsed_together() {
+        let mut cfg = minimal();
+        cfg["workspace_storage"] = "20Gi".into();
+        cfg["workspace_storage_class"] = "fast-ssd".into();
+        let parsed = parse(&cfg).unwrap();
+        assert_eq!(parsed.workspace_storage.as_deref(), Some("20Gi"));
+        assert_eq!(parsed.workspace_storage_class.as_deref(), Some("fast-ssd"));
+    }
+
+    #[test]
+    fn workspace_storage_class_requires_a_storage_request() {
+        let mut cfg = minimal();
+        cfg["workspace_storage_class"] = "fast-ssd".into();
+        let error = parse(&cfg).unwrap_err();
+        assert!(error.contains("workspace_storage_class"), "got: {error}");
+        assert!(error.contains("workspace_storage"), "got: {error}");
+    }
+
+    #[test]
     fn generated_namespaces_are_fresh_and_valid() {
         let a = generated_namespace();
         let b = generated_namespace();
@@ -423,10 +470,10 @@ mod tests {
         );
     }
 
-    /// Nine fields exactly (§`provider_config` v1 fields). The cap is 20; the
+    /// Eleven fields exactly (§`provider_config` fields). The cap is 20; the
     /// count is pinned so a field added without a spec change is caught here.
     #[test]
-    fn schema_declares_exactly_the_nine_v1_fields() {
+    fn schema_declares_exactly_the_eleven_fields() {
         let schema = config_schema();
         let props = schema["properties"].as_object().unwrap();
         let mut keys: Vec<&str> = props.keys().map(String::as_str).collect();
@@ -442,7 +489,9 @@ mod tests {
                 "memory_limit",
                 "memory_request",
                 "namespace",
-                "service_account"
+                "service_account",
+                "workspace_storage",
+                "workspace_storage_class"
             ]
         );
         assert_eq!(

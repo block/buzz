@@ -76,6 +76,12 @@ impl AgentIdentity {
         format!("buzz-agent-{}", &self.pubkey_hex[..12])
     }
 
+    /// Deterministic persistent workspace claim. Unlike the per-attempt
+    /// Secret, this name deliberately survives every pod generation.
+    pub fn workspace_claim_name(&self) -> String {
+        format!("{}-workspace", self.pod_name())
+    }
+
     /// Per-attempt Secret name. `generation` is a fresh random token per
     /// create attempt — never reused — which is what makes payload and Secret
     /// atomic at the pod-spec boundary (§K8s Secrets).
@@ -186,6 +192,17 @@ mod tests {
             .pod_name()
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+    }
+
+    #[test]
+    fn workspace_claim_name_is_identity_stable_and_dns_safe() {
+        let id = identity();
+        assert_eq!(id.workspace_claim_name(), id.workspace_claim_name());
+        assert_eq!(
+            id.workspace_claim_name(),
+            format!("{}-workspace", id.pod_name())
+        );
+        assert!(id.workspace_claim_name().len() <= 253);
     }
 
     /// Two attempts must never share a Secret name — that uniqueness is what

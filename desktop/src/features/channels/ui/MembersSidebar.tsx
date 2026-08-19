@@ -514,6 +514,7 @@ export function MembersSidebar({
     removableManagedBots,
     currentPubkey,
     onOpenChange,
+    presenceLookup: memberPresenceQuery.data ?? {},
     relayUrl,
   });
 

@@ -7,7 +7,7 @@ import {
 } from "@/features/agents/hooks";
 import {
   respawnManagedAgentWithRules,
-  isManagedAgentActive,
+  isManagedAgentLive,
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
@@ -25,6 +25,7 @@ import type {
   ChannelMember,
   ManagedAgent,
   ManagedAgentRuntimeStatus,
+  PresenceLookup,
 } from "@/shared/api/types";
 
 type UseMembersSidebarActionsOptions = {
@@ -33,6 +34,7 @@ type UseMembersSidebarActionsOptions = {
   removableManagedBots: readonly ManagedAgent[];
   currentPubkey?: string;
   onOpenChange: (open: boolean) => void;
+  presenceLookup: PresenceLookup;
   /** Active community relay. When set, local-agent lifecycle actions are
    * scoped to this agent+community pair instead of the whole agent. */
   relayUrl?: string;
@@ -53,6 +55,7 @@ export function useMembersSidebarActions({
   removableManagedBots,
   currentPubkey,
   onOpenChange,
+  presenceLookup,
   relayUrl,
 }: UseMembersSidebarActionsOptions) {
   const queryClient = useQueryClient();
@@ -72,8 +75,13 @@ export function useMembersSidebarActions({
 
   const stoppableManagedBots = React.useMemo(
     () =>
-      controllableManagedBots.filter((agent) => isManagedAgentActive(agent)),
-    [controllableManagedBots],
+      controllableManagedBots.filter((agent) =>
+        isManagedAgentLive(
+          agent,
+          presenceLookup[agent.pubkey.trim().toLowerCase()],
+        ),
+      ),
+    [controllableManagedBots, presenceLookup],
   );
 
   const isActionPending =
@@ -170,7 +178,12 @@ export function useMembersSidebarActions({
         return;
       }
 
-      if (isManagedAgentActive(agent)) {
+      if (
+        isManagedAgentLive(
+          agent,
+          presenceLookup[agent.pubkey.trim().toLowerCase()],
+        )
+      ) {
         await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
