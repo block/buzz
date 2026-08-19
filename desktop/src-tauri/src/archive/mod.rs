@@ -24,6 +24,7 @@ mod pipeline;
 pub mod retention;
 pub mod store;
 mod store_migrations;
+pub mod sync;
 
 pub use archive_db::ArchiveDb;
 
@@ -150,8 +151,20 @@ pub async fn archive_events(
     state: State<'_, AppState>,
     candidates: Vec<ArchiveCandidate>,
 ) -> Result<ArchiveBatchResult, String> {
-    let identity_pk = identity_pubkey(&state)?;
-    let relay_url = relay_ws_url_with_override(&state);
+    archive_candidates(&state, candidates).await
+}
+
+/// The body of [`archive_events`], callable without a command invocation.
+///
+/// The native sync task archives through this directly: routing its batches
+/// back out to the renderer just to have the renderer invoke the command would
+/// reintroduce the IPC round trip the move exists to delete.
+pub(crate) async fn archive_candidates(
+    state: &AppState,
+    candidates: Vec<ArchiveCandidate>,
+) -> Result<ArchiveBatchResult, String> {
+    let identity_pk = identity_pubkey(state)?;
+    let relay_url = relay_ws_url_with_override(state);
     let now = now_secs();
 
     // ── Phase 1: plan (blocking SQLite) ─────────────────────────────────────
@@ -163,8 +176,7 @@ pub async fn archive_events(
         .await?;
 
     // ── Phase 2: relay queries (async) ───────────────────────────────────────
-    let state_ref: &AppState = &state;
-    let bucket_results = query_buckets(plan.buckets, state_ref).await;
+    let bucket_results = query_buckets(plan.buckets, state).await;
 
     // ── Phase 3: persist (blocking SQLite) ──────────────────────────────────
     let owner_keys = {
@@ -288,6 +300,7 @@ fn validate_ephemeral_frame(
 #[tauri::command]
 pub async fn create_save_subscription(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     scope_type: ScopeType,
     scope_value: String,
     kinds: Vec<u32>,
@@ -340,7 +353,9 @@ pub async fn create_save_subscription(
                 now,
             )
         })
-        .await
+        .await?;
+    sync_state.notify_subscriptions_changed().await;
+    Ok(())
 }
 
 /// Probe: the current user has access to `channel_id` (kind 39002 lists them).
@@ -433,6 +448,7 @@ async fn probe_event_readable(state: &AppState, event_id: &str) -> Result<(), St
 #[tauri::command]
 pub async fn merge_save_subscription_kinds(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     kind: u32,
 ) -> Result<(), String> {
     if kind > u32::from(u16::MAX) {
@@ -448,7 +464,9 @@ pub async fn merge_save_subscription_kinds(
         .with_conn(move |conn| {
             store::merge_owner_p_kinds(conn, &identity_pk, &relay_url, &owner_pk, kind, now)
         })
-        .await
+        .await?;
+    sync_state.notify_subscriptions_changed().await;
+    Ok(())
 }
 
 // ── remove_save_subscription_kind ────────────────────────────────────────────
@@ -468,6 +486,7 @@ pub async fn merge_save_subscription_kinds(
 #[tauri::command]
 pub async fn remove_save_subscription_kind(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     kind: u32,
 ) -> Result<(), String> {
     if kind > u32::from(u16::MAX) {
@@ -482,7 +501,9 @@ pub async fn remove_save_subscription_kind(
         .with_conn(move |conn| {
             store::remove_owner_p_kind(conn, &identity_pk, &relay_url, &owner_pk, kind)
         })
-        .await
+        .await?;
+    sync_state.notify_subscriptions_changed().await;
+    Ok(())
 }
 
 // ── list_save_subscriptions ──────────────────────────────────────────────────
@@ -509,12 +530,13 @@ pub async fn list_save_subscriptions(
 #[tauri::command]
 pub async fn delete_save_subscription(
     state: State<'_, AppState>,
+    sync_state: State<'_, sync::ArchiveSyncState>,
     scope_type: ScopeType,
     scope_value: String,
 ) -> Result<bool, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    state
+    let removed = state
         .archive_db
         .with_conn(move |conn| {
             store::delete_save_subscription(
@@ -525,7 +547,11 @@ pub async fn delete_save_subscription(
                 &scope_value,
             )
         })
-        .await
+        .await?;
+    if removed {
+        sync_state.notify_subscriptions_changed().await;
+    }
+    Ok(removed)
 }
 
 // ── read_archived_events ─────────────────────────────────────────────────────

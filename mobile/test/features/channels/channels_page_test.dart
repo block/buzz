@@ -18,7 +18,7 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/community/community_icon_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -744,9 +744,10 @@ void main() {
     final route = ModalRoute.of(tester.element(find.text('Injected settings')));
     expect(route, isNot(isA<MaterialPageRoute<void>>()));
     expect(route?.opaque, isFalse);
+    expect(route?.allowSnapshotting, isFalse);
   });
 
-  testWidgets('reports Settings progress in both directions', (tester) async {
+  testWidgets('reports monotonic Settings route progress', (tester) async {
     final progress = <double>[];
     await tester.pumpWidget(
       buildTestable(
@@ -759,23 +760,31 @@ void main() {
     await tester.pumpAndSettle();
 
     await tester.tap(find.byType(ProfileAvatar));
+    await tester.pump();
+    expect(progress, [0]);
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(progress.last, inExclusiveRange(0, 1));
+    await tester.pump(const Duration(milliseconds: 95));
+    expect(progress.last, inExclusiveRange(0, 1));
     await tester.pumpAndSettle();
-    expect(progress.any((value) => value > 0 && value < 1), isTrue);
     expect(progress.last, 1);
+    for (var index = 1; index < progress.length; index++) {
+      expect(progress[index], greaterThanOrEqualTo(progress[index - 1]));
+    }
 
-    final reverseStart = progress.length;
     Navigator.of(tester.element(find.text('Injected settings'))).pop();
+    await tester.pump();
+    final reverseStart = progress.length;
+    await tester.pump(const Duration(milliseconds: 95));
+    expect(progress.last, inExclusiveRange(0, 1));
     await tester.pumpAndSettle();
-    expect(
-      progress.skip(reverseStart).any((value) => value > 0 && value < 1),
-      isTrue,
-    );
     expect(progress.last, 0);
+    for (var index = reverseStart + 1; index < progress.length; index++) {
+      expect(progress[index], lessThanOrEqualTo(progress[index - 1]));
+    }
   });
 
-  testWidgets('paints Settings content with its surface from the first frame', (
-    tester,
-  ) async {
+  testWidgets('scales and fully fades Settings into view', (tester) async {
     await tester.pumpWidget(
       buildTestable(
         overrides: [
@@ -792,7 +801,12 @@ void main() {
       const ValueKey('settings-transition-opacity'),
       skipOffstage: false,
     );
+    final scaleTransition = find.byKey(
+      const ValueKey('settings-transition-scale'),
+      skipOffstage: false,
+    );
     expect(transition, findsOneWidget);
+    expect(scaleTransition, findsOneWidget);
     expect(
       find.descendant(
         of: transition,
@@ -803,24 +817,44 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(tester.widget<FadeTransition>(transition).opacity.value, 0.8);
+    expect(tester.widget<FadeTransition>(transition).opacity.value, 0);
 
     await tester.pump(const Duration(milliseconds: 95));
+    final forwardOpacity = tester
+        .widget<FadeTransition>(transition)
+        .opacity
+        .value;
+    final forwardScale = tester
+        .widget<ScaleTransition>(scaleTransition)
+        .scale
+        .value;
+    final forwardScaleProgress = (1.04 - forwardScale) / 0.04;
     expect(
-      tester.widget<FadeTransition>(transition).opacity.value,
-      inExclusiveRange(0.8, 1),
+      forwardOpacity,
+      closeTo(Curves.easeOutQuad.transform(95 / 220), 0.02),
     );
+    expect(forwardScaleProgress, closeTo(forwardOpacity, 0.001));
     await tester.pumpAndSettle();
     expect(tester.widget<FadeTransition>(transition).opacity.value, 1);
 
     Navigator.of(tester.element(find.text('Injected settings'))).pop();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 95));
+    final reverseOpacity = tester
+        .widget<FadeTransition>(transition)
+        .opacity
+        .value;
+    final reverseScale = tester
+        .widget<ScaleTransition>(scaleTransition)
+        .scale
+        .value;
+    final reverseScaleProgress = (1.04 - reverseScale) / 0.04;
     expect(
-      tester.widget<FadeTransition>(transition).opacity.value,
+      reverseOpacity,
       inExclusiveRange(0, 1),
       reason: 'The complete Settings layer still fades out on exit.',
     );
+    expect(reverseScaleProgress, closeTo(reverseOpacity, 0.001));
   });
 
   testWidgets('gives feedback for the profile and community controls', (

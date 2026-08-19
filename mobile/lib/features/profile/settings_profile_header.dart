@@ -45,7 +45,8 @@ class SettingsProfileHeader extends HookConsumerWidget {
         showSetStatusSheet(context, currentStatus: status);
 
     return Padding(
-      padding: const EdgeInsets.only(top: Grid.sm, bottom: Grid.sm),
+      key: const ValueKey('settings-profile-header'),
+      padding: const EdgeInsets.only(top: Grid.sm, bottom: Grid.twelve),
       child: Column(
         children: [
           MaskedAvatarBadge(
