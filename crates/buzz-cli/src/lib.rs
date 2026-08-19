@@ -42,7 +42,7 @@ where
         Ok(cli) => cli,
         Err(e) => {
             if e.use_stderr() {
-                error::print_error(&CliError::Usage(e.to_string()));
+                error::print_error(&CliError::Usage(e.to_string()), None);
                 return 1;
             } else {
                 // --help and --version: print normally (intentional human output)
@@ -51,10 +51,11 @@ where
             }
         }
     };
+    let max_output_bytes = cli.message_read_max_output_bytes();
     match run(cli).await {
         Ok(()) => 0,
         Err(e) => {
-            error::print_error(&e);
+            error::print_error(&e, max_output_bytes);
             error::exit_code(&e)
         }
     }
@@ -71,6 +72,10 @@ Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+
+Safety:
+  --require-secure-relay rejects plaintext remote relay URLs.
+  `messages get` and `messages thread` also accept --max-output-bytes.
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -90,12 +95,30 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
+    /// Refuse plaintext remote relay URLs; http/ws remain allowed for loopback development.
+    #[arg(long, default_value_t = false)]
+    require_secure_relay: bool,
+
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
     #[command(subcommand)]
     command: Cmd,
+}
+
+impl Cli {
+    fn message_read_max_output_bytes(&self) -> Option<usize> {
+        match &self.command {
+            Cmd::Messages(MessagesCmd::Get {
+                max_output_bytes, ..
+            })
+            | Cmd::Messages(MessagesCmd::Thread {
+                max_output_bytes, ..
+            }) => *max_output_bytes,
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -461,7 +484,7 @@ pub enum MessagesCmd {
     },
     /// Retrieve messages from a channel
     #[command(
-        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
+        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984\n  buzz messages get --channel <UUID> --max-output-bytes 5242880"
     )]
     Get {
         /// Channel UUID
@@ -479,21 +502,33 @@ pub enum MessagesCmd {
         /// Comma-separated event kinds to filter (e.g. 1,1984)
         #[arg(long)]
         kinds: Option<String>,
+        /// Refuse to emit a JSON response larger than this many UTF-8 bytes
+        #[arg(long)]
+        max_output_bytes: Option<usize>,
     },
-    /// Get a message thread (replies to a root message)
+    /// Get the containing thread for a message or Buzz message link
+    #[command(
+        after_help = "Examples:\n  buzz messages thread --channel <UUID> --event <EVENT_ID>\n  buzz messages thread --link 'buzz://message?channel=<UUID>&id=<EVENT_ID>&thread=<ROOT_ID>'\n  buzz messages thread --link '<BUZZ_LINK>' --max-output-bytes 5242880"
+    )]
     Thread {
-        /// Channel UUID
-        #[arg(long)]
-        channel: String,
-        /// Root message event ID (64-char hex)
-        #[arg(long)]
-        event: String,
+        /// Channel UUID; required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        channel: Option<String>,
+        /// Message event ID (64-char hex); required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        event: Option<String>,
+        /// Canonical buzz://message deep link; uses the configured relay and identity
+        #[arg(long, conflicts_with_all = ["channel", "event"])]
+        link: Option<String>,
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
         /// Maximum reply nesting depth to include
         #[arg(long)]
         depth_limit: Option<u32>,
+        /// Refuse to emit a JSON response larger than this many UTF-8 bytes
+        #[arg(long)]
+        max_output_bytes: Option<usize>,
     },
     /// Full-text search across messages
     #[command(
@@ -1990,15 +2025,18 @@ fn normalize_auth_tag_input(input: &str) -> String {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
-    let relay_url = client::normalize_relay_url(&cli.relay);
-
-    // Pack commands are local-only — no relay connection needed.
+    // Pack commands are local-only — no relay policy or credentials required.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
     }
+
+    if cli.require_secure_relay {
+        client::validate_secure_relay_url(&cli.relay)?;
+    }
+    let relay_url = client::normalize_relay_url(&cli.relay);
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
@@ -2117,6 +2155,57 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn messages_thread_accepts_link_or_explicit_identifiers_and_output_cap() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "--require-secure-relay",
+            "messages",
+            "thread",
+            "--link",
+            link.as_str(),
+            "--max-output-bytes",
+            "5242880",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--channel",
+            channel,
+            "--event",
+            event.as_str(),
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn messages_thread_rejects_partial_or_mixed_targets() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(Cli::try_parse_from(["buzz", "messages", "thread"]).is_err());
+        assert!(
+            Cli::try_parse_from(["buzz", "messages", "thread", "--channel", channel,]).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "thread",
+            "--link",
+            link.as_str(),
+            "--event",
+            event.as_str(),
+        ])
+        .is_err());
     }
 
     #[test]

@@ -1286,6 +1286,37 @@ impl BuzzClient {
     }
 }
 
+/// Require encrypted transport for remote relays while permitting loopback development.
+///
+/// Also rejects credentials and fragments so an environment value cannot hide
+/// authority in userinfo or carry data that is irrelevant to relay selection.
+pub fn validate_secure_relay_url(input: &str) -> Result<(), CliError> {
+    let url = url::Url::parse(input.trim())
+        .map_err(|_| CliError::Usage("relay URL must be a valid http(s) or ws(s) URL".into()))?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err(CliError::Usage(
+            "relay URL must not contain credentials or a fragment".into(),
+        ));
+    }
+    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") || url.host_str().is_none() {
+        return Err(CliError::Usage(
+            "relay URL must be an http(s) or ws(s) URL with a host".into(),
+        ));
+    }
+    if matches!(url.scheme(), "http" | "ws")
+        && !url.host().is_some_and(|host| match host {
+            url::Host::Ipv4(address) => address.is_loopback(),
+            url::Host::Ipv6(address) => address.is_loopback(),
+            url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        })
+    {
+        return Err(CliError::Usage(
+            "relay URL must use secure transport unless it targets loopback".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Normalize a relay URL: ws:// → http://, wss:// → https://, strip trailing slash.
 /// BUZZ_RELAY_URL may be ws/wss (copied from MCP config).
 pub fn normalize_relay_url(url: &str) -> String {
@@ -2304,9 +2335,39 @@ mod retry_policy_tests {
 mod tests {
     use super::{
         advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        BuzzClient,
+        validate_secure_relay_url, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn secure_relay_policy_accepts_encrypted_and_loopback_urls() {
+        for relay in [
+            "https://relay.example",
+            "wss://relay.example",
+            "http://localhost:3000",
+            "ws://127.0.0.1:3000",
+            "http://[::1]:3000",
+        ] {
+            assert!(validate_secure_relay_url(relay).is_ok(), "rejected {relay}");
+        }
+    }
+
+    #[test]
+    fn secure_relay_policy_rejects_plaintext_remote_and_ambiguous_urls() {
+        for relay in [
+            "http://relay.example",
+            "ws://10.0.0.1:3000",
+            "https://user:secret@relay.example",
+            "https://relay.example#fragment",
+            "file:///tmp/relay",
+            "not-a-url",
+        ] {
+            assert!(
+                validate_secure_relay_url(relay).is_err(),
+                "accepted {relay}"
+            );
+        }
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {

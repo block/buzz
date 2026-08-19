@@ -350,14 +350,37 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
-pub async fn cmd_get_messages(
+struct MessageReadOutput<'a> {
+    format: &'a crate::OutputFormat,
+    max_bytes: Option<usize>,
+}
+
+fn print_bounded_output(output: String, max_output_bytes: Option<usize>) -> Result<(), CliError> {
+    if max_output_bytes == Some(0) {
+        return Err(CliError::Usage(
+            "--max-output-bytes must be greater than zero".into(),
+        ));
+    }
+    if let Some(maximum) = max_output_bytes {
+        let emitted_bytes = output.len().saturating_add(1); // println's trailing newline
+        if emitted_bytes > maximum {
+            return Err(CliError::Usage(format!(
+                "output exceeds --max-output-bytes ({emitted_bytes} > {maximum} bytes); lower --limit or increase the cap"
+            )));
+        }
+    }
+    println!("{output}");
+    Ok(())
+}
+
+async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
     limit: Option<u32>,
     before: Option<i64>,
     since: Option<i64>,
     kinds: Option<&str>,
-    format: &crate::OutputFormat,
+    output: MessageReadOutput<'_>,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     let limit = limit.unwrap_or(50).min(200);
@@ -387,44 +410,48 @@ pub async fn cmd_get_messages(
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
     let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
-    Ok(())
+    print_bounded_output(format_events(&normalized, output.format), output.max_bytes)
 }
 
-pub async fn cmd_get_thread(
+async fn cmd_get_thread(
     client: &BuzzClient,
     channel_id: &str,
     event_id: &str,
     limit: Option<u32>,
     depth_limit: Option<u32>,
-    format: &crate::OutputFormat,
+    output: MessageReadOutput<'_>,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     validate_hex64(event_id)?;
     let limit = limit.unwrap_or(100).min(500);
 
+    // `--event` may point at any message in the thread, not only its root.
+    // Resolve the selected event's NIP-10 root marker so old links without a
+    // `thread` query parameter still return the containing conversation.
+    let thread_ref = resolve_thread_ref(client, event_id).await?;
+    let root_event_id = thread_ref.root_event_id.to_hex();
+
     // Two filters ORed in a single HTTP call:
-    // 1. Replies referencing this event via e-tag (no kind restriction)
+    // 1. Replies referencing the resolved root via e-tag
     // 2. The root event itself by ID
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
         "#h": [channel_id],
-        "#e": [event_id],
+        "#e": [root_event_id.as_str()],
         "limit": limit
     });
     if let Some(d) = depth_limit {
         reply_filter["depth_limit"] = serde_json::json!(d);
     }
     let root_filter = serde_json::json!({
-        "ids": [event_id],
+        "ids": [root_event_id.as_str()],
         "limit": 1
     });
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
     let normalized = normalize_events(&events);
-    println!("{}", format_events(&normalized, format));
-    Ok(())
+    print_bounded_output(format_events(&normalized, output.format), output.max_bytes)
 }
 
 pub async fn cmd_search(
@@ -950,6 +977,7 @@ pub async fn dispatch(
             before,
             since,
             kinds,
+            max_output_bytes,
         } => {
             cmd_get_messages(
                 client,
@@ -958,16 +986,49 @@ pub async fn dispatch(
                 before,
                 since,
                 kinds.as_deref(),
-                format,
+                MessageReadOutput {
+                    format,
+                    max_bytes: max_output_bytes,
+                },
             )
             .await
         }
         MessagesCmd::Thread {
             channel,
             event,
+            link,
             limit,
             depth_limit,
-        } => cmd_get_thread(client, &channel, &event, limit, depth_limit, format).await,
+            max_output_bytes,
+        } => {
+            let (channel, event) =
+                match link {
+                    Some(link) => {
+                        let parsed = crate::links::parse_message_link(&link)?;
+                        let event = parsed.thread_root_id.unwrap_or(parsed.message_id);
+                        (parsed.channel_id, event)
+                    }
+                    None => match (channel, event) {
+                        (Some(channel), Some(event)) => (channel, event),
+                        _ => return Err(CliError::Usage(
+                            "messages thread requires either --link or both --channel and --event"
+                                .into(),
+                        )),
+                    },
+                };
+            cmd_get_thread(
+                client,
+                &channel,
+                &event,
+                limit,
+                depth_limit,
+                MessageReadOutput {
+                    format,
+                    max_bytes: max_output_bytes,
+                },
+            )
+            .await
+        }
         MessagesCmd::Search {
             query,
             author,
@@ -994,7 +1055,7 @@ pub async fn dispatch(
 mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys, print_bounded_output,
         resolve_names_to_pubkeys,
     };
     use buzz_sdk::mentions::{
@@ -1011,6 +1072,15 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn bounded_output_accepts_at_limit_and_rejects_over_limit_or_zero() {
+        assert!(print_bounded_output("ok".into(), None).is_ok());
+        assert!(print_bounded_output("ok".into(), Some(3)).is_ok());
+        assert!(print_bounded_output("ok".into(), Some(2)).is_err());
+        assert!(print_bounded_output("too large".into(), Some(2)).is_err());
+        assert!(print_bounded_output(String::new(), Some(0)).is_err());
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
