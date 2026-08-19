@@ -123,21 +123,36 @@ int? _channelReadTimestamp({
   return dateTimeToUnixSeconds(channel.lastMessageAt);
 }
 
+/// Controls how a hydrated initial thread is added to the navigation stack.
+enum InitialThreadRouteBehavior {
+  /// Keep the channel route beneath the thread.
+  push,
+
+  /// Replace the temporary channel route so Back returns to its origin.
+  replaceCurrentRoute,
+}
+
 class ChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
   final String? initialMessageId;
   final String? initialThreadRootId;
+
+  /// How the automatically opened initial thread affects the route stack.
+  final InitialThreadRouteBehavior initialThreadRouteBehavior;
 
   const ChannelDetailPage({
     super.key,
     required this.channel,
     this.initialMessageId,
     this.initialThreadRootId,
+    this.initialThreadRouteBehavior = InitialThreadRouteBehavior.push,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final composerFocusNode = useFocusNode();
+    final restoreComposerFocus = useRef<VoidCallback?>(null);
     final sendMessage = ref.read(sendMessageProvider);
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
     final channelsAsync = ref.watch(channelsProvider);
@@ -451,6 +466,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                               allMessages: messages,
                               initialMessageId: initialMessageId,
                               initialThreadRootId: initialThreadRootId,
+                              initialThreadRouteBehavior:
+                                  initialThreadRouteBehavior,
                               initialOrdinaryUnreadMessageIds:
                                   initialOrdinaryUnreadMessageIds,
                               initialOldestOrdinaryUnreadMessageId:
@@ -473,6 +490,12 @@ class ChannelDetailPage extends HookConsumerWidget {
                               composerBottomInset: showsComposer
                                   ? composerDockHeight.value
                                   : 0,
+                              composerFocusNode: showsComposer
+                                  ? composerFocusNode
+                                  : null,
+                              restoreComposerFocus: showsComposer
+                                  ? () => restoreComposerFocus.value?.call()
+                                  : null,
                             );
                           },
                         ),
@@ -521,6 +544,9 @@ class ChannelDetailPage extends HookConsumerWidget {
                       ),
                       ComposeBar(
                         channelId: channel.id,
+                        focusNode: composerFocusNode,
+                        onFocusRestorerChanged: (restoreFocus) =>
+                            restoreComposerFocus.value = restoreFocus,
                         channelName: resolvedChannel.isDm
                             ? ''
                             : resolvedChannel.name,

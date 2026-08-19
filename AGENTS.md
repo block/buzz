@@ -476,11 +476,18 @@ are frozen.**
 So for any readable text, reach for rem-based Tailwind tokens, never arbitrary
 px:
 
-- ✅ Stock rem tokens (`text-base`, `text-sm`, `text-xs`, …). **Chat body/author
-  text === `text-base` (16px) — chat is the app's base type size**, and the
-  surrounding timeline elements (timestamps, system rows, code, reactions) are
-  deliberate steps on that same stock ramp.
-- ✅ The `text-2xs` (0.6875rem / 11px) and `text-3xs` (0.5rem / 8px) meta-text
+- ✅ Stock rem tokens (`text-base`, `text-sm`, `text-xs`, …) for general
+  interface text. All of these derive from the virtual typography rem and
+  therefore follow the user's font-size preference and Cmd +/- zoom.
+- ✅ Conversation text uses the named `text-message` token. Its
+  **Smaller / Default / Larger contract is 13 / 14 / 15px** before keyboard
+  zoom. Author names use the same conversation-size step; timestamps, system
+  rows, code, and reactions are deliberate neighboring steps on the shared
+  virtual-rem ramp. Keep those relationships tokenized rather than restoring a
+  fixed 16px chat baseline or hardcoding preference-specific values in
+  components.
+- ✅ The `text-2xs` (0.6875rem / 11px at a 16px virtual rem) and `text-3xs`
+  (0.5rem / 8px at a 16px virtual rem) meta-text
   tokens (in `desktop/tailwind.config.js` under `theme.extend.fontSize`) for the
   sub-`text-xs` ramp — timestamps, count badges, tracking labels, tiny glyphs.
   These replaced the dozens of arbitrary `text-[…rem]` literals that had drifted

@@ -220,6 +220,8 @@ class ActivityPage extends HookConsumerWidget {
             channel: channel,
             initialMessageId: target.id,
             initialThreadRootId: threadRootId,
+            initialThreadRouteBehavior:
+                InitialThreadRouteBehavior.replaceCurrentRoute,
           ),
         ),
       );
@@ -240,6 +242,8 @@ class ActivityPage extends HookConsumerWidget {
           builder: (_) => ChannelDetailPage(
             channel: channel,
             initialThreadRootId: draft.threadHeadId,
+            initialThreadRouteBehavior:
+                InitialThreadRouteBehavior.replaceCurrentRoute,
           ),
         ),
       );
