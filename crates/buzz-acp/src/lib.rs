@@ -4321,6 +4321,9 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("--file ./report.md"));
         assert!(prompt.contains("do not publish its `url`"));
         assert!(prompt.contains("retry the delivery with `buzz messages send --file`"));
+        assert!(prompt.contains("event context includes an `Attachments` manifest"));
+        assert!(prompt.contains("buzz media get <url> --output <path>"));
+        assert!(prompt.contains("never assume another agent's local path is shared"));
     }
 
     #[test]

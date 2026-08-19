@@ -1107,6 +1107,68 @@ fn format_prompt_actor(pubkey: &str, profile_lookup: Option<&PromptProfileLookup
     }
 }
 
+/// Render NIP-92 `imeta` tags as an agent-readable attachment manifest.
+///
+/// Attachment bytes stay out of the prompt (apart from native image blocks,
+/// which are handled by the ACP pool). Agents can fetch any file on demand
+/// with the authenticated `buzz media get` command.
+fn format_event_attachments(event: &nostr::Event) -> Option<String> {
+    let mut attachments = Vec::new();
+    let mut seen_urls = std::collections::HashSet::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("imeta") {
+            continue;
+        }
+        let mut fields = std::collections::HashMap::new();
+        for field in parts.iter().skip(1) {
+            if let Some((key, value)) = field.split_once(' ') {
+                fields.insert(key, value);
+            }
+        }
+        let Some(url) = fields.get("url").copied() else {
+            continue;
+        };
+        if !seen_urls.insert(url) {
+            continue;
+        }
+        let filename = fields
+            .get("filename")
+            .copied()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("attachment");
+        let mime = fields
+            .get("m")
+            .copied()
+            .unwrap_or("application/octet-stream");
+        let size = fields.get("size").copied().unwrap_or("unknown");
+        let sha256 = fields.get("x").copied().unwrap_or("unknown");
+        // The filename is displayed as data, never executed. Keep the example
+        // output path fixed so a hostile filename cannot inject shell syntax.
+        let clean = |value: &str| {
+            value
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .collect::<String>()
+        };
+        attachments.push(format!(
+            "- filename: {}\n  mime: {}\n  size: {} bytes\n  sha256: {}\n  url: {}\n  download: buzz media get <url-above> --output ./downloaded-file",
+            clean(filename),
+            clean(mime),
+            clean(size),
+            clean(sha256),
+            clean(url),
+        ));
+    }
+    (!attachments.is_empty()).then(|| format!("Attachments:\n{}", attachments.join("\n")))
+}
+
 /// Format the per-event `[Event]` block for a single [`BatchEvent`].
 ///
 /// Includes: event_id, channel (name + UUID), kind, sender (hex + npub),
@@ -1179,6 +1241,10 @@ pub(crate) fn format_event_block(
     }
     if !parsed_parts.is_empty() {
         block.push_str(&format!("\nParsed: {}", parsed_parts.join(", ")));
+    }
+
+    if let Some(attachments) = format_event_attachments(&be.event) {
+        block.push_str(&format!("\n{attachments}"));
     }
 
     block
@@ -1624,7 +1690,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     if args.task_bound_auto_delivery {
         sections.push(
-            "[Buzz Delivery]\nReturn the user-visible reply as your final answer. The Buzz harness signs and publishes that final answer to this conversation. Do not call `buzz messages send` for this reply."
+            "[Buzz Delivery]\nReturn ordinary user-visible text as your final answer; the Buzz harness signs and publishes it to this conversation. If you need to deliver one or more files, use `buzz messages send --file <path>` yourself so the files become real attachments, then return a brief delivery summary as your final answer. Do not paste a local path or a bare upload URL as a substitute for an attachment."
                 .to_string(),
         );
     }
@@ -3931,6 +3997,72 @@ mod tests {
     }
 
     #[test]
+    fn test_format_event_block_renders_attachment_manifest() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "attached",
+            vec![vec![
+                "imeta".into(),
+                "url https://relay.test/media/report.md".into(),
+                "m text/markdown".into(),
+                "x deadbeef".into(),
+                "size 42".into(),
+                "filename report.md".into(),
+            ]],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(prompt.contains("Attachments:"));
+        assert!(prompt.contains("filename: report.md"));
+        assert!(prompt.contains("mime: text/markdown"));
+        assert!(prompt.contains("size: 42 bytes"));
+        assert!(prompt.contains("sha256: deadbeef"));
+        assert!(prompt.contains("buzz media get <url-above> --output ./downloaded-file"));
+    }
+
+    #[test]
+    fn test_format_event_block_deduplicates_attachment_urls_and_handles_missing_fields() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "attached",
+            vec![
+                vec!["imeta".into(), "url https://relay.test/media/a".into()],
+                vec![
+                    "imeta".into(),
+                    "url https://relay.test/media/a".into(),
+                    "filename a.txt".into(),
+                ],
+                vec!["imeta".into(), "m text/plain".into()],
+            ],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert_eq!(prompt.matches("url: https://relay.test/media/a").count(), 1);
+        assert!(!prompt.contains("mime: text/plain"));
+        assert!(prompt.contains("filename: attachment"));
+    }
+
+    #[test]
     fn test_drain_channel_removes_pending_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -4998,7 +5130,7 @@ mod tests {
             .iter()
             .position(|section| section.starts_with("[Context]"))
             .expect("room context section");
-        assert!(sections[delivery_index].contains("Do not call `buzz messages send`"));
+        assert!(sections[delivery_index].contains("buzz messages send --file <path>"));
         assert!(delivery_index < context_index);
     }
 
