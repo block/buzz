@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Check, Code, Pencil, X } from "lucide-react";
 import { useBlocker } from "@tanstack/react-router";
-import { isMap, parseDocument, stringify as yamlStringify } from "yaml";
+import { stringify as yamlStringify } from "yaml";
 
 import {
   useCreateWorkflowMutation,
@@ -48,6 +48,11 @@ import {
   formStateToYaml,
   yamlToFormState,
 } from "./workflowFormTypes";
+import {
+  readWorkflowHeaderState,
+  yamlWithWorkflowEnabled,
+  yamlWithWorkflowName,
+} from "./workflowYamlDocument";
 
 type DialogMode = "create" | "edit" | "duplicate";
 
@@ -100,44 +105,6 @@ const PENDING_LABELS: Record<DialogMode, string> = {
   edit: "Saving…",
   duplicate: "Creating…",
 };
-
-function visibleWorkflowName(
-  yaml: string,
-  fallbackName: string | undefined,
-): string {
-  const parsed = yamlToFormState(yaml);
-  if (parsed.ok && parsed.state.name.trim()) return parsed.state.name.trim();
-  return fallbackName?.trim() ?? "";
-}
-
-function yamlWithWorkflowName(yaml: string, name: string): string | null {
-  if (!yaml.trim()) {
-    return formStateToYaml({ ...DEFAULT_FORM_STATE, name });
-  }
-
-  const document = parseDocument(yaml);
-  if (document.errors.length > 0 || !isMap(document.contents)) return null;
-  document.set("name", name);
-  return document.toString();
-}
-
-function yamlWithWorkflowEnabled(
-  yaml: string,
-  enabled: boolean,
-): string | null {
-  if (!yaml.trim()) {
-    return formStateToYaml({ ...DEFAULT_FORM_STATE, enabled });
-  }
-
-  const document = parseDocument(yaml);
-  if (document.errors.length > 0 || !isMap(document.contents)) return null;
-  if (enabled) {
-    document.delete("enabled");
-  } else {
-    document.set("enabled", false);
-  }
-  return document.toString();
-}
 
 function WorkflowNameEditor({
   disabled,
@@ -488,17 +455,20 @@ export function WorkflowDialog({
     [editorMode, yamlDefinition],
   );
 
-  const workflowName = visibleWorkflowName(
-    yamlDefinition,
-    workflowSnapshot?.name,
-  );
-  const canEditWorkflowName =
-    !yamlDefinition.trim() || yamlToFormState(yamlDefinition).ok;
-  const workflowEnabled = parsedDefinition?.ok
-    ? parsedDefinition.state.enabled
-    : workflowSnapshot
+  // Header state reads the YAML document directly rather than the fully
+  // validated form state: a step that is still being filled in (a new
+  // send_message with no text yet) fails form validation, and gating the name
+  // on that made the title blank out as soon as a step pane opened.
+  const {
+    canEdit: canEditWorkflowName,
+    enabled: workflowEnabled,
+    name: workflowName,
+  } = readWorkflowHeaderState(yamlDefinition, {
+    enabled: workflowSnapshot
       ? getWorkflowEnabled(workflowSnapshot.definition)
-      : true;
+      : true,
+    name: workflowSnapshot?.name,
+  });
   const handleWorkflowNameCommit = React.useCallback(
     (name: string) => {
       const nextYaml = yamlWithWorkflowName(yamlDefinitionRef.current, name);

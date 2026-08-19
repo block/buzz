@@ -41,6 +41,7 @@ import {
   yamlToFormState,
 } from "./workflowFormTypes";
 import { defaultScheduleTrigger } from "./workflowSchedule";
+import { readWorkflowDocumentFields } from "./workflowYamlDocument";
 import type {
   ActionType,
   StepFormState,
@@ -434,9 +435,26 @@ export const WorkflowFormBuilder = React.forwardRef<
     canonicalYamlRef.current = yaml;
     if (mode !== "form" || yaml === lastSynchronizedYamlRef.current) return;
     const result = yamlToFormState(yaml);
-    if (!result.ok) return;
-    setFormState(result.state);
+    if (result.ok) {
+      setFormState(result.state);
+      lastSynchronizedYamlRef.current = yaml;
+      return;
+    }
+
+    // The header can rename or disable a definition whose body is still
+    // incomplete — a step that has no message text yet fails form validation.
+    // Adopt those fields anyway, otherwise the next form edit re-serializes the
+    // values this state was holding before the header wrote them.
+    const header = readWorkflowDocumentFields(yaml);
+    if (!header.editable) return;
     lastSynchronizedYamlRef.current = yaml;
+    setFormState((current) => {
+      const name = header.name ?? current.name;
+      const enabled = header.enabled !== false;
+      return name === current.name && enabled === current.enabled
+        ? current
+        : { ...current, enabled, name };
+    });
   }, [mode, yaml]);
 
   React.useEffect(() => {
