@@ -598,6 +598,12 @@ fn claude_spawn_uses_the_probed_cli_executable() {
     }
     let original_path = std::env::var_os("PATH");
     std::env::set_var("PATH", temp.path());
+    // `resolve_command` caches negative results for the app lifetime, so an
+    // earlier test's `resolve_command("claude") -> None` would survive here and
+    // mask this test's PATH mutation. Clear the cache after planting PATH so the
+    // resolver observes the fake CLI, and again after restoring PATH so the
+    // tempdir resolution does not leak into a later test.
+    crate::managed_agents::clear_resolve_cache();
 
     let mut command = std::process::Command::new("buzz-acp");
     super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
@@ -607,6 +613,7 @@ fn claude_spawn_uses_the_probed_cli_executable() {
     } else {
         std::env::remove_var("PATH");
     }
+    crate::managed_agents::clear_resolve_cache();
     assert!(command
         .get_envs()
         .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
