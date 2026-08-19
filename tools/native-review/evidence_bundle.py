@@ -19,7 +19,7 @@ SECRET_HEADER = re.compile(
 SECRET_VALUE = re.compile(
     r"(?i)(?P<name>[\"']?(?:auth|token|secret|password|private[_-]?key|cookie|api[_-]?key)[A-Z0-9_.-]*[\"']?)"
     r"(?P<sep>\s*[:=]\s*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]*)(?:\r?\n[ \t]+[^\r\n]*)*"
+    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\r\n]*)(?:\r?\n[ \t]+[^\r\n]*)*"
 )
 
 

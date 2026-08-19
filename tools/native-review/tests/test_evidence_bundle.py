@@ -130,6 +130,14 @@ class EvidenceBundleTests(unittest.TestCase):
                 "password=[REDACTED]\nnext=visible",
             'prefix token=alpha beta; gamma':
                 'prefix token=[REDACTED]',
+            '{"token": "prefix\\\"tail-secret", "safe": "visible"}':
+                '{"token": "[REDACTED]", "safe": "visible"}',
+            '{"api_key": "prefix\\\\\\\"tail-secret", "safe": "visible"}':
+                '{"api_key": "[REDACTED]", "safe": "visible"}',
+            "{'password': 'prefix\\'tail-secret', 'safe': 'visible'}":
+                "{'password': '[REDACTED]', 'safe': 'visible'}",
+            'token="prefix\\\"tail-secret"\nnext=visible':
+                'token="[REDACTED]"\nnext=visible',
         }
         for source, expected in sources.items():
             with self.subTest(source=source):
