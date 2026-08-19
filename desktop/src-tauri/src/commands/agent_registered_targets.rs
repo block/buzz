@@ -24,11 +24,20 @@ pub async fn update_managed_agent(
 #[tauri::command]
 pub async fn start_managed_agent(
     pubkey: String,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
     reject_registered_reference_target(&app, &pubkey)?;
-    super::agents::start_managed_agent_unchecked(pubkey, app, state).await
+    super::agents::start_managed_agent_unchecked(
+        pubkey,
+        expected_relay_url,
+        expected_signer_pubkey,
+        app,
+        state,
+    )
+    .await
 }
 
 #[tauri::command]

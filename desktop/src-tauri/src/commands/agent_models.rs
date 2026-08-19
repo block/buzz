@@ -706,7 +706,7 @@ pub(super) async fn update_managed_agent_unchecked(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
-    update::update_managed_agent(input, app, state).await
+    update::update_managed_agent_impl(input, app, state).await
 }
 
 // ── Model normalization ───────────────────────────────────────────────────────

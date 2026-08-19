@@ -2,7 +2,6 @@ import * as React from "react";
 
 import {
   useManagedAgentsQuery,
-  useRegisteredAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { mergeKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
@@ -42,17 +41,10 @@ export function KnownAgentPubkeysProvider({
 }) {
   const managedAgents = useManagedAgentsQuery().data;
   const relayAgents = useRelayAgentsQuery().data;
-  const registeredAgents = useRegisteredAgentsQuery().data;
 
   const merged = React.useMemo(
-    () =>
-      mergeKnownAgentPubkeys(managedAgents, [
-        ...(relayAgents ?? []),
-        ...(registeredAgents ?? []).map((reference) => ({
-          pubkey: reference.pubkey,
-        })),
-      ]),
-    [managedAgents, relayAgents, registeredAgents],
+    () => mergeKnownAgentPubkeys(managedAgents, relayAgents),
+    [managedAgents, relayAgents],
   );
   const stable = useStableSet(merged);
 

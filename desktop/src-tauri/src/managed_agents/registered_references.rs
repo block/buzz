@@ -176,10 +176,18 @@ pub(crate) fn reject_registered_reference_target(
     pubkey: &str,
 ) -> Result<(), String> {
     let normalized = normalize_pubkey(pubkey).unwrap_or_else(|_| pubkey.to_string());
-    if !super::storage::managed_agent_record_exists(app, &normalized)? {
-        return Err(format!("agent {normalized} not found"));
+    reject_registered_reference_target_at_path(
+        &super::storage::managed_agents_store_path(app)?,
+        &normalized,
+    )
+}
+
+fn reject_registered_reference_target_at_path(path: &Path, pubkey: &str) -> Result<(), String> {
+    if super::storage::managed_agent_record_exists_at_path(path, pubkey)? {
+        Ok(())
+    } else {
+        Err(format!("agent {pubkey} not found"))
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -192,6 +200,9 @@ mod tests {
     const PUBKEY_A_UPPER: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const PUBKEY_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const PUBKEY_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const COMMAND_TARGETS_SOURCE: &str = include_str!("../commands/agent_registered_targets.rs");
+    const SETTINGS_SOURCE: &str = include_str!("../commands/agent_settings.rs");
+    const RUNTIME_SOURCE: &str = include_str!("runtime_commands.rs");
 
     fn request(
         pubkey: &str,
@@ -353,4 +364,238 @@ mod tests {
         save_to_path(path, refs)?;
         Ok(reference)
     }
+
+    /// Extract one small command body so the regression tests verify the real
+    /// production routing as well as the path-based ownership decision. These
+    /// commands deliberately contain no nested brace-bearing literals before
+    /// their ownership check.
+    fn command_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let signature = format!("fn {name}(");
+        let start = source
+            .find(&signature)
+            .unwrap_or_else(|| panic!("missing command {name}"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("missing body for command {name}"));
+        let mut depth = 0usize;
+        for (offset, byte) in source[body_start..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..=body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for command {name}")
+    }
+
+    fn assert_before(body: &str, first: &str, second: &str) {
+        let first_index = body
+            .find(first)
+            .unwrap_or_else(|| panic!("missing preflight `{first}` in {body}"));
+        let second_index = body
+            .find(second)
+            .unwrap_or_else(|| panic!("missing mutation/delegation `{second}` in {body}"));
+        assert!(
+            first_index < second_index,
+            "`{first}` must precede `{second}`"
+        );
+    }
+
+    fn assert_production_command_is_guarded(target: &str) {
+        match target {
+            "start_managed_agent"
+            | "stop_managed_agent"
+            | "update_managed_agent"
+            | "delete_managed_agent" => assert_before(
+                command_body(COMMAND_TARGETS_SOURCE, target),
+                "reject_registered_reference_target",
+                &format!("{target}_unchecked"),
+            ),
+            "set_managed_agent_start_on_app_launch" | "set_managed_agent_auto_restart" => {
+                assert_before(
+                    command_body(SETTINGS_SOURCE, target),
+                    "reject_registered_reference_target",
+                    "spawn_blocking",
+                );
+            }
+            "put_managed_agent_runtime_lifecycle" => assert_before(
+                command_body(RUNTIME_SOURCE, target),
+                "reject_registered_reference_target",
+                "app.state::<AppState>()",
+            ),
+            "start_managed_agent_runtime" => {
+                assert!(command_body(RUNTIME_SOURCE, target)
+                    .contains("start_managed_agent_runtime_pair_lazy"));
+                assert_before(
+                    command_body(RUNTIME_SOURCE, "start_pair"),
+                    "reject_registered_reference_target",
+                    "app.state::<AppState>()",
+                );
+            }
+            "stop_managed_agent_runtime" => assert_before(
+                command_body(RUNTIME_SOURCE, target),
+                "reject_registered_reference_target",
+                "app.state::<AppState>()",
+            ),
+            "restart_managed_agent_runtime" => assert_before(
+                command_body(RUNTIME_SOURCE, target),
+                "stop_managed_agent_runtime",
+                "start_pair",
+            ),
+            _ => panic!("unmapped registered-reference command target {target}"),
+        }
+    }
+
+    fn snapshot_tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn visit(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let mut entries = fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap())
+                .collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(root, &path, out);
+                } else {
+                    out.push((
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(path).unwrap(),
+                    ));
+                }
+            }
+        }
+        let mut snapshot = Vec::new();
+        visit(root, root, &mut snapshot);
+        snapshot
+    }
+
+    fn assert_registered_reference_command_fails_closed(target: &str) {
+        let temp = tempfile::tempdir().unwrap();
+        let agents_dir = temp.path().join("agents");
+        fs::create_dir_all(agents_dir.join("agent-pids")).unwrap();
+        let managed_store = agents_dir.join("managed-agents.json");
+        let registered_store = agents_dir.join(STORE_FILENAME);
+
+        // The target exists only in the keyless reference store. The managed
+        // store contains an unrelated record with deliberately stale runtime
+        // metadata, matching the state that used to be synchronized before a
+        // missing-target error was returned.
+        let unrelated = serde_json::json!({
+            "pubkey": PUBKEY_B,
+            "name": "unrelated-exited-runtime",
+            "relay_url": "wss://relay.example",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": "",
+            "runtime_pid": 424242,
+            "last_error": "stale exited child",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+        fs::write(
+            &managed_store,
+            serde_json::to_vec_pretty(&vec![unrelated]).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &registered_store,
+            serde_json::to_vec_pretty(&vec![RegisteredAgentReference {
+                pubkey: PUBKEY_A.to_string(),
+                label: Some("external".to_string()),
+                role_summary: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Sentinels cover every side-effect class at issue: event emission,
+        // keyring writes/deletes, in-memory lifecycle state, runtime receipts,
+        // and process identity. A command reaching its mutation body would
+        // necessarily alter at least one of these or the managed store.
+        fs::write(agents_dir.join("event-sentinel"), b"0 events").unwrap();
+        fs::write(
+            agents_dir.join("keyring-sentinel"),
+            b"agent:b = nsec-sentinel",
+        )
+        .unwrap();
+        fs::write(
+            agents_dir.join("runtime-state-sentinel"),
+            br#"{"pubkey":"bbbb","lifecycle":"exited","pid":424242}"#,
+        )
+        .unwrap();
+        fs::write(
+            agents_dir.join("agent-pids").join("stale.json"),
+            br#"{"pid":424242,"status":"exited"}"#,
+        )
+        .unwrap();
+
+        let before = snapshot_tree(temp.path());
+        let error = reject_registered_reference_target_at_path(&managed_store, PUBKEY_A)
+            .expect_err("registered reference must not authorize a managed command");
+        assert_eq!(error, format!("agent {PUBKEY_A} not found"));
+        assert_eq!(snapshot_tree(temp.path()), before, "{target} mutated state");
+        assert_production_command_is_guarded(target);
+    }
+
+    macro_rules! fail_closed_command_test {
+        ($name:ident, $target:literal) => {
+            #[test]
+            fn $name() {
+                assert_registered_reference_command_fails_closed($target);
+            }
+        };
+    }
+
+    fail_closed_command_test!(
+        registered_agent_references_start_managed_agent_fails_closed,
+        "start_managed_agent"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_stop_managed_agent_fails_closed,
+        "stop_managed_agent"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_start_runtime_fails_closed,
+        "start_managed_agent_runtime"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_stop_runtime_fails_closed,
+        "stop_managed_agent_runtime"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_restart_runtime_fails_closed,
+        "restart_managed_agent_runtime"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_lifecycle_observer_write_fails_closed,
+        "put_managed_agent_runtime_lifecycle"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_start_on_launch_fails_closed,
+        "set_managed_agent_start_on_app_launch"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_auto_restart_fails_closed,
+        "set_managed_agent_auto_restart"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_update_fails_closed,
+        "update_managed_agent"
+    );
+    fail_closed_command_test!(
+        registered_agent_references_delete_fails_closed,
+        "delete_managed_agent"
+    );
 }

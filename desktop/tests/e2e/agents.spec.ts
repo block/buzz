@@ -2747,3 +2747,177 @@ test("register existing agent stays keyless and has no lifecycle controls", asyn
   expect(commands).not.toContain("create_managed_agent");
   expect(commands).not.toContain("start_managed_agent");
 });
+
+test("registered reference opens exact profile and remains display-only", async ({
+  page,
+}) => {
+  const pubkey = "b2".repeat(32);
+  const timestamp = "2026-08-18T00:00:00Z";
+  await installMockBridge(page, {
+    registeredAgents: [
+      {
+        pubkey,
+        label: "External Finch",
+        role_summary: "Research",
+        created_at: timestamp,
+        updated_at: timestamp,
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const card = page.getByTestId(`registered-agent-${pubkey}`);
+  await expect(
+    card.getByRole("button", { name: new RegExp(pubkey) }),
+  ).toBeVisible();
+  for (const control of [
+    "Start",
+    "Restart",
+    "Deploy",
+    "Auto-start",
+    "Model",
+    "Runtime error",
+    "Reveal secret",
+  ]) {
+    await expect(
+      card.getByRole("button", { name: new RegExp(control, "i") }),
+    ).toHaveCount(0);
+  }
+
+  await card.click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  const profileCalls = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+      (call) => call.command === "get_user_profile",
+    ),
+  );
+  expect(
+    profileCalls.some(
+      (call) =>
+        (call.payload as { pubkey?: unknown } | null)?.pubkey === pubkey,
+    ),
+  ).toBe(true);
+});
+
+test("registration rejects invalid and managed collisions without cards and normalizes blanks", async ({
+  page,
+}) => {
+  const managedPubkey = "c3".repeat(32);
+  const validPubkey = "d4".repeat(32);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: managedPubkey,
+        name: "Managed Collision",
+      },
+    ],
+    registeredAgents: [],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  for (const [input, error] of [
+    ["not-a-pubkey", "invalid public key"],
+    [managedPubkey, `agent ${managedPubkey} is already a managed agent`],
+  ] as const) {
+    await page.getByRole("button", { name: "Register existing agent" }).click();
+    const dialog = page.getByRole("dialog", {
+      name: "Register existing agent",
+    });
+    await dialog.getByTestId("register-existing-agent-pubkey").fill(input);
+    await dialog.getByRole("button", { name: "Register reference" }).click();
+    await expect(dialog).toContainText(error);
+    await expect(page.getByTestId(`registered-agent-${input}`)).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+  }
+
+  await page.getByRole("button", { name: "Register existing agent" }).click();
+  const dialog = page.getByRole("dialog", { name: "Register existing agent" });
+  await dialog.getByTestId("register-existing-agent-pubkey").fill(validPubkey);
+  await dialog.getByTestId("register-existing-agent-label").fill("   ");
+  await dialog.getByTestId("register-existing-agent-role-summary").fill(" \t ");
+  await dialog.getByRole("button", { name: "Register reference" }).click();
+  await expect(
+    page.getByTestId(`registered-agent-${validPubkey}`),
+  ).toBeVisible();
+  const registerInput = await page.evaluate(() => {
+    const call = (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+      (entry) => entry.command === "register_existing_agent_reference",
+    );
+    return (call?.payload as { input?: unknown } | null)?.input;
+  });
+  expect(registerInput).toMatchObject({
+    pubkey: validPubkey,
+    label: null,
+    roleSummary: null,
+  });
+});
+
+test("same-name references stay distinct and removing one only unregisters that reference", async ({
+  page,
+}) => {
+  const first = "e5".repeat(32);
+  const second = "f6".repeat(32);
+  const timestamp = "2026-08-18T00:00:00Z";
+  await installMockBridge(page, {
+    registeredAgents: [first, second].map((pubkey) => ({
+      pubkey,
+      label: "Same Name",
+      role_summary: null,
+      created_at: timestamp,
+      updated_at: timestamp,
+    })),
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  for (const pubkey of [first, second]) {
+    const card = page.getByTestId(`registered-agent-${pubkey}`);
+    await expect(card).toContainText(pubkey.slice(-4));
+    await expect(
+      card.getByRole("button", { name: new RegExp(pubkey) }),
+    ).toBeVisible();
+  }
+
+  await page.getByTestId(`registered-agent-actions-${first}`).click();
+  await page.getByRole("menuitem", { name: "Remove reference" }).click();
+  const confirm = page.getByRole("alertdialog");
+  await expect(confirm).toContainText(
+    "removes only the local card and reference",
+  );
+  await confirm.getByRole("button", { name: "Remove reference" }).click();
+  await expect(page.getByTestId(`registered-agent-${first}`)).toHaveCount(0);
+  await expect(page.getByTestId(`registered-agent-${second}`)).toBeVisible();
+
+  const mutations = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter((call) =>
+      ["unregister_existing_agent_reference", "delete_managed_agent"].includes(
+        call.command,
+      ),
+    ),
+  );
+  expect(mutations).toEqual([
+    expect.objectContaining({
+      command: "unregister_existing_agent_reference",
+      payload: { pubkey: first },
+    }),
+  ]);
+});
+
+test("malformed registered-reference store renders error and zero reference cards", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    registeredAgentsError: "failed to parse registered agent references",
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await expect(
+    page.getByText("failed to parse registered agent references"),
+  ).toBeVisible();
+  await expect(page.locator('[data-testid^="registered-agent-"]')).toHaveCount(
+    0,
+  );
+});

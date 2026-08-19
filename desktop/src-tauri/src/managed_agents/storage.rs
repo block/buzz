@@ -259,7 +259,26 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 /// Check managed-agent ownership without hydrating private keys or touching
 /// runtime state. Command boundaries use this before any lifecycle side effect.
 pub(crate) fn managed_agent_record_exists(app: &AppHandle, pubkey: &str) -> Result<bool, String> {
-    Ok(load_agent_store(app)?
+    managed_agent_record_exists_at_path(&managed_agents_store_path(app)?, pubkey)
+}
+
+/// Path-based ownership lookup used by the command-boundary regression tests.
+/// It intentionally shares the raw, non-hydrating read used in production so
+/// proving a rejected target cannot touch the keyring does not itself touch it.
+pub(crate) fn managed_agent_record_exists_at_path(
+    path: &Path,
+    pubkey: &str,
+) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("failed to read agent store: {error}"))?;
+    let records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|error| {
+        backup_invalid_store(path);
+        format!("failed to parse agent store (preserved as .invalid): {error}")
+    })?;
+    Ok(records
         .iter()
         .any(|record| !record.pubkey.is_empty() && record.pubkey == pubkey))
 }

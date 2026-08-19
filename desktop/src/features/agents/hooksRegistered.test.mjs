@@ -23,15 +23,21 @@ test("registered mutations invalidate only the registered-agent query key", () =
   );
 });
 
-test("agents-data-changed invalidates registered key alongside existing library keys", () => {
-  const block = refresh.slice(
+test("agents-data-changed invalidates registered key alongside existing local library keys", () => {
+  const localKeysBlock = refresh.slice(
+    refresh.indexOf("LOCAL_AGENT_DATA_QUERY_KEYS"),
+    refresh.indexOf("] as const"),
+  );
+  assert.match(localKeysBlock, /registeredAgentsQueryKey/);
+  assert.match(localKeysBlock, /personasQueryKey/);
+  assert.match(localKeysBlock, /teamsQueryKey/);
+  assert.match(localKeysBlock, /managedAgentsQueryKey/);
+  assert.doesNotMatch(localKeysBlock, /relayAgentsQueryKey/);
+
+  const listenerBlock = refresh.slice(
     refresh.indexOf('listen("agents-data-changed"'),
     refresh.indexOf("return () =>"),
   );
-  assert.match(block, /registeredAgentsQueryKey/);
-  assert.match(block, /personasQueryKey/);
-  assert.match(block, /teamsQueryKey/);
-  assert.match(block, /managedAgentsQueryKey/);
-  assert.match(block, /relayAgentsQueryKey/);
-  assert.doesNotMatch(block, /managedAgentRuntimesQueryKey/);
+  assert.match(listenerBlock, /LOCAL_AGENT_DATA_QUERY_KEYS/);
+  assert.doesNotMatch(listenerBlock, /managedAgentRuntimesQueryKey/);
 });
