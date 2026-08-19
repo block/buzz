@@ -376,21 +376,6 @@ pub fn merge_owner_p_kinds(
         )
         .map_err(|e| format!("merge_owner_p_kinds upsert: {e}"))?;
 
-        // Seed the default retention policy for the newly-merged kind in the
-        // same transaction, so `kinds` and the governing policy row are never
-        // observed out of sync. `ON CONFLICT DO NOTHING` (in the helper) makes
-        // this a no-op when the kind was already present or the user set an
-        // explicit policy — an existing policy always wins.
-        super::retention::seed_default_policy(
-            conn,
-            identity_pubkey,
-            relay_url,
-            "owner_p",
-            scope_value,
-            i64::from(new_kind),
-            now,
-        )?;
-
         Ok(())
     })();
 

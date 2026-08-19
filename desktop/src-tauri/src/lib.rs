@@ -907,9 +907,9 @@ pub fn run() {
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
             archive::get_agent_usage_series,
-            archive::set_save_subscription_retention,
-            archive::list_retention_policies,
-            archive::delete_retention_policy,
+            archive::get_observer_retention_days,
+            archive::set_observer_retention_days,
+            archive::archive_size_stats,
             is_auto_update_supported,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]

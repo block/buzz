@@ -118,7 +118,7 @@ async fn test_first_open_barrier_serializes_init_and_defers_opens() {
                 db.with_conn(move |conn| {
                     open_count.fetch_add(1, Ordering::SeqCst);
                     // Touch the migrated schema to prove a usable connection.
-                    conn.query_row("SELECT COUNT(*) FROM retention_policies", [], |r| {
+                    conn.query_row("SELECT COUNT(*) FROM archive_meta", [], |r| {
                         r.get::<_, i64>(0)
                     })
                     .map_err(|e| e.to_string())

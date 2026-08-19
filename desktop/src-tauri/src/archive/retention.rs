@@ -1,53 +1,44 @@
-//! Per-subscription / per-kind retention policy storage and lifecycle.
+//! Local archive retention configuration + size accounting.
 //!
-//! Retention is modelled as a normalized `retention_policies` table keyed
-//! `(identity_pubkey, relay_url, scope_type, scope_value, kind)` with a
-//! nullable `days` column (`NULL` = keep forever). The policy lifecycle is
-//! deliberately **independent of `save_subscriptions`**: disabling a kind or
-//! deleting a subscription leaves its policy behind so already-archived data
-//! keeps expiring. A policy is only ever removed by the explicit
-//! `delete_retention_policy` command.
+//! v4 (Will's ruling, 2026-08-19): retention is a single global setting — how
+//! many days observer frames (kind 24200) are kept locally. NIP-AM metrics
+//! (44200) and every other archived kind are kept indefinitely with no
+//! retention machinery. The setting lives as one row in the `archive_meta` k/v
+//! table (`observer_retention_days`), seeded by migration M4.
+//!
+//! This module owns the `archive_meta` schema, the scope-age index used by the
+//! Phase-2 prune scan, the get/set accessors for the observer window, and the
+//! PRAGMA-based size readout. The prune worker itself lands in Phase 2.
 //!
 //! Kept in a sibling file (not `store.rs`) to respect the 1000-line gate, per
 //! the existing `metric_store.rs` / `pipeline.rs` / `store_migrations.rs`
 //! precedent.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Kind 24200 (agent observer frames) — the unbounded-growth driver that
-/// defaults to a rolling window rather than Forever.
-pub const OBSERVER_FRAME_KIND: i64 = 24200;
+/// `archive_meta` key holding the observer-frame retention window, in days,
+/// stored as its decimal text.
+pub const OBSERVER_RETENTION_DAYS_KEY: &str = "observer_retention_days";
 
 /// Default rolling window for observer frames (Will's ruling: "~14–30"; 30 is
-/// the shipped default, trivially changeable).
+/// the shipped default, trivially changeable). Seeded into `archive_meta` by M4.
 pub const DEFAULT_OBSERVER_RETENTION_DAYS: i64 = 30;
 
-/// Upper bound on an explicit retention window (~100 years). Guards against a
-/// day count large enough to overflow `archived_at` cutoff arithmetic while
-/// still admitting any realistic user choice.
+/// Upper bound on the retention window (~100 years). Guards against a day count
+/// large enough to overflow `archived_at` cutoff arithmetic while still
+/// admitting any realistic user choice.
 pub const MAX_RETENTION_DAYS: i64 = 36_500;
 
 // ── Schema (created by migration M4, not the base SCHEMA) ─────────────────────
 
-/// `retention_policies` + `archive_meta`. Created inside M4 under
-/// `BEGIN IMMEDIATE` (see `store_migrations::migrate_add_retention_policies`).
-/// Plain `CREATE TABLE` (no `IF NOT EXISTS`): M4 creates these once on a DB that
-/// provably has neither table yet (the fail-closed guard rejects a pre-existing
-/// one), so the clause would be dead weight.
-pub(super) const RETENTION_SCHEMA: &str = "
-CREATE TABLE retention_policies (
-    identity_pubkey TEXT NOT NULL,
-    relay_url       TEXT NOT NULL,
-    scope_type      TEXT NOT NULL,
-    scope_value     TEXT NOT NULL,
-    kind            INTEGER NOT NULL,
-    days            INTEGER,
-    updated_at      INTEGER NOT NULL,
-    PRIMARY KEY (identity_pubkey, relay_url, scope_type, scope_value, kind)
-);
-
+/// `archive_meta`. Created inside M4 under `BEGIN IMMEDIATE` (see
+/// `store_migrations::migrate_add_retention_policies`). Plain `CREATE TABLE`
+/// (no `IF NOT EXISTS`): M4 creates it once on a DB that provably lacks it (the
+/// fail-closed guard rejects a pre-existing one), so the clause would be dead
+/// weight. Holds the observer-retention window and the Phase-2 prune timestamp.
+pub(super) const ARCHIVE_META_SCHEMA: &str = "
 CREATE TABLE archive_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -75,269 +66,135 @@ pub(super) const SCOPE_AGE_INDEX_NAME: &str = "idx_archived_event_scopes_age";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/// A retention policy row with its live-subscription status, returned by
-/// `list_retention_policies`.
-///
-/// `active` is `true` when a `save_subscriptions` row for the same
-/// `(scope_type, scope_value)` still lists this `kind`; `false` marks an
-/// orphaned policy that continues to expire historical data after the kind was
-/// disabled or the subscription deleted.
+/// Physical and logical size accounting for the archive DB file, returned by
+/// `archive_size_stats`. All figures come from cheap PRAGMAs and file metadata
+/// — no payload scans.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct RetentionPolicyStatus {
-    pub identity_pubkey: String,
-    pub relay_url: String,
-    pub scope_type: String,
-    pub scope_value: String,
-    pub kind: i64,
-    /// `None` = keep forever; otherwise the rolling-window day count.
-    pub days: Option<i64>,
-    pub updated_at: i64,
-    pub active: bool,
+pub struct ArchiveSizeStats {
+    /// On-disk size of the main DB file, in bytes (from filesystem metadata).
+    pub main_file_bytes: i64,
+    /// On-disk size of the `-wal` sidecar file, in bytes; `0` when absent.
+    pub wal_file_bytes: i64,
+    /// SQLite page size, in bytes (`PRAGMA page_size`).
+    pub page_size: i64,
+    /// Total pages in the main DB (`PRAGMA page_count`).
+    pub page_count: i64,
+    /// Free (reclaimable) pages on the freelist (`PRAGMA freelist_count`).
+    pub freelist_count: i64,
 }
 
-// ── Defaults & validation ──────────────────────────────────────────────────────
+// ── Validation ─────────────────────────────────────────────────────────────────
 
-/// The default retention for a freshly-seeded kind: observer frames (24200)
-/// default to a rolling window; every other kind defaults to Forever (`None`).
-pub fn default_days_for_kind(kind: i64) -> Option<i64> {
-    if kind == OBSERVER_FRAME_KIND {
-        Some(DEFAULT_OBSERVER_RETENTION_DAYS)
-    } else {
-        None
-    }
-}
-
-/// Fail-closed validation for an explicit retention choice: `None` (Forever) or
-/// a day count in `1..=MAX_RETENTION_DAYS`. Zero, negatives, and out-of-range
-/// values are rejected so no policy can encode a non-expiring "0 days" or an
+/// Fail-closed validation for the observer retention window: a day count in
+/// `1..=MAX_RETENTION_DAYS`. Zero, negatives, and out-of-range values are
+/// rejected so the setting can never encode a non-expiring "0 days" or an
 /// overflowing cutoff.
-pub fn validate_days(days: Option<i64>) -> Result<(), String> {
-    if let Some(d) = days {
-        if !(1..=MAX_RETENTION_DAYS).contains(&d) {
-            return Err(format!(
-                "retention days must be between 1 and {MAX_RETENTION_DAYS}, or Forever (null); got {d}"
-            ));
-        }
+pub fn validate_days(days: i64) -> Result<(), String> {
+    if !(1..=MAX_RETENTION_DAYS).contains(&days) {
+        return Err(format!(
+            "retention days must be between 1 and {MAX_RETENTION_DAYS}; got {days}"
+        ));
     }
     Ok(())
 }
 
-// ── Policy row mutation (single transactional path) ─────────────────────────────
+// ── Observer retention window (archive_meta accessor) ───────────────────────────
 
-/// Seed the default policy for one `(scope, kind)` tuple, only if no row exists
-/// yet. Idempotent (`ON CONFLICT DO NOTHING`): an existing row — whether a
-/// user's explicit choice or a prior seed — always wins, so re-enabling a kind
-/// never resets its retention. Runs on the caller's connection/transaction.
-pub fn seed_default_policy(
-    conn: &Connection,
-    identity_pubkey: &str,
-    relay_url: &str,
-    scope_type: &str,
-    scope_value: &str,
-    kind: i64,
-    now: i64,
-) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO retention_policies
-             (identity_pubkey, relay_url, scope_type, scope_value, kind, days, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT (identity_pubkey, relay_url, scope_type, scope_value, kind) DO NOTHING",
-        params![
-            identity_pubkey,
-            relay_url,
-            scope_type,
-            scope_value,
-            kind,
-            default_days_for_kind(kind),
-            now
-        ],
-    )
-    .map_err(|e| format!("failed to seed default retention policy: {e}"))?;
-    Ok(())
-}
+/// Read the observer-frame retention window (days). Returns the seeded default
+/// when the row is somehow absent (older DB opened before M4 seeded it, or an
+/// externally cleared row) so the setting always resolves to a bounded window
+/// rather than silently becoming Forever.
+pub fn get_observer_retention_days(conn: &Connection) -> Result<i64, String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM archive_meta WHERE key = ?1",
+            params![OBSERVER_RETENTION_DAYS_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("read observer retention days: {e}"))?;
 
-/// Seed default policies for every kind in a subscription's `kinds` list.
-/// Runs on the caller's connection/transaction so `kinds` and policy rows
-/// mutate together.
-pub fn seed_default_policies_for_kinds(
-    conn: &Connection,
-    identity_pubkey: &str,
-    relay_url: &str,
-    scope_type: &str,
-    scope_value: &str,
-    kinds: &[i64],
-    now: i64,
-) -> Result<(), String> {
-    for &kind in kinds {
-        seed_default_policy(
-            conn,
-            identity_pubkey,
-            relay_url,
-            scope_type,
-            scope_value,
-            kind,
-            now,
-        )?;
+    match raw {
+        Some(s) => s
+            .parse::<i64>()
+            .map_err(|e| format!("observer retention days not an integer ({s:?}): {e}")),
+        None => Ok(DEFAULT_OBSERVER_RETENTION_DAYS),
     }
-    Ok(())
 }
 
-/// Set (create or replace) an explicit retention policy for one `(scope, kind)`
-/// tuple. Fail-closed: rejects an out-of-range `days` before writing. A single
-/// idempotent upsert is atomic under autocommit; no explicit transaction is
-/// needed for this one-statement mutation.
-#[allow(clippy::too_many_arguments)] // one param per PK column + days + now
-pub fn set_policy(
-    conn: &Connection,
-    identity_pubkey: &str,
-    relay_url: &str,
-    scope_type: &str,
-    scope_value: &str,
-    kind: i64,
-    days: Option<i64>,
-    now: i64,
-) -> Result<(), String> {
+/// Set the observer-frame retention window (days). Fail-closed: rejects an
+/// out-of-range value before writing (see [`validate_days`]). A single
+/// idempotent upsert, atomic under autocommit.
+pub fn set_observer_retention_days(conn: &Connection, days: i64) -> Result<(), String> {
     validate_days(days)?;
     conn.execute(
-        "INSERT INTO retention_policies
-             (identity_pubkey, relay_url, scope_type, scope_value, kind, days, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT (identity_pubkey, relay_url, scope_type, scope_value, kind)
-         DO UPDATE SET days = excluded.days, updated_at = excluded.updated_at",
-        params![
-            identity_pubkey,
-            relay_url,
-            scope_type,
-            scope_value,
-            kind,
-            days,
-            now
-        ],
+        "INSERT INTO archive_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        params![OBSERVER_RETENTION_DAYS_KEY, days.to_string()],
     )
-    .map_err(|e| format!("failed to set retention policy: {e}"))?;
+    .map_err(|e| format!("set observer retention days: {e}"))?;
     Ok(())
 }
 
-/// Delete a retention policy row. Returns `true` if a row was removed. This is
-/// the ONLY path that removes a policy — disabling a kind or deleting a
-/// subscription never does. Remaining historical data for the `(scope, kind)`
-/// then becomes ungoverned (Forever) until an explicit purge (Phase 2+).
-pub fn delete_policy(
-    conn: &Connection,
-    identity_pubkey: &str,
-    relay_url: &str,
-    scope_type: &str,
-    scope_value: &str,
-    kind: i64,
-) -> Result<bool, String> {
-    let affected = conn
-        .execute(
-            "DELETE FROM retention_policies
-             WHERE identity_pubkey = ?1
-               AND relay_url       = ?2
-               AND scope_type      = ?3
-               AND scope_value     = ?4
-               AND kind            = ?5",
-            params![identity_pubkey, relay_url, scope_type, scope_value, kind],
+// ── Size accounting ─────────────────────────────────────────────────────────────
+
+/// Collect physical (file) and logical (page) size figures for the archive DB.
+/// PRAGMAs only — no row or payload scans. The main DB file path is read from
+/// the connection itself (`PRAGMA database_list`), and the `-wal` sidecar is
+/// measured by appending `-wal` to it.
+pub fn size_stats(conn: &Connection) -> Result<ArchiveSizeStats, String> {
+    let page_size: i64 = conn
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .map_err(|e| format!("read page_size: {e}"))?;
+    let page_count: i64 = conn
+        .pragma_query_value(None, "page_count", |row| row.get(0))
+        .map_err(|e| format!("read page_count: {e}"))?;
+    let freelist_count: i64 = conn
+        .pragma_query_value(None, "freelist_count", |row| row.get(0))
+        .map_err(|e| format!("read freelist_count: {e}"))?;
+
+    // `PRAGMA database_list` yields (seq, name, file) rows; the `main` schema's
+    // `file` is the on-disk DB path (empty for a `:memory:` DB). File sizes are
+    // read from filesystem metadata rather than page arithmetic so WAL frames
+    // not yet checkpointed into the main file are accounted for separately.
+    let main_path: Option<String> = conn
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |row| row.get::<_, String>(0),
         )
-        .map_err(|e| format!("failed to delete retention policy: {e}"))?;
-    Ok(affected > 0)
+        .optional()
+        .map_err(|e| format!("read database_list: {e}"))?
+        .filter(|p| !p.is_empty());
+
+    let (main_file_bytes, wal_file_bytes) = match main_path {
+        Some(p) => {
+            let main = std::path::PathBuf::from(&p);
+            (file_len(&main), file_len(&wal_path(&main)))
+        }
+        None => (0, 0),
+    };
+
+    Ok(ArchiveSizeStats {
+        main_file_bytes,
+        wal_file_bytes,
+        page_size,
+        page_count,
+        freelist_count,
+    })
 }
 
-/// List every retention policy for the identity + relay, independent of live
-/// subscriptions, tagging each with `active` (a matching subscription still
-/// lists the kind) vs orphaned. `json_each` expands the subscription's `kinds`
-/// JSON array to test membership.
-pub fn list_policies(
-    conn: &Connection,
-    identity_pubkey: &str,
-    relay_url: &str,
-) -> Result<Vec<RetentionPolicyStatus>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT rp.identity_pubkey, rp.relay_url, rp.scope_type, rp.scope_value,
-                    rp.kind, rp.days, rp.updated_at,
-                    EXISTS (
-                        SELECT 1 FROM save_subscriptions ss
-                        WHERE ss.identity_pubkey = rp.identity_pubkey
-                          AND ss.relay_url       = rp.relay_url
-                          AND ss.scope_type      = rp.scope_type
-                          AND ss.scope_value     = rp.scope_value
-                          AND rp.kind IN (SELECT value FROM json_each(ss.kinds))
-                    ) AS active
-             FROM retention_policies rp
-             WHERE rp.identity_pubkey = ?1
-               AND rp.relay_url       = ?2
-             ORDER BY rp.scope_type, rp.scope_value, rp.kind",
-        )
-        .map_err(|e| format!("prepare list_policies: {e}"))?;
-
-    let rows = stmt
-        .query_map(params![identity_pubkey, relay_url], |row| {
-            Ok(RetentionPolicyStatus {
-                identity_pubkey: row.get(0)?,
-                relay_url: row.get(1)?,
-                scope_type: row.get(2)?,
-                scope_value: row.get(3)?,
-                kind: row.get(4)?,
-                days: row.get(5)?,
-                updated_at: row.get(6)?,
-                active: row.get::<_, i64>(7)? != 0,
-            })
-        })
-        .map_err(|e| format!("query list_policies: {e}"))?;
-
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("read list_policies row: {e}"))
+/// Size of a file in bytes, or `0` when it does not exist / cannot be stat'd.
+/// A missing `-wal` (fully checkpointed DB) is the normal case, not an error.
+fn file_len(path: &std::path::Path) -> i64 {
+    std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0)
 }
 
-/// Create a save subscription and seed default policies for its kinds in ONE
-/// `BEGIN IMMEDIATE` transaction, so a reader never observes the subscription
-/// without its governing policies. `IMMEDIATE` takes the write lock up front so
-/// concurrent creators serialize on `busy_timeout` rather than racing to a
-/// `BUSY_SNAPSHOT` error (same rationale as `store::merge_owner_p_kinds`).
-#[allow(clippy::too_many_arguments)] // mirrors upsert_save_subscription's column set + kinds
-pub fn create_subscription_with_policies(
-    conn: &Connection,
-    identity_pubkey: &str,
-    relay_url: &str,
-    scope_type: &str,
-    scope_value: &str,
-    kinds: &[i64],
-    kinds_json: &str,
-    now: i64,
-) -> Result<(), String> {
-    conn.execute_batch("BEGIN IMMEDIATE")
-        .map_err(|e| format!("create_subscription_with_policies begin immediate: {e}"))?;
-
-    let result = (|| -> Result<(), String> {
-        super::store::upsert_save_subscription(
-            conn,
-            identity_pubkey,
-            relay_url,
-            scope_type,
-            scope_value,
-            kinds_json,
-            now,
-        )?;
-        seed_default_policies_for_kinds(
-            conn,
-            identity_pubkey,
-            relay_url,
-            scope_type,
-            scope_value,
-            kinds,
-            now,
-        )
-    })();
-
-    if result.is_ok() {
-        conn.execute_batch("COMMIT")
-            .map_err(|e| format!("create_subscription_with_policies commit: {e}"))?;
-    } else {
-        let _ = conn.execute_batch("ROLLBACK");
-    }
-    result
+/// The `-wal` sidecar path for a main DB file (`archive.db` → `archive.db-wal`).
+fn wal_path(db_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = db_path.as_os_str().to_os_string();
+    name.push("-wal");
+    std::path::PathBuf::from(name)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

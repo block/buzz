@@ -326,20 +326,16 @@ pub async fn create_save_subscription(
     let kinds_json =
         serde_json::to_string(&kinds).map_err(|e| format!("failed to serialize kinds: {e}"))?;
 
-    // `kinds` here is Vec<u32>; the policy helper wants i64 (SQLite-native,
-    // matches the retention_policies.kind column). Widening u32→i64 is lossless.
-    let policy_kinds: Vec<i64> = kinds.iter().map(|&k| i64::from(k)).collect();
     let scope_type_str = scope_type.as_str().to_string();
     state
         .archive_db
         .with_conn(move |conn| {
-            retention::create_subscription_with_policies(
+            store::upsert_save_subscription(
                 conn,
                 &identity_pk,
                 &relay_url,
                 &scope_type_str,
                 &scope_value,
-                &policy_kinds,
                 &kinds_json,
                 now,
             )
@@ -804,93 +800,40 @@ pub async fn get_agent_usage_series(
         .await
 }
 
-// ── Retention policy commands ─────────────────────────────────────────────────
+// ── Retention configuration commands ──────────────────────────────────────────
 
-/// Set (create or replace) the retention policy for one `(scope, kind)` of the
-/// active identity + relay.
-///
-/// Identity and relay are derived server-side — never trusted from the
-/// frontend. `days` is `None` for Forever or a bounded positive count; the
-/// store layer fail-closes on zero, negative, or out-of-range values (see
-/// [`retention::validate_days`]). This is a single idempotent upsert, atomic
-/// under autocommit; no default seeding occurs here (an explicit user choice is
-/// exactly what this writes).
+/// Read the global observer-frame (kind 24200) retention window, in days. Every
+/// other archived kind — NIP-AM metrics and any custom subscription — is kept
+/// indefinitely and has no setting.
 #[tauri::command]
-pub async fn set_save_subscription_retention(
+pub async fn get_observer_retention_days(state: State<'_, AppState>) -> Result<i64, String> {
+    state
+        .archive_db
+        .with_conn(retention::get_observer_retention_days)
+        .await
+}
+
+/// Set the global observer-frame retention window, in days. Fail-closed: the
+/// store layer rejects zero, negative, or out-of-range values (see
+/// [`retention::validate_days`]).
+#[tauri::command]
+pub async fn set_observer_retention_days(
     state: State<'_, AppState>,
-    scope_type: ScopeType,
-    scope_value: String,
-    kind: u32,
-    days: Option<i64>,
+    days: i64,
 ) -> Result<(), String> {
-    if kind > u32::from(u16::MAX) {
-        return Err(format!("kind {kind} is out of the valid range 0..=65535"));
-    }
-    let identity_pk = identity_pubkey(&state)?;
-    let relay_url = relay_ws_url_with_override(&state);
-    let now = now_secs();
-    let scope_type_str = scope_type.as_str().to_string();
     state
         .archive_db
-        .with_conn(move |conn| {
-            retention::set_policy(
-                conn,
-                &identity_pk,
-                &relay_url,
-                &scope_type_str,
-                &scope_value,
-                i64::from(kind),
-                days,
-                now,
-            )
-        })
+        .with_conn(move |conn| retention::set_observer_retention_days(conn, days))
         .await
 }
 
-/// List every retention policy for the active identity + relay, each tagged
-/// `active` (a live subscription still lists the kind) or orphaned (the kind
-/// was disabled or the subscription deleted, but the policy keeps expiring its
-/// historical data). Independent of the live subscription rows.
+/// Physical (file) and logical (page) size accounting for the archive DB, for
+/// the Settings size readout. PRAGMAs + file metadata only — no payload scans.
 #[tauri::command]
-pub async fn list_retention_policies(
+pub async fn archive_size_stats(
     state: State<'_, AppState>,
-) -> Result<Vec<retention::RetentionPolicyStatus>, String> {
-    let identity_pk = identity_pubkey(&state)?;
-    let relay_url = relay_ws_url_with_override(&state);
-    state
-        .archive_db
-        .with_conn(move |conn| retention::list_policies(conn, &identity_pk, &relay_url))
-        .await
-}
-
-/// Delete a retention policy for one `(scope, kind)` of the active identity +
-/// relay. Returns `true` if a row was removed. This is the ONLY path that
-/// removes a policy — disabling a kind or deleting a subscription never does.
-/// Remaining historical data for the tuple then becomes ungoverned (Forever)
-/// until an explicit purge (Phase 2+).
-#[tauri::command]
-pub async fn delete_retention_policy(
-    state: State<'_, AppState>,
-    scope_type: ScopeType,
-    scope_value: String,
-    kind: u32,
-) -> Result<bool, String> {
-    let identity_pk = identity_pubkey(&state)?;
-    let relay_url = relay_ws_url_with_override(&state);
-    let scope_type_str = scope_type.as_str().to_string();
-    state
-        .archive_db
-        .with_conn(move |conn| {
-            retention::delete_policy(
-                conn,
-                &identity_pk,
-                &relay_url,
-                &scope_type_str,
-                &scope_value,
-                i64::from(kind),
-            )
-        })
-        .await
+) -> Result<retention::ArchiveSizeStats, String> {
+    state.archive_db.with_conn(retention::size_stats).await
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
