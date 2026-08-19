@@ -14,6 +14,7 @@ class _ConnectionSection extends ConsumerWidget {
 
     return AppListCard(
       label: 'Connection',
+      verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           icon: LucideIcons.server,
@@ -104,6 +105,7 @@ class _RemoveCommunitySection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return AppListCard(
+      verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           icon: LucideIcons.logOut,

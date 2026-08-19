@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -8,18 +9,29 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/app_list_card.dart';
+import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/frosted_app_bar.dart';
+import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/sheet_divider.dart';
 import 'channel.dart';
+import 'add_members_sheet.dart';
 import 'channel_management_provider.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import 'manage_channel_sheet.dart';
+import 'members_sheet.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
+
+part 'channel_details_page.dart';
 
 /// Opens the mobile channel actions sheet and returns whether its parent page
 /// should close after a successful lifecycle action.
@@ -47,7 +59,7 @@ Future<bool?> showChannelActionsSheet({
 
 /// Mobile action sheet for channel-level read, organization, and lifecycle
 /// operations.
-class ChannelActionsSheet extends ConsumerWidget {
+class ChannelActionsSheet extends HookConsumerWidget {
   const ChannelActionsSheet({
     super.key,
     required this.channel,
@@ -63,6 +75,8 @@ class ChannelActionsSheet extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final displayedChannel = useState(channel);
+    final currentChannel = displayedChannel.value;
     final isMuted =
         ref.watch(channelMutesProvider).store.channels[channel.id]?.muted ==
         true;
@@ -207,7 +221,13 @@ class ChannelActionsSheet extends ConsumerWidget {
                         maxWidth: 640,
                         maxHeight: MediaQuery.sizeOf(context).height * 0.9,
                       ),
-                      builder: (_) => ManageChannelSheet(channel: channel),
+                      builder: (_) => ManageChannelSheet(
+                        channel: currentChannel,
+                        canEditDetails:
+                            canManageLifecycle && !currentChannel.isArchived,
+                        onChannelUpdated: (updated) =>
+                            displayedChannel.value = updated,
+                      ),
                     );
                     if (shouldClose == true && context.mounted) {
                       Navigator.of(context).pop(true);
@@ -222,7 +242,7 @@ class ChannelActionsSheet extends ConsumerWidget {
                   close();
                   copyToClipboard(
                     context,
-                    channel.name,
+                    currentChannel.name,
                     message: 'Channel name copied to clipboard',
                   );
                 },
@@ -250,7 +270,7 @@ class ChannelActionsSheet extends ConsumerWidget {
                     onTap: () => _confirmAndRun(
                       context,
                       ref,
-                      title: 'Leave #${channel.name}?',
+                      title: 'Leave #${currentChannel.name}?',
                       body: 'You’ll stop receiving messages from this channel.',
                       confirmLabel: 'Leave',
                       action: () => ref
@@ -281,7 +301,7 @@ class ChannelActionsSheet extends ConsumerWidget {
                       onTap: () => _confirmAndRun(
                         context,
                         ref,
-                        title: 'Archive #${channel.name}?',
+                        title: 'Archive #${currentChannel.name}?',
                         body: 'The channel will become read-only.',
                         confirmLabel: 'Archive',
                         action: () => ref
@@ -296,7 +316,7 @@ class ChannelActionsSheet extends ConsumerWidget {
                       onTap: () => _confirmAndRun(
                         context,
                         ref,
-                        title: 'Unarchive #${channel.name}?',
+                        title: 'Unarchive #${currentChannel.name}?',
                         body: 'The channel will become active again.',
                         confirmLabel: 'Unarchive',
                         action: () => ref
@@ -312,7 +332,7 @@ class ChannelActionsSheet extends ConsumerWidget {
                       onTap: () => _confirmAndRun(
                         context,
                         ref,
-                        title: 'Delete #${channel.name}?',
+                        title: 'Delete #${currentChannel.name}?',
                         body:
                             'This permanently deletes the channel and cannot be undone.',
                         confirmLabel: 'Delete',

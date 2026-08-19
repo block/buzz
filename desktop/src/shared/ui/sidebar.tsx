@@ -1,13 +1,13 @@
 import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { performSidebarDefaultHaptic } from "@/shared/lib/haptics";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { Button } from "@/shared/ui/button";
+import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
 import { Input } from "@/shared/ui/input";
 import { Separator } from "@/shared/ui/separator";
 import {
@@ -396,7 +396,7 @@ const SidebarTrigger = React.forwardRef<
   React.ElementRef<typeof Button>,
   React.ComponentProps<typeof Button>
 >(({ className, onClick, ...props }, ref) => {
-  const { toggleSidebar, open } = useSidebar();
+  const { open, toggleSidebar } = useSidebar();
 
   return (
     <Button
@@ -411,7 +411,7 @@ const SidebarTrigger = React.forwardRef<
       }}
       {...props}
     >
-      {open ? <PanelLeftClose /> : <PanelLeftOpen />}
+      <DrawerPanelIcon side={open ? "left" : "right"} />
       <span className="sr-only">Toggle Sidebar</span>
     </Button>
   );

@@ -34,14 +34,14 @@ const PULL_REQUEST_SCOPE_OPTIONS: Array<{
   value: ProjectsWorkItemScope;
 }> = [
   { label: "All", value: "all" },
-  { label: "My Pull Requests", value: "mine" },
+  { label: "My Reviews", value: "mine" },
 ];
 const ISSUE_SCOPE_OPTIONS: Array<{
   label: string;
   value: ProjectsWorkItemScope;
 }> = [
   { label: "All", value: "all" },
-  { label: "My Issues", value: "mine" },
+  { label: "My Tasks", value: "mine" },
   { label: "Assigned to me", value: "assigned" },
 ];
 
@@ -86,14 +86,14 @@ export function ProjectsListHeaderBar({
   const scopeDropdown =
     filter === "prs" ? (
       <ProjectsListScopeDropdown
-        label="Filter pull requests"
+        label="Filter reviews"
         onChange={onPullRequestScopeChange}
         options={PULL_REQUEST_SCOPE_OPTIONS}
         value={pullRequestScope}
       />
     ) : filter === "issues" ? (
       <ProjectsListScopeDropdown
-        label="Filter issues"
+        label="Filter tasks"
         onChange={onIssueScopeChange}
         options={ISSUE_SCOPE_OPTIONS}
         value={issueScope}
@@ -124,7 +124,7 @@ export function ProjectsListHeaderBar({
       )}
       data-testid="projects-list-header"
     >
-      {scopeDropdown}
+      <div className="flex flex-wrap items-center gap-2">{scopeDropdown}</div>
       <div className="flex flex-wrap items-center gap-2">
         <label className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="sr-only">Sort projects</span>

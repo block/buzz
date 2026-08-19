@@ -1996,7 +1996,13 @@ test("day divider appears in timeline", async ({ page }) => {
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to general",
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: the seeds are backdated by up to 120s, so a run that straddles
+  // midnight UTC legitimately renders two dividers (Yesterday + Today) and a
+  // bare locator fails Playwright strict mode. The intent is "a divider
+  // appears", which the first divider proves on both sides of midnight.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
 });
 
 test("send message to DM channel p-tags the recipient", async ({ page }) => {
