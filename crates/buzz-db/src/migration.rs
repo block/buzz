@@ -1051,6 +1051,21 @@ mod tests {
         assert!(roster_fence.contains("roster_tag.tag_json->>3"));
         assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
         assert!(roster_fence.contains("ERRCODE = '23514'"));
+
+        // Fresh desired-state bootstrap must install the identical executable
+        // fence as migration 0032. CI and isolated relay startup use schema.sql
+        // without running migrations, so drift reopens rolling-deploy races.
+        fn extract_roster_fence(sql: &str) -> &str {
+            let fence_start = "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()";
+            let fence_end = "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();";
+            let start = sql.find(fence_start).expect("roster fence function");
+            let relative_end = sql[start..].find(fence_end).expect("roster fence trigger");
+            &sql[start..start + relative_end + fence_end.len()]
+        }
+        assert_eq!(
+            extract_roster_fence(roster_fence),
+            extract_roster_fence(desired_schema)
+        );
     }
 
     #[test]

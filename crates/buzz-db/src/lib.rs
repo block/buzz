@@ -5731,6 +5731,100 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn desired_schema_rejects_stale_legacy_roster_role() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let scratch_name = format!("schema_roster_role_{}", Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE {scratch_name}"
+        )))
+        .execute(&admin)
+        .await
+        .expect("create desired-schema scratch db");
+        let base_url = admin_url().await;
+        let slash = base_url.rfind('/').expect("database URL has path segment");
+        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&scratch_url)
+            .await
+            .expect("connect desired-schema scratch db");
+        sqlx::raw_sql(include_str!("../../../schema/schema.sql"))
+            .execute(&pool)
+            .await
+            .expect("apply desired-state schema");
+
+        let db = Db::from_pool(pool.clone());
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = Uuid::new_v4();
+        let relay_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_bytes();
+        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
+        let member = Keys::generate().public_key().to_bytes();
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
+             VALUES ($1, $2, $3, 'admin', $4)",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .bind(member.as_slice())
+        .bind(owner.as_slice())
+        .execute(&pool)
+        .await
+        .expect("seed canonical admin");
+
+        let roster = |role: &str, timestamp| {
+            EventBuilder::new(Kind::Custom(39002), "")
+                .tags(vec![
+                    Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
+                    Tag::parse(["p", hex::encode(owner).as_str(), "", "owner"])
+                        .expect("owner p tag"),
+                    Tag::parse(["p", hex::encode(member).as_str(), "", role])
+                        .expect("member p tag"),
+                ])
+                .custom_created_at(Timestamp::from(timestamp))
+                .sign_with_keys(&relay_keys)
+                .expect("sign roster")
+        };
+        let base = Timestamp::now().as_secs();
+        let fresh = roster("admin", base);
+        assert!(
+            db.replace_addressable_event(community, &fresh, Some(channel))
+                .await
+                .expect("publish canonical role")
+                .1
+        );
+        let stale = roster("member", base + 1);
+        let error = db
+            .replace_addressable_event(community, &stale, Some(channel))
+            .await
+            .expect_err("desired-state fence must reject stale role");
+        assert!(matches!(
+            error,
+            DbError::Sqlx(sqlx::Error::Database(ref db_error))
+                if db_error.code().as_deref() == Some("23514")
+        ));
+        let live_id: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
+             AND kind=39002 AND deleted_at IS NULL",
+        )
+        .bind(community_uuid)
+        .bind(channel)
+        .fetch_one(&pool)
+        .await
+        .expect("load desired-state live roster");
+        assert_eq!(live_id, fresh.id.as_bytes().to_vec());
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn nip_rs_replacement_hard_deletes_payload_and_watermark_rejects_replay() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
