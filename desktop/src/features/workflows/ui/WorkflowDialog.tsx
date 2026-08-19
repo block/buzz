@@ -5,8 +5,10 @@ import {
   useCreateWorkflowMutation,
   useUpdateWorkflowMutation,
 } from "@/features/workflows/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type { Channel, Workflow } from "@/shared/api/types";
 import { getRelayHttpUrl } from "@/shared/api/tauri";
+import { useChannelMembersQuery } from "@/features/channels/hooks";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -18,6 +20,11 @@ import {
 import { ChannelCombobox } from "./ChannelCombobox";
 import { WorkflowFormBuilder } from "./WorkflowFormBuilder";
 import { WorkflowWebhookSecretDialog } from "./WorkflowWebhookSecretDialog";
+import {
+  canAuthorWebhookWorkflow,
+  getChannelRoleForPubkey,
+  workflowUsesCallWebhook,
+} from "./workflowAuthz";
 import { FieldLabel } from "./workflowFormPrimitives";
 
 type DialogMode = "create" | "edit" | "duplicate";
@@ -91,6 +98,23 @@ export function WorkflowDialog({
 
   const selectedChannel =
     channels.find((c) => c.id === selectedChannelId) ?? null;
+  const identityQuery = useIdentityQuery();
+  const usesWebhookAction = React.useMemo(
+    () => workflowUsesCallWebhook(yamlDefinition),
+    [yamlDefinition],
+  );
+  const membersQuery = useChannelMembersQuery(
+    selectedChannelId || null,
+    open && usesWebhookAction,
+  );
+  const selectedChannelRole = getChannelRoleForPubkey(
+    membersQuery.data,
+    identityQuery.data?.pubkey,
+  );
+  const webhookAuthzBlocked =
+    usesWebhookAction &&
+    membersQuery.isSuccess &&
+    !canAuthorWebhookWorkflow(selectedChannelRole);
 
   const defaultChannelId = channels[0]?.id ?? "";
   const workflowChannelId = workflow?.channelId ?? null;
@@ -132,7 +156,9 @@ export function WorkflowDialog({
   );
 
   async function handleSubmit() {
-    if (!selectedChannelId || !yamlDefinition.trim()) return;
+    if (!selectedChannelId || !yamlDefinition.trim() || webhookAuthzBlocked) {
+      return;
+    }
 
     try {
       const saved = await mutation.mutateAsync(yamlDefinition);
@@ -209,32 +235,58 @@ export function WorkflowDialog({
               yaml={yamlDefinition}
             />
 
-            {mutation.error instanceof Error ? (
-              <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                {mutation.error.message}
+            {usesWebhookAction && membersQuery.isError ? (
+              <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+                Could not check your channel role before saving this webhook
+                workflow. If the relay rejects it, the exact relay error will
+                appear below.
               </p>
             ) : null}
           </div>
 
-          <div className="flex flex-shrink-0 justify-end gap-2 border-t border-border pt-4">
-            <Button
-              onClick={() => handleOpenChange(false)}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={
-                !selectedChannelId ||
-                !yamlDefinition.trim() ||
-                mutation.isPending
-              }
-              onClick={handleSubmit}
-              type="button"
-            >
-              {mutation.isPending ? PENDING_LABELS[mode] : SUBMIT_LABELS[mode]}
-            </Button>
+          <div className="flex flex-shrink-0 flex-col gap-3 border-t border-border pt-4">
+            {webhookAuthzBlocked ? (
+              <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                This workflow uses <code>call_webhook</code>, which the relay
+                only allows channel owners or admins to save. Your current role
+                in {selectedChannel?.name ?? "this channel"} is{" "}
+                <code>{selectedChannelRole ?? "unknown"}</code>. Switch to the
+                owner identity or ask an owner/admin to save it.
+              </p>
+            ) : null}
+
+            {mutation.error instanceof Error ? (
+              <p
+                aria-live="polite"
+                className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                Save failed: {mutation.error.message}
+              </p>
+            ) : null}
+
+            <div className="flex justify-end gap-2">
+              <Button
+                onClick={() => handleOpenChange(false)}
+                type="button"
+                variant="outline"
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={
+                  !selectedChannelId ||
+                  !yamlDefinition.trim() ||
+                  mutation.isPending ||
+                  webhookAuthzBlocked
+                }
+                onClick={handleSubmit}
+                type="button"
+              >
+                {mutation.isPending
+                  ? PENDING_LABELS[mode]
+                  : SUBMIT_LABELS[mode]}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
