@@ -1,0 +1,47 @@
+[
+  {
+    "name": "lowercase top-level token",
+    "content": "@all please review",
+    "active": true
+  },
+  {
+    "name": "uppercase token",
+    "content": "ping @ALL now",
+    "active": true
+  },
+  {
+    "name": "mixed-case token with punctuation",
+    "content": "ping @AlL, now",
+    "active": true
+  },
+  {
+    "name": "longer mention token",
+    "content": "@alligator",
+    "active": false
+  },
+  {
+    "name": "email-like text",
+    "content": "user@all",
+    "active": false
+  },
+  {
+    "name": "inline code only",
+    "content": "show `@all` literally",
+    "active": false
+  },
+  {
+    "name": "fenced code only",
+    "content": "before\n```text\n@all\n```\nafter",
+    "active": false
+  },
+  {
+    "name": "code example followed by active token",
+    "content": "`@all` then @all",
+    "active": true
+  },
+  {
+    "name": "ordinary plain text",
+    "content": "plain text",
+    "active": false
+  }
+]

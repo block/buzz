@@ -85,6 +85,12 @@ type MessageQueryContext = {
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
 
+// Transport-only sentinel: false positives are safe because Rust decides
+// whether the reserved token is active and computes all recipient semantics.
+export function shouldUseNativeAllMentionTransport(content: string): boolean {
+  return content.toLowerCase().includes("@all");
+}
+
 export function createOptimisticMessage(
   channelId: string,
   content: string,
@@ -532,7 +538,8 @@ export function useSendMessageMutation(
         parentEventId ||
         imetaTags.length > 0 ||
         emojiTags.length > 0 ||
-        linkPreviewTags.length > 0
+        linkPreviewTags.length > 0 ||
+        shouldUseNativeAllMentionTransport(content)
       ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(

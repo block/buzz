@@ -37,6 +37,28 @@ use nostr::{FromBech32, PublicKey};
 /// inline implementation.
 pub const MENTION_CAP: usize = 50;
 
+/// The final unique recipient set for an `@all` expansion exceeded
+/// [`MENTION_CAP`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllMentionOverflow {
+    /// Number of unique recipients after deduplication and sender exclusion.
+    pub count: usize,
+    /// Maximum number of mention p-tags allowed on one message.
+    pub max: usize,
+}
+
+impl std::fmt::Display for AllMentionOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "@all resolves to {} unique recipients (max {})",
+            self.count, self.max
+        )
+    }
+}
+
+impl std::error::Error for AllMentionOverflow {}
+
 /// A channel-member profile, as needed for name matching.
 ///
 /// `pubkey` is the lowercase hex public key. `content_json` is the raw
@@ -234,6 +256,46 @@ pub fn normalize_mention_pubkeys(pubkeys: &[String], sender_pubkey: Option<&str>
         .filter(|pk| sender.as_deref() != Some(pk.as_str()))
         .filter(|pk| seen.insert(pk.clone()))
         .collect()
+}
+
+/// Return whether `content` contains an active, exact `@all` mention.
+///
+/// Matching is case-insensitive and uses the same token boundaries as
+/// [`extract_at_names`]. Inline and fenced code are removed before scanning.
+pub fn contains_all_mention(content: &str) -> bool {
+    let stripped = strip_code_regions(content);
+    extract_at_names(&stripped).iter().any(|name| name == "all")
+}
+
+/// Expand an active `@all` mention into the final unique recipient set.
+///
+/// Existing explicit/name/URI mentions retain priority, followed by the fresh
+/// channel membership order. Pubkeys are lowercased, duplicates and the sender
+/// are removed, and the cap is checked only after that normalization. `None`
+/// means `content` did not contain an active reserved token and callers should
+/// keep their existing send path unchanged.
+pub fn resolve_all_mention_pubkeys(
+    content: &str,
+    existing_mentions: &[String],
+    fresh_member_pubkeys: &[String],
+    sender_pubkey: &str,
+) -> Result<Option<Vec<String>>, AllMentionOverflow> {
+    if !contains_all_mention(content) {
+        return Ok(None);
+    }
+
+    let mut combined = Vec::with_capacity(existing_mentions.len() + fresh_member_pubkeys.len());
+    combined.extend_from_slice(existing_mentions);
+    combined.extend_from_slice(fresh_member_pubkeys);
+    let recipients = normalize_mention_pubkeys(&combined, Some(sender_pubkey));
+    if recipients.len() > MENTION_CAP {
+        return Err(AllMentionOverflow {
+            count: recipients.len(),
+            max: MENTION_CAP,
+        });
+    }
+
+    Ok(Some(recipients))
 }
 
 /// Remove fenced code blocks and inline code spans from content.
@@ -816,5 +878,67 @@ mod tests {
         let content = format!("nostr:{}", npub_mixed);
         let result = extract_nostr_uris(&content);
         assert_eq!(result, vec![TEST_HEX1]);
+    }
+
+    #[test]
+    fn all_mention_detects_exact_token_case_insensitively() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/at_all_detection.json"))
+                .expect("shared detection corpus must be valid JSON");
+
+        for case in cases.as_array().expect("corpus root must be an array") {
+            let name = case["name"].as_str().expect("case must have a name");
+            let content = case["content"]
+                .as_str()
+                .expect("case must have string content");
+            let active = case["active"]
+                .as_bool()
+                .expect("case must have boolean active state");
+            assert_eq!(contains_all_mention(content), active, "{name}");
+        }
+    }
+
+    #[test]
+    fn all_mention_resolution_merges_normalizes_dedupes_and_excludes_sender() {
+        let existing = vec!["EXPLICIT".to_string(), "member-a".to_string()];
+        let members = vec![
+            "SENDER".to_string(),
+            "MEMBER-A".to_string(),
+            "member-b".to_string(),
+            "MEMBER-B".to_string(),
+        ];
+
+        let resolved = resolve_all_mention_pubkeys("hello @ALL", &existing, &members, "sender")
+            .expect("resolution should fit")
+            .expect("reserved token should be present");
+
+        assert_eq!(resolved, vec!["explicit", "member-a", "member-b"]);
+    }
+
+    #[test]
+    fn all_mention_resolution_returns_none_when_token_is_absent() {
+        let resolved = resolve_all_mention_pubkeys(
+            "ordinary message",
+            &["explicit".to_string()],
+            &["member".to_string()],
+            "sender",
+        )
+        .expect("absence is not an error");
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn all_mention_cap_counts_final_unique_recipients() {
+        let at_cap: Vec<String> = (0..MENTION_CAP).map(|i| format!("member-{i}")).collect();
+        let resolved = resolve_all_mention_pubkeys("@all", &[], &at_cap, "sender")
+            .expect("exactly the cap should pass")
+            .expect("reserved token should be present");
+        assert_eq!(resolved.len(), MENTION_CAP);
+
+        let over_cap: Vec<String> = (0..=MENTION_CAP).map(|i| format!("member-{i}")).collect();
+        let error = resolve_all_mention_pubkeys("@all", &[], &over_cap, "sender")
+            .expect_err("one over the cap should fail");
+        assert_eq!(error.count, MENTION_CAP + 1);
+        assert_eq!(error.max, MENTION_CAP);
     }
 }

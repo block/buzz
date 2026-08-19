@@ -50,7 +50,7 @@ import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
   appendUniqueName,
-  buildTeamMentionCandidates,
+  buildChannelMentionCandidates,
   formatSearchUserDisplayName,
   formatSearchUserSecondaryLabel,
   formatTeamMention,
@@ -439,16 +439,16 @@ export function useMentions(
     () => getAdmittedAgentPubkeys(mentionCandidates),
     [mentionCandidates],
   );
+  const includeAll = ["stream", "forum"].includes(options?.channelType ?? "");
   const mentionCandidatesWithTeams = React.useMemo(
-    () => [
-      ...mentionCandidates,
-      ...buildTeamMentionCandidates(
+    () =>
+      buildChannelMentionCandidates(
+        mentionCandidates,
         teamsQuery.data ?? [],
         personasQuery.data ?? [],
-        mentionCandidates,
+        includeAll,
       ),
-    ],
-    [mentionCandidates, personasQuery.data, teamsQuery.data],
+    [includeAll, mentionCandidates, personasQuery.data, teamsQuery.data],
   );
   const ownerPubkeys = React.useMemo(
     () => [

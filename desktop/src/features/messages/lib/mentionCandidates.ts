@@ -73,6 +73,41 @@ export function globalSearchIdentityKey(candidate: MentionCandidate) {
   return `global-person:${label}:${secondaryLabel}`;
 }
 
+/**
+ * Prepend the presentation-only reserved `@all` candidate and remove any
+ * case-insensitive display-name collision. Delivery resolves the literal token
+ * in Rust; this candidate deliberately carries no pubkey.
+ */
+export function withAllMentionCandidate(
+  candidates: readonly MentionCandidate[],
+): MentionCandidate[] {
+  return [
+    {
+      kind: "identity",
+      displayName: "all",
+      isMember: true,
+      isAgent: false,
+    },
+    ...candidates.filter(
+      (candidate) => candidate.displayName?.trim().toLowerCase() !== "all",
+    ),
+  ];
+}
+
+/** Compose the channel-aware reserved candidate with ordinary and team entries. */
+export function buildChannelMentionCandidates(
+  candidates: readonly MentionCandidate[],
+  teams: readonly AgentTeam[],
+  personas: AgentPersona[],
+  includeAll: boolean,
+): MentionCandidate[] {
+  const combined = [
+    ...candidates,
+    ...buildTeamMentionCandidates(teams, personas, candidates),
+  ];
+  return includeAll ? withAllMentionCandidate(combined) : combined;
+}
+
 function findTeamMemberTarget(
   persona: AgentPersona,
   candidates: readonly MentionCandidate[],
