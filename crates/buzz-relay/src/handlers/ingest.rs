@@ -219,6 +219,31 @@ fn valid_link_preview_text(value: &str, max: usize, allow_newlines: bool) -> boo
             .any(|character| character.is_control() && !(allow_newlines && character == '\n'))
 }
 
+fn content_contains_canonical(content: &str, canonical_str: &str, canonical: &url::Url) -> bool {
+    if content.contains(canonical_str) {
+        return true;
+    }
+    // Bare-domain URLs: `https://example.com` vs `https://example.com/` are
+    // semantically identical but differ by one trailing slash. `new URL()`
+    // in the desktop normalizes bare domains to the slashed form (#6347),
+    // so tolerate either direction for root-path URLs (with or without query).
+    if canonical.path() == "/" {
+        let alt = if canonical_str.contains("/?") {
+            canonical_str.replacen("/?", "?", 1)
+        } else if canonical_str.contains('?') {
+            canonical_str.replacen('?', "/?", 1)
+        } else if canonical_str.ends_with('/') {
+            canonical_str.trim_end_matches('/').to_string()
+        } else {
+            format!("{canonical_str}/")
+        };
+        if content.contains(&alt) {
+            return true;
+        }
+    }
+    false
+}
+
 fn validate_link_preview_tags(event: &Event, media_base_url: &str) -> Result<(), String> {
     const MAX_SNAPSHOTS: usize = 8;
     const MAX_TITLE: usize = 300;
@@ -256,7 +281,7 @@ fn validate_link_preview_tags(event: &Event, media_base_url: &str) -> Result<(),
             || canonical.password().is_some()
             || canonical.fragment().is_some()
             || !seen.insert(parts[3].clone())
-            || !event.content.contains(&parts[3])
+            || !content_contains_canonical(event.content, &parts[3], &canonical)
         {
             return Err("invalid link-preview canonical URL".into());
         }
