@@ -99,6 +99,12 @@ export function useObservedUnreadPersistence(
   const nativeFailedRef = React.useRef(false);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const queueRef = React.useRef<QueuedObservedUnreadEvent[]>([]);
+  const pendingMarkersRef = React.useRef(
+    new Map<
+      string,
+      Map<string, { contextId: string; readAt: number | null }>
+    >(),
+  );
   const chainRef = React.useRef(Promise.resolve());
   const persistRefs = React.useRef<ObservedUnreadRefs>({
     eventsRef: observedUnreadEventsByChannelRef,
@@ -323,46 +329,93 @@ export function useObservedUnreadPersistence(
   }, []);
 
   const enqueueNative = React.useCallback(
-    (state: NativeState, mutation: NativeMutation) => {
+    (state: NativeState, mutation: NativeMutation, onSettled?: () => void) => {
       flushNative();
       chainRef.current = chainRef.current.then(async () => {
-        const ingest = async () => {
-          const current = nativeRef.current;
-          if (
-            !current ||
-            current.scope.pubkey !== state.scope.pubkey ||
-            current.scope.relayUrl !== state.scope.relayUrl
-          )
+        try {
+          const ingest = async () => {
+            const current = nativeRef.current;
+            if (
+              !current ||
+              current.scope.pubkey !== state.scope.pubkey ||
+              current.scope.relayUrl !== state.scope.relayUrl
+            )
+              return true;
+            const response = await ingestObservedUnread({
+              scope: current.scope,
+              sequence: current.sequence + 1,
+              baseRevision: current.revision,
+              ...mutation,
+            });
+            if (response.kind === "snapshotRequired") return false;
+            apply(response);
             return true;
-          const response = await ingestObservedUnread({
-            scope: current.scope,
-            sequence: current.sequence + 1,
-            baseRevision: current.revision,
-            ...mutation,
-          });
-          if (response.kind === "snapshotRequired") return false;
-          apply(response);
-          return true;
-        };
+          };
 
-        try {
-          if (await ingest()) return;
-        } catch {}
+          try {
+            if (await ingest()) return;
+          } catch {}
 
-        try {
-          await reopen(state.scope);
-          if (await ingest()) return;
-        } catch {}
+          try {
+            await reopen(state.scope);
+            if (await ingest()) return;
+          } catch {}
 
-        if (
-          activityScopeKey(state.scope.pubkey, state.scope.relayUrl) ===
-          scopeLoadedRef.current
-        ) {
-          seedFallback(mutation);
+          if (
+            activityScopeKey(state.scope.pubkey, state.scope.relayUrl) ===
+            scopeLoadedRef.current
+          ) {
+            seedFallback(mutation);
+          }
+        } finally {
+          onSettled?.();
         }
       });
     },
     [apply, flushNative, reopen, seedFallback],
+  );
+
+  const flushPendingMarkers = React.useCallback(
+    (scopeKey: string) => {
+      const pending = pendingMarkersRef.current.get(scopeKey);
+      if (!pending || pending.size === 0) return;
+      const markers = [...pending.values()];
+      const state = nativeRef.current;
+      if (!state) {
+        // The fallback reads markers directly from ReadStateManager and prunes
+        // through the read-state effect below; replaying this native delta into
+        // fallback would collapse its top-level-only semantics.
+        if (nativeFailedRef.current && scopeLoadedRef.current === scopeKey)
+          pendingMarkersRef.current.delete(scopeKey);
+        return;
+      }
+      if (
+        activityScopeKey(state.scope.pubkey, state.scope.relayUrl) !== scopeKey
+      )
+        return;
+      enqueueNative(
+        state,
+        {
+          events: [],
+          channelLatest: [],
+          markers,
+          membership: [],
+          clearChannels: [],
+          clearAll: false,
+        },
+        () => {
+          if (scopeLoadedRef.current !== scopeKey) return;
+          const current = pendingMarkersRef.current.get(scopeKey);
+          if (!current) return;
+          for (const marker of markers) {
+            if (current.get(marker.contextId) === marker)
+              current.delete(marker.contextId);
+          }
+          if (current.size === 0) pendingMarkersRef.current.delete(scopeKey);
+        },
+      );
+    },
+    [enqueueNative],
   );
 
   React.useEffect(() => {
@@ -414,6 +467,7 @@ export function useObservedUnreadPersistence(
         };
         scopeLoadedRef.current = currentScope;
         apply(response);
+        flushPendingMarkers(currentScope);
         if (response.migrationComplete) {
           try {
             window.localStorage.removeItem(key);
@@ -432,6 +486,7 @@ export function useObservedUnreadPersistence(
           latestByChannelRef.current = deriveLatestByChannel(stored);
         }
         scopeLoadedRef.current = currentScope;
+        flushPendingMarkers(currentScope);
         optionsRef.current.onPruned?.();
       });
     return () => {
@@ -439,15 +494,14 @@ export function useObservedUnreadPersistence(
       flushNative();
       flushObservedUnreadWrite(persistRefs.current);
     };
-  }, [normalizedPubkey, normalizedRelayUrl]);
+  }, [normalizedPubkey, normalizedRelayUrl, flushPendingMarkers]);
 
   const syncMarkers = React.useCallback(
     (
       contextIds: Iterable<string>,
       explicitReadAt?: ReadonlyMap<string, number>,
     ) => {
-      const state = nativeRef.current;
-      if (!state) return;
+      if (!currentScope) return;
       const markers = [...new Set(contextIds)].map((contextId) => ({
         contextId,
         readAt:
@@ -457,16 +511,15 @@ export function useObservedUnreadPersistence(
             : getEffectiveTimestamp(contextId)),
       }));
       if (markers.length === 0) return;
-      enqueueNative(state, {
-        events: [],
-        channelLatest: [],
-        markers,
-        membership: [],
-        clearChannels: [],
-        clearAll: false,
-      });
+      let pending = pendingMarkersRef.current.get(currentScope);
+      if (!pending) {
+        pending = new Map();
+        pendingMarkersRef.current.set(currentScope, pending);
+      }
+      for (const marker of markers) pending.set(marker.contextId, marker);
+      flushPendingMarkers(currentScope);
     },
-    [enqueueNative, getEffectiveTimestamp, getOwnTimestamp],
+    [currentScope, flushPendingMarkers, getEffectiveTimestamp, getOwnTimestamp],
   );
 
   // A read-state revision only needs to send the contexts that changed. Native

@@ -56,6 +56,50 @@ async function settle() {
   });
 }
 
+test("marker advances queued before native readiness are ingested after open", async () => {
+  installFreshStorage();
+  let harness;
+  let releaseOpen;
+  const openGate = new Promise((resolve) => {
+    releaseOpen = resolve;
+  });
+  const rig = installNativeRig();
+  const invoke = globalThis.window.__TAURI_INTERNALS__.invoke;
+  globalThis.window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+    if (command === "observed_unread_open_scope") await openGate;
+    return invoke(command, args);
+  };
+  try {
+    harness = await mountHook(
+      {
+        ...DEFAULT_PROPS,
+        pubkey: "pk-delayed-open-marker",
+        getTs: () => NOW_S,
+      },
+      makeRefs(),
+    );
+
+    harness.api.syncMarkers(["channel-before-ready"]);
+    assert.equal(
+      rig.requests("observed_unread_ingest").length,
+      0,
+      "the marker cannot be ingested before the native scope opens",
+    );
+
+    releaseOpen();
+    await settle();
+    await settle();
+
+    assert.deepEqual(rig.markerUpdates(), [
+      { contextId: "channel-before-ready", readAt: NOW_S },
+    ]);
+  } finally {
+    releaseOpen?.();
+    await harness?.unmount();
+    rig.restore();
+  }
+});
+
 test("native no-op marker delta does not notify the renderer", async () => {
   installFreshStorage();
   let harness;
