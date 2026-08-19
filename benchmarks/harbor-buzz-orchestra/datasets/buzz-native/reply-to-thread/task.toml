@@ -6,6 +6,11 @@ description = "Answer a financial projection in the thread started by the user."
 authors = [{ name = "Buzz" }]
 keywords = ["buzz-native", "messaging", "threading"]
 
+[metadata]
+difficulty = "easy"
+category = "collaboration"
+tags = ["messaging", "threading", "implicit-behavior"]
+
 [agent]
 timeout_sec = 300.0
 

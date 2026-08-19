@@ -88,7 +88,14 @@ After the agent stops, the runtime snapshots public relay state (source
 messages plus any task-declared channels and members) to
 `/logs/artifacts/buzz-evidence.json`. The task verifier reads that post-agent
 artifact; relay credentials and database access are never exposed to the model
-or verifier.
+or verifier. If the snapshot cannot be exported the trial **fails** rather than
+scoring 0 — a harness fault and a model fault stay distinguishable — and the
+cause is written to the trial's `buzz/buzz-evidence-error.txt`.
+
+Each task ships its own `README.md` documenting its reward dimensions and, for
+the tasks whose graded Buzz behavior is deliberately absent from
+`instruction.md` (`reply-to-thread`, `user-mention`), why that omission is the
+point. Read it before editing a task's instruction or verifier.
 
 ## Leaderboard runs
 

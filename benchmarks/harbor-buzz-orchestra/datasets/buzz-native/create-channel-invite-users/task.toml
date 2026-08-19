@@ -6,6 +6,11 @@ description = "Create a temporary PR channel with an exact subset of users and b
 authors = [{ name = "Buzz" }]
 keywords = ["buzz-native", "channels", "membership", "cli"]
 
+[metadata]
+difficulty = "medium"
+category = "collaboration"
+tags = ["channels", "membership", "cli"]
+
 [agent]
 timeout_sec = 300.0
 

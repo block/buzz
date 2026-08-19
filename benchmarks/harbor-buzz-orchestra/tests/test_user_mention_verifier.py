@@ -61,7 +61,9 @@ def test_correct_answer_with_user_p_tag_passes():
 
 
 def test_answer_text_without_p_tag_fails_delivery_mention():
-    evidence = _evidence("top-level.json", "@John Vincent Doe, the annual cost is $5,328.")
+    evidence = _evidence(
+        "top-level.json", "@John Vincent Doe, the annual cost is $5,328."
+    )
 
     metrics, _ = verifier.score_evidence(evidence)
 

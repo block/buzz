@@ -9,7 +9,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-EXPECTED_AMOUNTS = (160_811.0, 84_462.0, 374_470.0)
+# Each amount must appear on a line that also names what it is. Scanning the
+# whole reply for bare numbers passes a work-showing table whose month-6 rows
+# are right but whose stated answer is wrong.
+EXPECTED_ANSWERS = (
+    ("revenue", 160_811.0),
+    ("expense", 84_462.0),
+    ("profit", 374_470.0),
+)
+EXPECTED_AMOUNTS = tuple(amount for _, amount in EXPECTED_ANSWERS)
 NUMBER = re.compile(r"(?<![A-Za-z0-9_])-?\$?\d[\d,]*(?:\.\d+)?")
 
 
@@ -25,6 +33,14 @@ def _numbers(content: str) -> list[float]:
 
 def _contains_amount(values: list[float], expected: float) -> bool:
     return any(abs(value - expected) <= 1.0 for value in values)
+
+
+def _labelled_amount(content: str, label: str, expected: float) -> bool:
+    """Whether some line names ``label`` and carries ``expected`` on it."""
+    return any(
+        label in line.casefold() and _contains_amount(_numbers(line), expected)
+        for line in content.splitlines()
+    )
 
 
 def _has_tag(message: dict[str, Any], expected: list[str]) -> bool:
@@ -85,9 +101,13 @@ def score_evidence(evidence: object) -> tuple[dict[str, float], dict[str, Any]]:
         and final.get("reply_to_event_id") == task_event_id
         and _has_tag(final, ["e", task_event_id, "", "reply"])
     )
-    values = _numbers(str(final.get("content", ""))) if final is not None else []
+    content = str(final.get("content", "")) if final is not None else ""
+    values = _numbers(content)
     answer_correct = float(
-        all(_contains_amount(values, expected) for expected in EXPECTED_AMOUNTS)
+        all(
+            _labelled_amount(content, label, expected)
+            for label, expected in EXPECTED_ANSWERS
+        )
     )
     reward = float(
         all(

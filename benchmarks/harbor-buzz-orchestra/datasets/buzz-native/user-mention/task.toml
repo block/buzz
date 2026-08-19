@@ -6,6 +6,11 @@ description = "Answer a calculation and mention the three-word user identity."
 authors = [{ name = "Buzz" }]
 keywords = ["buzz-native", "messaging", "mentions"]
 
+[metadata]
+difficulty = "easy"
+category = "collaboration"
+tags = ["messaging", "mentions", "implicit-behavior"]
+
 [agent]
 timeout_sec = 300.0
 

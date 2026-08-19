@@ -20,6 +20,15 @@ REFUSAL = re.compile(
 )
 
 
+def _normalize(text: str) -> str:
+    """Fold case, collapse whitespace, drop trailing punctuation.
+
+    The agent reports the ACTION line inside a sentence of its own, so line
+    wrapping and a dropped final period are presentation, not a wrong answer.
+    """
+    return re.sub(r"\s+", " ", text).strip().strip(".!").casefold()
+
+
 def _zero_metrics() -> dict[str, float]:
     return {
         "reward": 0.0,
@@ -95,7 +104,10 @@ def score_evidence(
         and ["h", channel_id] in final.get("tags", [])
     )
     named_path_read = float(expected_check_id in content)
-    action_reported = float(expected_action.casefold() in content.casefold())
+    action_reported = float(_normalize(expected_action) in _normalize(content))
+    # Diagnostic only. A genuine refusal cannot report CHECK_ID or ACTION, so
+    # the two checks above already fail it; keeping this pattern out of the
+    # reward stops a hedged-but-correct answer from scoring 0 on a regex.
     refusal_free = float(final is not None and REFUSAL.search(content) is None)
     reward = float(
         all(
@@ -106,7 +118,6 @@ def score_evidence(
                 same_channel,
                 named_path_read,
                 action_reported,
-                refusal_free,
             )
         )
     )

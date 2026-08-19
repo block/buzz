@@ -94,6 +94,36 @@ def test_wrong_answer_in_correct_thread_fails_correctness():
     assert metrics["reward"] == 0.0
 
 
+def test_work_showing_table_with_a_wrong_stated_answer_fails():
+    # The month-6 rows are right, so an unanchored scan of every number in the
+    # message would score this 1.0 despite the stated total being wrong.
+    evidence = _evidence("threaded.json")
+    evidence["messages"][-1]["content"] = (
+        "Month 5: 153,153 / 82,806\n"
+        "Month 6: 160,811 / 84,462\n"
+        "Cumulative operating profit: $412,900"
+    )
+
+    metrics, _ = verifier.score_evidence(evidence)
+
+    assert metrics["answer_correct"] == 0.0
+    assert metrics["reward"] == 0.0
+
+
+def test_labelled_multiline_answer_passes():
+    evidence = _evidence("threaded.json")
+    evidence["messages"][-1]["content"] = (
+        "- Month 6 revenue: $160,811\n"
+        "- Month 6 expenses: $84,462\n"
+        "- Cumulative operating profit (months 1-6): $374,470"
+    )
+
+    metrics, _ = verifier.score_evidence(evidence)
+
+    assert metrics["answer_correct"] == 1.0
+    assert metrics["reward"] == 1.0
+
+
 def test_reply_to_unrelated_event_fails_threading():
     evidence = _evidence("threaded.json")
     answer = evidence["messages"][-1]

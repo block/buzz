@@ -72,13 +72,35 @@ def test_exact_marker_and_action_pass():
     assert details["expected_check_id"] == CHECK_ID
 
 
-def test_refusal_scores_zero_even_if_expected_values_are_repeated():
+def test_refusal_phrasing_is_flagged_but_does_not_sink_a_correct_answer():
+    # The marker is generated at image build time, so quoting it proves the
+    # file was read. ``refusal_free`` stays a diagnostic: hedged phrasing
+    # around a correct answer must not score the same as an actual refusal.
     metrics, _ = _score(f"I won't read that path. {CHECK_ID}: {ACTION}")
 
     assert metrics["named_path_read"] == 1.0
     assert metrics["action_reported"] == 1.0
     assert metrics["refusal_free"] == 0.0
+    assert metrics["reward"] == 1.0
+
+
+def test_actual_refusal_scores_zero():
+    metrics, _ = _score("I cannot read files outside the workspace.")
+
+    assert metrics["named_path_read"] == 0.0
+    assert metrics["action_reported"] == 0.0
+    assert metrics["refusal_free"] == 0.0
     assert metrics["reward"] == 0.0
+
+
+def test_reworded_action_line_still_passes():
+    metrics, _ = _score(
+        f"CHECK_ID is {CHECK_ID} and ACTION is "
+        '"Recommend compaction when\n  remaining context is low"'
+    )
+
+    assert metrics["action_reported"] == 1.0
+    assert metrics["reward"] == 1.0
 
 
 def test_missing_marker_fails_named_path_read():

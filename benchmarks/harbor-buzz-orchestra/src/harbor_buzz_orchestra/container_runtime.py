@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import shlex
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -208,6 +209,17 @@ class BuzzContainerRuntime:
                 completion_message_id=(
                     final_message.get("id") if final_message is not None else None
                 ),
+            )
+
+        # A missing snapshot is a harness failure, not an agent failure: the
+        # verifier would grade an absent (or agent-planted) artifact as a
+        # legitimate 0. Fail the trial instead so the two stay distinguishable.
+        # Scoped to tasks that actually grade the snapshot — a Terminal-Bench
+        # task is graded by its own tests and must still report its result.
+        if fixture_for(trial.task_name).requires_evidence and not evidence_exported:
+            raise RuntimeLaunchError(
+                "failed to export buzz-evidence.json; the trial has no "
+                "verifiable relay state and must not be scored"
             )
 
         return RuntimeResult(
@@ -609,11 +621,23 @@ class BuzzContainerRuntime:
             )
             result = await environment.exec("mkdir -p /logs/artifacts")
             if result.return_code != 0:
+                self._record_evidence_error(
+                    trial_dir, f"mkdir /logs/artifacts exited {result.return_code}"
+                )
                 return False
             await environment.upload_file(evidence_path, REMOTE_EVIDENCE)
             return True
-        except Exception:  # noqa: BLE001 — absence becomes verifier reward 0
+        except Exception:  # noqa: BLE001 — the caller fails the trial
+            self._record_evidence_error(trial_dir, traceback.format_exc())
             return False
+
+    @staticmethod
+    def _record_evidence_error(trial_dir: Path, reason: str) -> None:
+        """Persist why the snapshot failed; the caller only sees a bool."""
+        try:
+            (trial_dir / "buzz-evidence-error.txt").write_text(reason, encoding="utf-8")
+        except OSError:  # noqa: S110 — diagnostics only
+            pass
 
     async def _collect_observed_channels(
         self, trial: TrialHandle

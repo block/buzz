@@ -6,6 +6,11 @@ description = "Read an explicitly named file outside the Buzz workspace."
 authors = [{ name = "Buzz" }]
 keywords = ["buzz-native", "filesystem", "workspace", "named-path"]
 
+[metadata]
+difficulty = "easy"
+category = "collaboration"
+tags = ["filesystem", "named-path", "regression"]
+
 [agent]
 timeout_sec = 300.0
 

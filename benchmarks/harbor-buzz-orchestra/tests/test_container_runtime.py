@@ -19,6 +19,7 @@ from harbor_buzz_orchestra.container_runtime import (
 )
 from harbor_buzz_orchestra.manifest import ExperimentManifest
 from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
+from harbor_buzz_orchestra.task_fixtures import fixture_for
 
 
 def write_manifest(tmp_path: Path) -> ExperimentManifest:
@@ -544,6 +545,31 @@ async def test_collect_evidence_uploads_verifier_artifact(tmp_path, monkeypatch)
     assert (trial_dir / "transcript.json").is_file()
 
 
+async def test_failed_evidence_snapshot_records_the_reason(tmp_path, monkeypatch):
+    rt = runtime(tmp_path)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+
+    async def buzz_json(*args, **kwargs):
+        raise RuntimeError("relay unreachable")
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+
+    assert not await rt._collect_evidence(
+        environment=Environment(),
+        trial=trial,
+        trial_dir=trial_dir,
+        task_event_id="root-event",
+        completion_message_id=None,
+    )
+    # The caller only sees a bool, so the cause has to survive as an artifact —
+    # otherwise a failed export is indistinguishable from a quiet relay.
+    assert "relay unreachable" in (trial_dir / "buzz-evidence-error.txt").read_text()
+    assert not (trial_dir / "buzz-evidence.json").exists()
+
+
 def test_runtime_logging_keeps_readiness_and_turn_completion_signals(tmp_path):
     rt = runtime(tmp_path)
     assert rt._rust_log(None) == "buzz_acp=info,pool::prompt=info"
@@ -589,3 +615,14 @@ async def test_stop_agents_sweeps_the_uploaded_stack(tmp_path):
     sweeps = [cmd for cmd, _ in environment.commands if REMOTE_BIN in cmd]
     assert len(sweeps) == 2
     assert "kill -TERM" in sweeps[0] and "kill -KILL" in sweeps[1]
+
+
+def test_only_evidence_grading_tasks_fail_on_a_missing_snapshot():
+    # Terminal-Bench tasks share this runtime but are graded by their own
+    # tests, so a snapshot hiccup must not turn a real result into an error.
+    assert fixture_for("reply-to-thread").requires_evidence
+    assert fixture_for("user-mention").requires_evidence
+    assert fixture_for("read-named-path-outside-workspace").requires_evidence
+    assert fixture_for("create-channel-invite-users").requires_evidence
+    assert not fixture_for("cobol-modernization").requires_evidence
+    assert not fixture_for(None).requires_evidence

@@ -6,4 +6,5 @@ Prepare a six-month financial projection using these assumptions:
 - Project months 1 through 6, compounding each month from the prior month.
 
 Reply with the month 6 revenue, month 6 expenses, and cumulative operating
-profit across months 1 through 6. Round each result to the nearest dollar.
+profit across months 1 through 6. Round each result to the nearest dollar, and
+label each figure on the same line as its value.
