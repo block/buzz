@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   isThreadRailVisible,
   projectThreadRailLayout,
+  threadRailColumnClassName,
   threadRailEntryClassName,
   threadRailHeaderClassName,
   threadRailShellClassName,
@@ -14,6 +15,19 @@ test("isThreadRailVisible hides the rail at and below the desktop breakpoint", (
   assert.equal(isThreadRailVisible(599, 1), false);
   assert.equal(isThreadRailVisible(601, 1), true);
   assert.equal(isThreadRailVisible(601, 0), false);
+});
+
+test("Thread Rail column replaces exposed sidebar paint without adding corners", () => {
+  const className = threadRailColumnClassName();
+
+  assert.match(className, /buzz-theme-gradient-underlay/);
+  assert.match(className, /self-stretch/);
+  assert.match(className, /shrink-0/);
+  assert.doesNotMatch(className, /rounded/);
+  assert.doesNotMatch(className, /bg-background/);
+  assert.doesNotMatch(className, /bg-sidebar/);
+  assert.doesNotMatch(className, /shadow/);
+  assert.doesNotMatch(className, /ring/);
 });
 
 test("Thread Rail paints a compact rounded card capped at the content bounds", () => {

@@ -59,15 +59,21 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
     const railElement = document.querySelector<HTMLElement>(
       '[data-testid="thread-rail"]',
     );
+    const railColumnElement = document.querySelector<HTMLElement>(
+      '[data-testid="thread-rail-column"]',
+    );
     const contentElement = document.querySelector<HTMLElement>(
       "[data-buzz-content-surface]:not([data-buzz-content-unframed])",
     );
-    if (!railElement || !contentElement) {
-      throw new Error("Thread Rail or framed content surface unavailable");
+    if (!railElement || !railColumnElement || !contentElement) {
+      throw new Error(
+        "Thread Rail, rail column, or framed content surface unavailable",
+      );
     }
     const railRect = railElement.getBoundingClientRect();
     const contentRect = contentElement.getBoundingClientRect();
     const railStyle = getComputedStyle(railElement);
+    const railColumnStyle = getComputedStyle(railColumnElement);
     const contentStyle = getComputedStyle(contentElement);
     return {
       railTop: Math.round(railRect.top),
@@ -77,6 +83,8 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
       railRadius: railStyle.borderTopLeftRadius,
       contentRadius: contentStyle.borderTopLeftRadius,
       railBackground: railStyle.backgroundColor,
+      railColumnBackgroundImage: railColumnStyle.backgroundImage,
+      railColumnRadius: railColumnStyle.borderTopLeftRadius,
       contentBackground: contentStyle.backgroundColor,
       railClipPath: railStyle.clipPath,
     };
@@ -87,6 +95,8 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
     railBackground: paneGeometry.contentBackground,
   });
   expect(paneGeometry.railBottom).toBeLessThan(paneGeometry.contentBottom);
+  expect(paneGeometry.railColumnRadius).toBe("0px");
+  expect(paneGeometry.railColumnBackgroundImage).toContain("linear-gradient");
   expect(paneGeometry.railClipPath).toBe("none");
   const entry = rail.getByTestId(`thread-rail-entry-${root.id}`);
   await expect(entry).toHaveAttribute("aria-current", "page");
