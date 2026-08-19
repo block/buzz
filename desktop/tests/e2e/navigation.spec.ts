@@ -654,7 +654,17 @@ test("message links explain when preview metadata is unavailable", async ({
   );
   await expect(missingMessageLink).toHaveText("general");
   await missingMessageLink.hover();
-  await expect(page.getByRole("tooltip")).toHaveText("Message unavailable");
+  const unavailableTooltip = page.getByRole("tooltip");
+  await expect(unavailableTooltip).toHaveText("Message unavailable");
+  await expect(unavailableTooltip).toHaveCSS("pointer-events", "none");
+
+  const tooltipBox = await unavailableTooltip.boundingBox();
+  if (!tooltipBox) throw new Error("Unavailable tooltip bounds missing");
+  await page.mouse.move(
+    tooltipBox.x + tooltipBox.width / 2,
+    tooltipBox.y + tooltipBox.height / 2,
+  );
+  await expect(unavailableTooltip).toHaveCount(0);
 });
 
 test("message links reopen a closed thread when the same messageId is already in the URL", async ({
