@@ -63,13 +63,46 @@ class JourneyTests(unittest.TestCase):
             with self.assertRaisesRegex(review_native.HarnessError, "scroll requires integer delta_y"):
                 review_native.load_journey(path)
 
+    def test_action_numeric_bounds_match_schema(self):
+        source = (MODULE_PATH.parent / "desktop/composer-keyboard.yaml").read_text()
+        mutations = (
+            ("duration_ms: 100", "duration_ms: 30000", None),
+            ("duration_ms: 100", "duration_ms: 30001", "wait requires integer duration_ms in 1..30000"),
+            ("delta_y: 240", "delta_y: -10000", None),
+            ("delta_y: 240", "delta_y: 10000", None),
+            ("delta_y: 240", "delta_y: 10001", "scroll requires integer delta_y in -10000..10000"),
+            ("delta_y: 240", "delta_y: 2147483648", "scroll requires integer delta_y in -10000..10000"),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(new=new), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "journey.yaml"
+                path.write_text(source.replace(old, new, 1))
+                if diagnostic is None:
+                    review_native.load_journey(path)
+                else:
+                    with self.assertRaisesRegex(review_native.HarnessError, diagnostic):
+                        review_native.load_journey(path)
+
+    def test_expect_for_duration_bounds_match_schema(self):
+        source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
+        insertion = "    expect_for:\n      duration_ms: VALUE\n      condition: {exists: {role: window}}\n    timeout_ms: 1000\n"
+        for value, diagnostic in ((1, None), (30000, None), (30001, "expect_for.duration_ms")):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                path = pathlib.Path(directory) / "journey.yaml"
+                path.write_text(source.replace("    timeout_ms: 1000\n", insertion.replace("VALUE", str(value)), 1))
+                if diagnostic is None:
+                    review_native.load_journey(path)
+                else:
+                    with self.assertRaisesRegex(review_native.HarnessError, diagnostic):
+                        review_native.load_journey(path)
+
     def test_boolean_negative_and_vacuous_durations_are_rejected(self):
         source = (MODULE_PATH.parent / "desktop/tooltip-fresh-dwell.yaml").read_text()
         mutations = (
-            ("duration_ms: 100", "duration_ms: true", "wait requires positive"),
-            ("duration_ms: 800", "duration_ms: -1", "wait requires positive"),
-            ("duration_ms: 800", "duration_ms: 0", "wait requires positive"),
-            ("duration_ms: 800", "", "wait requires positive"),
+            ("duration_ms: 100", "duration_ms: true", "wait requires integer duration_ms"),
+            ("duration_ms: 800", "duration_ms: -1", "wait requires integer duration_ms"),
+            ("duration_ms: 800", "duration_ms: 0", "wait requires integer duration_ms"),
+            ("duration_ms: 800", "", "wait requires integer duration_ms"),
             ("    timeout_ms: 1000\n", "    expect_for:\n      duration_ms: 0\n      condition: {exists: {role: window}}\n    timeout_ms: 1000\n", "expect_for.duration_ms"),
             ("timeout_ms: 1000", "timeout_ms: true", "timeout_ms"),
         )
@@ -97,6 +130,17 @@ class JourneyTests(unittest.TestCase):
             path.write_text(source)
             with self.assertRaisesRegex(review_native.HarnessError, "scroll requires locate"):
                 review_native.load_journey(path)
+
+    def test_driver_timeout_includes_bounded_action_duration(self):
+        driver = object.__new__(review_native.Driver)
+        driver.process = mock.Mock()
+        driver.process.stdin = mock.Mock()
+        driver.process.stdout = mock.Mock()
+        driver.process.stdout.readline.return_value = '{"ok": true}\n'
+        driver.process.stderr = mock.Mock()
+        with mock.patch.object(review_native.select, "select", return_value=([driver.process.stdout], [], [])) as selected:
+            driver.request("act", action={"type": "wait", "duration_ms": 30000})
+        self.assertEqual(selected.call_args.args[3], 35)
 
     def test_value_expectation_uses_selected_element(self):
         driver = mock.Mock()

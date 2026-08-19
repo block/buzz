@@ -219,20 +219,22 @@ def load_journey(path: pathlib.Path) -> dict[str, Any]:
                 raise HarnessError(f"{where}: press modifiers must be strings")
         if action_type == "type_text" and not isinstance(action.get("text"), str):
             raise HarnessError(f"{where}: type_text requires text")
-        if action_type == "scroll" and not is_int(action.get("delta_y")):
-            raise HarnessError(f"{where}: scroll requires integer delta_y")
-        if action_type == "wait" and (not is_int(action.get("duration_ms")) or action["duration_ms"] <= 0):
-            raise HarnessError(f"{where}: wait requires positive integer duration_ms")
+        if action_type == "scroll" and (
+                not is_int(action.get("delta_y")) or not -10000 <= action["delta_y"] <= 10000):
+            raise HarnessError(f"{where}: scroll requires integer delta_y in -10000..10000")
+        if action_type == "wait" and (
+                not is_int(action.get("duration_ms")) or not 0 < action["duration_ms"] <= 30000):
+            raise HarnessError(f"{where}: wait requires integer duration_ms in 1..30000")
         if action_type != "wait" and "duration_ms" in action and (
-                not is_int(action["duration_ms"]) or action["duration_ms"] < 0):
-            raise HarnessError(f"{where}.act.duration_ms must be a non-negative integer")
+                not is_int(action["duration_ms"]) or not 0 <= action["duration_ms"] <= 30000):
+            raise HarnessError(f"{where}.act.duration_ms must be an integer in 0..30000")
         validate_expectation(step["expect"], f"{where}.expect")
         if "expect_for" in step:
             sustained = step["expect_for"]
             if not isinstance(sustained, dict) or set(sustained) != {"duration_ms", "condition"}:
                 raise HarnessError(f"{where}.expect_for requires duration_ms and condition")
-            if not is_int(sustained["duration_ms"]) or sustained["duration_ms"] <= 0:
-                raise HarnessError(f"{where}.expect_for.duration_ms must be a positive integer")
+            if not is_int(sustained["duration_ms"]) or not 0 < sustained["duration_ms"] <= 30000:
+                raise HarnessError(f"{where}.expect_for.duration_ms must be an integer in 1..30000")
             validate_expectation(sustained["condition"], f"{where}.expect_for.condition")
         timeout = step.get("timeout_ms", 5000)
         if not is_int(timeout) or not 0 < timeout <= 60000:
@@ -341,6 +343,10 @@ class Driver:
         self.process.stdin.write(json.dumps({"command": command, **payload}) + "\n")
         self.process.stdin.flush()
         timeout_seconds = 45 if command in {"record_start", "record_stop"} else 15
+        if command == "act" and isinstance(payload.get("action"), dict):
+            duration_ms = payload["action"].get("duration_ms", 0)
+            if is_int(duration_ms):
+                timeout_seconds = max(timeout_seconds, duration_ms / 1000 + 5)
         ready, _, _ = select.select([self.process.stdout], [], [], timeout_seconds)
         if not ready:
             self.process.kill()

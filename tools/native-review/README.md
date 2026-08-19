@@ -77,6 +77,7 @@ just native-review-ios 'iPhone 17 Pro'
 
 # Harness tests
 python3 -m unittest discover -s tools/native-review/tests -p 'test_*.py'
+swift test --package-path tools/native-review/swift
 ```
 
 Artifacts are written under:

@@ -73,7 +73,7 @@ class EvidenceBundleTests(unittest.TestCase):
             bundle_receipt = json.loads((output / "receipt.json").read_text())
             self.assertNotIn("failure-secret", json.dumps(bundle_receipt))
             self.assertNotIn("nested-secret", json.dumps(bundle_receipt))
-            self.assertEqual(bundle_receipt["failure"], "Authorization: Bearer [REDACTED]")
+            self.assertEqual(bundle_receipt["failure"], "Authorization: [REDACTED]")
             self.assertEqual(bundle_receipt["cleanup"]["errors"][0]["token"], "[REDACTED]")
             self.assertEqual(manifest["head_sha"], "abc123")
             self.assertEqual(manifest["status"], "failed")
@@ -83,7 +83,13 @@ class EvidenceBundleTests(unittest.TestCase):
     def test_redacts_header_and_json_secret_forms(self):
         sources = {
             'Authorization: Bearer abc123\n{"token": "json-secret", "safe": "visible"}':
-                'Authorization: Bearer [REDACTED]\n{"token": "[REDACTED]", "safe": "visible"}',
+                'Authorization: [REDACTED]\n{"token": "[REDACTED]", "safe": "visible"}',
+            'Authorization: token ghp_supersecret':
+                'Authorization: [REDACTED]',
+            'Authorization: Digest username="user", response="secret"':
+                'Authorization: [REDACTED]',
+            'Proxy-Authorization: Custom opaque credential with spaces':
+                'Proxy-Authorization: [REDACTED]',
             '{"authorization": "Bearer supersecret"}':
                 '{"authorization": "[REDACTED]"}',
             "{'authorization': 'Bearer supersecret'}":

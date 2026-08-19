@@ -3,6 +3,7 @@ import ApplicationServices
 import AVFoundation
 import CoreGraphics
 import Foundation
+import BuzzNativeDriverSupport
 
 struct Locator: Codable {
     let id: String?
@@ -331,12 +332,11 @@ final class WindowRecorder: @unchecked Sendable {
 
         captureTask = Task.detached { [weak self] in
             guard let self else { return }
-            let start = ContinuousClock.now
-            var frame: Int64 = 0
+            var schedule = CaptureSchedule()
             while !Task.isCancelled {
-                frame += 1
+                let tick = schedule.advance(isReadyForMoreMediaData: writerInput.isReadyForMoreMediaData)
                 autoreleasepool {
-                    guard writerInput.isReadyForMoreMediaData,
+                    guard tick.shouldCapture,
                           let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
                           let pool = pixelAdaptor.pixelBufferPool else { return }
                     var optionalBuffer: CVPixelBuffer?
@@ -351,13 +351,11 @@ final class WindowRecorder: @unchecked Sendable {
                                                   bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return }
                     context.interpolationQuality = .high
                     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-                    let time = CMTime(value: frame - 1, timescale: 15)
-                    if !pixelAdaptor.append(buffer, withPresentationTime: time) {
+                    if !pixelAdaptor.append(buffer, withPresentationTime: tick.presentationTime) {
                         self.captureError = assetWriter.error ?? DriverError.message("failed to append window video frame")
                     }
                 }
-                let target = start.advanced(by: .milliseconds(Int(frame * 1000 / 15)))
-                try? await Task.sleep(until: target)
+                try? await Task.sleep(until: tick.deadline)
             }
         }
     }
@@ -563,11 +561,10 @@ struct BuzzNativeDriver {
                                 CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
                             } else if type == "scroll" {
                                 let deltaY = Int32(action["delta_y"] as? Int ?? 0)
-                                guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
-                                                          wheel1: deltaY, wheel2: 0, wheel3: 0) else {
+                                let targetFrame = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+                                guard let event = makeScrollEvent(deltaY: deltaY, targetFrame: targetFrame) else {
                                     throw DriverError.message("could not create scroll event")
                                 }
-                                event.location = point
                                 event.post(tap: .cghidEventTap)
                             } else { throw DriverError.message("unsupported action: \(type)") }
                         }
