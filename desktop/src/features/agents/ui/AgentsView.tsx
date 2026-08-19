@@ -354,7 +354,10 @@ export function AgentsView() {
             : null
         }
         isPending={registerReferenceMutation.isPending}
-        onOpenChange={setIsRegisterExistingOpen}
+        onOpenChange={(open) => {
+          setIsRegisterExistingOpen(open);
+          if (!open) registerReferenceMutation.reset();
+        }}
         onSubmit={(input) => registerReferenceMutation.mutateAsync(input)}
         open={isRegisterExistingOpen}
       />
@@ -363,7 +366,8 @@ export function AgentsView() {
         onConfirm={(reference) => {
           void unregisterReferenceMutation
             .mutateAsync(reference)
-            .then(() => setReferenceToRemove(null));
+            .then(() => setReferenceToRemove(null))
+            .catch(() => undefined);
         }}
         onOpenChange={(open) => {
           if (!open) setReferenceToRemove(null);

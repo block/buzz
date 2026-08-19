@@ -46,8 +46,13 @@ export function RegisterExistingAgentDialog({
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await onSubmit({ pubkey, label, roleSummary });
-    onOpenChange(false);
+    try {
+      await onSubmit({ pubkey, label, roleSummary });
+      onOpenChange(false);
+    } catch {
+      // The mutation owns the error state rendered above. Keep the dialog open
+      // and consume the rejection at this UI event boundary.
+    }
   }
 
   return (

@@ -35,7 +35,12 @@ export function RegisteredAgentIdentityCard({
   const summary = registeredAgentRoleSummary(reference.roleSummary);
 
   async function copyPubkey() {
-    await navigator.clipboard?.writeText(reference.pubkey);
+    try {
+      await navigator.clipboard?.writeText(reference.pubkey);
+    } catch {
+      // Clipboard availability is best-effort; never leak a rejected browser
+      // permission promise from a menu event.
+    }
   }
 
   return (
