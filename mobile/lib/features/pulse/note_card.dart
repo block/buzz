@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
@@ -43,7 +44,7 @@ class NoteCard extends HookConsumerWidget {
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pubkey])) ??
         ref.read(userCacheProvider.notifier).get(pubkey);
-    final displayName = profile?.label ?? _shortPubkey(pubkey);
+    final displayName = profile?.label ?? shortPubkey(pubkey);
     final effectiveUpvoted =
         pendingUpvote.value ?? reaction.reactedByCurrentUser;
     final effectiveCount = _effectiveCount(reaction, pendingUpvote.value);
@@ -149,7 +150,7 @@ class NoteCard extends HookConsumerWidget {
                 if (note.replyParentId != null) ...[
                   const SizedBox(height: 2),
                   Text(
-                    'Replying to ${_shortPubkey(note.replyParentAuthor ?? note.replyParentId!)}',
+                    'Replying to ${_replyParentLabel(note)}',
                     style: context.textTheme.labelSmall?.copyWith(
                       color: context.colors.onSurfaceVariant,
                     ),
@@ -312,8 +313,12 @@ class _ActionButton extends StatelessWidget {
 String _shareUri(UserNote note) =>
     'nostr:${nostr.Nip19.encodeShareableIdentifiers(prefix: nostr.Nip19Prefix.nevent, data: note.id, author: note.pubkey, kind: 1)}';
 
-String _shortPubkey(String pubkey) =>
-    pubkey.length <= 8 ? pubkey : '${pubkey.substring(0, 8)}…';
+String _replyParentLabel(UserNote note) {
+  final author = note.replyParentAuthor;
+  return author == null
+      ? shortEventId(note.replyParentId!)
+      : shortPubkey(author);
+}
 
 String formatPulseRelativeTime(int createdAt) {
   final date = DateTime.fromMillisecondsSinceEpoch(createdAt * 1000);

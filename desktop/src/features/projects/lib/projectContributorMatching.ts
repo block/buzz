@@ -3,7 +3,7 @@ import type {
   ProjectRepoCommit,
   ProjectRepoContributor,
 } from "@/shared/api/types";
-import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
 
 type SignedProjectContributorSources = {
   owner: string;
@@ -122,9 +122,11 @@ function profileMatchesContributor(
   const email = contributor.email.trim().toLowerCase();
   const candidates = [
     pubkey,
+    pubkey ? safeNpub(pubkey) : null,
     profile.displayName,
     profile.nip05Handle,
     profile.ownerPubkey,
+    profile.ownerPubkey ? safeNpub(profile.ownerPubkey) : null,
   ]
     .map((value) => value?.trim().toLowerCase() ?? "")
     .filter(Boolean);
@@ -133,6 +135,34 @@ function profileMatchesContributor(
     (name.length > 0 && candidates.includes(name)) ||
     (email.length > 0 && candidates.includes(email))
   );
+}
+
+/**
+ * Human-facing Git author fallback. Git names and emails are untrusted text,
+ * but when either field is an exact public-key encoding that identity takes
+ * precedence and is shown as canonical npub rather than legacy hex.
+ */
+export function gitAuthorFieldDisplayValue(value: string): string {
+  const trimmed = value.trim();
+  return safeNpub(trimmed) ?? trimmed;
+}
+
+export function commitAuthorDisplayName(
+  commit: Pick<ProjectRepoCommit, "authorName" | "authorEmail">,
+): string {
+  const authorName = gitAuthorFieldDisplayValue(commit.authorName);
+  const authorEmail = gitAuthorFieldDisplayValue(commit.authorEmail);
+  // An exact key in either Git identity field is the only identity-shaped
+  // value here. Prefer it over ordinary unauthenticated author text, while
+  // preserving the normal Git name/email fallback when neither field is a key.
+  const identityNpub =
+    safeNpub(commit.authorName) ?? safeNpub(commit.authorEmail);
+  if (identityNpub) return identityNpub;
+
+  if (authorName) return authorName;
+  if (authorEmail) return authorEmail;
+
+  return "Unknown author";
 }
 
 export function profileForContributor(

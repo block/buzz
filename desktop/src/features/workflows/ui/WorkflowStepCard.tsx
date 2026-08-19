@@ -83,7 +83,7 @@ function StepConfigFields({
               onChange={(event) =>
                 onUpdate({ ...step, text: event.target.value })
               }
-              placeholder="e.g. Deployment started by {{trigger.author}}"
+              placeholder="e.g. Deployment started by {{trigger.author | npub}}"
               value={step.text ?? ""}
             />
           </div>
@@ -119,7 +119,7 @@ function StepConfigFields({
         <div className="space-y-2">
           <BackendSupportHint action={step.action} />
           <div className="space-y-1.5">
-            <FieldLabel htmlFor={`${prefix}-to`}>To (pubkey)</FieldLabel>
+            <FieldLabel htmlFor={`${prefix}-to`}>To (npub)</FieldLabel>
             <Input
               autoCapitalize="off"
               disabled={disabled}
@@ -127,7 +127,7 @@ function StepConfigFields({
               onChange={(event) =>
                 onUpdate({ ...step, to: event.target.value })
               }
-              placeholder="e.g. {{trigger.author}} or hex pubkey"
+              placeholder="e.g. {{trigger.author | npub}} or npub1…"
               value={step.to ?? ""}
             />
           </div>
@@ -220,7 +220,7 @@ function StepConfigFields({
               onChange={(event) =>
                 onUpdate({ ...step, from: event.target.value })
               }
-              placeholder="Pubkey or role"
+              placeholder="@role or npub1…"
               value={step.from ?? ""}
             />
           </div>

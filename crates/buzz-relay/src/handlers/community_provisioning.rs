@@ -18,12 +18,19 @@
 //! ## Request shape
 //!
 //! ```json
-//! { "host": "acme.communities.buzz.xyz", "initial_owner_pubkey": "<hex>" }
+//! { "host": "acme.communities.buzz.xyz", "initial_owner_pubkey": "<npub>" }
 //! ```
 //!
 //! `initial_owner_pubkey` is optional. When present for an existing community,
 //! it rotates that community owner through the same bootstrap path used by
 //! `RELAY_OWNER_PUBKEY`; relay operators are deployment-root authorities.
+//!
+//! ## Response identity compatibility
+//!
+//! Operator responses preserve the original `owner_pubkey` hex field for
+//! existing automation and add `owner_npub` for new consumers. New clients
+//! should read `owner_npub`; the legacy field remains protocol hex during the
+//! compatibility window and must not be repurposed in place.
 
 use std::sync::Arc;
 
@@ -34,6 +41,9 @@ use buzz_core::tenant::{normalize_host, TenantContext};
 use url::{Host, Url};
 
 use crate::state::AppState;
+use buzz_core::nostr_identity::{
+    canonical_npub_or_invalid, parse_public_key_compat, public_key_to_npub,
+};
 
 /// Maximum accepted authority length. Matches `communities.host VARCHAR(255)`.
 const MAX_HOST_LEN: usize = 255;
@@ -63,15 +73,36 @@ pub struct ProvisionCommunityResponse {
     /// `created` when the host row was inserted, `existed` when it was already
     /// present and the request converged idempotently.
     pub status: &'static str,
-    /// Echoes the validated owner pubkey when an owner bootstrap/rotation ran.
+    /// Legacy protocol-hex owner retained for response compatibility.
+    ///
+    /// New consumers should read [`Self::owner_npub`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_pubkey: Option<String>,
+    /// Canonical npub owner for human-facing and new client use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_npub: Option<String>,
 }
 
-pub(crate) fn validate_pubkey_hex(value: &str) -> Option<String> {
-    let normalized = value.to_ascii_lowercase();
-    (normalized.len() == 64 && normalized.chars().all(|c| c.is_ascii_hexdigit()))
-        .then_some(normalized)
+fn provision_community_response(
+    community_id: String,
+    host: String,
+    status: &'static str,
+    owner_pubkey: Option<String>,
+) -> ProvisionCommunityResponse {
+    let owner_npub = owner_pubkey.as_deref().map(canonical_npub_or_invalid);
+    ProvisionCommunityResponse {
+        community_id,
+        host,
+        status,
+        owner_pubkey,
+        owner_npub,
+    }
+}
+
+pub(crate) fn parse_pubkey_to_hex(value: &str) -> Option<String> {
+    parse_public_key_compat(value)
+        .ok()
+        .map(|(public_key, _)| public_key.to_hex())
 }
 
 /// Validate a normalized host authority value for a community.
@@ -252,6 +283,8 @@ pub async fn provision_community(
     request: ProvisionCommunityRequest,
 ) -> Result<ProvisionCommunityResponse, String> {
     let operator_hex = operator_pubkey.to_hex();
+    let operator_npub = public_key_to_npub(operator_pubkey)
+        .map_err(|_| "failed to encode operator npub".to_string())?;
 
     // Operator gate. Deliberately NOT a relay_members lookup: provisioning
     // authority spans tenants and lives in deployment config only. Empty
@@ -271,9 +304,8 @@ pub async fn provision_community(
         .initial_owner_pubkey
         .as_deref()
         .map(|value| {
-            validate_pubkey_hex(value).ok_or_else(|| {
-                "invalid initial_owner_pubkey: expected 64-char hex pubkey".to_string()
-            })
+            parse_pubkey_to_hex(value)
+                .ok_or_else(|| "invalid initial_owner_pubkey: expected an npub".to_string())
         })
         .transpose()?;
 
@@ -281,6 +313,7 @@ pub async fn provision_community(
         let owner_hex = initial_owner.as_deref().ok_or_else(|| {
             "initial_owner_pubkey is required when create_only is true".to_string()
         })?;
+        let owner_npub = canonical_npub_or_invalid(owner_hex);
         let record = match state
             .db
             .create_community_with_owner(&request.host, owner_hex)
@@ -300,19 +333,19 @@ pub async fn provision_community(
         };
 
         info!(
-            operator = %operator_hex,
+            operator = %operator_npub,
             community = %record.id,
             host = %record.host,
-            owner = %owner_hex,
+            owner = %owner_npub,
             "community created via operator endpoint"
         );
         publish_membership_snapshot_if_required(state, record.id, &record.host).await;
-        return Ok(ProvisionCommunityResponse {
-            community_id: record.id.to_string(),
-            host: record.host,
-            status: "created",
-            owner_pubkey: initial_owner,
-        });
+        return Ok(provision_community_response(
+            record.id.to_string(),
+            record.host,
+            "created",
+            Some(owner_hex.to_string()),
+        ));
     }
 
     // Legacy convergence mode remains available to deployment operators and
@@ -333,26 +366,70 @@ pub async fn provision_community(
         publish_membership_snapshot_if_required(state, record.id, &record.host).await;
     }
 
+    let owner_npub = initial_owner.as_deref().map(canonical_npub_or_invalid);
     info!(
-        operator = %operator_hex,
+        operator = %operator_npub,
         community = %record.id,
         host = %record.host,
-        owner = initial_owner.as_deref().unwrap_or("<none>"),
+        owner = owner_npub.as_deref().unwrap_or("<none>"),
         created = record.created,
         "community provisioned via operator endpoint"
     );
 
-    Ok(ProvisionCommunityResponse {
-        community_id: record.id.to_string(),
-        host: record.host,
-        status: if record.created { "created" } else { "existed" },
-        owner_pubkey: initial_owner,
-    })
+    Ok(provision_community_response(
+        record.id.to_string(),
+        record.host,
+        if record.created { "created" } else { "existed" },
+        initial_owner,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_key_boundary_accepts_npub_and_emits_npub() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = public_key_to_npub(&keys.public_key()).unwrap();
+
+        assert_eq!(parse_pubkey_to_hex(&npub), Some(hex.clone()));
+        assert_eq!(parse_pubkey_to_hex(&hex), Some(hex.clone()));
+        assert_eq!(parse_pubkey_to_hex("not-a-pubkey"), None);
+    }
+
+    #[test]
+    fn provision_response_preserves_legacy_hex_and_adds_npub() {
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let owner_npub = public_key_to_npub(&owner.public_key()).expect("encode owner npub");
+        let response = serde_json::to_value(provision_community_response(
+            "community".to_string(),
+            "community.example".to_string(),
+            "created",
+            Some(owner_hex.clone()),
+        ))
+        .expect("serialize provisioning response");
+
+        assert_eq!(response["owner_pubkey"], owner_hex);
+        assert_eq!(response["owner_npub"], owner_npub);
+    }
+
+    #[test]
+    fn provision_additive_npub_fails_closed_without_changing_legacy_hex() {
+        let invalid_hex = "ff".repeat(32);
+        let response = serde_json::to_value(provision_community_response(
+            "community".to_string(),
+            "community.example".to_string(),
+            "created",
+            Some(invalid_hex.clone()),
+        ))
+        .expect("serialize provisioning response");
+
+        assert_eq!(response["owner_pubkey"], invalid_hex);
+        assert_eq!(response["owner_npub"], "<invalid-pubkey>");
+    }
 
     #[test]
     fn host_valid_bare_domain() {

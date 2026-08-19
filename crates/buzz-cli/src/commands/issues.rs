@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
+use crate::validate::{
+    format_npub, normalize_pubkey, read_or_stdin, reject_secret_key_input, sdk_err, validate_hex64,
+    validate_repo_id,
+};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 use nostr::Timestamp;
 use serde::Deserialize;
@@ -42,6 +45,23 @@ fn assignment_note_label(assignees: &[String], label: Option<&str>) -> Result<St
     Err(CliError::Usage(
         "Unable to generate an assignee label between 1 and 128 characters".into(),
     ))
+}
+
+fn normalize_assignment_identities(
+    repo_owner: &str,
+    assignees: &[String],
+) -> Result<(String, Vec<String>, Vec<String>), CliError> {
+    reject_secret_key_input(repo_owner)?;
+    let repo_owner_hex = normalize_pubkey(repo_owner)?;
+    let mut assignee_hexes = Vec::with_capacity(assignees.len());
+    let mut assignee_npubs = Vec::with_capacity(assignees.len());
+    for assignee in assignees {
+        reject_secret_key_input(assignee)?;
+        let assignee_hex = normalize_pubkey(assignee)?;
+        assignee_npubs.push(format_npub(&assignee_hex)?);
+        assignee_hexes.push(assignee_hex);
+    }
+    Ok((repo_owner_hex, assignee_hexes, assignee_npubs))
 }
 
 #[derive(Clone, Copy)]
@@ -237,17 +257,21 @@ pub async fn cmd_create_issue(
     labels: &[String],
     to: &[String],
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
+    let repo_owner = normalize_pubkey(repo_owner)?;
     validate_repo_id(repo_id)?;
     let body = read_or_stdin(content)?;
+    let recipients = to
+        .iter()
+        .map(|pubkey| normalize_pubkey(pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let meta = GitIssueMeta {
         labels: labels.to_vec(),
-        recipients: to.to_vec(),
+        recipients,
     };
 
     let repo = GitRepoCoord {
-        owner: repo_owner.to_string(),
+        owner: repo_owner.clone(),
         id: repo_id.to_string(),
     };
 
@@ -259,7 +283,7 @@ pub async fn cmd_create_issue(
     let resp = client.submit_event(event).await?;
     // `link` renders as a rich preview card in Buzz Desktop when included in
     // a chat message — agents announce issues with it (see base_prompt.md).
-    let link = crate::links::issue_link(&event_id, repo_owner, repo_id);
+    let link = crate::links::issue_link(&event_id, &repo_owner, repo_id)?;
     crate::client::print_create_response(&resp, "link", &link);
     Ok(())
 }
@@ -320,29 +344,27 @@ async fn publish_issue_assignment_operation(
     operation: IssueAssignmentOperation,
 ) -> Result<(), CliError> {
     validate_hex64(issue)?;
-    validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
-    for assignee in assignees {
-        validate_hex64(assignee)?;
-    }
+    let (repo_owner, assignees, assignee_npubs) =
+        normalize_assignment_identities(repo_owner, assignees)?;
 
-    let label = assignment_note_label(assignees, label)?;
+    let label = assignment_note_label(&assignee_npubs, label)?;
     let content = operation.content(&label);
     let repo = GitRepoCoord {
-        owner: repo_owner.to_string(),
+        owner: repo_owner.clone(),
         id: repo_id.to_string(),
     };
     let signer = client.keys().public_key().to_hex();
     let is_self_service = assignees.len() == 1
         && assignees[0].eq_ignore_ascii_case(&signer)
-        && !signer.eq_ignore_ascii_case(repo_owner);
+        && !signer.eq_ignore_ascii_case(&repo_owner);
     let context = issue_assignment_context(client, issue, &repo, &signer, is_self_service).await?;
     let builder = match (operation, is_self_service) {
         (IssueAssignmentOperation::Assign, true) => {
             buzz_sdk::build_git_issue_assignment_with_prior(
                 &repo,
                 issue,
-                assignees,
+                &assignees,
                 &content,
                 context.prior.as_deref(),
             )
@@ -351,16 +373,16 @@ async fn publish_issue_assignment_operation(
             buzz_sdk::build_git_issue_unassignment_with_prior(
                 &repo,
                 issue,
-                assignees,
+                &assignees,
                 &content,
                 context.prior.as_deref(),
             )
         }
         (IssueAssignmentOperation::Assign, false) => {
-            buzz_sdk::build_git_issue_assignment(&repo, issue, assignees, &content)
+            buzz_sdk::build_git_issue_assignment(&repo, issue, &assignees, &content)
         }
         (IssueAssignmentOperation::Unassign, false) => {
-            buzz_sdk::build_git_issue_unassignment(&repo, issue, assignees, &content)
+            buzz_sdk::build_git_issue_unassignment(&repo, issue, &assignees, &content)
         }
     }
     .map(|builder| builder.custom_created_at(Timestamp::from_secs(context.created_at)));
@@ -462,7 +484,7 @@ pub async fn cmd_list_issues(
     label: Option<&str>,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
+    let repo_owner = normalize_pubkey(repo_owner)?;
     validate_repo_id(repo_id)?;
 
     let a_value = format!("30617:{repo_owner}:{repo_id}");
@@ -472,7 +494,7 @@ pub async fn cmd_list_issues(
     });
 
     if let Some(pk) = author {
-        validate_hex64(pk)?;
+        let pk = normalize_pubkey(pk)?;
         filter["authors"] = serde_json::json!([pk]);
     }
     if let Some(l) = label {
@@ -507,10 +529,10 @@ pub async fn cmd_issue_status(
 
     let repo = match (repo_owner, repo_id) {
         (Some(owner), Some(id)) => {
-            validate_hex64(owner)?;
+            let owner = normalize_pubkey(owner)?;
             validate_repo_id(id)?;
             Some(GitRepoCoord {
-                owner: owner.to_string(),
+                owner,
                 id: id.to_string(),
             })
         }
@@ -530,9 +552,9 @@ pub async fn cmd_issue_status(
         recipients.push(repo.owner.clone());
     }
     for recipient in to {
-        validate_hex64(recipient)?;
-        if !recipients.contains(recipient) {
-            recipients.push(recipient.clone());
+        let recipient = normalize_pubkey(recipient)?;
+        if !recipients.contains(&recipient) {
+            recipients.push(recipient);
         }
     }
 
@@ -645,8 +667,8 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::{
-        assignment_note_label, reduce_assignment_operations, AssignmentEvent, AssignmentQueryEvent,
-        ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
+        assignment_note_label, normalize_assignment_identities, reduce_assignment_operations,
+        AssignmentEvent, AssignmentQueryEvent, ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
     };
 
     const ISSUE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -703,6 +725,50 @@ mod tests {
         let generated = assignment_note_label(&many_assignees, None).unwrap();
         assert!(generated.chars().count() <= 128);
         assert!(generated.contains("others"));
+    }
+
+    #[test]
+    fn assignment_identities_accept_npub_and_legacy_hex_at_the_boundary() {
+        let owner = nostr::Keys::generate().public_key();
+        let assignee = nostr::Keys::generate().public_key();
+        let owner_npub = crate::validate::format_npub(&owner.to_hex()).unwrap();
+        let assignee_npub = crate::validate::format_npub(&assignee.to_hex()).unwrap();
+
+        let (owner_hex, assignee_hexes, assignee_npubs) =
+            normalize_assignment_identities(&owner_npub, std::slice::from_ref(&assignee_npub))
+                .expect("npub identities normalize");
+        assert_eq!(owner_hex, owner.to_hex());
+        assert_eq!(assignee_hexes, vec![assignee.to_hex()]);
+        assert_eq!(assignee_npubs, vec![assignee_npub.clone()]);
+        assert!(assignment_note_label(&assignee_npubs, None)
+            .unwrap()
+            .starts_with("npub1"));
+
+        let (owner_hex, assignee_hexes, _) = normalize_assignment_identities(
+            &owner.to_hex(),
+            std::slice::from_ref(&assignee.to_hex()),
+        )
+        .expect("legacy hex identities remain compatible");
+        assert_eq!(owner_hex, owner.to_hex());
+        assert_eq!(assignee_hexes, vec![assignee.to_hex()]);
+    }
+
+    #[test]
+    fn assignment_identities_reject_secret_shapes_without_echoing_them() {
+        let public = nostr::Keys::generate().public_key().to_hex();
+        for supplied in [
+            "nsec1secret-shaped-input",
+            "NSEC1SECRET-SHAPED-INPUT",
+            "nostr:nsec1secret-shaped-input",
+        ] {
+            let error = normalize_assignment_identities(supplied, std::slice::from_ref(&public))
+                .expect_err("secret-shaped repo owner must fail");
+            assert!(!error.to_string().contains(supplied));
+
+            let error = normalize_assignment_identities(&public, &[supplied.to_string()])
+                .expect_err("secret-shaped assignee must fail");
+            assert!(!error.to_string().contains(supplied));
+        }
     }
 
     #[test]

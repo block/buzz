@@ -15,6 +15,7 @@ import {
   getToolString,
   getToolStringList,
 } from "./agentSessionUtils";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 type ToolItem = Extract<TranscriptItem, { type: "tool" }>;
 
@@ -591,7 +592,7 @@ function extractBuzzToolPreview(args: Record<string, unknown>): string | null {
   const workflowId = getToolString(args, ["workflow_id", "workflowId"]);
   if (workflowId) return workflowId;
   const pubkeys = getToolStringList(args, ["pubkeys", "pubkey"]);
-  if (pubkeys.length === 1) return pubkeys[0];
+  if (pubkeys.length === 1) return truncatePubkey(pubkeys[0]);
   if (pubkeys.length > 1) return `${pubkeys.length} users`;
   return getToolString(args, ["event_id", "eventId", "name"]);
 }

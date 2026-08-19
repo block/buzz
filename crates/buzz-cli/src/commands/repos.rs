@@ -265,7 +265,7 @@ pub async fn cmd_create_repo(
     let resp = client.submit_event(event).await?;
     // `link` renders as a rich preview card in Buzz Desktop when included in
     // a chat message — agents announce repos with it (see base_prompt.md).
-    let link = crate::links::repo_link(&owner, repo_id);
+    let link = crate::links::repo_link(&owner, repo_id)?;
     crate::client::print_create_response(&resp, "link", &link);
     Ok(())
 }
@@ -285,7 +285,7 @@ pub async fn cmd_get_repo(
     // If owner specified, filter by author pubkey; otherwise return any match.
     // Note: without --owner, multiple repos with the same name (different owners) may be returned.
     if let Some(pk) = owner {
-        crate::validate::validate_hex64(pk)?;
+        let pk = crate::validate::normalize_pubkey(pk)?;
         filter["authors"] = serde_json::json!([pk]);
     }
 
@@ -301,10 +301,7 @@ pub async fn cmd_list_repos(
 ) -> Result<(), CliError> {
     // Default to self if no owner specified.
     let pubkey = match owner {
-        Some(pk) => {
-            crate::validate::validate_hex64(pk)?;
-            pk.to_string()
-        }
+        Some(pk) => crate::validate::normalize_pubkey(pk)?,
         None => client.keys().public_key().to_hex(),
     };
 

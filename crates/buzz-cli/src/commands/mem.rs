@@ -27,13 +27,15 @@ use nostr::PublicKey;
 
 use crate::client::BuzzClient;
 use crate::error::CliError;
+use crate::validate::normalize_pubkey;
 
 /// Resolve the agent's owner pubkey: explicit `--owner` flag wins, otherwise
 /// fall back to the NIP-OA `auth_tag` (which carries owner pubkey in slot 1).
 fn resolve_owner(client: &BuzzClient, owner_flag: Option<&str>) -> Result<PublicKey, CliError> {
     if let Some(s) = owner_flag {
-        return PublicKey::from_hex(s)
-            .map_err(|e| CliError::Usage(format!("--owner must be a 64-hex pubkey: {e}")));
+        let owner = normalize_pubkey(s)?;
+        return PublicKey::from_hex(&owner)
+            .map_err(|e| CliError::Usage(format!("--owner must be an npub: {e}")));
     }
     let tag = client.auth_tag_owner_hex().ok_or_else(|| {
         CliError::Usage(
@@ -62,8 +64,9 @@ fn resolve_reader(
                 "--owner and --agent are mutually exclusive for read commands".into(),
             ));
         }
-        let agent = PublicKey::from_hex(agent)
-            .map_err(|e| CliError::Usage(format!("--agent must be a 64-hex pubkey: {e}")))?;
+        let agent = normalize_pubkey(agent)?;
+        let agent = PublicKey::from_hex(&agent)
+            .map_err(|e| CliError::Usage(format!("--agent must be an npub: {e}")))?;
         if agent == client.keys().public_key() {
             return Err(CliError::Usage(
                 "--agent must differ from the CLI identity; omit --agent for agent-side reads"

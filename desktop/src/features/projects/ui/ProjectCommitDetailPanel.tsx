@@ -1,6 +1,7 @@
 import { Calendar, GitCommitHorizontal, Hash } from "lucide-react";
 
 import {
+  commitAuthorDisplayName,
   profileForCommit,
   type ViewerGitIdentity,
 } from "@/features/projects/lib/projectContributorMatching";
@@ -68,7 +69,9 @@ export function ProjectCommitDetailPanel({
     : null;
   const authorLabel = matchedProfile
     ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
-    : (commit?.authorName ?? commit?.authorEmail ?? "Unknown author");
+    : commit
+      ? commitAuthorDisplayName(commit)
+      : "Unknown author";
   const shortHash = commit?.shortHash ?? commitHash.slice(0, 7);
   const fileCount = diff?.files.length;
 

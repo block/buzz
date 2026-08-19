@@ -2,6 +2,8 @@ export type SearchMessagesInput = {
   q: string;
   limit?: number;
   channelId?: string;
+  /** Prefix for typeahead; fullText for web-search operators such as OR. */
+  searchMode?: "prefix" | "fullText";
   /** Hex pubkeys for `from:` operator. */
   authors?: string[];
   /** Unix seconds (`after:YYYY-MM-DD`). */

@@ -65,6 +65,7 @@ import type { Channel, HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
@@ -149,7 +150,9 @@ export function HomeView({
   // FeedItem selection model, so reload while in Reminders mode keeps a stale
   // `?item=` unconsumed and does not snap back to a feed-item detail view.
   const urlSelectedItemId = isMessagesMode ? inboxSearchValues.item : null;
-  const profilePanelPubkey = inboxSearchValues.profile;
+  const profilePanelPubkey = inboxSearchValues.profile
+    ? parsePubkeyInput(inboxSearchValues.profile)
+    : null;
   const profilePanelTab = profilePanelTabFromSearch(
     inboxSearchValues.profileTab,
   );
@@ -184,8 +187,10 @@ export function HomeView({
   const handleOpenProfilePanel = React.useCallback(
     (pubkey: string) => {
       setManagedChannelId(null);
+      const profile = safeNpub(pubkey);
+      if (!profile) return;
       applyInboxSearchPatch({
-        profile: pubkey,
+        profile,
         profileTab: null,
         profileView: null,
       });

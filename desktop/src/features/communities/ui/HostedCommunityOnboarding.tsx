@@ -2,6 +2,7 @@ import * as React from "react";
 import { AlertCircle, LoaderCircle } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
+import { compareHostedCommunityIdentity } from "@/features/communities/hostedCommunityIdentity";
 import {
   bindBuilderlabIdentity,
   cancelBuilderlabLogin,
@@ -23,7 +24,6 @@ import {
 } from "@/features/communities/hostedCommunityApi";
 import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
@@ -195,14 +195,8 @@ export function HostedCommunityOnboarding({
       await loadAccount();
     });
 
-  const boundPubkey = identity?.pubkey_hex ?? null;
-  const identityMismatch = Boolean(
-    identity &&
-      boundPubkey &&
-      localPubkey &&
-      boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
-  );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+  const { boundNpub, localNpub, identityMismatch } =
+    compareHostedCommunityIdentity(identity, localPubkey);
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -543,9 +537,9 @@ export function HostedCommunityOnboarding({
                 this device, or sign out to use a different email.
               </DialogDescription>
               <p className="mt-4 w-full break-all rounded-xl bg-[rgb(var(--buzz-hosted-community-identity-bg)/0.5)] px-4 py-3 text-left font-mono text-xs text-foreground">
-                Account: {identity.npub ?? boundPubkey}
+                Account: {boundNpub ?? "Unavailable"}
                 <br />
-                This device: {localNpub ?? localPubkey}
+                This device: {localNpub ?? "Unavailable"}
               </p>
               {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
               <div className="mt-6 flex flex-col items-stretch gap-2">

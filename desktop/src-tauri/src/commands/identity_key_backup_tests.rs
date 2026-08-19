@@ -14,9 +14,8 @@ fn verification_returns_only_public_identity_and_match_status() {
     let result = verify_ncryptsec_backup_inner(&state, &backup, PASSWORD).unwrap();
     assert_eq!(
         result.pubkey,
-        state.keys.lock().unwrap().public_key().to_hex()
+        state.keys.lock().unwrap().public_key().to_bech32().unwrap()
     );
-    assert!(result.npub.starts_with("npub1"));
     assert!(result.matches_current_identity);
 }
 
@@ -26,7 +25,7 @@ fn verification_reports_valid_backup_for_a_different_identity() {
     let other = Keys::generate();
     let backup = crate::key_backup::create_backup_blob(&other, PASSWORD, FAST_LOG_N).unwrap();
     let result = verify_ncryptsec_backup_inner(&state, &backup, PASSWORD).unwrap();
-    assert_eq!(result.pubkey, other.public_key().to_hex());
+    assert_eq!(result.pubkey, other.public_key().to_bech32().unwrap());
     assert!(!result.matches_current_identity);
 }
 

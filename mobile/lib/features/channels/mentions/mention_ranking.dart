@@ -1,5 +1,8 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../shared/nostr/nostr_keys.dart';
+import '../../../shared/utils/string_utils.dart';
+
 /// A mention autocomplete candidate. Mirrors the desktop's
 /// `MentionCandidateForRanking` (desktop/src/features/messages/lib/mentionRanking.ts).
 @immutable
@@ -27,7 +30,7 @@ class MentionCandidate {
   String get label {
     final name = displayName?.trim();
     if (name != null && name.isNotEmpty) return name;
-    return pubkey.length >= 8 ? pubkey.substring(0, 8) : pubkey;
+    return shortPubkey(pubkey);
   }
 }
 
@@ -68,13 +71,16 @@ List<MentionCandidate> rankMentionCandidates(
   for (var order = 0; order < candidates.length; order++) {
     final candidate = candidates[order];
 
-    final labelScores = [candidate.displayName, candidate.secondaryLabel].map((
-      value,
-    ) {
-      final trimmed = value?.trim();
-      if (trimmed == null || trimmed.isEmpty) return null;
-      return _scoreLabel(trimmed, lowerQuery);
-    }).whereType<int>();
+    final labelScores =
+        [
+          candidate.displayName,
+          candidate.secondaryLabel,
+          tryNpubFromPublicKey(candidate.pubkey),
+        ].map((value) {
+          final trimmed = value?.trim();
+          if (trimmed == null || trimmed.isEmpty) return null;
+          return _scoreLabel(trimmed, lowerQuery);
+        }).whereType<int>();
     int? score = labelScores.isEmpty
         ? null
         : labelScores.reduce((a, b) => a < b ? a : b);

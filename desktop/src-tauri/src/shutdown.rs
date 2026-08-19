@@ -231,7 +231,7 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
                     &format!(
                         "=== stopped {} ({}) at {} ===",
                         record.name,
-                        record.pubkey,
+                        crate::app_state::identity_npub_for_log_str(&record.pubkey),
                         util::now_iso()
                     ),
                 );

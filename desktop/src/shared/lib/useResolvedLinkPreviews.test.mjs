@@ -12,6 +12,11 @@ import {
   withEntityFallbacks,
 } from "./useResolvedLinkPreviews.ts";
 
+const OWNER =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const ATTACKER =
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+
 const preview = {
   kind: "generic-link",
   href: "https://example.com/story",
@@ -43,7 +48,7 @@ test("pending external metadata reserves the image treatment", () => {
 test("pending Buzz entity metadata remains image-less", () => {
   const entityPreview = {
     kind: "buzz-repository",
-    href: `buzz://repo?owner=${"cd".repeat(32)}&d=buzz`,
+    href: `buzz://repo?owner=${OWNER}&d=buzz`,
     provider: "Buzz",
     title: "buzz",
     typeLabel: "repo",
@@ -204,7 +209,7 @@ test("metadata loader coalesces fragment variants and bounds concurrency", async
 test("withEntityFallbacks re-adds previews dropped by null metadata", () => {
   const entityPreview = {
     kind: "buzz-pull-request",
-    href: `buzz://pr?id=${"ab".repeat(32)}&owner=${"cd".repeat(32)}&d=buzz`,
+    href: `buzz://pr?id=${"ab".repeat(32)}&owner=${OWNER}&d=buzz`,
     provider: "Buzz",
     title: `buzz #${"ab".repeat(4)}`,
     typeLabel: "Review",
@@ -218,14 +223,14 @@ test("withEntityFallbacks re-adds previews dropped by null metadata", () => {
 test("withEntityFallbacks keeps resolved previews and preserves order", () => {
   const first = {
     kind: "buzz-repository",
-    href: `buzz://repo?owner=${"cd".repeat(32)}&d=buzz`,
+    href: `buzz://repo?owner=${OWNER}&d=buzz`,
     provider: "Buzz",
     title: "buzz",
     typeLabel: "repo",
   };
   const second = {
     kind: "buzz-issue",
-    href: `buzz://issue?id=${"ef".repeat(32)}&owner=${"cd".repeat(32)}&d=buzz`,
+    href: `buzz://issue?id=${"ef".repeat(32)}&owner=${OWNER}&d=buzz`,
     provider: "Buzz",
     title: `buzz #${"ef".repeat(4)}`,
     typeLabel: "Task",
@@ -247,7 +252,7 @@ test("entity fallback eligibility is kind-scoped", () => {
     isBuzzEntityPreview({
       ...preview,
       kind: "buzz-repository",
-      href: `buzz://repo?owner=${"cd".repeat(32)}&d=buzz`,
+      href: `buzz://repo?owner=${OWNER}&d=buzz`,
     }),
     true,
   );
@@ -277,8 +282,8 @@ function relayEvent({
 }
 
 test("Buzz PR metadata includes repository identity and trusted root context", async () => {
-  const owner = "cd".repeat(32);
-  const attacker = "ef".repeat(32);
+  const owner = OWNER;
+  const attacker = ATTACKER;
   const id = "ab".repeat(32);
   const repoAddress = `30617:${owner}:buzz`;
   const commit = "1234567".padEnd(40, "0");
@@ -365,8 +370,8 @@ test("Buzz PR metadata includes repository identity and trusted root context", a
 });
 
 test("Buzz entity roots reject ambiguous repository tags", async () => {
-  const owner = "cd".repeat(32);
-  const attacker = "ef".repeat(32);
+  const owner = OWNER;
+  const attacker = ATTACKER;
   const targetAddress = `30617:${owner}:buzz`;
   const attackerAddress = `30617:${attacker}:other`;
   const repository = relayEvent({
@@ -409,7 +414,7 @@ test("Buzz entity roots reject ambiguous repository tags", async () => {
 });
 
 test("Buzz repository metadata stays image-less and exposes default branch", async () => {
-  const owner = "cd".repeat(32);
+  const owner = OWNER;
   const result = await fetchBuzzEntityMetadata(
     `buzz://repo?owner=${owner}&d=relay-tools`,
     async () => [
@@ -437,7 +442,7 @@ test("Buzz repository metadata stays image-less and exposes default branch", asy
 });
 
 test("Buzz project metadata resolves from the 30621 announcement", async () => {
-  const owner = "cd".repeat(32);
+  const owner = OWNER;
   const result = await fetchBuzzEntityMetadata(
     `buzz://project?owner=${owner}&d=pollinator`,
     async () => [
@@ -462,7 +467,7 @@ test("Buzz project metadata resolves from the 30621 announcement", async () => {
 });
 
 test("Buzz project metadata declines a missing or invalid announcement", async () => {
-  const owner = "cd".repeat(32);
+  const owner = OWNER;
   assert.equal(
     await fetchBuzzEntityMetadata(
       `buzz://project?owner=${owner}&d=pollinator`,

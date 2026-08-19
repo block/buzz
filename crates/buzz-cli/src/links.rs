@@ -6,14 +6,18 @@
 //! stay format-compatible (see `golden_format_matches_desktop` below and
 //! the mirror test in `entityLink.test.mjs`).
 //!
-//! Callers are expected to validate inputs first (`validate_hex64`,
-//! `validate_repo_id`); the identifier charsets need no URL encoding.
+//! Callers normalize public keys to protocol hex before reaching these
+//! builders; links expose the human-facing owner as npub. Other identifiers
+//! are validated before reaching these builders and need no URL encoding.
 //!
 //! Coordinate links additionally accept an optional `&tab=<tab>` parameter
 //! (`files|commits|issues|prs|contributors|channels`) selecting a workspace tab on
 //! the receiving side. The CLI builders emit the canonical no-tab form
 //! (overview); the parameter exists for the desktop's tab-aware copy-link
 //! button.
+
+use crate::error::CliError;
+use crate::validate::format_npub;
 
 /// Whether a d-tag can be expressed in a `buzz://` link.
 ///
@@ -34,23 +38,35 @@ pub fn is_linkable_dtag(dtag: &str) -> bool {
 }
 
 /// Build a `buzz://repo` link for a repository announcement (kind 30617).
-pub fn repo_link(owner: &str, repo_id: &str) -> String {
-    format!("buzz://repo?owner={owner}&d={repo_id}")
+pub fn repo_link(owner: &str, repo_id: &str) -> Result<String, CliError> {
+    Ok(format!(
+        "buzz://repo?owner={}&d={repo_id}",
+        format_npub(owner)?
+    ))
 }
 
 /// Build a `buzz://project` link for a project announcement (kind 30621).
-pub fn project_link(owner: &str, project_id: &str) -> String {
-    format!("buzz://project?owner={owner}&d={project_id}")
+pub fn project_link(owner: &str, project_id: &str) -> Result<String, CliError> {
+    Ok(format!(
+        "buzz://project?owner={}&d={project_id}",
+        format_npub(owner)?
+    ))
 }
 
 /// Build a `buzz://pr` link for a pull request event (kind 1618).
-pub fn pull_request_link(event_id: &str, owner: &str, repo_id: &str) -> String {
-    format!("buzz://pr?id={event_id}&owner={owner}&d={repo_id}")
+pub fn pull_request_link(event_id: &str, owner: &str, repo_id: &str) -> Result<String, CliError> {
+    Ok(format!(
+        "buzz://pr?id={event_id}&owner={}&d={repo_id}",
+        format_npub(owner)?
+    ))
 }
 
 /// Build a `buzz://issue` link for an issue event (kind 1621).
-pub fn issue_link(event_id: &str, owner: &str, repo_id: &str) -> String {
-    format!("buzz://issue?id={event_id}&owner={owner}&d={repo_id}")
+pub fn issue_link(event_id: &str, owner: &str, repo_id: &str) -> Result<String, CliError> {
+    Ok(format!(
+        "buzz://issue?id={event_id}&owner={}&d={repo_id}",
+        format_npub(owner)?
+    ))
 }
 
 #[cfg(test)]
@@ -70,19 +86,19 @@ mod tests {
         let event_id = golden["eventId"].as_str().unwrap();
         let dtag = golden["dtag"].as_str().unwrap();
         assert_eq!(
-            pull_request_link(event_id, owner, dtag),
+            pull_request_link(event_id, owner, dtag).unwrap(),
             golden["links"]["pullRequest"].as_str().unwrap()
         );
         assert_eq!(
-            issue_link(event_id, owner, dtag),
+            issue_link(event_id, owner, dtag).unwrap(),
             golden["links"]["issue"].as_str().unwrap()
         );
         assert_eq!(
-            repo_link(owner, dtag),
+            repo_link(owner, dtag).unwrap(),
             golden["links"]["repository"].as_str().unwrap()
         );
         assert_eq!(
-            project_link(owner, dtag),
+            project_link(owner, dtag).unwrap(),
             golden["links"]["project"].as_str().unwrap()
         );
     }

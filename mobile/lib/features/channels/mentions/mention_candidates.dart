@@ -1,4 +1,5 @@
 import '../../../shared/mentions/agent_identity_provider.dart';
+import '../../../shared/utils/string_utils.dart';
 import '../../profile/user_profile.dart';
 import '../channel_management_provider.dart';
 import 'mention_ranking.dart';
@@ -35,7 +36,7 @@ String? formatOwnerLabel(
   if (name != null && name.isNotEmpty) return name;
   final handle = profile?.nip05Handle?.trim();
   if (handle != null && handle.isNotEmpty) return handle;
-  return '${ownerPubkey.substring(0, 8)}…';
+  return shortPubkey(ownerPubkey);
 }
 
 /// Assemble the full mention candidate list: channel members first-class,

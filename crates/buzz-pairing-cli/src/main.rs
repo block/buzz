@@ -16,6 +16,7 @@ use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
 use buzz_core::kind::KIND_PAIRING;
+use buzz_core::nostr_identity::{parse_secret_key_compat, secret_key_to_nsec};
 use buzz_core::pairing::session::PairingSession;
 use buzz_core::pairing::{
     crypto::{derive_sas, derive_session_id, derive_transcript_hash, format_sas},
@@ -576,14 +577,17 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<Event> {
 
 /// Resolve the payload to send.
 ///
-/// If `nsec` is provided, parse it as bech32 and return the raw nsec string.
-/// Otherwise generate a fresh test key and return its nsec.
+/// If a key is provided, normalize it to canonical nsec before transfer.
+/// Legacy hex remains readable for compatibility but is never emitted.
 fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadType), CliError> {
     match nsec {
         Some(s) => {
-            // Validate it parses as a secret key.
-            let _sk = SecretKey::parse(&s).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
-            Ok((Zeroizing::new(s), PayloadType::Nsec))
+            let raw = Zeroizing::new(s);
+            let (secret_key, _) = parse_secret_key_compat(&raw)
+                .map_err(|_| CliError::InvalidNsec("expected a valid nsec".to_string()))?;
+            let canonical = secret_key_to_nsec(&secret_key)
+                .map_err(|_| CliError::InvalidNsec("failed to encode nsec".to_string()))?;
+            Ok((Zeroizing::new(canonical), PayloadType::Nsec))
         }
         None => {
             let keys = Keys::generate();
@@ -594,6 +598,31 @@ fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadTy
             println!("(no --nsec provided; using generated test key)");
             Ok((Zeroizing::new(nsec_str), PayloadType::Nsec))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_normalizes_legacy_secret_hex_to_nsec() {
+        let keys = Keys::generate();
+        let legacy_hex = keys.secret_key().to_secret_hex();
+
+        let (payload, payload_type) = resolve_payload(Some(legacy_hex.clone())).unwrap();
+
+        assert_eq!(payload_type, PayloadType::Nsec);
+        assert_eq!(payload.as_str(), keys.secret_key().to_bech32().unwrap());
+        assert_ne!(payload.as_str(), legacy_hex);
+    }
+
+    #[test]
+    fn payload_errors_do_not_echo_secret_input() {
+        let supplied = "not-a-valid-secret";
+        let error = resolve_payload(Some(supplied.to_string())).unwrap_err();
+
+        assert!(!error.to_string().contains(supplied));
     }
 }
 

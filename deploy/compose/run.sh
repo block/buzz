@@ -87,10 +87,10 @@ case "${1:-help}" in
     backup_hint
     ;;
   add-member)
-    docker compose exec relay /usr/local/bin/buzz-admin add-member --pubkey "${2:?Usage: ./run.sh add-member <npub-or-hex> [--role member|admin]}" "${@:3}"
+    docker compose exec relay /usr/local/bin/buzz-admin add-member --pubkey "${2:?Usage: ./run.sh add-member <npub> [--role member|admin]}" "${@:3}"
     ;;
   remove-member)
-    docker compose exec relay /usr/local/bin/buzz-admin remove-member --pubkey "${2:?Usage: ./run.sh remove-member <npub-or-hex> [--role member|admin]}" "${@:3}"
+    docker compose exec relay /usr/local/bin/buzz-admin remove-member --pubkey "${2:?Usage: ./run.sh remove-member <npub> [--role member|admin]}" "${@:3}"
     ;;
   list-members)
     docker compose exec relay /usr/local/bin/buzz-admin list-members
@@ -110,9 +110,9 @@ Commands:
   config        Render merged compose config
   backup-hint   Print the production backup checklist
 
-  add-member <npub-or-hex> [--role member|admin]
+  add-member <npub> [--role member|admin]
                 Add a relay member (default role: member)
-  remove-member <npub-or-hex> [--role member|admin]
+  remove-member <npub> [--role member|admin]
                 Remove a relay member
   list-members  List all relay members
 

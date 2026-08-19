@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
+import { redactUnsafeRelaySearchInput } from "@/features/search/lib/searchInputSafety";
 import { searchMessages } from "@/shared/api/tauri";
 
 export const MIN_SEARCH_QUERY_LENGTH = 2;
@@ -18,14 +19,16 @@ export function useSearchMessagesQuery(
     until?: number | null;
     enabled?: boolean;
     limit?: number;
+    searchMode?: "prefix" | "fullText";
     unresolvedOperator?: boolean;
     minimumQueryLength?: number;
   },
 ) {
-  const trimmedQuery = query.trim();
+  const { trimmedQuery, safe } = redactUnsafeRelaySearchInput(query);
   const enabled = options?.enabled ?? true;
   const limit = options?.limit ?? 12;
   const channelId = options?.channelId;
+  const searchMode = options?.searchMode ?? "prefix";
   const authors = options?.authors;
   const since = options?.since ?? null;
   const until = options?.until ?? null;
@@ -39,6 +42,7 @@ export function useSearchMessagesQuery(
       trimmedQuery,
       limit,
       channelId ?? null,
+      searchMode,
       authors ?? null,
       since,
       until,
@@ -49,13 +53,14 @@ export function useSearchMessagesQuery(
         q: trimmedQuery,
         limit,
         channelId,
+        searchMode,
         authors,
         since: since ?? undefined,
         until: until ?? undefined,
       }),
     // Call sites own the "when to search" floor (FTS length / unresolved
     // operators). Keep a single threshold here so it cannot drift.
-    enabled: enabled && trimmedQuery.length >= minimumQueryLength,
+    enabled: enabled && safe && trimmedQuery.length >= minimumQueryLength,
     staleTime: 30_000,
     gcTime: 5 * 60 * 1_000,
   });

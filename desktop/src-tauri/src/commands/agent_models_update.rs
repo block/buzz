@@ -218,7 +218,7 @@ pub async fn update_managed_agent(
         let record = records
             .iter()
             .find(|r| r.pubkey == input.pubkey)
-            .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
+            .ok_or_else(|| format!("agent {} not found", npub(&input.pubkey)))?;
 
         // Publish the edit to the relay. After-save, inside the lock, before
         // any .await. The retention upsert hashes the opt-IN projection, so an

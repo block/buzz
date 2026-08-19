@@ -1,15 +1,18 @@
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
+
 /**
- * Canonical pubkey normalisation.
+ * Canonical pubkey normalisation for comparisons and protocol boundaries.
  *
- * Hex pubkeys are case-insensitive, but callers compare them with `===`.
- * Trimming guards against stray whitespace from user input or tag parsing.
+ * Valid npub and legacy-hex inputs converge on lowercase protocol hex. The
+ * lowercase fallback preserves the historical behavior for partial or
+ * synthetic values used by local state and tests.
  */
 export function normalizePubkey(pubkey: string): string {
-  return pubkey.trim().toLowerCase();
+  return parsePubkeyInput(pubkey) ?? pubkey.trim().toLowerCase();
 }
 
 /**
- * The ONE canonical compact display form for a pubkey: `abcd1234…wxyz`.
+ * The ONE canonical compact display form for a pubkey: `npub1abc…wxyz`.
  *
  * A truncated pubkey is a recognition aid, never an identity proof — vanity
  * grinders forge short prefixes cheaply. Surfaces where the user makes a
@@ -18,8 +21,20 @@ export function normalizePubkey(pubkey: string): string {
  * fails the build if one sneaks in outside this module.
  */
 export function truncatePubkey(pubkey: string): string {
-  if (pubkey.length <= 12) {
-    return pubkey;
-  }
-  return `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`;
+  const npub = safeNpub(pubkey);
+  if (!npub) return "Invalid public key";
+  return truncateIdentifier(npub);
+}
+
+/**
+ * Compact a protocol-level hexadecimal identifier such as an event id or
+ * Blossom blob hash. Public keys must use `truncatePubkey` instead.
+ */
+export function truncateHexId(value: string): string {
+  return truncateIdentifier(value.trim().toLowerCase());
+}
+
+function truncateIdentifier(value: string): string {
+  if (value.length <= 12) return value;
+  return `${value.slice(0, 8)}…${value.slice(-4)}`;
 }

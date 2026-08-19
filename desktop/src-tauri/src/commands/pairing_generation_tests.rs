@@ -2,11 +2,27 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use nostr::ToBech32;
+
 use super::{
-    clear_pairing_session_if_current, commit_recovery_if_current, invalidate_pairing_generation,
-    recovery_result_after_completion, validate_recovery_payload_type, PairingHandle,
-    PairingSession, PayloadType,
+    clear_pairing_session_if_current, commit_recovery_if_current, identity_pairing_payload,
+    invalidate_pairing_generation, recovery_result_after_completion,
+    validate_recovery_payload_type, PairingHandle, PairingSession, PayloadType,
 };
+
+#[test]
+fn identity_transfer_payload_uses_npub_and_nsec_only() {
+    let keys = nostr::Keys::generate();
+    let payload = identity_pairing_payload("https://relay.example", &keys).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+    assert_eq!(parsed["relayUrl"], "https://relay.example");
+    assert_eq!(parsed["npub"], keys.public_key().to_bech32().unwrap());
+    assert_eq!(parsed["nsec"], keys.secret_key().to_bech32().unwrap());
+    assert!(parsed.get("pubkey").is_none());
+    assert!(!payload.contains(&keys.public_key().to_hex()));
+    assert!(!payload.contains(&keys.secret_key().to_secret_hex()));
+}
 
 #[tokio::test]
 async fn overlapping_starts_are_serialized() {

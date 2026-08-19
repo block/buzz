@@ -78,14 +78,15 @@ free.
 Extend the existing `buzz://` scheme, mirroring `buzz://message`:
 
 ```
-buzz://repo?owner=<pubkey-hex>&d=<repo-dtag>[&tab=<tab>]
-buzz://project?owner=<pubkey-hex>&d=<project-dtag>[&tab=<tab>]
-buzz://pr?id=<event-id-hex>&owner=<pubkey-hex>&d=<repo-dtag>
-buzz://issue?id=<event-id-hex>&owner=<pubkey-hex>&d=<repo-dtag>
+buzz://repo?owner=<npub>&d=<repo-dtag>[&tab=<tab>]
+buzz://project?owner=<npub>&d=<project-dtag>[&tab=<tab>]
+buzz://pr?id=<event-id-hex>&owner=<npub>&d=<repo-dtag>
+buzz://issue?id=<event-id-hex>&owner=<npub>&d=<repo-dtag>
 ```
 
-- `owner` is the 64-char lowercase hex pubkey of the repository/project
-  announcement author (the NIP-34 / NIP-MP coordinate owner).
+- `owner` is the canonical NIP-19 `npub` of the repository/project
+  announcement author. Clients decode it to the protocol-hex NIP-34 / NIP-MP
+  coordinate owner internally.
 - `d` is the addressable `d`-tag. For `repo`/`project` links the
   (`owner`, `d`) pair is the full `30617:<owner>:<d>` /
   `30621:<owner>:<d>` coordinate.
@@ -104,9 +105,9 @@ buzz://issue?id=<event-id-hex>&owner=<pubkey-hex>&d=<repo-dtag>
   navigation. A future revision can relax this without breaking existing
   links.
 
-Validation rules match the existing codebase: `owner` and `id` are
-`/^[a-f0-9]{64}$/`; `d` follows addressable d-tag rules already enforced in
-`projectModels.ts` / `buzz-sdk`.
+`owner` must be a valid `npub` (legacy hex links remain readable); `id` remains
+`/^[a-f0-9]{64}$/` because it is an event ID. `d` follows addressable d-tag
+rules already enforced in `projectModels.ts` / `buzz-sdk`.
 
 ### HTTPS URLs
 
@@ -115,7 +116,7 @@ Agents naturally paste HTTPS clone URLs
 recognized **first** — implemented on this branch. Detection keys on the
 path shape (`/git/` + 64-hex pubkey segment) rather than a host allow-list,
 since relay hosts differ per community. The preview href is normalized to
-the canonical `buzz://repo?owner=…&d=…` deep link (the raw transport URL is
+the canonical npub-based `buzz://repo?owner=…&d=…` deep link (the raw transport URL is
 not a browsable page), so clone-URL cards and inline clone-URL anchors get
 the same in-app click navigation as explicit entity links, and both
 spellings of the same repository dedupe to one card.
@@ -275,8 +276,9 @@ No persona changes needed — the base prompt applies to all managed agents.
 
 ## Security considerations
 
-- All identifiers are validated before use (`owner`/`id` strict hex-64,
-  `d`-tag charset rules). Parse failures render the raw text as a plain,
+- All identifiers are validated before use (`owner` is a canonical npub with
+  legacy hex accepted only for old links, `id` is strict hex-64, and `d` uses
+  its tag charset rules). Parse failures render the raw text as a plain,
   non-clickable string — never an anchor with an unvalidated href.
 - Title enrichment queries go through the already-authenticated
   `relayClient` with explicit `kinds` filters; no new HTTP surface and no

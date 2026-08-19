@@ -67,3 +67,19 @@ admission is not per-operator identity. Anyone admitted to the dashboard can
 read attachments for feedback records they can access. Per-person attribution
 or revocation requires authenticated operator identity at ingress/application
 level; this endpoint deliberately does not claim to provide it.
+
+## Public-key response compatibility
+
+The admin JSON API keeps its established public-key fields in lowercase
+64-character NIP-01 hex so existing dashboard deployments continue to parse the
+same response shape. Each identity also has an additive canonical npub field:
+
+- reports: `reporterNpub`, `targetNpub` for pubkey targets, and
+  `resolvedByNpub`;
+- reported messages: `authorNpub`;
+- feedback: `submitterNpub`.
+
+New consumers should prefer the `*Npub` fields and fall back to the legacy hex
+fields when talking to an older relay. Event IDs, blob hashes, and raw Nostr
+tags remain hex by protocol. The legacy identity fields are retained only for
+compatibility and must not be used for display in new code.

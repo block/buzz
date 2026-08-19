@@ -1,6 +1,8 @@
 import {
+  commitAuthorDisplayName,
   commitAuthorPubkeysFromPullRequests,
   contributorKey,
+  gitAuthorFieldDisplayValue,
   profileForCommit,
   profileForContributor,
   type ProjectContributorActivityCounts,
@@ -63,10 +65,14 @@ export function ContributorsPanel({
     const matchedProfile = signedProfile ?? heuristicProfile?.profile;
     const label = matchedProfile
       ? resolveUserLabel({ pubkey: matchedPubkey ?? "", profiles })
-      : contributor.name || contributor.email || "Unknown contributor";
+      : commitAuthorDisplayName({
+          authorName: contributor.name,
+          authorEmail: contributor.email,
+        });
     const signedCounts = matchedPubkey
       ? activityCounts[matchedPubkey]
       : undefined;
+    const emailLabel = gitAuthorFieldDisplayValue(contributor.email);
 
     return {
       avatarUrl: matchedProfile?.avatarUrl ?? null,
@@ -78,14 +84,14 @@ export function ContributorsPanel({
       profileLinked: matchedPubkey !== null,
       reviewCount: signedCounts?.reviews ?? null,
       role: signedPubkey
-        ? matchedProfile?.nip05Handle || contributor.email || "Buzz contributor"
+        ? matchedProfile?.nip05Handle || emailLabel || "Buzz contributor"
         : heuristicProfile
           ? `${
               heuristicProfile.profile.nip05Handle ||
-              contributor.email ||
+              emailLabel ||
               "Git contributor"
             } · unverified match`
-          : contributor.email || "Git contributor",
+          : emailLabel || "Git contributor",
       taskCount: signedCounts?.tasks ?? null,
     };
   });
@@ -273,7 +279,7 @@ export function ActivityPanel({
                 pubkey: matchedProfile.pubkey,
                 profiles,
               })
-            : commit.authorName || commit.authorEmail || "Unknown author";
+            : commitAuthorDisplayName(commit);
           const matchingContributor = repoContributors.find(
             (contributor) =>
               contributor.name.trim().toLowerCase() ===

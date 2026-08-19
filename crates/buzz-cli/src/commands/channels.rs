@@ -11,7 +11,7 @@ use crate::client::{
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
+use crate::validate::{format_npub, normalize_pubkey, parse_uuid, read_or_stdin, validate_uuid};
 
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -20,6 +20,55 @@ fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
         "description": extract_tag_value(e, "about"),
         "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
     })
+}
+
+fn format_identity_field(value: &mut serde_json::Value, field: &str) -> Result<(), CliError> {
+    let pubkey = value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CliError::Other(format!("relay response missing '{field}' public key")))?;
+    value[field] = serde_json::Value::String(format_npub(pubkey)?);
+    Ok(())
+}
+
+fn format_member_identities(
+    members: Vec<serde_json::Value>,
+) -> Result<Vec<serde_json::Value>, CliError> {
+    members
+        .into_iter()
+        .map(|mut member| {
+            format_identity_field(&mut member, "pubkey")?;
+            Ok(member)
+        })
+        .collect()
+}
+
+fn format_archived_exclusions(
+    exclusions: &[ArchivedExclusion],
+) -> Result<Vec<serde_json::Value>, CliError> {
+    exclusions
+        .iter()
+        .map(|exclusion| {
+            Ok(serde_json::json!({
+                "persona_id": exclusion.persona_id,
+                "pubkey": format_npub(&exclusion.pubkey)?,
+            }))
+        })
+        .collect()
+}
+
+fn format_resolved_agent_identities(agents: &[ResolvedAgent]) -> Result<Vec<String>, CliError> {
+    agents
+        .iter()
+        .map(|agent| format_npub(&agent.pubkey))
+        .collect()
+}
+
+fn extract_channel_detail(e: &serde_json::Value) -> Result<serde_json::Value, CliError> {
+    let mut normalized = extract_channel_metadata(e);
+    normalized["pubkey"] = e.get("pubkey").cloned().unwrap_or(serde_json::Value::Null);
+    format_identity_field(&mut normalized, "pubkey")?;
+    Ok(normalized)
 }
 
 pub async fn cmd_list_channels(
@@ -231,9 +280,7 @@ pub async fn cmd_get_channel(client: &BuzzClient, channel_id: &str) -> Result<()
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     if let Some(e) = events.first() {
-        let mut normalized = extract_channel_metadata(e);
-        normalized["pubkey"] =
-            serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
+        let normalized = extract_channel_detail(e)?;
         println!("{normalized}");
     } else {
         println!("null");
@@ -253,7 +300,7 @@ pub async fn cmd_list_channel_members(
     });
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
-    let members = events.first().map(extract_p_tags).unwrap_or_default();
+    let members = format_member_identities(events.first().map(extract_p_tags).unwrap_or_default())?;
     let output = serde_json::to_string(&members).unwrap_or_default();
     println!("{output}");
     Ok(())
@@ -487,7 +534,10 @@ fn apply_cardinality_rule(
             [] => skipped.push(slug.clone()),
             [one] => agents.push((*one).clone()),
             many => {
-                let candidates: Vec<&str> = many.iter().map(|a| a.pubkey.as_str()).collect();
+                let candidates = many
+                    .iter()
+                    .map(|agent| format_npub(&agent.pubkey))
+                    .collect::<Result<Vec<_>, _>>()?;
                 return Err(CliError::Usage(format!(
                     "persona '{slug}' has {} live instances for this owner ({}); \
                      pass a template with a single instance per persona, or resolve \
@@ -695,6 +745,10 @@ pub async fn cmd_create_channel_from_template(
         .unwrap_or_else(|| client.keys().public_key().to_hex());
 
     let resolved = build_roster_resolution(client, &owner, &template.agents).await?;
+    // Validate and format every public identity before channel-creation side
+    // effects. Protocol builders below continue to receive canonical hex.
+    let agent_npubs = format_resolved_agent_identities(&resolved.agents)?;
+    let archived_excluded = format_archived_exclusions(&resolved.archived_excluded)?;
 
     let channel_uuid = Uuid::new_v4();
     let vis = match visibility {
@@ -742,7 +796,7 @@ pub async fn cmd_create_channel_from_template(
     // here would race each other for no benefit.
     let mut members_added: Vec<serde_json::Value> = Vec::new();
     let mut member_failures: Vec<serde_json::Value> = Vec::new();
-    for agent in &resolved.agents {
+    for (agent, agent_npub) in resolved.agents.iter().zip(agent_npubs) {
         let outcome: Result<(), CliError> = async {
             let builder = buzz_sdk::build_add_member(
                 channel_uuid,
@@ -758,11 +812,11 @@ pub async fn cmd_create_channel_from_template(
         match outcome {
             Ok(()) => members_added.push(serde_json::json!({
                 "persona_id": agent.persona_id,
-                "pubkey": agent.pubkey,
+                "pubkey": agent_npub,
             })),
             Err(e) => member_failures.push(serde_json::json!({
                 "persona_id": agent.persona_id,
-                "pubkey": agent.pubkey,
+                "pubkey": agent_npub,
                 "error": e.to_string(),
             })),
         }
@@ -780,6 +834,7 @@ pub async fn cmd_create_channel_from_template(
         canvas_applied,
         members_added,
         member_failures,
+        archived_excluded,
         &resolved,
     );
     println!("{report}");
@@ -799,6 +854,7 @@ fn build_template_report(
     canvas_applied: bool,
     members_added: Vec<serde_json::Value>,
     member_failures: Vec<serde_json::Value>,
+    archived_excluded: Vec<serde_json::Value>,
     resolved: &RosterResolution,
 ) -> serde_json::Value {
     let mut report = serde_json::json!({
@@ -808,7 +864,7 @@ fn build_template_report(
         "canvas_applied": canvas_applied,
         "members_added": members_added,
         "skipped": resolved.skipped,
-        "archived_excluded": resolved.archived_excluded,
+        "archived_excluded": archived_excluded,
         "member_failures": member_failures,
     });
     if let Some(warning) = &resolved.archive_state_warning {
@@ -972,7 +1028,7 @@ pub async fn cmd_add_channel_member(
     pubkey: &str,
     role: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
     let typed_role = match role {
@@ -988,7 +1044,7 @@ pub async fn cmd_add_channel_member(
             )))
         }
     };
-    let builder = buzz_sdk::build_add_member(channel_uuid, pubkey, typed_role)
+    let builder = buzz_sdk::build_add_member(channel_uuid, &pubkey, typed_role)
         .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -1002,10 +1058,10 @@ pub async fn cmd_remove_channel_member(
     channel_id: &str,
     pubkey: &str,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_remove_member(channel_uuid, pubkey)
+    let builder = buzz_sdk::build_remove_member(channel_uuid, &pubkey)
         .map_err(|e| CliError::Other(format!("build_remove_member failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -1192,17 +1248,69 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
+        apply_cardinality_rule, build_template_report, cmd_set_add_policy, extract_channel_detail,
+        finalize_roster_resolution, format_archived_exclusions, format_member_identities,
+        format_resolved_agent_identities, name_matches, resolve_roster_with_archive_filter,
         validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
         ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
+    use crate::validate::format_npub;
     use crate::CliError;
     use serde_json::json;
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
         json!({ "tags": tags })
+    }
+
+    fn test_identity() -> (String, String) {
+        let hex = nostr::Keys::generate().public_key().to_hex();
+        let npub = crate::validate::format_npub(&hex).expect("test public key formats");
+        (hex, npub)
+    }
+
+    #[test]
+    fn channel_detail_and_member_projections_emit_npub_only() {
+        let (hex, npub) = test_identity();
+        let detail = extract_channel_detail(&json!({
+            "pubkey": hex.clone(),
+            "created_at": 1,
+            "tags": [["d", "channel-1"], ["name", "general"]],
+        }))
+        .expect("channel detail formats");
+        assert_eq!(detail["pubkey"], npub);
+        assert!(!detail.to_string().contains(&hex));
+
+        let members = format_member_identities(vec![json!({
+            "pubkey": hex.clone(),
+            "role": "bot",
+        })])
+        .expect("member list formats");
+        assert_eq!(members[0]["pubkey"], npub);
+        assert!(!serde_json::to_string(&members).unwrap().contains(&hex));
+    }
+
+    #[test]
+    fn archived_template_report_identities_emit_npub_only() {
+        let (hex, npub) = test_identity();
+        let agents = vec![ResolvedAgent {
+            persona_id: "builtin:fizz".into(),
+            pubkey: hex.clone(),
+        }];
+        let displayed_agents =
+            format_resolved_agent_identities(&agents).expect("agent identities format");
+        assert_eq!(displayed_agents, vec![npub.clone()]);
+        assert!(!serde_json::to_string(&displayed_agents)
+            .unwrap()
+            .contains(&hex));
+
+        let formatted = format_archived_exclusions(&[ArchivedExclusion {
+            persona_id: "builtin:fizz".into(),
+            pubkey: hex.clone(),
+        }])
+        .expect("archived exclusions format");
+        assert_eq!(formatted[0]["pubkey"], npub);
+        assert!(!serde_json::to_string(&formatted).unwrap().contains(&hex));
     }
 
     #[test]
@@ -1441,16 +1549,22 @@ mod tests {
     #[test]
     fn cardinality_multiple_instances_is_hard_error_listing_candidates() {
         let slugs = vec!["builtin:fizz".to_string()];
+        let first = nostr::Keys::generate().public_key().to_hex();
+        let second = nostr::Keys::generate().public_key().to_hex();
+        let first_npub = format_npub(&first).unwrap();
+        let second_npub = format_npub(&second).unwrap();
         let found = vec![
-            agent("builtin:fizz", &"a".repeat(64)),
-            agent("builtin:fizz", &"b".repeat(64)),
+            agent("builtin:fizz", &first),
+            agent("builtin:fizz", &second),
         ];
         let err = apply_cardinality_rule(&slugs, &found).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
         let msg = err.to_string();
         assert!(msg.contains("builtin:fizz"));
-        assert!(msg.contains(&"a".repeat(64)));
-        assert!(msg.contains(&"b".repeat(64)));
+        assert!(msg.contains(&first_npub));
+        assert!(msg.contains(&second_npub));
+        assert!(!msg.contains(&first));
+        assert!(!msg.contains(&second));
     }
 
     #[test]
@@ -1464,10 +1578,12 @@ mod tests {
             "builtin:fizz".to_string(),
             "builtin:duplicated".to_string(),
         ];
+        let first_duplicate = nostr::Keys::generate().public_key().to_hex();
+        let second_duplicate = nostr::Keys::generate().public_key().to_hex();
         let found = vec![
             agent("builtin:fizz", &"a".repeat(64)),
-            agent("builtin:duplicated", &"b".repeat(64)),
-            agent("builtin:duplicated", &"c".repeat(64)),
+            agent("builtin:duplicated", &first_duplicate),
+            agent("builtin:duplicated", &second_duplicate),
         ];
         let err = apply_cardinality_rule(&slugs, &found).unwrap_err();
         assert!(err.to_string().contains("builtin:duplicated"));
@@ -1593,9 +1709,11 @@ mod tests {
         // but the trust warning rides along in the error detail — never a
         // fake success report on stdout.
         let slugs = vec!["builtin:fizz".to_string()];
+        let first = nostr::Keys::generate().public_key().to_hex();
+        let second = nostr::Keys::generate().public_key().to_hex();
         let found = vec![
-            agent("builtin:fizz", &"a".repeat(64)),
-            agent("builtin:fizz", &"b".repeat(64)),
+            agent("builtin:fizz", &first),
+            agent("builtin:fizz", &second),
         ];
         let archived_err = CliError::Other("query failure".into());
         let err = resolve_roster_with_archive_filter(&slugs, found, Err(archived_err))
@@ -1671,6 +1789,7 @@ mod tests {
             false,
             members_added,
             member_failures,
+            Vec::new(),
             &resolution,
         );
         assert_eq!(
@@ -1688,9 +1807,11 @@ mod tests {
         // this path by construction — the function returns `Err` before
         // `cmd_create_channel_from_template` ever reaches `build_template_report`.
         let slugs = vec!["builtin:fizz".to_string()];
+        let first = nostr::Keys::generate().public_key().to_hex();
+        let second = nostr::Keys::generate().public_key().to_hex();
         let found = vec![
-            agent("builtin:fizz", &"a".repeat(64)),
-            agent("builtin:fizz", &"b".repeat(64)),
+            agent("builtin:fizz", &first),
+            agent("builtin:fizz", &second),
         ];
         let archived_err = CliError::Other("query failure".into());
         let mut sink: Vec<u8> = Vec::new();
@@ -1734,6 +1855,7 @@ mod tests {
             false,
             members_added,
             member_failures,
+            Vec::new(),
             &resolution,
         );
         assert!(

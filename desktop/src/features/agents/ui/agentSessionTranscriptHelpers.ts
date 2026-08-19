@@ -1,3 +1,4 @@
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 import type { ObserverEvent, PromptSection } from "./agentSessionTypes";
 import {
   findBuzzToolName,
@@ -286,8 +287,20 @@ function extractEventContent(body: string): string {
 }
 
 function extractEventAuthorPubkey(body: string): string | null {
-  const fromMatch = body.match(/^From:.*\bhex:\s*([0-9a-fA-F]{64})/m);
-  return fromMatch?.[1]?.toLowerCase() ?? null;
+  const fromLine = body.match(/^From:\s*(.*)$/m)?.[1];
+  if (!fromLine) return null;
+
+  const npub = fromLine.match(/(?:nostr:)?npub1[0-9a-z]+/i)?.[0];
+  if (npub) {
+    const parsed = parsePubkeyInput(npub);
+    if (parsed) return parsed;
+  }
+
+  // Persisted transcripts produced before the npub-only prompt migration used
+  // `(hex: …)`. Keep that format readable, but do not accept arbitrary bare
+  // hex in a display-oriented From header.
+  const legacyHex = fromLine.match(/\bhex:\s*([0-9a-fA-F]{64})/)?.[1];
+  return legacyHex ? parsePubkeyInput(legacyHex) : null;
 }
 
 function extractEventId(body: string): string | null {

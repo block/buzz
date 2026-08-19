@@ -3,13 +3,15 @@
  * explicit `clone` tag.
  *
  * Buzz relays serve their own git repositories at a canonical path —
- * `<relay-origin>/git/<owner-pubkey>/<repo-id>` — which is exactly the shape the
+ * `<relay-origin>/git/<owner-hex>/<repo-id>` — which is exactly the shape the
  * Rust `validate_clone_url` gate enforces. When an announcement carries no
  * `clone` tag (e.g. it was created via `buzz repos create` without `--clone`),
  * the desktop would otherwise have no URL to fetch from, so the project detail
  * view comes up empty. Synthesizing the canonical relay-hosted URL lets those
  * repositories load while still deferring to any explicit clone URLs.
  */
+
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 
 /**
  * Builds the canonical relay-hosted clone URL for a repository, or `null` when
@@ -25,11 +27,12 @@ export function deriveRelayCloneUrl(
   dtag: string,
 ): string | null {
   if (!relayOrigin || !owner || !dtag) return null;
-  // The Rust validator requires a 64-char hex owner pubkey; anything else is
-  // not a relay-hosted repo we can address, so decline rather than guess.
-  if (!/^[0-9a-fA-F]{64}$/.test(owner)) return null;
+  // The Git smart-HTTP transport is an intentional protocol exception: its
+  // path segment is the lowercase NIP-01 key, even when callers supply npub.
+  const ownerHex = parsePubkeyInput(owner);
+  if (!ownerHex) return null;
   const origin = relayOrigin.replace(/\/+$/, "");
-  return `${origin}/git/${owner.toLowerCase()}/${dtag}`;
+  return `${origin}/git/${ownerHex}/${dtag}`;
 }
 
 /**

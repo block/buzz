@@ -10,6 +10,7 @@ import {
 
 const HEX = "a".repeat(64);
 const HEX_UPPER = "A".repeat(64);
+const NPUB = "npub1424242424242424242424242424242424242424242424242424qamrcaj";
 
 test("parsePromptText returns the empty/Prompt fallback for whitespace-only input", () => {
   // The early `sections.length === 0` branch only fires when there are no
@@ -40,7 +41,7 @@ test("parsePromptText wraps header-less free text in a single Prompt section", (
   assert.equal(result.userEventId, null);
 });
 
-test("parsePromptText extracts event id, content, hex pubkey, and a title-cased kind", () => {
+test("parsePromptText extracts event id, content, npub author, and a title-cased kind", () => {
   const text = [
     "[System]",
     "system preamble here",
@@ -48,7 +49,7 @@ test("parsePromptText extracts event id, content, hex pubkey, and a title-cased 
     "[Buzz event: @mention]",
     `Event ID: ${HEX_UPPER}`,
     "Channel: demo",
-    `From: Wes (hex: ${HEX})`,
+    `From: Wes (npub: ${NPUB})`,
     "Content: hello @Brain please look",
   ].join("\n");
 
@@ -99,7 +100,7 @@ test("parsePromptText preserves multiline event content in the user bubble text"
   assert.equal(result.userEventId, null);
 });
 
-test("parsePromptText lowercases the extracted hex pubkey", () => {
+test("parsePromptText retains compatibility with legacy hex author headers", () => {
   const text = [
     "[Buzz event: dm]",
     `From: Someone (hex: ${HEX_UPPER})`,
@@ -110,7 +111,15 @@ test("parsePromptText lowercases the extracted hex pubkey", () => {
   assert.equal(result.userPubkey, HEX);
 });
 
-test("parsePromptText yields a null pubkey when From has no hex", () => {
+test("parsePromptText extracts a bare npub author header", () => {
+  const text = ["[Buzz event: note]", `From: ${NPUB}`, "Content: hi"].join(
+    "\n",
+  );
+
+  assert.equal(parsePromptText(text).userPubkey, HEX);
+});
+
+test("parsePromptText yields a null pubkey when From has no public key", () => {
   const text = ["[Buzz event: note]", "From: Someone", "Content: hi"].join(
     "\n",
   );

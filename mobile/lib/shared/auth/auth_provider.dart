@@ -1,8 +1,8 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../nostr/nostr_keys.dart';
 
 enum AuthStatus { unknown, unauthenticated, authenticated }
 
@@ -54,16 +54,24 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   /// Writes to storage directly to avoid circular dependency with community
   /// providers.
   Future<void> authenticateWithCommunity(Community community) async {
+    final identity = tryIdentityFromNsec(community.nsec);
+    if (identity == null) {
+      throw const FormatException('Community credentials require a valid nsec');
+    }
+    final canonical = community.copyWith(
+      npub: identity.npub,
+      nsec: identity.nsec,
+    );
     final storage = ref.read(communityStorageProvider);
-    await storage.save(community);
-    await storage.saveActiveId(community.id);
+    await storage.save(canonical);
+    await storage.saveActiveId(canonical.id);
 
     // Invalidate community providers so other consumers pick up the new data.
     ref.invalidate(communityListProvider);
     ref.invalidate(activeCommunityProvider);
 
     state = AsyncData(
-      AuthState(status: AuthStatus.authenticated, community: community),
+      AuthState(status: AuthStatus.authenticated, community: canonical),
     );
   }
 
@@ -96,14 +104,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
 }
 
 bool _hasValidNsec(String? nsec) {
-  if (nsec == null || nsec.isEmpty) return false;
-  try {
-    final decoded = nostr.Nip19.decode(payload: nsec);
-    return decoded.prefix == nostr.Nip19Prefix.nsec &&
-        decoded.data.length == 64;
-  } catch (_) {
-    return false;
-  }
+  return tryIdentityFromNsec(nsec) != null;
 }
 
 final authProvider = AsyncNotifierProvider<AuthNotifier, AuthState>(

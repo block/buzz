@@ -18,6 +18,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use buzz_core::kind::*;
+use buzz_core::nostr_identity::public_key_to_npub_or_invalid;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
@@ -1288,7 +1289,7 @@ async fn handle_approval_deny(
     // 6. Cancel the workflow run (post-commit, async)
     let community_id = tenant.community();
     let run_id = approval.run_id;
-    let pubkey_hex = self_hex.clone();
+    let denial_message = approval_denial_message(auth.pubkey());
     let db = state.db.clone();
 
     tokio::spawn(async move {
@@ -1308,7 +1309,6 @@ async fn handle_approval_deny(
             return;
         }
 
-        let cancel_msg = format!("workflow cancelled: approval denied by {pubkey_hex}");
         if let Err(e) = db
             .update_workflow_run(
                 community_id,
@@ -1318,7 +1318,7 @@ async fn handle_approval_deny(
                 &run.execution_trace,
                 Some(buzz_db::workflow::WorkflowRunFailure {
                     code: "approval_denied",
-                    message: &cancel_msg,
+                    message: &denial_message,
                 }),
             )
             .await
@@ -1339,6 +1339,13 @@ async fn handle_approval_deny(
             })
         ),
     })
+}
+
+fn approval_denial_message(pubkey: &nostr::PublicKey) -> String {
+    format!(
+        "workflow cancelled: approval denied by {}",
+        public_key_to_npub_or_invalid(pubkey)
+    )
 }
 
 /// Resume a suspended workflow run after an approval gate has been granted.
@@ -1635,5 +1642,16 @@ mod tests {
     #[test]
     fn revision_tag_does_not_change_other_command_kinds() {
         assert!(validate_workflow_revision(KIND_DM_OPEN as i32, Some("not-hex"), None).is_ok());
+    }
+
+    #[test]
+    fn approval_denial_message_uses_npub_not_hex() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+
+        let message = approval_denial_message(&keys.public_key());
+
+        assert!(message.contains("npub1"));
+        assert!(!message.contains(&hex));
     }
 }

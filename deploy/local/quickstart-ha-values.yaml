@@ -23,7 +23,7 @@ redis:
 minio:
   enabled: true
 relayUrl: wss://buzz.test.local
-ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000001"
+ownerPubkey: "npub1a2d567n60z37xu57245tzntkf4yk90swrus0wjdulrvah0u6jv5qusyp60"
 relay:
   # Testbed, not business-logic validation — same rationale as CI quickstart.
   requireRelayMembership: false

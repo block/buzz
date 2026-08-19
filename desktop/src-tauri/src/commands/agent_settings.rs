@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         current_instance_id, find_managed_agent_mut, load_managed_agents, save_managed_agents,
         sync_managed_agent_processes, ManagedAgentSummary,
@@ -54,7 +54,7 @@ pub async fn set_managed_agent_start_on_app_launch(
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            .ok_or_else(|| format!("agent {} not found", identity_npub_for_log_str(&pubkey)))?;
         super::agents::summarize_from_disk(&app, record, &runtimes)
     })
     .await
@@ -98,7 +98,7 @@ pub async fn set_managed_agent_auto_restart(
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            .ok_or_else(|| format!("agent {} not found", identity_npub_for_log_str(&pubkey)))?;
         super::agents::summarize_from_disk(&app, record, &runtimes)
     })
     .await

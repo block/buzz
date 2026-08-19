@@ -16,6 +16,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
 
 const PULSE_PANEL_SEARCH_KEYS = [
   "profile",
@@ -26,12 +27,17 @@ const PULSE_PANEL_SEARCH_KEYS = [
 export function PulseScreen() {
   const identityQuery = useIdentityQuery();
   const { applyPatch, values } = useHistorySearchState(PULSE_PANEL_SEARCH_KEYS);
-  const profilePanelPubkey = values.profile;
+  const profilePanelPubkey = values.profile
+    ? parsePubkeyInput(values.profile)
+    : null;
   const profilePanelTab = profilePanelTabFromSearch(values.profileTab);
   const profilePanelView = profilePanelViewFromSearch(values.profileView);
   const handleOpenProfilePanel = React.useCallback(
-    (pubkey: string) =>
-      applyPatch({ profile: pubkey, profileTab: null, profileView: null }),
+    (pubkey: string) => {
+      const profile = safeNpub(pubkey);
+      if (!profile) return;
+      applyPatch({ profile, profileTab: null, profileView: null });
+    },
     [applyPatch],
   );
   const handleCloseProfilePanel = React.useCallback(

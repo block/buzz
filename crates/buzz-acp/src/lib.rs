@@ -24,6 +24,7 @@ use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
     KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
+use buzz_core::nostr_identity::{canonical_npub_or_invalid, public_key_to_npub_or_invalid};
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
     OBSERVER_MAX_PLAINTEXT_LEN,
@@ -104,7 +105,7 @@ fn emit_runtime_lifecycle(
             None,
             &observer::ObserverContext::default(),
             serde_json::json!({
-                "pubkey": pubkey,
+                "pubkey": canonical_npub_or_invalid(pubkey),
                 "relayUrl": relay_url,
                 "startNonce": start_nonce,
                 "lifecycle": lifecycle,
@@ -128,7 +129,10 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
             match buzz_sdk::nip_oa::verify_auth_tag(&auth_tag, &agent_pk) {
                 Ok(owner_pk) => {
                     let owner_hex = owner_pk.to_hex().to_ascii_lowercase();
-                    tracing::info!("owner resolved from BUZZ_AUTH_TAG: {owner_hex}");
+                    tracing::info!(
+                        "owner resolved from BUZZ_AUTH_TAG: {}",
+                        public_key_to_npub_or_invalid(&owner_pk)
+                    );
                     return Some(owner_hex);
                 }
                 Err(e) => {
@@ -349,11 +353,15 @@ async fn check_sibling_via_profile(
         let tag_json = serde_json::to_string(tag).unwrap_or_default();
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
-                tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
+                tracing::debug!(
+                    author = %public_key_to_npub_or_invalid(&agent_pk),
+                    expected_owner = %canonical_npub_or_invalid(expected_owner),
+                    "sibling verified via NIP-OA"
+                );
                 return true;
             }
             Err(e) => {
-                tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
+                tracing::debug!(author = %public_key_to_npub_or_invalid(&agent_pk), "NIP-OA auth tag verification failed: {e}");
             }
         }
     }
@@ -1082,8 +1090,8 @@ fn handle_relay_observer_control_event(
     // Defense-in-depth: verify the sender is the resolved owner.
     if event.pubkey.to_hex() != owner_pubkey_hex {
         tracing::warn!(
-            sender = %event.pubkey,
-            expected = %owner_pubkey_hex,
+            sender = %public_key_to_npub_or_invalid(&event.pubkey),
+            expected = %canonical_npub_or_invalid(owner_pubkey_hex),
             "observer control frame from non-owner — dropping"
         );
         return;
@@ -2013,7 +2021,7 @@ async fn tokio_main() -> Result<()> {
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
     if let Some(ref owner) = startup_owner {
-        tracing::info!("agent owner: {owner}");
+        tracing::info!("agent owner: {}", canonical_npub_or_invalid(owner));
     } else {
         tracing::info!("no agent owner configured");
     }
@@ -2763,7 +2771,7 @@ async fn tokio_main() -> Result<()> {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
                                         tracing::info!(
                                             channel_id = %buzz_event.channel_id,
-                                            sender = %buzz_event.event.pubkey.to_hex(),
+                                            sender = %public_key_to_npub_or_invalid(&buzz_event.event.pubkey),
                                             "shutdown command from owner — exiting gracefully"
                                         );
                                         let _ = shutdown_tx.send(());
@@ -2907,7 +2915,7 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %public_key_to_npub_or_invalid(&buzz_event.event.pubkey),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -4588,7 +4596,7 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("use the person's **exact display name as shown in Buzz**"));
         assert!(prompt.contains("Do not expand a short display name, infer a surname"));
         assert!(prompt.contains("Preserve it exactly; do not infer, expand, or look up a surname"));
-        assert!(prompt.contains("--mention <hex-or-npub>"));
+        assert!(prompt.contains("--mention <npub>"));
         assert!(prompt.contains("every presentation-only name that should notify"));
         assert!(
             prompt.contains("permits unresolved or ambiguous `@Name` text as presentation-only")
@@ -4599,6 +4607,15 @@ mod agent_draft_prompt_tests {
         assert!(prompt
             .contains("add them explicitly with `buzz channels add-member` only when authorized"));
         assert!(prompt.contains("never changes membership automatically"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_issue_assignment_with_npubs() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("--repo-owner <npub>"));
+        assert!(prompt.contains("--assignee <npub>"));
+        assert!(!prompt.contains("--repo-owner <hex>"));
+        assert!(!prompt.contains("--assignee <hex>"));
     }
 }
 

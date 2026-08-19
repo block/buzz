@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use axum::extract::ws::Message as WsMessage;
+use buzz_core::nostr_identity::public_key_to_npub_or_invalid;
 use tracing::{debug, info, warn};
 
 use crate::connection::{AuthState, ConnectionState};
@@ -90,6 +91,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     {
         Ok(mut auth_ctx) => {
             let pubkey = auth_ctx.pubkey;
+            let pubkey_npub = public_key_to_npub_or_invalid(&pubkey);
 
             // Community ban gate (NIP-42 seam). Runs immediately after auth
             // verification succeeds and before the allowlist and relay-membership
@@ -124,7 +126,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     Ok(state) if state.banned => BanOutcome::Banned,
                     Ok(_) => BanOutcome::Clear,
                     Err(e) => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
+                        warn!(conn_id = %conn_id, pubkey = %pubkey_npub, error = %e,
                               "ban-state DB lookup failed, denying (fail-closed)");
                         BanOutcome::DbError
                     }
@@ -146,7 +148,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                             Ok(state) if state.banned => BanOutcome::Banned,
                             Ok(_) => BanOutcome::Clear,
                             Err(e) => {
-                                warn!(conn_id = %conn_id, owner = %owner.to_hex(), error = %e,
+                                warn!(conn_id = %conn_id, owner = %public_key_to_npub_or_invalid(&owner), error = %e,
                                       "owner ban-state DB lookup failed, denying (fail-closed)");
                                 BanOutcome::DbError
                             }
@@ -166,7 +168,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 };
 
                 if let Some((metric_reason, deny_reason)) = denial {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), reason = deny_reason, "principal denied at ban seam");
+                    warn!(conn_id = %conn_id, pubkey = %pubkey_npub, reason = deny_reason, "principal denied at ban seam");
                     metrics::counter!("buzz_auth_failures_total", "reason" => metric_reason)
                         .increment(1);
                     *conn.auth_state.write().await = AuthState::Failed;
@@ -194,13 +196,13 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 {
                     Ok(v) => v,
                     Err(e) => {
-                        warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e,
+                        warn!(conn_id = %conn_id, pubkey = %pubkey_npub, error = %e,
                               "allowlist DB lookup failed, denying (fail-closed)");
                         false
                     }
                 };
                 if !allowed {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
+                    warn!(conn_id = %conn_id, pubkey = %pubkey_npub, "pubkey not in allowlist");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "allowlist_denied")
                         .increment(1);
                     *conn.auth_state.write().await = AuthState::Failed;
@@ -224,7 +226,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             {
                 Ok(owner) => owner,
                 Err(e) => {
-                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
+                    warn!(conn_id = %conn_id, pubkey = %pubkey_npub, error = ?e, "not a relay member");
                     metrics::counter!("buzz_auth_failures_total", "reason" => "not_relay_member")
                         .increment(1);
                     *conn.auth_state.write().await = AuthState::Failed;
@@ -267,14 +269,14 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 } else {
                     warn!(
                         conn_id = %conn_id,
-                        agent = %pubkey.to_hex(),
-                        nip_oa_owner = %owner.to_hex(),
+                        agent = %pubkey_npub,
+                        nip_oa_owner = %public_key_to_npub_or_invalid(&owner),
                         "NIP-OA owner could not be materialized"
                     );
                 }
             }
 
-            info!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "NIP-42 auth successful");
+            info!(conn_id = %conn_id, pubkey = %pubkey_npub, "NIP-42 auth successful");
             *conn.auth_state.write().await = AuthState::Authenticated(auth_ctx);
             state
                 .conn_manager

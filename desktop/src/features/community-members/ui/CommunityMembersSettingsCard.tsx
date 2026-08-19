@@ -1,5 +1,4 @@
 import { Crown, MoreHorizontal, Search, Shield } from "lucide-react";
-import { nip19 } from "nostr-tools";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -19,6 +18,7 @@ import type {
   RelayMemberRole,
   UserProfileSummary,
 } from "@/shared/api/types";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -42,14 +42,6 @@ function formatDisplayName(member: RelayMember, displayName?: string | null) {
   return member.role === "owner" ? "Community owner" : "Unnamed member";
 }
 
-function npubFromPubkey(pubkey: string): string | null {
-  try {
-    return nip19.npubEncode(pubkey);
-  } catch {
-    return null;
-  }
-}
-
 function formatDate(dateString: string): string {
   return new Date(dateString).toLocaleDateString(undefined, {
     month: "short",
@@ -65,7 +57,7 @@ function HoverMemberIdentity({
   displayName: string;
   pubkey: string;
 }) {
-  const npub = npubFromPubkey(pubkey) ?? pubkey;
+  const npub = safeNpub(pubkey) ?? "Invalid public key";
   return (
     <span className="inline-grid min-w-0 max-w-full grid-cols-1" title={npub}>
       <span
@@ -275,7 +267,7 @@ export function CommunityMembersSettingsCard({
       const profile = profiles?.[normalizedPubkey];
       const displayName = profile?.displayName?.toLowerCase() ?? "";
       const nip05 = profile?.nip05Handle?.toLowerCase() ?? "";
-      const npub = npubFromPubkey(member.pubkey)?.toLowerCase() ?? "";
+      const npub = safeNpub(member.pubkey)?.toLowerCase() ?? "";
       return (
         displayName.includes(q) ||
         nip05.includes(q) ||

@@ -17,8 +17,12 @@ import {
   useSearchMessagesQuery,
 } from "@/features/search/hooks";
 import {
+  getFromHandleLookupQuery,
+  isRelaySearchInputSafe,
+  shouldEnableRelaySearch,
+} from "@/features/search/lib/searchInputSafety";
+import {
   isChannelUuid,
-  isHexPubkey,
   normalizeFromHandle,
   normalizeInChannel,
   parseSearchOperators,
@@ -26,10 +30,15 @@ import {
 } from "@/features/search/lib/parseSearchOperators";
 import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 
 function formatUserResultName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || user.pubkey;
+  return (
+    user.displayName?.trim() ||
+    user.nip05Handle?.trim() ||
+    truncatePubkey(user.pubkey)
+  );
 }
 
 function dedupeSearchHits(hits: SearchHit[]) {
@@ -79,8 +88,12 @@ function resolveAuthorFromOperator(
   if (!raw) {
     return { status: "none" };
   }
-  if (isHexPubkey(raw)) {
-    return { status: "resolved", value: normalizePubkey(raw) };
+  if (!isRelaySearchInputSafe(raw)) {
+    return { status: "unresolved" };
+  }
+  const directPubkey = parsePubkeyInput(raw);
+  if (directPubkey) {
+    return { status: "resolved", value: directPubkey };
   }
   const handle = normalizeFromHandle(raw).toLowerCase();
   if (!handle) {
@@ -141,14 +154,15 @@ export function useSearchResults({
     parsedQuery.from !== null ||
     parsedQuery.in !== null;
 
-  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
+  const searchBackedQueriesEnabled = shouldEnableRelaySearch({
+    enabled,
+    hasSearchQuery,
+    input: debouncedQuery,
+  });
   const needsAuthorResolution = Boolean(parsedQuery.from);
   const entitySearchEnabled = searchBackedQueriesEnabled && !scopeChannelId;
 
-  const fromHandleForLookup =
-    parsedQuery.from && !isHexPubkey(parsedQuery.from)
-      ? normalizeFromHandle(parsedQuery.from)
-      : "";
+  const fromHandleForLookup = getFromHandleLookupQuery(parsedQuery.from);
 
   const managedAgentsQuery = useManagedAgentsQuery({
     enabled:
@@ -223,7 +237,7 @@ export function useSearchResults({
 
   const searchQuery = useSearchMessagesQuery(ftsQuery, {
     enabled:
-      enabled &&
+      searchBackedQueriesEnabled &&
       !hasUnresolvedOperator &&
       !waitingOnFromResolution &&
       ftsQuery.length >= minimumQueryLength,

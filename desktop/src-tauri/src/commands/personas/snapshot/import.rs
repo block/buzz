@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         agent_snapshot::{extract_chunk_payload_png, AgentSnapshot, MemoryLevel},
         agent_snapshot_envelope::{
@@ -552,7 +552,10 @@ pub async fn confirm_agent_snapshot_import(
 
         // Guard against duplicate pubkey (astronomically unlikely but safe).
         if records.iter().any(|r| r.pubkey == pubkey) {
-            return Err(format!("generated pubkey {pubkey} already exists — retry"));
+            return Err(format!(
+                "generated pubkey {} already exists — retry",
+                identity_npub_for_log_str(&pubkey)
+            ));
         }
 
         let now = now_iso();

@@ -26,6 +26,7 @@ use nostr::{Event, EventBuilder, Tag, Timestamp};
 use crate::client::BuzzClient;
 use crate::commands::parse_write_response;
 use crate::error::CliError;
+use crate::validate::{format_npub, normalize_pubkey, reject_secret_key_input};
 
 // ── Buzz repo-ID grammar (bare --repo shorthand) ─────────────────────────────
 
@@ -42,18 +43,52 @@ fn is_bare_repo_id(s: &str) -> bool {
 /// Expand a CLI `--repo` argument into a full `30617:<owner>:<d>` coordinate.
 ///
 /// Bare form (`[a-zA-Z0-9._-]{1,64}`): owner defaults to the caller's pubkey.
-/// Full form (`30617:<owner-hex>:<d>`): used verbatim.
+/// Full form (`30617:<owner-npub>:<d>`): normalized to protocol hex.
 fn expand_repo_coord(s: &str, caller_pubkey: &str) -> Result<ProjectMemberCoord, CliError> {
+    // A secret-shaped value can otherwise satisfy the bare repo-id grammar
+    // and be published as a d-tag. Reject it before selecting either form.
+    reject_secret_key_input(s)?;
     if is_bare_repo_id(s) {
         // Bare form: expand to full coordinate with caller as owner.
         let full = format!("30617:{caller_pubkey}:{s}");
         ProjectMemberCoord::parse_full(&full)
             .map_err(|e| CliError::Usage(format!("invalid repo coordinate: {e}")))
     } else {
-        // Full form: must be parseable as a complete coordinate.
-        ProjectMemberCoord::parse_full(s)
-            .map_err(|e| CliError::Usage(format!("invalid repo coordinate: {e}")))
+        // Full form: normalize the human-facing owner before crossing the
+        // NIP-33/NIP-34 protocol boundary. The repo d-tag may contain colons,
+        // so split only the first two separators.
+        let mut parts = s.splitn(3, ':');
+        let kind = parts.next();
+        let owner = parts.next();
+        let repo_d = parts.next();
+        if kind != Some("30617") || owner.is_none() || repo_d.is_none_or(str::is_empty) {
+            return Err(CliError::Usage(
+                "invalid repo coordinate; expected 30617:<npub>:<repo-d>".to_string(),
+            ));
+        }
+        let owner = owner.unwrap_or_default();
+        reject_secret_key_input(owner)?;
+        let owner_hex = normalize_pubkey(owner).map_err(|_| {
+            CliError::Usage("repo coordinate owner must be a valid npub".to_string())
+        })?;
+        let normalized = format!("30617:{owner_hex}:{}", repo_d.unwrap_or_default());
+        ProjectMemberCoord::parse_full(&normalized).map_err(|_| {
+            CliError::Usage("invalid repo coordinate; expected 30617:<npub>:<repo-d>".to_string())
+        })
     }
+}
+
+fn project_member_display(member: &ProjectMemberCoord) -> Result<String, CliError> {
+    let mut parts = member.coord.splitn(3, ':');
+    let kind = parts.next().unwrap_or_default();
+    let owner = parts.next().unwrap_or_default();
+    let repo_d = parts.next().unwrap_or_default();
+    if kind != "30617" || repo_d.is_empty() {
+        return Err(CliError::Other(
+            "project member has an invalid protocol coordinate".to_string(),
+        ));
+    }
+    Ok(format!("30617:{}:{repo_d}", format_npub(owner)?))
 }
 
 // ── Head-fetch helper ─────────────────────────────────────────────────────────
@@ -75,10 +110,7 @@ async fn fetch_project(
     owner: Option<&str>,
 ) -> Result<Option<Event>, CliError> {
     let pubkey = match owner {
-        Some(pk) => {
-            crate::validate::validate_hex64(pk)?;
-            pk.to_string()
-        }
+        Some(pk) => crate::validate::normalize_pubkey(pk)?,
         None => client.keys().public_key().to_hex(),
     };
     let filter = serde_json::json!({
@@ -126,11 +158,10 @@ async fn submit_project(
     let raw = client.submit_event(event).await?;
     let response = parse_write_response(&raw, "project changed concurrently; retry")?;
     match link_slug {
-        Some(slug) => crate::client::print_create_response(
-            &response,
-            "link",
-            &crate::links::project_link(&owner, slug),
-        ),
+        Some(slug) => {
+            let link = crate::links::project_link(&owner, slug)?;
+            crate::client::print_create_response(&response, "link", &link);
+        }
         None => println!("{response}"),
     }
     Ok(())
@@ -196,9 +227,9 @@ pub async fn cmd_create(
     let mut seen = std::collections::HashSet::new();
     for m in &members {
         if !seen.insert(m.coord.clone()) {
+            let member = project_member_display(m)?;
             return Err(CliError::Usage(format!(
-                "duplicate --repo coordinate in this invocation: {:?}",
-                m.coord
+                "duplicate --repo coordinate in this invocation: {member:?}"
             )));
         }
     }
@@ -241,19 +272,30 @@ pub async fn cmd_create(
 }
 
 /// `buzz projects get`
+fn project_output(event: &Event) -> Result<serde_json::Value, CliError> {
+    Ok(serde_json::json!({
+        "event_id": event.id.to_hex(),
+        "pubkey": format_npub(&event.pubkey.to_hex())?,
+        "created_at": event.created_at.as_secs(),
+        "kind": event.kind.as_u16(),
+        "tags": event.tags.iter().map(|t| t.as_slice().to_vec()).collect::<Vec<_>>(),
+        "content": event.content,
+    }))
+}
+
+fn project_owner_display(owner: Option<&str>) -> Result<String, CliError> {
+    match owner {
+        Some(owner) => format_npub(&crate::validate::normalize_pubkey(owner)?),
+        None => Ok("current identity".to_string()),
+    }
+}
+
 pub async fn cmd_get(client: &BuzzClient, slug: &str, owner: Option<&str>) -> Result<(), CliError> {
     validate_project_slug(slug)?;
     let resp = match fetch_project(client, slug, owner).await? {
-        Some(event) => serde_json::json!({
-            "event_id": event.id.to_hex(),
-            "pubkey": event.pubkey.to_hex(),
-            "created_at": event.created_at.as_secs(),
-            "kind": event.kind.as_u16(),
-            "tags": event.tags.iter().map(|t| t.as_slice().to_vec()).collect::<Vec<_>>(),
-            "content": event.content,
-        }),
+        Some(event) => project_output(&event)?,
         None => {
-            let owner_desc = owner.unwrap_or("current identity");
+            let owner_desc = project_owner_display(owner)?;
             return Err(CliError::NotFound(format!(
                 "project {slug:?} not found for {owner_desc}"
             )));
@@ -270,10 +312,7 @@ pub async fn cmd_list(
     limit: Option<u32>,
 ) -> Result<(), CliError> {
     let pubkey = match owner {
-        Some(pk) => {
-            crate::validate::validate_hex64(pk)?;
-            pk.to_string()
-        }
+        Some(pk) => crate::validate::normalize_pubkey(pk)?,
         None => client.keys().public_key().to_hex(),
     };
     let mut filter = serde_json::json!({
@@ -307,9 +346,9 @@ pub async fn cmd_add_repo(
     let mut seen = std::collections::HashSet::new();
     for m in &new_members {
         if !seen.insert(m.coord.clone()) {
+            let member = project_member_display(m)?;
             return Err(CliError::Usage(format!(
-                "duplicate --repo coordinate in this invocation: {:?}",
-                m.coord
+                "duplicate --repo coordinate in this invocation: {member:?}"
             )));
         }
     }
@@ -383,9 +422,9 @@ pub async fn cmd_remove_repo(
         .collect();
     for m in &to_remove {
         if !existing_coords.contains(m.coord.as_str()) {
+            let member = project_member_display(m)?;
             return Err(CliError::NotFound(format!(
-                "project {slug:?} does not contain member {:?}",
-                m.coord
+                "project {slug:?} does not contain member {member:?}"
             )));
         }
     }
@@ -649,13 +688,47 @@ mod tests {
 
     // ── Coordinate expansion ──────────────────────────────────────────────────
 
-    const OWNER_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const OWNER_B_HEX: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const OWNER_HEX: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
+    const OWNER_B_HEX: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
 
     #[test]
     fn expand_repo_coord_bare_expands_with_caller_pubkey() {
         let coord = expand_repo_coord("my-repo", OWNER_HEX).unwrap();
         assert_eq!(coord.coord, format!("30617:{OWNER_HEX}:my-repo"));
+    }
+
+    #[test]
+    fn project_output_emits_author_as_npub_without_changing_protocol_tags() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let coordinate = format!("30617:{hex}:repo");
+        let event = EventBuilder::new(nostr::Kind::Custom(KIND_PROJECT as u16), "")
+            .tags([
+                Tag::parse(["d", "project"]).unwrap(),
+                Tag::parse(["a", &coordinate]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let output = project_output(&event).expect("project output formats");
+        assert!(output["pubkey"].as_str().unwrap().starts_with("npub1"));
+        assert_ne!(output["pubkey"], hex);
+        assert_eq!(output["tags"][1][1], coordinate);
+        assert!(output["tags"].to_string().contains(&hex));
+    }
+
+    #[test]
+    fn project_owner_display_normalizes_legacy_hex_for_errors() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+
+        let displayed = project_owner_display(Some(&hex)).expect("legacy public key formats");
+        assert!(displayed.starts_with("npub1"));
+        assert!(!displayed.contains(&hex));
+        assert_eq!(
+            project_owner_display(None).expect("current identity sentinel formats"),
+            "current identity"
+        );
     }
 
     #[test]
@@ -674,9 +747,59 @@ mod tests {
     }
 
     #[test]
-    fn expand_repo_coord_rejects_uppercase_owner() {
-        let upper = "30617:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:buzz";
-        assert!(expand_repo_coord(upper, OWNER_HEX).is_err());
+    fn expand_repo_coord_accepts_npub_owner_and_normalizes_to_protocol_hex() {
+        let npub = format_npub(OWNER_HEX).expect("owner formats");
+        let coord = expand_repo_coord(&format!("30617:{npub}:buzz"), OWNER_B_HEX)
+            .expect("npub coordinate parses");
+        assert_eq!(coord.coord, format!("30617:{OWNER_HEX}:buzz"));
+    }
+
+    #[test]
+    fn expand_repo_coord_normalizes_legacy_uppercase_owner() {
+        let upper = OWNER_HEX.to_ascii_uppercase();
+        let coord = expand_repo_coord(&format!("30617:{upper}:buzz"), OWNER_B_HEX)
+            .expect("legacy uppercase owner parses");
+        assert_eq!(coord.coord, format!("30617:{OWNER_HEX}:buzz"));
+    }
+
+    #[test]
+    fn expand_repo_coord_rejects_secret_or_invalid_owner_without_echo() {
+        for owner in [
+            "nsec1secret-shaped-input",
+            "NSEC1SECRET-SHAPED-INPUT",
+            "not-a-public-key",
+        ] {
+            let supplied = format!("30617:{owner}:buzz");
+            let error = expand_repo_coord(&supplied, OWNER_B_HEX)
+                .expect_err("non-public owner must be rejected");
+            let message = error.to_string();
+            assert!(!message.contains(owner));
+            assert!(!message.contains(&supplied));
+        }
+    }
+
+    #[test]
+    fn expand_repo_coord_rejects_bare_secret_shape_without_echo() {
+        for supplied in [
+            "nsec1secretshapedrepo",
+            "NSEC1SECRETSHAPEDREPO",
+            "nostr:nsec1secretshapedrepo",
+            "NOSTR:NSEC1SECRETSHAPEDREPO",
+        ] {
+            let error = expand_repo_coord(supplied, OWNER_B_HEX)
+                .expect_err("secret-shaped bare repo must be rejected");
+            assert!(!error.to_string().contains(supplied));
+        }
+    }
+
+    #[test]
+    fn project_member_display_uses_npub_without_changing_internal_coordinate() {
+        let member = expand_repo_coord(&format!("30617:{OWNER_HEX}:buzz"), OWNER_B_HEX)
+            .expect("coordinate parses");
+        let display = project_member_display(&member).expect("coordinate displays");
+        assert!(display.contains("npub1"));
+        assert!(!display.contains(OWNER_HEX));
+        assert_eq!(member.coord, format!("30617:{OWNER_HEX}:buzz"));
     }
 
     #[test]
@@ -1212,11 +1335,13 @@ mod tests {
             matches!(err, CliError::Usage(_)),
             "expected CliError::Usage for duplicate repo, got {err:?}"
         );
-        // Error message must name the duplicate coordinate.
+        // Error message names the duplicate using its human-facing owner.
+        let message = err.to_string();
         assert!(
-            format!("{err}").contains("buzz"),
+            message.contains("buzz") && message.contains("npub1"),
             "Usage message must name the duplicate coordinate, got {err:?}"
         );
+        assert!(!message.contains(OWNER_HEX));
     }
 
     /// Supplying the same coordinate twice in one add-repo call must return Usage
@@ -1232,6 +1357,9 @@ mod tests {
             matches!(err, CliError::Usage(_)),
             "expected CliError::Usage for duplicate repo on add-repo, got {err:?}"
         );
+        let message = err.to_string();
+        assert!(message.contains("npub1"));
+        assert!(!message.contains(OWNER_HEX));
     }
 
     // ── create collision guard ────────────────────────────────────────────────

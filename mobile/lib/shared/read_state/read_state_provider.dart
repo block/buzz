@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../relay/relay.dart';
 import '../theme/theme_provider.dart';
 import '../community/community_provider.dart';
+import '../nostr/nostr_keys.dart';
 import 'read_state_manager.dart';
 
 class ReadStateState {
@@ -88,7 +89,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       nsec: nsec,
     );
     final pubkey =
-        _normalizePubkey(activeCommunity?.pubkey) ??
+        tryPublicKeyHexFromInput(activeCommunity?.npub, allowLegacyHex: true) ??
         _safeDerivedPubkey(signedRelay);
     if (pubkey == null) {
       return const ReadStateState.inert();

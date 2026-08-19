@@ -20,6 +20,7 @@ import {
 } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
+import { parsePubkeyInput, safeNpub } from "@/shared/lib/nostrUtils";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 const AgentsView = React.lazy(async () => {
@@ -48,7 +49,8 @@ export function AgentsScreen() {
   const profilePanelView = profilePanelViewFromSearch(values.profileView);
   const profilePanelTarget = React.useMemo<ProfilePanelTarget | null>(() => {
     if (values.profile) {
-      return { kind: "pubkey", pubkey: values.profile };
+      const pubkey = parsePubkeyInput(values.profile);
+      if (pubkey) return { kind: "pubkey", pubkey };
     }
 
     if (values.profilePersona) {
@@ -68,8 +70,10 @@ export function AgentsScreen() {
 
   const handleOpenProfilePanel = React.useCallback(
     (pubkey: string, options?: ProfilePanelOpenOptions) => {
+      const profile = safeNpub(pubkey);
+      if (!profile) return;
       applyPatch({
-        profile: pubkey,
+        profile,
         profilePersona: null,
         profileTab: options?.tab === "info" ? null : (options?.tab ?? null),
         profileView: null,

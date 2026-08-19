@@ -8,7 +8,9 @@ import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/nostr/nostr_keys.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/utils/string_utils.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channels_provider.dart';
@@ -28,10 +30,7 @@ class AddMembersException implements Exception {
   const AddMembersException(this.failures);
 
   String get message => failures.entries
-      .map(
-        (entry) =>
-            '${entry.key.length > 8 ? '${entry.key.substring(0, 8)}…' : entry.key}: ${entry.value}',
-      )
+      .map((entry) => '${shortPubkey(entry.key)}: ${entry.value}')
       .join('; ');
 
   @override
@@ -64,7 +63,7 @@ class ChannelMember {
     if (displayName case final name? when name.trim().isNotEmpty) {
       return name.trim();
     }
-    return pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
+    return shortPubkey(pubkey);
   }
 }
 
@@ -166,7 +165,7 @@ class DirectoryUser {
     if (nip05 != null && nip05.isNotEmpty) {
       return nip05;
     }
-    return pubkey.length > 8 ? '${pubkey.substring(0, 8)}…' : pubkey;
+    return shortPubkey(pubkey);
   }
 
   String get secondaryLabel {
@@ -174,7 +173,7 @@ class DirectoryUser {
     if (nip05 != null && nip05.isNotEmpty && nip05 != label) {
       return nip05;
     }
-    return pubkey.length > 16 ? '${pubkey.substring(0, 16)}…' : pubkey;
+    return shortPubkey(pubkey);
   }
 
   /// First visible character used when no avatar image is available.
@@ -255,10 +254,11 @@ final currentPubkeyProvider = Provider<String?>((ref) {
   }
 
   final authState = ref.watch(authProvider).whenData((value) => value).value;
-  final credentialPubkey = authState?.community?.pubkey?.trim();
-  if (credentialPubkey != null && credentialPubkey.isNotEmpty) {
-    return credentialPubkey.toLowerCase();
-  }
+  final credentialPubkey = tryPublicKeyHexFromInput(
+    authState?.community?.npub,
+    allowLegacyHex: true,
+  );
+  if (credentialPubkey != null) return credentialPubkey;
 
   return null;
 });
@@ -416,8 +416,14 @@ final relayDirectorySearchProvider = FutureProvider.autoDispose
       ref.watch(relayConfigProvider);
       final session = ref.watch(relaySessionProvider.notifier);
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
+      final exactPubkey = tryPublicKeyHexFromInput(
+        trimmed,
+        allowLegacyHex: true,
+      );
       final events = await session.queryRelay([
-        NostrFilters.searchUsers(trimmed, limit: 50),
+        exactPubkey == null
+            ? NostrFilters.searchUsers(trimmed, limit: 50)
+            : NostrFilters.profile(exactPubkey),
       ]);
       return directoryUsersFromProfileEvents(
         events,
@@ -810,8 +816,11 @@ class ChannelActions {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return const [];
 
+    final exactPubkey = tryPublicKeyHexFromInput(trimmed, allowLegacyHex: true);
     final events = await _session.queryRelay([
-      NostrFilters.searchUsers(trimmed, limit: limit),
+      exactPubkey == null
+          ? NostrFilters.searchUsers(trimmed, limit: limit)
+          : NostrFilters.profile(exactPubkey),
     ]);
     return directoryUsersFromProfileEvents(events)
         .where(

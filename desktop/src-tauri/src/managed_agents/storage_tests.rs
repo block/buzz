@@ -237,11 +237,13 @@ fn spawn_refused_when_private_key_empty() {
     // The spawn path MUST refuse a record left empty by an outage/absence
     // before injecting an empty BUZZ_PRIVATE_KEY / NOSTR_PRIVATE_KEY — never
     // launch an agent with no identity (Wes storage.rs:158).
-    let record = record_with_key("");
-    assert!(
-        super::spawn_key_refusal(&record).is_some(),
-        "an agent with no private key must be refused"
-    );
+    const PUBKEY_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let record = record_with_pubkey_and_key(PUBKEY_HEX, "");
+    let error =
+        super::spawn_key_refusal(&record).expect("an agent with no private key must be refused");
+    let expected_npub = buzz_core_pkg::nostr_identity::canonical_npub(PUBKEY_HEX).unwrap();
+    assert!(error.contains(&expected_npub));
+    assert!(!error.contains(PUBKEY_HEX));
 }
 
 #[test]

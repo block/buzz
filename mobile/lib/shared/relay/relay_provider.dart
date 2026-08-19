@@ -1,7 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community_provider.dart';
+import '../nostr/nostr_keys.dart';
 import 'relay_client.dart';
 
 /// Relay connection configuration.
@@ -98,20 +98,22 @@ final relayConfigProvider = NotifierProvider<RelayConfigNotifier, RelayConfig>(
 
 /// Derive the hex pubkey from a bech32 nsec, or null on any failure.
 String? pubkeyFromNsec(String? nsec) {
-  if (nsec == null || nsec.isEmpty) return null;
-  try {
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
-  } catch (_) {
-    return null;
-  }
+  return tryIdentityFromNsec(nsec)?.publicKeyHex;
 }
+
+/// Derive the canonical bech32 public identity from an nsec.
+String? npubFromNsec(String? nsec) => tryIdentityFromNsec(nsec)?.npub;
 
 /// The current user's hex pubkey, derived from the active community nsec.
 final myPubkeyProvider = Provider<String?>((ref) {
   final config = ref.watch(relayConfigProvider);
   return pubkeyFromNsec(config.nsec);
+});
+
+/// The current user's canonical bech32 public identity.
+final myNpubProvider = Provider<String?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  return npubFromNsec(config.nsec);
 });
 
 /// Provides a [RelayClient] that reacts to config changes.

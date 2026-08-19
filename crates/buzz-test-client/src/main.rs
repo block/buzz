@@ -27,6 +27,7 @@
 
 use std::time::Duration;
 
+use buzz_core::nostr_identity::{parse_secret_key_compat, public_key_to_npub};
 use buzz_test_client::{BuzzTestClient, RelayMessage};
 use nostr::{Filter, Keys};
 
@@ -48,10 +49,18 @@ async fn main() {
     let kind = opts.kind.unwrap_or(9);
 
     let keys = match std::env::var("BUZZ_PRIVATE_KEY") {
-        Ok(sk) => Keys::parse(&sk).expect("invalid BUZZ_PRIVATE_KEY"),
+        Ok(secret) => match parse_secret_key_compat(&secret) {
+            Ok((secret_key, _)) => Keys::new(secret_key),
+            Err(_) => {
+                eprintln!("invalid BUZZ_PRIVATE_KEY: expected an nsec");
+                std::process::exit(1);
+            }
+        },
         Err(_) => Keys::generate(),
     };
-    println!("Using pubkey: {}", keys.public_key());
+    let npub =
+        public_key_to_npub(&keys.public_key()).unwrap_or_else(|_| "<invalid-pubkey>".to_string());
+    println!("Using pubkey: {npub}");
 
     if opts.subscribe {
         run_subscribe(url, &keys, channel, kind).await;

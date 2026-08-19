@@ -9,6 +9,7 @@ import {
   WELCOME_CHANNEL_READY_EVENT,
 } from "@/features/onboarding/welcome";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 
 type HomeRouteSearch = {
   item?: string;
@@ -24,8 +25,8 @@ function validateHomeSearch(search: Record<string, unknown>): HomeRouteSearch {
         ? search.item
         : undefined,
     profile:
-      typeof search.profile === "string" && search.profile.length > 0
-        ? search.profile
+      typeof search.profile === "string"
+        ? (safeNpub(search.profile) ?? undefined)
         : undefined,
     profileTab:
       typeof search.profileTab === "string" && search.profileTab.length > 0

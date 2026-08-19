@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::{parse_uuid, sdk_err, validate_hex64};
+use crate::validate::{format_npub, normalize_pubkey, parse_uuid, sdk_err};
 
 /// List DM conversations by querying kind:41001 (relay-confirmed DMs) filtered by our pubkey.
 pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(), CliError> {
@@ -27,7 +27,10 @@ pub async fn cmd_list_dms(client: &BuzzClient, limit: Option<u32>) -> Result<(),
                         .filter_map(|tag| {
                             let arr = tag.as_array()?;
                             if arr.first()?.as_str()? == "p" {
-                                arr.get(1)?.as_str().map(|s| s.to_string())
+                                arr.get(1)?.as_str().map(|s| {
+                                    format_npub(s)
+                                        .unwrap_or_else(|_| "<invalid-pubkey>".to_string())
+                                })
                             } else {
                                 None
                             }
@@ -52,9 +55,10 @@ pub async fn cmd_open_dm(client: &BuzzClient, pubkeys: &[String]) -> Result<(), 
     if pubkeys.is_empty() || pubkeys.len() > 8 {
         return Err(CliError::Usage("--pubkey: must provide 1-8 pubkeys".into()));
     }
-    for pk in pubkeys {
-        validate_hex64(pk)?;
-    }
+    let pubkeys = pubkeys
+        .iter()
+        .map(|pubkey| normalize_pubkey(pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
     let dm_id = Uuid::new_v4().to_string();
     let refs: Vec<&str> = pubkeys.iter().map(String::as_str).collect();
 
@@ -115,9 +119,9 @@ pub async fn cmd_add_dm_member(
     pubkey: &str,
 ) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
 
-    let builder = buzz_sdk::build_dm_add_member(channel_uuid, pubkey).map_err(sdk_err)?;
+    let builder = buzz_sdk::build_dm_add_member(channel_uuid, &pubkey).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;

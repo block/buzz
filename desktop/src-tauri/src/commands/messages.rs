@@ -9,7 +9,7 @@ use forum::{
 pub use forum::{get_forum_posts, get_forum_thread};
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     events,
     managed_agents::{find_managed_agent_mut, load_managed_agents, ManagedAgentRecord},
     models::{
@@ -168,20 +168,29 @@ fn build_search_messages_filter(
     q: &str,
     cap: u32,
     channel_id: Option<&str>,
+    search_mode: Option<&str>,
     authors: Option<&[String]>,
     since: Option<i64>,
     until: Option<i64>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
+    let relay_search_mode = match search_mode.map(str::trim) {
+        None | Some("prefix") => "prefix",
+        Some("fullText") => "word",
+        Some(_) => return Err("unsupported search mode".to_string()),
+    };
     let mut filter = serde_json::Map::new();
     filter.insert(
         "kinds".to_string(),
         serde_json::json!([9, 40002, 45001, 45003]),
     );
     filter.insert("search".to_string(), serde_json::json!(q.trim()));
-    // The desktop topbar is a typeahead surface. This bridge-only extension is
-    // consumed before nostr::Filter parsing on the relay, so general WS/NIP-50
-    // search remains word/lexeme-based.
-    filter.insert("search_mode".to_string(), serde_json::json!("prefix"));
+    // This bridge-only extension is consumed before nostr::Filter parsing on
+    // the relay. Typeahead callers retain prefix matching while full-text
+    // discovery uses the relay's word/websearch semantics.
+    filter.insert(
+        "search_mode".to_string(),
+        serde_json::json!(relay_search_mode),
+    );
     filter.insert("limit".to_string(), serde_json::json!(cap));
     if let Some(cid) = channel_id {
         filter.insert("#h".to_string(), serde_json::json!([cid]));
@@ -205,7 +214,7 @@ fn build_search_messages_filter(
     if let Some(until) = until {
         filter.insert("until".to_string(), serde_json::json!(until));
     }
-    serde_json::Value::Object(filter)
+    Ok(serde_json::Value::Object(filter))
 }
 
 #[tauri::command]
@@ -213,6 +222,7 @@ pub async fn search_messages(
     q: String,
     limit: Option<u32>,
     channel_id: Option<String>,
+    search_mode: Option<String>,
     authors: Option<Vec<String>>,
     since: Option<i64>,
     until: Option<i64>,
@@ -223,10 +233,11 @@ pub async fn search_messages(
         &q,
         cap,
         channel_id.as_deref(),
+        search_mode.as_deref(),
         authors.as_deref(),
         since,
         until,
-    );
+    )?;
 
     let events = query_relay(&state, &[filter]).await?;
     Ok(nostr_convert::search_response_from_events(&events))
@@ -752,7 +763,7 @@ pub async fn send_managed_agent_channel_message(
     if key_pubkey != record.pubkey.to_ascii_lowercase() {
         return Err(format!(
             "managed agent key does not match stored pubkey {}",
-            record.pubkey
+            identity_npub_for_log_str(&record.pubkey)
         ));
     }
     let submission_auth_tag =

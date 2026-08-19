@@ -918,6 +918,157 @@ void main() {
         expect(state.errorMessage, contains('could not store'));
       });
     });
+
+    group('desktop credential import', () {
+      const sourceSecret =
+          '09b3065e3570a3a4054660dccd66e12774a99a904fdb0ca02dbc6c3136249506';
+      const sessionSecretHex =
+          'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+      final importedKeys = nostr.Keys(
+        '1111111111111111111111111111111111111111111111111111111111111111',
+      );
+      late _ControllableSocket socket;
+      late PairingNotifier notifier;
+      late String pairingCode;
+      late int validationCalls;
+
+      setUp(() {
+        final source = nostr.Keys(sourceSecret);
+        pairingCode =
+            'nostrpair://${source.public}'
+            '?secret=$sessionSecretHex'
+            '&relay=wss%3A%2F%2Fpairing.buzz.xyz&v=1';
+        validationCalls = 0;
+        fakeAuth = FakeAuthNotifier();
+        notifier = PairingNotifier(
+          socketFactory:
+              ({
+                required wsUrl,
+                required ephemeralPrivkey,
+                required onMessage,
+                required onDisconnected,
+              }) {
+                socket = _ControllableSocket(
+                  ephemeralPrivkey: ephemeralPrivkey,
+                  onMessage: onMessage,
+                  onDisconnected: onDisconnected,
+                );
+                return socket;
+              },
+          credentialValidator: ({required relayUrl, required nsec}) async {
+            validationCalls++;
+            expect(relayUrl, 'https://relay.test');
+            expect(nsec, importedKeys.nsec);
+          },
+        );
+        container = ProviderContainer(
+          overrides: [
+            pairingProvider.overrideWith(() => notifier),
+            authProvider.overrideWith(() => fakeAuth),
+          ],
+        );
+        container.read(pairingProvider);
+        notifier = container.read(pairingProvider.notifier);
+      });
+
+      Future<void> confirmPairing() async {
+        await notifier.pair(pairingCode);
+        // This group exercises credential canonicalization, not biometric
+        // enrollment. Upstream now defaults imported identities to protected,
+        // so explicitly use the unprotected path before confirming SAS.
+        notifier.setProtectSensitiveActions(false);
+        notifier.confirmSas();
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {'type': 'sas-confirm'},
+          includeTranscriptHash: true,
+        );
+        expect(
+          container.read(pairingProvider).status,
+          PairingStatus.transferring,
+        );
+      }
+
+      Future<void> sendCredentials(Map<String, dynamic> credentials) async {
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {
+            'type': 'payload',
+            'payload_type': 'custom',
+            'payload': jsonEncode(credentials),
+          },
+        );
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      test('stores a matching legacy hex claim as canonical npub', () async {
+        await confirmPairing();
+        await sendCredentials({
+          'relayUrl': 'https://relay.test',
+          'pubkey': importedKeys.public,
+          'nsec': importedKeys.nsec,
+        });
+
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(validationCalls, 1);
+        expect(fakeAuth.lastCommunity?.npub, importedKeys.npub);
+        expect(fakeAuth.lastCommunity?.nsec, importedKeys.nsec);
+      });
+
+      test('accepts a matching npub claim', () async {
+        await confirmPairing();
+        await sendCredentials({
+          'relayUrl': 'https://relay.test',
+          'npub': importedKeys.npub,
+          'nsec': importedKeys.nsec,
+        });
+
+        expect(container.read(pairingProvider).status, PairingStatus.success);
+        expect(validationCalls, 1);
+        expect(fakeAuth.lastCommunity?.npub, importedKeys.npub);
+      });
+
+      test('rejects a claimed identity that does not match nsec', () async {
+        await confirmPairing();
+        final attacker = nostr.Keys(
+          '2222222222222222222222222222222222222222222222222222222222222222',
+        );
+        await sendCredentials({
+          'relayUrl': 'https://relay.test',
+          'npub': attacker.npub,
+          'nsec': importedKeys.nsec,
+        });
+
+        final state = container.read(pairingProvider);
+        expect(state.status, PairingStatus.error);
+        expect(state.errorMessage, contains('Failed to import credentials'));
+        expect(validationCalls, 0);
+        expect(fakeAuth.lastCommunity, isNull);
+      });
+
+      test('malformed custom payload never echoes an nsec', () async {
+        await confirmPairing();
+        socket.sendSourceMessage(
+          sourceSecret: sourceSecret,
+          sessionSecretHex: sessionSecretHex,
+          message: {
+            'type': 'payload',
+            'payload_type': 'custom',
+            'payload': '{"nsec":"${importedKeys.nsec}",',
+          },
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        final state = container.read(pairingProvider);
+        expect(state.status, PairingStatus.error);
+        expect(state.errorMessage, contains('Failed to import credentials'));
+        expect(state.errorMessage, isNot(contains(importedKeys.nsec)));
+        expect(validationCalls, 0);
+        expect(fakeAuth.lastCommunity, isNull);
+      });
+    });
   });
 }
 

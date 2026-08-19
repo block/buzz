@@ -5,7 +5,7 @@
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         agent_events::ManagedAgentEventContent, load_personas, persona_events::persona_d_tag,
         save_personas, team_events::TeamEventContent, try_regenerate_nest, AgentDefinition,
@@ -276,7 +276,12 @@ fn reconcile_inbound_persona_event_blocking(
                 let record = agents
                     .iter_mut()
                     .find(|record| record.pubkey == d_tag)
-                    .ok_or_else(|| format!("agent {d_tag} disappeared during inbound apply"))?;
+                    .ok_or_else(|| {
+                        format!(
+                            "agent {} disappeared during inbound apply",
+                            identity_npub_for_log_str(&d_tag)
+                        )
+                    })?;
                 match &record.backend {
                     crate::managed_agents::BackendKind::Local => {
                         let mut runtimes = state

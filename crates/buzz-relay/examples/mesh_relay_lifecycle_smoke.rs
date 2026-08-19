@@ -58,6 +58,7 @@ use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use buzz_core::nostr_identity::{public_key_to_npub, secret_key_to_nsec};
 use buzz_test_client::BuzzTestClient;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use mesh_llm_host_runtime::crypto::{load_keystore, save_keystore, OwnerKeypair};
@@ -708,14 +709,12 @@ fn orchestrate() -> anyhow::Result<()> {
     // MEMBERSHIP: A and B become relay members via buzz-admin (publishes the
     // kind:13534 roster snapshot). C is deliberately not added.
     for (label, keys) in [("A", &member_a), ("B", &member_b)] {
+        let npub = public_key_to_npub(&keys.public_key())?;
         let status = Command::new(&admin)
-            .args(["add-member", "--pubkey", &keys.public_key().to_hex()])
+            .args(["add-member", "--pubkey", &npub])
             .status()?;
         anyhow::ensure!(status.success(), "buzz-admin add-member {label} failed");
-        eprintln!(
-            "[lifecycle] member {label} added: {}",
-            keys.public_key().to_hex()
-        );
+        eprintln!("[lifecycle] member {label} added: {npub}");
     }
 
     // Isolated HOMEs (mesh-llm keeps node identity under ~/.mesh-llm), with
@@ -733,14 +732,14 @@ fn orchestrate() -> anyhow::Result<()> {
     };
 
     let exe = std::env::current_exe()?;
-    let secret_hex = |keys: &Keys| format!("{}", keys.secret_key().display_secret());
+    let secret_nsec = |keys: &Keys| secret_key_to_nsec(keys.secret_key());
 
     // SERVE child (member A).
     eprintln!("[lifecycle] starting SERVE member (relay-derived allowlist)...");
     let mut serve_child = Command::new(&exe)
         .env("MESH_ROLE", "serve")
         .env("MESH_SMOKE_MODEL", &model)
-        .env("BUZZ_MEMBER_NSEC", secret_hex(&member_a))
+        .env("BUZZ_MEMBER_NSEC", secret_nsec(&member_a)?)
         .env("MESH_OWNER_KEY", &serve_key)
         .env("MESH_EXPECTED_OWNERS", &expected_owners)
         .env("HOME", role_home("serve")?)
@@ -765,7 +764,7 @@ fn orchestrate() -> anyhow::Result<()> {
     eprintln!("[lifecycle] starting CLIENT member (relay-driven join)...");
     let mut client_child = Command::new(&exe)
         .env("MESH_ROLE", "client")
-        .env("BUZZ_MEMBER_NSEC", secret_hex(&member_b))
+        .env("BUZZ_MEMBER_NSEC", secret_nsec(&member_b)?)
         .env("MESH_OWNER_KEY", &client_key)
         .env("HOME", role_home("client")?)
         .env("MESH_LLM_NATIVE_RUNTIME_CACHE_DIR", &native_cache)
@@ -821,7 +820,7 @@ fn orchestrate() -> anyhow::Result<()> {
     eprintln!("[lifecycle] starting STRANGER (non-member, leaked endpoint)...");
     let mut stranger_child = Command::new(&exe)
         .env("MESH_ROLE", "stranger")
-        .env("BUZZ_MEMBER_NSEC", secret_hex(&stranger))
+        .env("BUZZ_MEMBER_NSEC", secret_nsec(&stranger)?)
         .env("MESH_OWNER_KEY", &stranger_key)
         .env("MESH_LEAKED_ENDPOINT", &endpoint)
         .env("HOME", role_home("stranger")?)

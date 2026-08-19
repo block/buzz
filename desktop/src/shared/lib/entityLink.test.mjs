@@ -22,6 +22,7 @@ const GOLDEN = JSON.parse(
   ),
 );
 const OWNER = GOLDEN.owner;
+const OWNER_NPUB = GOLDEN.ownerNpub;
 const EVENT_ID = GOLDEN.eventId;
 
 // This fixture is also consumed by buzz-cli and the Tauri deep-link validator.
@@ -102,7 +103,7 @@ test("commit links select an exact repository commit", () => {
   });
   assert.equal(
     link,
-    `buzz://repo?owner=${OWNER}&d=buzz-world&tab=commits&commit=${EVENT_ID}`,
+    `buzz://repo?owner=${OWNER_NPUB}&d=buzz-world&tab=commits&commit=${EVENT_ID}`,
   );
   assert.deepEqual(parseEntityLink(link), {
     ok: true,
@@ -129,6 +130,13 @@ test("parseEntityLink lowercase-normalizes hex identifiers", () => {
   assert.deepEqual(parsed, {
     ok: true,
     value: { type: "issue", id: EVENT_ID, owner: OWNER, dtag: "buzz-world" },
+  });
+});
+
+test("parseEntityLink accepts legacy hex-owner links", () => {
+  assert.deepEqual(parseEntityLink(`buzz://repo?owner=${OWNER}&d=buzz-world`), {
+    ok: true,
+    value: { type: "repo", owner: OWNER, dtag: "buzz-world" },
   });
 });
 
@@ -186,7 +194,7 @@ test("coordinate links carry an optional workspace tab", () => {
     dtag: "buzz-world",
     tab: "prs",
   });
-  assert.equal(link, `buzz://project?owner=${OWNER}&d=buzz-world&tab=prs`);
+  assert.equal(link, `buzz://project?owner=${OWNER_NPUB}&d=buzz-world&tab=prs`);
   assert.deepEqual(parseEntityLink(link), {
     ok: true,
     value: { type: "project", owner: OWNER, dtag: "buzz-world", tab: "prs" },
@@ -225,6 +233,7 @@ test("coordinate links carry an optional workspace tab", () => {
 
 test("isLinkableCoordinate gates coordinates the link format cannot express", () => {
   assert.equal(isLinkableCoordinate(OWNER, "buzz-world"), true);
+  assert.equal(isLinkableCoordinate(OWNER_NPUB, "buzz-world"), true);
   assert.equal(isLinkableCoordinate(OWNER, "a".repeat(64)), true);
   // Addressable d-tags allow far more than the link charset does.
   assert.equal(isLinkableCoordinate(OWNER, "a".repeat(65)), false);

@@ -5,6 +5,7 @@ import type {
   AgentSnapshotImportPreview,
   AgentSnapshotImportResult,
 } from "@/features/agents/hooks";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -35,6 +36,28 @@ type AgentSnapshotImportDialogProps = {
   onConfirm: (keepAllowlist: boolean) => void;
   onOpenChange: (open: boolean) => void;
 };
+
+function manifestForDisplay(manifestJson: string): string {
+  try {
+    const manifest = JSON.parse(manifestJson) as {
+      definition?: { respondToAllowlist?: unknown };
+    };
+    const allowlist = manifest.definition?.respondToAllowlist;
+    if (Array.isArray(allowlist)) {
+      manifest.definition = {
+        ...manifest.definition,
+        respondToAllowlist: allowlist.map((value) =>
+          typeof value === "string"
+            ? (safeNpub(value) ?? "Invalid public key")
+            : "Invalid public key",
+        ),
+      };
+    }
+    return JSON.stringify(manifest, null, 2);
+  } catch {
+    return "Unable to display snapshot manifest.";
+  }
+}
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -250,7 +273,7 @@ export function PreviewBody({
           >
             {preview.sourceAllowlist.map((pubkey) => (
               <li className="break-all" key={pubkey}>
-                {pubkey}
+                {safeNpub(pubkey) ?? "Invalid public key"}
               </li>
             ))}
           </ul>
@@ -295,7 +318,7 @@ export function PreviewBody({
           credentials, and source identity are not part of the snapshot format.
         </p>
         <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/60 p-3 text-xs">
-          {preview.manifestJson}
+          {manifestForDisplay(preview.manifestJson)}
         </pre>
       </details>
     </div>

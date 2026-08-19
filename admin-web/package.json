@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^6.0.0",
+    "nostr-tools": "^2.23.3",
     "vite": "^8.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

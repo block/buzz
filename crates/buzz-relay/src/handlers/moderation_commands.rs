@@ -62,6 +62,7 @@ use buzz_core::kind::{
     KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
     KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
 };
+use buzz_core::nostr_identity::public_key_bytes_to_npub_or_invalid;
 use buzz_core::tenant::TenantContext;
 use chrono::{DateTime, TimeZone, Utc};
 use nostr::Event;
@@ -218,7 +219,7 @@ async fn handle_ban(
         info!(error = %e, "ban notice DM delivery failed (ban still enforced)");
     }
 
-    info!(target = %hex::encode(&target), "community ban applied");
+    info!(target = %public_key_bytes_to_npub_or_invalid(&target), "community ban applied");
     Ok(())
 }
 
@@ -254,7 +255,7 @@ async fn handle_unban(
 
     insert_audit(state, tenant, actor, "unban", Some(&target), None, None).await?;
 
-    info!(target = %hex::encode(&target), "community ban lifted");
+    info!(target = %public_key_bytes_to_npub_or_invalid(&target), "community ban lifted");
     Ok(())
 }
 
@@ -321,7 +322,7 @@ async fn handle_timeout(
         info!(error = %e, "timeout notice DM delivery failed (timeout still enforced)");
     }
 
-    info!(target = %hex::encode(&target), "community timeout applied");
+    info!(target = %public_key_bytes_to_npub_or_invalid(&target), "community timeout applied");
     Ok(())
 }
 
@@ -357,7 +358,7 @@ async fn handle_untimeout(
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
 
-    info!(target = %hex::encode(&target), "community timeout cleared");
+    info!(target = %public_key_bytes_to_npub_or_invalid(&target), "community timeout cleared");
     Ok(())
 }
 

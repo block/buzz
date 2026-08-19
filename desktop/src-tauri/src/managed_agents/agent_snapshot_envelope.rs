@@ -22,6 +22,7 @@
 //!   partial plaintext or crypto details.
 
 use buzz_core_pkg::engram::NIP44_PLAINTEXT_MAX;
+use buzz_core_pkg::nostr_identity::{parse_public_key_compat, public_key_to_npub};
 use nostr::nips::nip44::{self, Version};
 use nostr::{Keys, PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
@@ -72,10 +73,12 @@ pub struct LockedSnapshotEnvelope {
 pub struct LockedEncryption {
     /// Always [`LOCKED_SCHEME`].
     pub scheme: String,
-    /// Owner identity pubkey (64 lowercase hex). Plaintext so a decryptor
-    /// knows which counterparty to pair with.
+    /// Owner identity pubkey (canonical npub). Plaintext so a decryptor knows
+    /// which counterparty to pair with. Version 1 readers also accept the
+    /// legacy 64-character lowercase hex encoding.
     pub owner_pubkey: String,
-    /// Agent instance pubkey (64 lowercase hex).
+    /// Agent instance pubkey (canonical npub). Version 1 readers also accept
+    /// the legacy 64-character lowercase hex encoding.
     pub agent_pubkey: String,
     /// NIP-44 v2 ciphertext (base64) of the plain manifest JSON.
     pub ciphertext: String,
@@ -100,24 +103,38 @@ struct FormatProbe {
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-/// Canonical pubkey check: exactly 64 lowercase hex chars that parse as a
-/// valid x-only pubkey. Lowercase is required so string comparisons against
-/// record pubkeys (always `to_hex()` output) stay sound. Curve validation is
-/// explicit: nostr's `PublicKey::from_hex` only decodes 32 bytes and defers
-/// lift-x validation to `xonly()`, so a non-point like `"f" * 64` would
-/// otherwise pass structurally and fail only at decrypt time.
+/// Parse a canonical npub or the legacy v1 lowercase-hex representation as a
+/// valid x-only pubkey. Curve validation is explicit: nostr's hex parser only
+/// decodes 32 bytes and defers lift-x validation to `xonly()`, so a non-point
+/// like `"f" * 64` would otherwise pass structurally and fail only at decrypt
+/// time.
 pub(crate) fn parse_canonical_pubkey(field: &str, value: &str) -> Result<PublicKey, String> {
-    if value.len() != 64
-        || !value
+    let is_canonical_npub = value.starts_with("npub1") && value == value.to_ascii_lowercase();
+    let is_legacy_hex = value.len() == 64
+        && value
             .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-    {
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+    if !is_canonical_npub && !is_legacy_hex {
         return Err(format!(
-            "Locked card envelope has a malformed {field} (expected 64 lowercase hex chars)."
+            "Locked card envelope has a malformed {field} (expected a canonical npub or legacy 64-character lowercase hex key)."
         ));
     }
-    let pubkey = PublicKey::from_hex(value)
-        .map_err(|_| format!("Locked card envelope has an invalid {field}."))?;
+    let (pubkey, _) = parse_public_key_compat(value).map_err(|_| {
+        if is_legacy_hex {
+            format!("Locked card envelope has an invalid {field} (not a curve point).")
+        } else {
+            format!("Locked card envelope has an invalid {field}.")
+        }
+    })?;
+    if is_canonical_npub
+        && public_key_to_npub(&pubkey)
+            .map_err(|_| format!("Locked card envelope has an invalid {field}."))?
+            != value
+    {
+        return Err(format!(
+            "Locked card envelope has a malformed {field} (npub is not canonical)."
+        ));
+    }
     pubkey
         .xonly()
         .map_err(|_| format!("Locked card envelope has an invalid {field} (not a curve point)."))?;
@@ -185,9 +202,15 @@ pub fn parse_chunk_payload(json_bytes: &[u8]) -> Result<ChunkPayload, String> {
             if json_bytes.len() > MAX_LOCKED_ENVELOPE_JSON_BYTES {
                 return Err("Locked card envelope exceeds the maximum size.".to_string());
             }
-            let envelope: LockedSnapshotEnvelope = serde_json::from_slice(json_bytes)
+            let mut envelope: LockedSnapshotEnvelope = serde_json::from_slice(json_bytes)
                 .map_err(|e| format!("Invalid locked card envelope: {e}"))?;
-            validate_envelope(&envelope)?;
+            let (owner, agent) = validate_envelope(&envelope)?;
+            // Read legacy v1 hex endpoints, but never let a successfully
+            // imported portable envelope escape or reserialize in hex.
+            envelope.encryption.owner_pubkey = public_key_to_npub(&owner)
+                .map_err(|_| "Locked card envelope has an invalid ownerPubkey.".to_string())?;
+            envelope.encryption.agent_pubkey = public_key_to_npub(&agent)
+                .map_err(|_| "Locked card envelope has an invalid agentPubkey.".to_string())?;
             Ok(ChunkPayload::Locked(envelope))
         }
         Some(other) => Err(format!("Unsupported snapshot format: {other:?}")),
@@ -226,13 +249,18 @@ pub fn encrypt_snapshot_envelope(
     )
     .map_err(|e| format!("Failed to encrypt card manifest: {e}"))?;
 
+    let owner_npub = public_key_to_npub(&owner_keys.public_key())
+        .map_err(|e| format!("Failed to encode owner npub: {e}"))?;
+    let agent_npub = public_key_to_npub(agent_pubkey)
+        .map_err(|e| format!("Failed to encode agent npub: {e}"))?;
+
     Ok(LockedSnapshotEnvelope {
         format: LOCKED_FORMAT.to_string(),
         version: LOCKED_VERSION,
         encryption: LockedEncryption {
             scheme: LOCKED_SCHEME.to_string(),
-            owner_pubkey: owner_keys.public_key().to_hex(),
-            agent_pubkey: agent_pubkey.to_hex(),
+            owner_pubkey: owner_npub,
+            agent_pubkey: agent_npub,
             ciphertext,
         },
     })
@@ -273,16 +301,17 @@ pub fn resolve_unlock_secret(
     owner_keys: Option<&Keys>,
     records: &[ManagedAgentRecord],
 ) -> Option<SecretKey> {
+    let (owner_pubkey, agent_pubkey) = validate_envelope(envelope).ok()?;
     if let Some(keys) = owner_keys {
-        if keys.public_key().to_hex() == envelope.encryption.owner_pubkey {
+        if keys.public_key() == owner_pubkey {
             return Some(keys.secret_key().clone());
         }
     }
-    let record = records
-        .iter()
-        .find(|r| r.pubkey == envelope.encryption.agent_pubkey)?;
+    let record = records.iter().find(|record| {
+        PublicKey::from_hex(&record.pubkey).is_ok_and(|record_pubkey| record_pubkey == agent_pubkey)
+    })?;
     let agent_keys = Keys::parse(record.private_key_nsec.trim()).ok()?;
-    if agent_keys.public_key().to_hex() != envelope.encryption.agent_pubkey {
+    if agent_keys.public_key() != agent_pubkey {
         return None;
     }
     Some(agent_keys.secret_key().clone())
@@ -446,6 +475,52 @@ mod tests {
     }
 
     #[test]
+    fn envelope_export_uses_npub_endpoints_without_hex_keys() {
+        let (env, owner, agent) = locked_envelope();
+        let json = serde_json::to_string(&env).unwrap();
+
+        assert!(env.encryption.owner_pubkey.starts_with("npub1"));
+        assert!(env.encryption.agent_pubkey.starts_with("npub1"));
+        assert!(!json.contains(&owner.public_key().to_hex()));
+        assert!(!json.contains(&agent.public_key().to_hex()));
+    }
+
+    #[test]
+    fn legacy_v1_hex_endpoints_still_validate_and_decrypt() {
+        let (mut env, owner, agent) = locked_envelope();
+        env.encryption.owner_pubkey = owner.public_key().to_hex();
+        env.encryption.agent_pubkey = agent.public_key().to_hex();
+
+        assert_eq!(
+            validate_envelope(&env).unwrap(),
+            (owner.public_key(), agent.public_key())
+        );
+        assert_eq!(
+            decrypt_envelope(&env, owner.secret_key()).unwrap(),
+            sample_snapshot()
+        );
+    }
+
+    #[test]
+    fn legacy_v1_hex_endpoints_normalize_when_parsed_for_reexport() {
+        let (mut env, owner, agent) = locked_envelope();
+        let owner_hex = owner.public_key().to_hex();
+        let agent_hex = agent.public_key().to_hex();
+        env.encryption.owner_pubkey = owner_hex.clone();
+        env.encryption.agent_pubkey = agent_hex.clone();
+
+        let bytes = serde_json::to_vec(&env).unwrap();
+        let ChunkPayload::Locked(parsed) = parse_chunk_payload(&bytes).unwrap() else {
+            panic!("expected locked envelope");
+        };
+        let reexported = serde_json::to_string(&parsed).unwrap();
+        assert!(parsed.encryption.owner_pubkey.starts_with("npub1"));
+        assert!(parsed.encryption.agent_pubkey.starts_with("npub1"));
+        assert!(!reexported.contains(&owner_hex));
+        assert!(!reexported.contains(&agent_hex));
+    }
+
+    #[test]
     fn unrelated_key_fails_closed_with_refusal_only() {
         let (env, _owner, _agent) = locked_envelope();
         let stranger = Keys::generate();
@@ -489,7 +564,9 @@ mod tests {
         // derive the wrong conversation key — the NIP-44 MAC fails and only
         // the refusal surfaces.
         let (mut env, owner, _agent) = locked_envelope();
-        env.encryption.agent_pubkey = Keys::generate().public_key().to_hex();
+        env.encryption.agent_pubkey =
+            buzz_core_pkg::nostr_identity::public_key_to_npub(&Keys::generate().public_key())
+                .unwrap();
         let err = decrypt_envelope(&env, owner.secret_key()).unwrap_err();
         assert_eq!(err, LOCKED_CARD_REFUSAL);
     }

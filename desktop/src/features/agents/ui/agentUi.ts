@@ -25,7 +25,11 @@ export function describeResolvedCommand(command: string, resolvedPath: string) {
   return "installed on PATH";
 }
 
-export function describeLogFile(path: string) {
+export function describeLogFile(path: string, displayLabel?: string) {
+  if (displayLabel?.trim()) {
+    return displayLabel.trim();
+  }
+
   const normalized = path.replace(/\\/g, "/");
   const basename = normalized.split("/").pop() ?? path;
 

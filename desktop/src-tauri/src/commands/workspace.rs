@@ -1,4 +1,4 @@
-use nostr::Keys;
+use nostr::{Keys, ToBech32};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -111,7 +111,10 @@ pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspac
     let relay_url = relay::relay_ws_url_with_override(&state);
     Ok(ActiveWorkspaceInfo {
         relay_url,
-        pubkey: keys.public_key().to_hex(),
+        pubkey: keys
+            .public_key()
+            .to_bech32()
+            .map_err(|error| format!("encode workspace npub: {error}"))?,
     })
 }
 
@@ -180,7 +183,15 @@ pub async fn apply_workspace(
         // ── Validate before mutating ──────────────────────────────────────────
         let parsed_keys = match nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(nsec_trimmed) => {
-                Some(Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?)
+                let (secret_key, encoding) =
+                    buzz_core_pkg::nostr_identity::parse_secret_key_compat(nsec_trimmed)
+                        .map_err(|_| "invalid workspace identity; expected a canonical nsec")?;
+                if encoding == buzz_core_pkg::nostr_identity::KeyInputEncoding::LegacyHex {
+                    eprintln!(
+                        "buzz-desktop: workspace identity uses legacy secret hex; store the canonical nsec form"
+                    );
+                }
+                Some(Keys::new(secret_key))
             }
             None => None,
         };

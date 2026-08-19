@@ -12,6 +12,7 @@ import {
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
 import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 function message(overrides) {
   return {
@@ -607,6 +608,8 @@ test("buildThreadPanelDataFromIndex matches direct panel data", () => {
 
 test("buildMainTimelineEntries renders a relay-only thread summary", () => {
   const root = message({ id: "root", createdAt: 1 });
+  const alice = "ab".repeat(32);
+  const bob = "cd".repeat(32);
   const summaries = new Map([
     [
       "root",
@@ -614,11 +617,13 @@ test("buildMainTimelineEntries renders a relay-only thread summary", () => {
         replyCount: 2,
         descendantCount: 4,
         lastReplyAt: 9,
-        participantPubkeys: ["alice", "bob"],
+        participantPubkeys: [alice, bob],
       },
     ],
   ]);
-  const profiles = { alice: { displayName: "Alice", avatarUrl: "alice.png" } };
+  const profiles = {
+    [alice]: { displayName: "Alice", avatarUrl: "alice.png" },
+  };
 
   const [entry] = buildMainTimelineEntries(
     [root],
@@ -634,8 +639,8 @@ test("buildMainTimelineEntries renders a relay-only thread summary", () => {
     // Relay returns participants most-recent-first (["alice", "bob"]); the
     // facepile renders them oldest-first so the last replier lands rightmost.
     participants: [
-      { id: "bob", author: "bob", avatarUrl: null },
-      { id: "alice", author: "Alice", avatarUrl: "alice.png" },
+      { id: bob, author: truncatePubkey(bob), avatarUrl: null },
+      { id: alice, author: "Alice", avatarUrl: "alice.png" },
     ],
   });
 });

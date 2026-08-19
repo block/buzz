@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../crypto/nip44.dart';
 import '../relay/relay.dart';
+import '../utils/string_utils.dart';
 import 'read_state_format.dart';
 import 'read_state_storage.dart';
 import 'read_state_time.dart';
@@ -95,7 +96,7 @@ class ReadStateManager {
     if (_initialized || _disposed) return;
     _initialized = true;
     debugPrint(
-      '[ReadStateManager] initialize pubkey=${pubkey.substring(0, 8)}… clientId=${_clientId.substring(0, 8)}… slotId=$_slotId',
+      '[ReadStateManager] initialize identity=${shortPubkey(pubkey)} clientId=${_clientId.substring(0, 8)}… slotId=$_slotId',
     );
 
     if (!_remoteEnabled || _relaySession == null) {

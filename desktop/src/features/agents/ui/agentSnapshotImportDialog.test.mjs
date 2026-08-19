@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { npubEncode } from "nostr-tools/nip19";
 
 // Source-path tests for AgentSnapshotImportDialog ResultBody rendering.
 //
@@ -10,6 +11,12 @@ import test from "node:test";
 // correct data-testid. No DOM or test renderer is needed.
 
 import { PreviewBody, ResultBody } from "./AgentSnapshotImportDialog.tsx";
+
+const SOURCE_ALLOWLIST = [
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+];
+const SOURCE_ALLOWLIST_NPUBS = SOURCE_ALLOWLIST.map(npubEncode);
 
 /**
  * Walk a React element tree (breadth-first) and collect all elements that
@@ -80,8 +87,13 @@ function makePreview(overrides = {}) {
     memoryEntryCount: 0,
     hasSourceAllowlist: true,
     sourceAllowlistCount: 2,
-    sourceAllowlist: ["a".repeat(64), "b".repeat(64)],
-    manifestJson: '{\n  "format": "buzz-agent-snapshot"\n}',
+    sourceAllowlist: SOURCE_ALLOWLIST,
+    manifestJson: JSON.stringify({
+      format: "buzz-agent-snapshot",
+      definition: {
+        respondToAllowlist: SOURCE_ALLOWLIST,
+      },
+    }),
     locked: false,
     ...overrides,
   };
@@ -101,10 +113,17 @@ test("preview_body_discloses_prompt_allowlist_and_full_manifest", () => {
   const allText = collectText(element).join(" ");
 
   assert.ok(allText.includes(preview.systemPrompt));
-  for (const pubkey of preview.sourceAllowlist) {
-    assert.ok(allText.includes(pubkey), `missing allowlist pubkey ${pubkey}`);
+  for (const npub of SOURCE_ALLOWLIST_NPUBS) {
+    assert.ok(allText.includes(npub), `missing allowlist npub ${npub}`);
   }
-  assert.ok(allText.includes(preview.manifestJson));
+  for (const legacyHex of preview.sourceAllowlist) {
+    assert.equal(
+      allText.includes(legacyHex),
+      false,
+      `leaked legacy hex pubkey ${legacyHex}`,
+    );
+  }
+  assert.ok(allText.includes('"format": "buzz-agent-snapshot"'));
   assert.equal(
     findAll(
       element,

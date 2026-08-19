@@ -754,7 +754,7 @@ export function UserProfilePanel({
   const managedAgentLogContent = managedAgentLogQuery.data?.content ?? null;
   const logHeaderSubtitle =
     isDiagnosticsLikeView && managedAgent
-      ? `${managedAgent.name} · ${describeLogFile(managedAgent.logPath)}`
+      ? `${managedAgent.name} · ${describeLogFile(managedAgent.logPath, managedAgent.logDisplayLabel)}`
       : null;
   const { headerActions, headerLeftContent } = getUserProfilePanelHeaderContent(
     {

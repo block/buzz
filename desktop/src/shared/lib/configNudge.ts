@@ -68,7 +68,7 @@ export type ConfigNudgeRequirement =
  */
 export type ConfigNudgePayload = {
   agent_name: string;
-  /** Hex-encoded agent pubkey. Used by the desktop card action to open Edit Agent. */
+  /** Canonical npub. Used by the desktop card action to open Edit Agent. */
   agent_pubkey: string;
   requirements: ConfigNudgeRequirement[];
 };

@@ -16,6 +16,7 @@ fn entity_link_golden() -> serde_json::Value {
 fn parse_entity_deep_link_accepts_every_share_link_shape() {
     let golden = entity_link_golden();
     let owner = golden["owner"].as_str().unwrap();
+    let owner_npub = golden["ownerNpub"].as_str().unwrap();
     let dtag = golden["dtag"].as_str().unwrap();
     for raw in golden["links"]
         .as_object()
@@ -24,10 +25,13 @@ fn parse_entity_deep_link_accepts_every_share_link_shape() {
         .map(|value| value.as_str().unwrap().to_owned())
         .chain(golden["tabs"].as_array().unwrap().iter().map(|tab| {
             format!(
-                "buzz://repo?owner={owner}&d={dtag}&tab={}",
+                "buzz://repo?owner={owner_npub}&d={dtag}&tab={}",
                 tab.as_str().unwrap()
             )
         }))
+        .chain(std::iter::once(format!(
+            "buzz://repo?owner={owner}&d={dtag}"
+        )))
     {
         assert!(
             parse_entity_deep_link(&Url::parse(&raw).unwrap()).is_some(),

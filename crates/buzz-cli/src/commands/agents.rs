@@ -6,7 +6,7 @@ use serde_json::json;
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, validate_hex64};
+use crate::validate::{format_npub, normalize_pubkey, read_or_stdin};
 use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
@@ -92,7 +92,9 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             content,
             admin,
         } => {
-            validate_hex64(&target_pubkey)?;
+            let target_pubkey = normalize_pubkey(&target_pubkey)?;
+            let target_npub = format_npub(&target_pubkey)?;
+            let replaced_by = replaced_by.as_deref().map(normalize_pubkey).transpose()?;
             let signer_hex = client.keys().public_key().to_hex();
             let auth = resolve_auth(
                 client,
@@ -119,7 +121,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     "ok": true,
                     "event_id": event_id,
                     "action": "archive",
-                    "target": target_pubkey,
+                    "target": target_npub,
                 })
             );
             Ok(())
@@ -131,7 +133,8 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             content,
             admin,
         } => {
-            validate_hex64(&target_pubkey)?;
+            let target_pubkey = normalize_pubkey(&target_pubkey)?;
+            let target_npub = format_npub(&target_pubkey)?;
             let signer_hex = client.keys().public_key().to_hex();
             let auth = resolve_auth(
                 client,
@@ -157,7 +160,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     "ok": true,
                     "event_id": event_id,
                     "action": "unarchive",
-                    "target": target_pubkey,
+                    "target": target_npub,
                 })
             );
             Ok(())
@@ -208,10 +211,16 @@ impl AuthFailure {
     fn message(&self) -> String {
         match self {
             AuthFailure::NoProfile(target) => {
-                format!("no kind:0 profile found for target {target}")
+                format!(
+                    "no kind:0 profile found for target {}",
+                    auth_failure_identity(target)
+                )
             }
             AuthFailure::NoTagsArray(target) => {
-                format!("target {target} kind:0 has no tags array")
+                format!(
+                    "target {} kind:0 has no tags array",
+                    auth_failure_identity(target)
+                )
             }
             AuthFailure::NoAuthTag => "target kind:0 has no \"auth\" tag".to_owned(),
             AuthFailure::AmbiguousAuthTag(n) => format!(
@@ -223,17 +232,25 @@ impl AuthFailure {
             AuthFailure::NonStringElement => {
                 "sole \"auth\" tag contains a non-string element".to_owned()
             }
-            AuthFailure::InvalidOwnerHex(v) => {
-                format!("sole \"auth\" tag owner field is not a valid 64-hex pubkey: {v}")
+            AuthFailure::InvalidOwnerHex(_) => {
+                "sole \"auth\" tag owner field is not a valid public identity (<invalid-pubkey>)"
+                    .to_owned()
             }
             AuthFailure::InvalidSigHex => {
                 "sole \"auth\" tag sig field is not a valid 128-hex signature".to_owned()
             }
             AuthFailure::OwnerMismatch(actual) => {
-                format!("sole \"auth\" tag names owner {actual} which does not match your key")
+                format!(
+                    "sole \"auth\" tag names owner {} which does not match your key",
+                    auth_failure_identity(actual)
+                )
             }
         }
     }
+}
+
+fn auth_failure_identity(pubkey_hex: &str) -> String {
+    format_npub(pubkey_hex).unwrap_or_else(|_| "<invalid-pubkey>".to_owned())
 }
 
 /// Single classifier: either extract the auth tag or return the typed reason
@@ -396,9 +413,9 @@ fn extract_owner_auth_tag(tags: &[serde_json::Value], signer_hex: &str) -> Optio
 /// the case the relay published `self` in.
 fn normalize_relay_self_hex(self_hex: &str) -> Result<String, CliError> {
     if self_hex.len() != 64 || !self_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(CliError::Other(format!(
-            "relay 'self' field is not a valid 64-hex pubkey: {self_hex}"
-        )));
+        return Err(CliError::Other(
+            "relay 'self' field is not a valid protocol public key".to_owned(),
+        ));
     }
     Ok(self_hex.to_ascii_lowercase())
 }
@@ -443,7 +460,9 @@ pub(crate) async fn fetch_archived_snapshot(client: &BuzzClient) -> Result<Vec<S
     }
 
     // State 2 or 3: verify then collect.
-    let raw_event = events.into_iter().next().unwrap();
+    let raw_event = events.into_iter().next().ok_or_else(|| {
+        CliError::Other("archived-identities query unexpectedly returned no event".into())
+    })?;
     let event: nostr::Event = serde_json::from_value(raw_event)
         .map_err(|e| CliError::Other(format!("archived-identities event is malformed: {e}")))?;
     let archived = verify_archived_event(&event, &self_hex)?;
@@ -456,8 +475,16 @@ pub(crate) async fn fetch_archived_snapshot(client: &BuzzClient) -> Result<Vec<S
 /// verification command can never look like success.
 async fn cmd_archived(client: &BuzzClient) -> Result<(), CliError> {
     let archived = fetch_archived_snapshot(client).await?;
-    println!("{}", json!({"archived": archived}));
+    println!("{}", archived_output(&archived)?);
     Ok(())
+}
+
+fn archived_output(archived_hex: &[String]) -> Result<serde_json::Value, CliError> {
+    let archived = archived_hex
+        .iter()
+        .map(|pubkey| format_npub(pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({"archived": archived}))
 }
 
 /// Pure verification of a kind:13535 archived-identities event.
@@ -476,10 +503,11 @@ fn verify_archived_event<'a>(
     }
 
     if event.pubkey.to_hex() != relay_self_hex {
+        let event_author = format_npub(&event.pubkey.to_hex())?;
+        let relay_self =
+            format_npub(relay_self_hex).unwrap_or_else(|_| "<invalid-pubkey>".to_owned());
         return Err(CliError::Other(format!(
-            "archived-identities event author {} does not match relay self {}",
-            event.pubkey.to_hex(),
-            relay_self_hex
+            "archived-identities event author {event_author} does not match relay self {relay_self}"
         )));
     }
 
@@ -733,8 +761,11 @@ mod tests {
         let tags = vec![json!(["auth", bad_owner, "", hex128('a')])];
         assert_eq!(
             classify_owner_auth_tag(&tags, &bad_owner),
-            Err(AuthFailure::InvalidOwnerHex(bad_owner))
+            Err(AuthFailure::InvalidOwnerHex(bad_owner.clone()))
         );
+        let message = AuthFailure::InvalidOwnerHex(bad_owner.clone()).message();
+        assert!(message.contains("<invalid-pubkey>"));
+        assert!(!message.contains(&bad_owner));
     }
 
     #[test]
@@ -752,20 +783,18 @@ mod tests {
     fn classify_owner_mismatch_returns_owner_mismatch_with_actual_owner() {
         // Case 4: structurally valid tag but owner ≠ signer. The failure must
         // carry the actual owner so resolve_auth can print it in the warning.
-        let actual_owner = hex64('a');
-        let signer = hex64('b');
+        let actual_owner = Keys::generate().public_key().to_hex();
+        let signer = Keys::generate().public_key().to_hex();
         let sig = hex128('c');
         let tags = vec![json!(["auth", actual_owner, "conditions", sig])];
         assert_eq!(
             classify_owner_auth_tag(&tags, &signer),
             Err(AuthFailure::OwnerMismatch(actual_owner.clone()))
         );
-        // Message must include the actual owner for actionability.
+        // Message must include the canonical npub without exposing raw hex.
         let msg = AuthFailure::OwnerMismatch(actual_owner.clone()).message();
-        assert!(
-            msg.contains(&actual_owner),
-            "OwnerMismatch message must include actual owner, got: {msg}"
-        );
+        assert!(msg.contains(&format_npub(&actual_owner).expect("owner formats")));
+        assert!(!msg.contains(&actual_owner));
     }
 
     // --- (c2) extract_auth: profile-level failure taxonomy ---
@@ -820,20 +849,18 @@ mod tests {
 
     #[test]
     fn extract_auth_owner_mismatch_returns_owner_mismatch_failure() {
-        let actual_owner = hex64('a');
-        let signer = hex64('b');
+        let actual_owner = Keys::generate().public_key().to_hex();
+        let signer = Keys::generate().public_key().to_hex();
         let sig = hex128('c');
         let profile = json!({"tags": [["auth", actual_owner, "conditions", sig]]});
         assert_eq!(
             extract_auth(Some(&profile), &hex64('t'), &signer),
             Err(AuthFailure::OwnerMismatch(actual_owner.clone()))
         );
-        // Message must include the actual owner for actionability.
+        // Message must include the canonical npub without exposing raw hex.
         let msg = AuthFailure::OwnerMismatch(actual_owner.clone()).message();
-        assert!(
-            msg.contains(&actual_owner),
-            "OwnerMismatch message must include actual owner, got: {msg}"
-        );
+        assert!(msg.contains(&format_npub(&actual_owner).expect("owner formats")));
+        assert!(!msg.contains(&actual_owner));
     }
 
     // --- (c3) resolve_auth: production async resolver via counted test server ---
@@ -1155,6 +1182,25 @@ mod tests {
     }
 
     #[test]
+    fn archived_output_emits_npub_identities_only() {
+        let first = Keys::generate().public_key().to_hex();
+        let second = Keys::generate().public_key().to_hex();
+
+        let output = archived_output(&[first.clone(), second.clone()]).expect("output formats");
+
+        assert!(output["archived"][0]
+            .as_str()
+            .expect("first identity")
+            .starts_with("npub1"));
+        assert!(output["archived"][1]
+            .as_str()
+            .expect("second identity")
+            .starts_with("npub1"));
+        assert!(!output.to_string().contains(&first));
+        assert!(!output.to_string().contains(&second));
+    }
+
+    #[test]
     fn archived_state3_wrong_kind_errors() {
         let keys = Keys::generate();
         let self_hex = keys.public_key().to_hex();
@@ -1169,13 +1215,17 @@ mod tests {
     #[test]
     fn archived_state3_wrong_author_errors() {
         let event_keys = Keys::generate();
-        let other_self = hex64('f');
+        let other_self = Keys::generate().public_key().to_hex();
         let event = build_archived_event(&event_keys, KIND_IA_ARCHIVED_LIST as u16, &[], true);
         let err = verify_archived_event(&event, &other_self).unwrap_err();
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("does not match relay self"),
+            message.contains("does not match relay self"),
             "error should name author mismatch: {err}"
         );
+        assert!(message.contains("npub1"));
+        assert!(!message.contains(&event.pubkey.to_hex()));
+        assert!(!message.contains(&other_self));
     }
 
     #[test]

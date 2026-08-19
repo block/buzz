@@ -28,7 +28,9 @@ fn truncated_display_name(pubkey: &PublicKey) -> Result<String, String> {
 pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
     let keys = state.keys.lock().map_err(|error| error.to_string())?;
     let pubkey = keys.public_key();
-    let pubkey_hex = pubkey.to_hex();
+    let pubkey_npub = pubkey
+        .to_bech32()
+        .map_err(|error| format!("encode identity npub: {error}"))?;
     let display_name = truncated_display_name(&pubkey)?;
     let lost = state
         .identity_lost
@@ -41,7 +43,7 @@ pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> 
         .load(std::sync::atomic::Ordering::Acquire);
 
     Ok(IdentityInfo {
-        pubkey: pubkey_hex,
+        pubkey: pubkey_npub,
         display_name,
         storage: state.identity_storage().as_str().to_string(),
         lost,
@@ -257,7 +259,6 @@ pub async fn create_ncryptsec_backup(
 #[serde(rename_all = "camelCase")]
 pub struct BackupVerification {
     pub pubkey: String,
-    pub npub: String,
     pub matches_current_identity: bool,
 }
 
@@ -270,8 +271,7 @@ fn verify_ncryptsec_backup_inner(
     let pubkey = keys.public_key();
     let current = state.signing_keys()?.public_key();
     Ok(BackupVerification {
-        pubkey: pubkey.to_hex(),
-        npub: pubkey
+        pubkey: pubkey
             .to_bech32()
             .map_err(|e| format!("encode backup identity: {e}"))?,
         matches_current_identity: pubkey == current,
@@ -370,13 +370,15 @@ pub async fn import_identity(
             crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
         })?;
 
-        let pubkey_hex = pubkey.to_hex();
         let display_name = truncated_display_name(&pubkey)?;
+        let pubkey_npub = pubkey
+            .to_bech32()
+            .map_err(|error| format!("encode imported identity npub: {error}"))?;
 
-        eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
+        eprintln!("buzz-desktop: imported identity pubkey {pubkey_npub}");
 
         Ok(IdentityInfo {
-            pubkey: pubkey_hex,
+            pubkey: pubkey_npub,
             display_name,
             storage: storage.as_str().to_string(),
             lost: false,
@@ -505,11 +507,13 @@ pub async fn persist_current_identity(
             .store(false, std::sync::atomic::Ordering::Release);
 
         let pubkey = keys.public_key();
-        let pubkey_hex = pubkey.to_hex();
+        let pubkey_npub = pubkey
+            .to_bech32()
+            .map_err(|error| format!("encode identity npub: {error}"))?;
         let display_name = truncated_display_name(&pubkey)?;
 
         Ok(IdentityInfo {
-            pubkey: pubkey_hex,
+            pubkey: pubkey_npub,
             display_name,
             storage: storage.as_str().to_string(),
             lost: false,

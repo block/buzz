@@ -1,5 +1,16 @@
 import { expect, test } from "@playwright/test";
 
+const LEGACY_HEX =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const CANONICAL_NPUB =
+  "npub1a2d567n60z37xu57245tzntkf4yk90swrus0wjdulrvah0u6jv5qusyp60";
+const PRIMARY_IDENTITY_HEX =
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+const PRIMARY_IDENTITY_NPUB =
+  "npub1ccz8l9zpa47k6vz9gphftsrumpw80rjt3nhnefat4symjhrsnmjs38mnyd";
+const SECONDARY_IDENTITY_HEX =
+  "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/admin/v1/**", async (route) => {
     await route.fulfill({ contentType: "application/json", body: "[]" });
@@ -42,7 +53,7 @@ test("report rows render the relay response contract", async ({ page }) => {
           id: "0e6caad8-1e18-4cd7-84fa-7264103f0a08",
           communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
           communityHost: "design.buzz.xyz",
-          reporterPubkey: "21".repeat(32),
+          reporterPubkey: PRIMARY_IDENTITY_HEX,
           targetKind: "event",
           target: "12".repeat(32),
           reportType: "spam",
@@ -69,14 +80,15 @@ test("event report detail renders the reported message content", async ({
         id,
         communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
         communityHost: "design.buzz.xyz",
-        reporterPubkey: "21".repeat(32),
+        reporterPubkey: PRIMARY_IDENTITY_HEX,
         targetKind: "event",
         target: "12".repeat(32),
         reportType: "spam",
         status: "open",
         createdAt: "2026-07-17T17:30:00Z",
         message: {
-          authorPubkey: "31".repeat(32),
+          authorPubkey: LEGACY_HEX,
+          authorNpub: CANONICAL_NPUB,
           content:
             "This is the complete reported message.\nIt preserves lines.",
           createdAt: "2026-07-17T17:25:00Z",
@@ -90,7 +102,10 @@ test("event report detail renders the reported message content", async ({
   await expect(
     page.getByText("This is the complete reported message.", { exact: false }),
   ).toBeVisible();
-  await expect(page.getByText("31".repeat(32))).toBeVisible();
+  await expect(page.getByText(CANONICAL_NPUB)).toBeVisible();
+  await expect(page.getByText(PRIMARY_IDENTITY_NPUB)).toBeVisible();
+  await expect(page.getByText(LEGACY_HEX)).toHaveCount(0);
+  await expect(page.getByText(PRIMARY_IDENTITY_HEX)).toHaveCount(0);
   await expect(
     page.getByText("Message content is unavailable", { exact: false }),
   ).toHaveCount(0);
@@ -107,7 +122,7 @@ test("event report detail explains when message content is unavailable", async (
         id,
         communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
         communityHost: "design.buzz.xyz",
-        reporterPubkey: "21".repeat(32),
+        reporterPubkey: PRIMARY_IDENTITY_HEX,
         targetKind: "event",
         target: "12".repeat(32),
         reportType: "spam",
@@ -135,7 +150,7 @@ test("feedback cards open the complete submission", async ({ page }) => {
         communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
         communityHost: "design.buzz.xyz",
         eventId: "31".repeat(32),
-        submitterPubkey: "21".repeat(32),
+        submitterPubkey: PRIMARY_IDENTITY_HEX,
         category: "needs-work",
         body: fullBody,
         tags: [],
@@ -152,7 +167,7 @@ test("feedback cards open the complete submission", async ({ page }) => {
           id,
           communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
           communityHost: "design.buzz.xyz",
-          submitterPubkey: "21".repeat(32),
+          submitterPubkey: PRIMARY_IDENTITY_HEX,
           category: "needs-work",
           bodySummary: `${fullBody.slice(0, 240)}…`,
           receivedAt: "2026-07-17T17:30:00Z",
@@ -166,6 +181,8 @@ test("feedback cards open the complete submission", async ({ page }) => {
   await expect(card.locator(".record-provenance")).toContainText(
     "design.buzz.xyz",
   );
+  await expect(card.locator(".record-provenance code")).toContainText("npub1");
+  await expect(card).not.toContainText("Invalid public key");
   await card.locator(".feedback-main-link").click();
   await expect(page).toHaveURL(`/feedback/${id}`);
   await expect(
@@ -189,7 +206,7 @@ test("feedback can be searched and filtered by community and time", async ({
           id: "recent",
           communityId: "one",
           communityHost: "design.buzz.xyz",
-          submitterPubkey: "21".repeat(32),
+          submitterPubkey: PRIMARY_IDENTITY_HEX,
           category: "bug",
           bodySummary: "Composer freezes after sleep",
           receivedAt: recent,
@@ -198,7 +215,7 @@ test("feedback can be searched and filtered by community and time", async ({
           id: "old",
           communityId: "two",
           communityHost: "engineering.buzz.xyz",
-          submitterPubkey: "22".repeat(32),
+          submitterPubkey: SECONDARY_IDENTITY_HEX,
           category: "praise",
           bodySummary: "Calls are much more reliable",
           receivedAt: old,
@@ -233,7 +250,7 @@ test("feedback status is stored locally by feedback id", async ({ page }) => {
           id: "feedback-one",
           communityId: "one",
           communityHost: "design.buzz.xyz",
-          submitterPubkey: "21".repeat(32),
+          submitterPubkey: PRIMARY_IDENTITY_HEX,
           category: "bug",
           bodySummary: "Composer freezes after sleep",
           receivedAt: new Date().toISOString(),
@@ -266,7 +283,7 @@ test("feedback attachments render from imeta without raw markdown", async ({
         communityId: "one",
         communityHost: "design.buzz.xyz",
         eventId: "31".repeat(32),
-        submitterPubkey: "21".repeat(32),
+        submitterPubkey: PRIMARY_IDENTITY_HEX,
         category: "bug",
         body: `Composer froze.\n![image](${imageUrl})\n[diagnostics.txt](${fileUrl})`,
         tags: [

@@ -12,6 +12,7 @@ import type {
   ProjectRepoSnapshot,
   Repository,
 } from "@/features/projects/hooks";
+import { commitAuthorDisplayName } from "@/features/projects/lib/projectContributorMatching";
 import {
   formatExactTimestamp,
   markdownToPlainText,
@@ -129,7 +130,7 @@ function buildActivityItems({
       kind: "commit",
       createdAt: commit.timestamp,
       actorPubkey: null,
-      actorName: commit.authorName,
+      actorName: commitAuthorDisplayName(commit),
       action: "pushed a commit to",
       title: commit.subject || commit.shortHash,
       body: "",

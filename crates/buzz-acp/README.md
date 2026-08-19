@@ -31,7 +31,7 @@ Each agent needs a Nostr keypair — this is the agent's identity in Buzz. Use `
 cargo run -p buzz-admin -- generate-key
 ```
 
-This prints a public and secret key pair as hex. **Save the secret key immediately — it is not stored and cannot be recovered.** Set `BUZZ_PRIVATE_KEY` to the secret key to act as this identity.
+This prints the public key as `npub` and the secret key as `nsec`. **Save the secret key immediately — it is not stored and cannot be recovered.** Set `BUZZ_PRIVATE_KEY` to the `nsec` to act as this identity.
 
 Then register the agent's public key as a relay member so it can read and publish:
 
@@ -136,7 +136,7 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
 | `--respond-to` | `BUZZ_ACP_RESPOND_TO` | `owner-only` | Author gate mode: `owner-only`, `allowlist`, `anyone`, `nobody`. |
-| `--respond-to-allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | — | Comma-separated 64-char hex pubkeys (required when mode is `allowlist`). Owner is always implicitly included. |
+| `--respond-to-allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | — | Comma-separated `npub` identities (required when mode is `allowlist`). Owner is always implicitly included. |
 
 **Modes:**
 
@@ -169,7 +169,7 @@ buzz-acp
 
 # Respond to a team of three users (owner always included automatically)
 buzz-acp --respond-to allowlist \
-  --respond-to-allowlist "abc123...64hex,def456...64hex,789abc...64hex"
+  --respond-to-allowlist "<owner-npub>,<teammate-npub>,<reviewer-npub>"
 
 # Respond to anyone (open agent)
 buzz-acp --respond-to anyone

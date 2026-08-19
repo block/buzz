@@ -2,7 +2,7 @@ use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{
-    read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
+    normalize_pubkey, read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
 };
 use buzz_sdk::{GitPrUpdateMeta, GitPullRequestMeta, GitRepoCoord, GitStatusMeta};
 
@@ -35,17 +35,21 @@ pub async fn cmd_open_pr(
     channel: Option<&str>,
     revision_of: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
+    let repo_owner = normalize_pubkey(repo_owner)?;
     validate_repo_id(repo_id)?;
     let content = read_optional_body(body, body_file)?;
+    let recipients = to
+        .iter()
+        .map(|pubkey| normalize_pubkey(pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let repo = GitRepoCoord {
-        owner: repo_owner.to_string(),
+        owner: repo_owner.clone(),
         id: repo_id.to_string(),
     };
     let meta = GitPullRequestMeta {
         euc: euc.map(str::to_string),
-        recipients: to.to_vec(),
+        recipients,
         channel_id: channel.map(str::to_string),
         subject: subject.to_string(),
         labels: labels.to_vec(),
@@ -64,7 +68,7 @@ pub async fn cmd_open_pr(
     let resp = client.submit_event(event).await?;
     // `link` renders as a rich preview card in Buzz Desktop when included in
     // a chat message — agents announce PRs with it (see base_prompt.md).
-    let link = crate::links::pull_request_link(&event_id, repo_owner, repo_id);
+    let link = crate::links::pull_request_link(&event_id, &repo_owner, repo_id)?;
     crate::client::print_create_response(&resp, "link", &link);
     Ok(())
 }
@@ -84,21 +88,25 @@ pub async fn cmd_update_pr(
     euc: Option<&str>,
     to: &[String],
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
+    let repo_owner = normalize_pubkey(repo_owner)?;
     validate_repo_id(repo_id)?;
     validate_hex64(pr)?;
-    validate_hex64(pr_author)?;
+    let pr_author = normalize_pubkey(pr_author)?;
     let content = read_optional_body(body, body_file)?;
+    let recipients = to
+        .iter()
+        .map(|pubkey| normalize_pubkey(pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let repo = GitRepoCoord {
-        owner: repo_owner.to_string(),
+        owner: repo_owner,
         id: repo_id.to_string(),
     };
     let meta = GitPrUpdateMeta {
         euc: euc.map(str::to_string),
-        recipients: to.to_vec(),
+        recipients,
         pr_event: pr.to_string(),
-        pr_author: pr_author.to_string(),
+        pr_author,
         commit: commit.to_string(),
         clone_urls: clone_urls.to_vec(),
         merge_base: merge_base.map(str::to_string),
@@ -132,7 +140,7 @@ pub async fn cmd_list_prs(
     label: Option<&str>,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
+    let repo_owner = normalize_pubkey(repo_owner)?;
     validate_repo_id(repo_id)?;
 
     let a_value = format!("30617:{repo_owner}:{repo_id}");
@@ -142,7 +150,7 @@ pub async fn cmd_list_prs(
     });
 
     if let Some(pk) = author {
-        validate_hex64(pk)?;
+        let pk = normalize_pubkey(pk)?;
         filter["authors"] = serde_json::json!([pk]);
     }
     if let Some(l) = label {
@@ -176,10 +184,10 @@ pub async fn cmd_pr_status(
 
     let repo = match (repo_owner, repo_id) {
         (Some(owner), Some(id)) => {
-            validate_hex64(owner)?;
+            let owner = normalize_pubkey(owner)?;
             validate_repo_id(id)?;
             Some(GitRepoCoord {
-                owner: owner.to_string(),
+                owner,
                 id: id.to_string(),
             })
         }
@@ -198,9 +206,9 @@ pub async fn cmd_pr_status(
         recipients.push(repo.owner.clone());
     }
     for recipient in to {
-        validate_hex64(recipient)?;
-        if !recipients.contains(recipient) {
-            recipients.push(recipient.clone());
+        let recipient = normalize_pubkey(recipient)?;
+        if !recipients.contains(&recipient) {
+            recipients.push(recipient);
         }
     }
 

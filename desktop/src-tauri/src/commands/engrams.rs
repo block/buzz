@@ -36,6 +36,22 @@ use crate::{app_state::AppState, managed_agents::load_managed_agents, relay::que
 /// `truncated = true` so the UI can warn that the list may be incomplete.
 const ENGRAM_FETCH_LIMIT: u32 = 5000;
 
+const INVALID_AGENT_IDENTITY_ERROR: &str = "invalid agent identity; expected a canonical npub";
+
+fn normalize_agent_identity(input: &str) -> Result<(PublicKey, String), String> {
+    let (agent, _) = buzz_core_pkg::nostr_identity::parse_public_key_compat(input)
+        .map_err(|_| INVALID_AGENT_IDENTITY_ERROR.to_string())?;
+    let agent_hex = agent.to_hex();
+    Ok((agent, agent_hex))
+}
+
+fn not_agent_owner_error(agent: &PublicKey) -> String {
+    format!(
+        "not the owner of agent {} (no managed-agent record and no verified NIP-OA owner declaration)",
+        crate::app_state::identity_npub_for_log(agent)
+    )
+}
+
 /// One memory entry returned to the UI.
 ///
 /// `slug` is the canonical slug (`core` or `mem/foo/bar`). `body` is the
@@ -134,8 +150,7 @@ pub async fn get_agent_memory(
     // wrongly locked legitimate owners out of their own memory. The declared-
     // owner path is cleared (PR #917 author signed off); decryption still
     // does the real guarding.)
-    let agent = PublicKey::from_hex(&agent_pubkey)
-        .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
+    let (agent, agent_pubkey_hex) = normalize_agent_identity(&agent_pubkey)?;
 
     let viewer_pubkey = {
         let keys = state.keys.lock().map_err(|e| e.to_string())?;
@@ -143,20 +158,17 @@ pub async fn get_agent_memory(
     };
 
     let managed = load_managed_agents(&app)?;
-    let is_managed = managed.iter().any(|m| m.pubkey == agent_pubkey);
+    let is_managed = managed.iter().any(|m| m.pubkey == agent_pubkey_hex);
     let is_declared_owner = if is_managed {
         false // already authorized; skip the relay roundtrip
     } else {
         // Verify the agent's live `kind:0` declares the viewer as owner.
-        let kind0 = fetch_kind0(&state, &agent_pubkey).await?;
+        let kind0 = fetch_kind0(&state, &agent_pubkey_hex).await?;
         kind0_declares_viewer_owner(kind0.as_ref(), &viewer_pubkey)
     };
 
     if !is_managed && !is_declared_owner {
-        return Err(format!(
-            "not the owner of agent {agent_pubkey} (no managed-agent record \
-             and no verified NIP-OA owner declaration)"
-        ));
+        return Err(not_agent_owner_error(&agent));
     }
 
     // ── Resolve owner key material ──────────────────────────────────────
@@ -278,6 +290,42 @@ pub async fn get_agent_memory(
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn agent_identity_accepts_npub_and_legacy_hex_then_normalizes_to_hex() {
+        let pubkey = Keys::generate().public_key();
+        let hex = pubkey.to_hex();
+        let npub = crate::app_state::identity_npub_for_log(&pubkey);
+
+        let (from_hex, normalized_hex) = normalize_agent_identity(&hex).unwrap();
+        let (from_npub, normalized_npub) = normalize_agent_identity(&npub).unwrap();
+
+        assert_eq!(from_hex, pubkey);
+        assert_eq!(from_npub, pubkey);
+        assert_eq!(normalized_hex, hex);
+        assert_eq!(normalized_npub, hex);
+    }
+
+    #[test]
+    fn invalid_agent_identity_error_is_generic_and_does_not_echo_input() {
+        let supplied = "definitely-not-a-public-key";
+        let error = normalize_agent_identity(supplied).unwrap_err();
+
+        assert_eq!(error, INVALID_AGENT_IDENTITY_ERROR);
+        assert!(!error.contains(supplied));
+        assert!(!error.contains("hex"));
+    }
+
+    #[test]
+    fn non_owner_error_reports_npub_without_hex() {
+        let pubkey = Keys::generate().public_key();
+        let hex = pubkey.to_hex();
+        let npub = crate::app_state::identity_npub_for_log(&pubkey);
+        let error = not_agent_owner_error(&pubkey);
+
+        assert!(error.contains(&npub));
+        assert!(!error.contains(&hex));
+    }
 
     /// Build a `kind:0` carrying a valid NIP-OA `auth` tag declaring `owner`
     /// as the owner of `agent`. Mirrors the helper in `identity_archive`'s

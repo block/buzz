@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/shared/nostr/nostr_keys.dart';
 import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 
 // Ported from desktop/src/features/messages/lib/mentionRanking.test.mjs
@@ -6,6 +8,7 @@ import 'package:buzz/features/channels/mentions/mention_ranking.dart';
 
 final channelBrainPubkey = '1' * 64;
 final otherBrainPubkey = '2' * 64;
+final prefixMatchPubkey = nostr.Keys('3' * 64).public;
 
 MentionCandidate candidate({
   String? displayName = 'Brain',
@@ -100,9 +103,19 @@ void main() {
   });
 
   test('pubkey prefix matches when no label matches', () {
-    final byPubkey = candidate(displayName: 'Pinky', pubkey: 'abc${'0' * 61}');
+    final byPubkey = candidate(displayName: 'Pinky', pubkey: prefixMatchPubkey);
 
-    expect(rankedPubkeys([byPubkey], 'abc'), ['abc${'0' * 61}']);
+    expect(rankedPubkeys([byPubkey], prefixMatchPubkey.substring(0, 3)), [
+      prefixMatchPubkey,
+    ]);
+  });
+
+  test('npub matches when no profile label matches', () {
+    final byNpub = candidate(displayName: 'Pinky', pubkey: prefixMatchPubkey);
+
+    expect(rankedPubkeys([byNpub], npubFromPublicKey(prefixMatchPubkey)), [
+      prefixMatchPubkey,
+    ]);
   });
 
   test('empty query keeps stable order within groups', () {

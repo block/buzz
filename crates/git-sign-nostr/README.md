@@ -11,10 +11,10 @@ git config gpg.format x509
 git config gpg.x509.program /path/to/git-sign-nostr
 git config commit.gpgsign true
 git config tag.gpgsign true
-git config user.signingkey <hex-pubkey>
+git config user.signingkey <npub>
 
 # Set the private key (env var)
-export NOSTR_PRIVATE_KEY=<hex-or-nsec>
+export NOSTR_PRIVATE_KEY=<nsec>
 
 # Optional: NIP-OA owner attestation
 export BUZZ_AUTH_TAG='["auth","<owner-pk>","<conditions>","<owner-sig>"]'
@@ -32,7 +32,7 @@ git verify-commit HEAD
 2. `BUZZ_PRIVATE_KEY` environment variable
 3. Keyfile at path from `git config nostr.keyfile`
 
-Keys may be hex (64 chars) or NIP-19 bech32 (`nsec1...`).
+Store public identities as NIP-19 `npub` and private keys as `nsec`.
 
 ## How It Works
 

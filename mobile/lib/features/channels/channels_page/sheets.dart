@@ -481,8 +481,10 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
           if (normalizedQuery.isEmpty) {
             return true;
           }
+          final npub = tryNpubFromPublicKey(user.pubkey)?.toLowerCase();
           return user.label.toLowerCase().contains(normalizedQuery) ||
               user.secondaryLabel.toLowerCase().contains(normalizedQuery) ||
+              (npub?.contains(normalizedQuery) ?? false) ||
               normalizedPubkey.contains(normalizedQuery);
         }).toList() ??
         const <DirectoryUser>[];

@@ -157,7 +157,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       final community = Community.create(
         name: _communityNameFromClaim(claim, invite.relayUrl),
         relayUrl: invite.relayUrl,
-        pubkey: keys.public,
+        npub: keys.npub,
         nsec: keys.nsec,
         sensitiveActionPolicy: SensitiveActionPolicy.disabledByUser,
       );

@@ -5,6 +5,7 @@ use tauri::AppHandle;
 use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 
 use crate::{
+    app_state::identity_npub_for_log_str,
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
@@ -65,6 +66,7 @@ use instance_reaper::{buffer_contains_identifier, is_desktop_binary};
 // Exact-path harness sweep lives in runtime/sweep.rs (re-exported above).
 
 mod lifecycle;
+use super::setup_payload::serialize_setup_payload;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
@@ -219,8 +221,9 @@ pub fn build_managed_agent_summary(
             record_pubkey,
             missing_persona_id,
         } => {
+            let who = identity_npub_for_log_str(&record_pubkey);
             eprintln!(
-                "orphaned agent instance: pubkey={record_pubkey}, missing_persona_id={missing_persona_id}"
+                "orphaned agent instance: pubkey={who}, missing_persona_id={missing_persona_id}"
             );
             (None, None, None, None)
         }
@@ -337,6 +340,10 @@ pub fn build_managed_agent_summary(
         last_error_code: record.last_error_code,
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
+        log_display_label: format!(
+            "{}.log",
+            crate::app_state::identity_npub_for_log_str(&record.pubkey)
+        ),
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
@@ -350,7 +357,16 @@ pub fn find_managed_agent_mut<'a>(
     records
         .iter_mut()
         .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))
+        .ok_or_else(|| managed_agent_not_found_error(pubkey))
+}
+
+/// Format a managed-agent lookup miss for a human-facing error without
+/// exposing the protocol-native hex key stored on the record.
+pub(crate) fn managed_agent_not_found_error(pubkey: &str) -> String {
+    format!(
+        "agent {} not found",
+        crate::app_state::identity_npub_for_log_str(pubkey)
+    )
 }
 
 /// Pure decision function for the inbound author gate env vars.
@@ -453,7 +469,7 @@ pub fn spawn_agent_child(
             .map_err(|e| {
                 format!(
                     "cannot spawn agent {}: {}",
-                    record.pubkey,
+                    identity_npub_for_log_str(&record.pubkey),
                     crate::managed_agents::user_facing_harness_error(&e)
                 )
             })?;
@@ -466,7 +482,7 @@ pub fn spawn_agent_child(
         &format!(
             "\n=== starting {} ({}) at {} ===",
             record.name,
-            record.pubkey,
+            identity_npub_for_log_str(&record.pubkey),
             now_iso()
         ),
     )?;
@@ -564,7 +580,8 @@ pub fn spawn_agent_child(
     // when desktop has computed NotReady — the desktop is the sole readiness
     // source and buzz-acp only transports the payload.
     //
-    // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp:
+    // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp. Identity
+    // is canonical npub at this app-defined boundary (never record hex):
     //   { "agent_name": "...", "agent_pubkey": "...", "requirements": [{ "surface": "...", ... }] }
     //
     // `spawned_setup_mode` is captured outside the block so it can be stamped
@@ -625,16 +642,11 @@ pub fn spawn_agent_child(
                         }),
                     })
                     .collect();
-                let payload = serde_json::json!({
-                    "agent_name": record.name,
-                    "agent_pubkey": record.pubkey,
-                    "requirements": reqs,
-                });
-                match serde_json::to_string(&payload) {
+                match serialize_setup_payload(&record.name, &record.pubkey, reqs) {
                     Ok(json) => Some(json),
                     Err(e) => {
                         eprintln!(
-                            "buzz-desktop: failed to serialize setup payload for {}: {e}",
+                            "buzz-desktop: refused setup payload for {}: {e}",
                             record.name
                         );
                         None

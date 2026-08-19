@@ -86,6 +86,8 @@ test("parseSupportedLinkPreview ignores unsupported GitHub URLs", () => {
 
 const BUZZ_OWNER =
   "71d67180ba17e749ee825fc8819c9c6ee7003617e1c126504f9b658070ab9224";
+const BUZZ_OWNER_NPUB =
+  "npub1w8t8rq96zln5nm5ztlygr8yudmnsqdshu8qjv5z0ndjcqu9tjgjqze3m9s";
 
 test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
   // Must pass the active relay origin for host validation.
@@ -96,7 +98,7 @@ test("parseSupportedLinkPreview parses Buzz relay git clone URLs", () => {
     ),
     {
       kind: "buzz-repository",
-      href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
+      href: `buzz://repo?owner=${BUZZ_OWNER_NPUB}&d=buzz-world-galaxy`,
       provider: "Buzz",
       title: "buzz-world-galaxy",
       typeLabel: "repo",
@@ -119,7 +121,7 @@ test("parseSupportedLinkPreview strips .git suffix from clone URLs", () => {
     ),
     {
       kind: "buzz-repository",
-      href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`,
+      href: `buzz://repo?owner=${BUZZ_OWNER_NPUB}&d=buzz-world`,
       provider: "Buzz",
       title: "buzz-world",
       typeLabel: "repo",
@@ -129,9 +131,8 @@ test("parseSupportedLinkPreview strips .git suffix from clone URLs", () => {
 
 test("parseSupportedLinkPreview rejects malformed Buzz git URLs", () => {
   for (const href of [
-    // Owner segment must be a 64-char lowercase hex pubkey.
+    // Owner segment must be the lowercase hex required by Git transport.
     "https://relay.example/git/not-a-pubkey/repo",
-    `https://relay.example/git/${BUZZ_OWNER.toUpperCase()}/repo`,
     `https://relay.example/git/${BUZZ_OWNER.slice(0, 32)}/repo`,
     // Missing or invalid repo segment.
     `https://relay.example/git/${BUZZ_OWNER}`,
@@ -146,6 +147,16 @@ test("parseSupportedLinkPreview rejects malformed Buzz git URLs", () => {
       href,
     );
   }
+});
+
+test("parseSupportedLinkPreview rejects uppercase hex clone owners", () => {
+  assert.equal(
+    parseSupportedLinkPreview(
+      `https://relay.example/git/${BUZZ_OWNER.toUpperCase()}/repo`,
+      "https://relay.example",
+    )?.kind,
+    "generic-link",
+  );
 });
 
 test("parseSupportedLinkPreview rejects clone URLs from non-relay hosts", () => {
@@ -185,7 +196,7 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
     ),
     {
       kind: "buzz-pull-request",
-      href: `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
+      href: `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER_NPUB}&d=buzz-world`,
       provider: "Buzz",
       title: "buzz-world #c3b589fa",
       typeLabel: "Review",
@@ -201,7 +212,7 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
     parseSupportedLinkPreview(`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`),
     {
       kind: "buzz-repository",
-      href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`,
+      href: `buzz://repo?owner=${BUZZ_OWNER_NPUB}&d=buzz-world`,
       provider: "Buzz",
       title: "buzz-world",
       typeLabel: "repo",
@@ -216,7 +227,7 @@ test("parseSupportedLinkPreview parses buzz:// project deep links", () => {
     ),
     {
       kind: "buzz-project",
-      href: `buzz://project?owner=${BUZZ_OWNER}&d=buzz-world`,
+      href: `buzz://project?owner=${BUZZ_OWNER_NPUB}&d=buzz-world`,
       provider: "Buzz",
       title: "buzz-world",
       typeLabel: "project",
@@ -333,7 +344,7 @@ test("extractSupportedLinkPreviews picks up bare Buzz clone URLs in prose", () =
     [
       {
         kind: "buzz-repository",
-        href: `buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`,
+        href: `buzz://repo?owner=${BUZZ_OWNER_NPUB}&d=buzz-world-galaxy`,
         provider: "Buzz",
         title: "buzz-world-galaxy",
         typeLabel: "repo",
@@ -368,7 +379,7 @@ test("extractSupportedLinkPreviews dedupes clone URL variants of one repo", () =
       ].join(" "),
       "https://relay.example",
     ).map((preview) => preview.href),
-    [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
+    [`buzz://repo?owner=${BUZZ_OWNER_NPUB}&d=buzz-world-galaxy`],
   );
 });
 
@@ -381,7 +392,7 @@ test("clone URLs and buzz://repo links for the same repo dedupe to one card", ()
       ].join(" "),
       "https://relay.example",
     ).map((preview) => preview.href),
-    [`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world-galaxy`],
+    [`buzz://repo?owner=${BUZZ_OWNER_NPUB}&d=buzz-world-galaxy`],
   );
 });
 

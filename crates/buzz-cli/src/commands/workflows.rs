@@ -5,9 +5,22 @@ use crate::client::{
     BuzzClient,
 };
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
+use crate::validate::{format_npub, parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage with buzz-sdk builder functions
+
+fn normalize_workflow(event: &serde_json::Value) -> Result<serde_json::Value, CliError> {
+    let author = event
+        .get("pubkey")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CliError::Other("relay response missing workflow author".into()))?;
+    Ok(serde_json::json!({
+        "workflow_id": extract_d_tag(event),
+        "content": event.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+        "created_at": event.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+        "pubkey": format_npub(author)?,
+    }))
+}
 
 /// List workflows in a channel — query kind:30620 workflow definition events.
 pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
@@ -20,15 +33,8 @@ pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     let workflows: Vec<serde_json::Value> = events
         .iter()
-        .map(|e| {
-            serde_json::json!({
-                "workflow_id": extract_d_tag(e),
-                "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-                "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
-            })
-        })
-        .collect();
+        .map(normalize_workflow)
+        .collect::<Result<_, _>>()?;
     let output = serde_json::to_string(&workflows).unwrap_or_default();
     println!("{output}");
     Ok(())
@@ -44,12 +50,7 @@ pub async fn cmd_get_workflow(client: &BuzzClient, workflow_id: &str) -> Result<
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     if let Some(e) = events.first() {
-        let normalized = serde_json::json!({
-            "workflow_id": extract_d_tag(e),
-            "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-            "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-            "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
-        });
+        let normalized = normalize_workflow(e)?;
         println!("{normalized}");
     } else {
         println!("null");
@@ -252,5 +253,27 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
             // approved is already a bool — no parse_bool_flag needed
             cmd_approve_step(client, &token, approved, note.as_deref()).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_workflow;
+    use serde_json::json;
+
+    #[test]
+    fn normalized_workflow_author_is_npub_not_hex() {
+        let hex = nostr::Keys::generate().public_key().to_hex();
+        let workflow = normalize_workflow(&json!({
+            "pubkey": hex.clone(),
+            "created_at": 1,
+            "content": "name: test",
+            "tags": [["d", "workflow-1"]],
+        }))
+        .expect("workflow formats");
+        let displayed = workflow["pubkey"].as_str().expect("string public key");
+        assert!(displayed.starts_with("npub1"));
+        assert_ne!(displayed, hex);
+        assert!(!workflow.to_string().contains(&hex));
     }
 }

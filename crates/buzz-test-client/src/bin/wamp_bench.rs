@@ -8,10 +8,11 @@
 //! (milliseconds, f64) per line to `latency_out`.
 //!
 //! Usage: wamp-bench <channel_uuid> <qps> <duration_secs> <conns> <latency_out>
-//! Env:   BUZZ_RELAY_URL (default ws://localhost:3000), BENCH_PRIVATE_KEY (hex)
+//! Env:   BUZZ_RELAY_URL (default ws://localhost:3000), BENCH_PRIVATE_KEY (nsec)
 
 use std::time::{Duration, Instant};
 
+use buzz_core::nostr_identity::parse_secret_key_compat;
 use buzz_test_client::BuzzTestClient;
 use nostr::Keys;
 use tokio::time::MissedTickBehavior;
@@ -34,7 +35,11 @@ async fn main() -> anyhow::Result<()> {
 
     let url = std::env::var("BUZZ_RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".into());
     let keys = match std::env::var("BENCH_PRIVATE_KEY") {
-        Ok(hex) => Keys::parse(&hex)?,
+        Ok(secret) => {
+            let (secret_key, _) = parse_secret_key_compat(&secret)
+                .map_err(|_| anyhow::anyhow!("BENCH_PRIVATE_KEY must be a valid nsec"))?;
+            Keys::new(secret_key)
+        }
         Err(_) => anyhow::bail!("BENCH_PRIVATE_KEY is required (channel member secret key)"),
     };
 

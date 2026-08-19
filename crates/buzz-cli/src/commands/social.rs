@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::{parse_event_id, validate_hex64};
+use crate::validate::{normalize_pubkey, parse_event_id, validate_hex64};
 
 /// A single contact entry (CLI-local, not from buzz-sdk).
 #[derive(Debug, Deserialize)]
@@ -47,14 +47,20 @@ pub async fn cmd_set_contact_list(
     let entries: Vec<ContactEntry> = serde_json::from_str(contacts_json)
         .map_err(|e| CliError::Usage(format!("invalid contacts JSON: {e}")))?;
 
-    let contacts: Vec<(&str, Option<&str>, Option<&str>)> = entries
+    let normalized_entries = entries
         .iter()
         .map(|c| {
-            (
-                c.pubkey.as_str(),
-                c.relay_url.as_deref(),
-                c.petname.as_deref(),
-            )
+            Ok((
+                normalize_pubkey(&c.pubkey)?,
+                c.relay_url.clone(),
+                c.petname.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    let contacts: Vec<(&str, Option<&str>, Option<&str>)> = normalized_entries
+        .iter()
+        .map(|(pubkey, relay_url, petname)| {
+            (pubkey.as_str(), relay_url.as_deref(), petname.as_deref())
         })
         .collect();
 
@@ -87,7 +93,7 @@ pub async fn cmd_get_user_notes(
     before: Option<i64>,
     before_id: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     if let Some(bid) = before_id {
         validate_hex64(bid)?;
     }
@@ -113,7 +119,7 @@ pub async fn cmd_get_user_notes(
 
 /// Get a user's contact list (kind:3) by pubkey.
 pub async fn cmd_get_contact_list(client: &BuzzClient, pubkey: &str) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     let filter = serde_json::json!({
         "kinds": [3],
         "authors": [pubkey],
@@ -187,7 +193,7 @@ pub async fn cmd_get_list(
     kind: u32,
     d_tag: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    let pubkey = normalize_pubkey(pubkey)?;
     validate_social_list_kind(kind)?;
     if !is_parameterized_social_list_kind(kind) && d_tag.is_some() {
         return Err(CliError::Usage(format!(

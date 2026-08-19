@@ -100,7 +100,8 @@ pub enum ActionDef {
     },
     /// Send a direct message to a user.
     SendDm {
-        /// Recipient — pubkey hex or `{{trigger.author}}`.
+        /// Recipient — canonical npub, or legacy `{{trigger.author}}` protocol
+        /// hex. Prefer `{{trigger.author | npub}}` in new definitions.
         to: String,
         /// Message text (supports template variables).
         text: String,

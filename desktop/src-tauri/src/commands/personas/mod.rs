@@ -26,6 +26,10 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+fn persona_agent_for_log(pubkey: &str) -> String {
+    crate::app_state::identity_npub_for_log_str(pubkey)
+}
+
 mod pending;
 pub(in crate::commands) use pending::retain_persona_pending;
 pub(super) use pending::tombstone_persona_pending;
@@ -200,7 +204,10 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                         .lock()
                         .map_err(|error| error.to_string())?;
                     if let Err(e) = stop_managed_agent_process(&app, rec, &mut runtimes) {
-                        eprintln!("buzz-desktop: delete_persona: failed to stop agent {pk}: {e}");
+                        eprintln!(
+                            "buzz-desktop: delete_persona: failed to stop agent {}: {e}",
+                            persona_agent_for_log(pk)
+                        );
                     }
                     // runtimes drops here (per-agent, process lock not held across stops).
                 }

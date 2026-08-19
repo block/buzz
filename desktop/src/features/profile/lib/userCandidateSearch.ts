@@ -1,5 +1,6 @@
 import type { UserSearchResult } from "@/shared/api/types";
 import { hasTypoTolerantPrefixMatch } from "@/shared/lib/fuzzyText";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type ScoreUserCandidateInput = {
@@ -52,16 +53,24 @@ export function scoreUserCandidate({
     if (lower.includes(normalizedQuery)) return 2;
   }
 
-  const pubkey = normalizePubkey(user.pubkey);
-  if (pubkey.startsWith(normalizedQuery)) return 3;
-  if (pubkey.includes(normalizedQuery)) return 4;
+  const npub = safeNpub(user.pubkey)?.toLowerCase() ?? "";
+  if (npub.startsWith(normalizedQuery)) return 3;
+  if (npub.includes(normalizedQuery)) return 4;
+
+  // Compatibility only: older callers may still paste protocol hex. Keep it
+  // searchable, but rank canonical npub matches ahead of it.
+  if (npub) {
+    const legacyHex = normalizePubkey(user.pubkey);
+    if (legacyHex.startsWith(normalizedQuery)) return 5;
+    if (legacyHex.includes(normalizedQuery)) return 6;
+  }
 
   if (
     labels.some((candidateLabel) =>
       hasTypoTolerantPrefixMatch(candidateLabel, normalizedQuery),
     )
   ) {
-    return 5;
+    return 7;
   }
 
   return null;

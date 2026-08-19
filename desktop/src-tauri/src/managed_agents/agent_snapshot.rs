@@ -41,8 +41,11 @@
 //! placed into `AgentSnapshotDefinition`) and asserted by unit tests.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use buzz_core_pkg::nostr_identity::{parse_public_key_compat, public_key_to_npub};
+use nostr::PublicKey;
 use png::{BitDepth, ColorType, Decoder, Encoder};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashSet;
 use std::io::Cursor;
 
 use crate::managed_agents::types::ManagedAgentRecord;
@@ -114,9 +117,18 @@ pub struct AgentSnapshotDefinition {
     pub parallelism: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
-    /// Allowlist entries. These are flagged during import — they come from the
-    /// source environment and are meaningless on the importer's relay.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Allowlist entries. Portable artifacts serialize these as canonical
+    /// npubs. Deserialization accepts v1's legacy hex representation and
+    /// normalizes both encodings to the protocol-native lowercase hex used by
+    /// managed-agent records. Entries are still flagged during import because
+    /// they come from the source environment and may be meaningless on the
+    /// importer's relay.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_respond_to_allowlist",
+        deserialize_with = "deserialize_respond_to_allowlist"
+    )]
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
@@ -178,6 +190,56 @@ pub struct AgentSnapshot {
     pub definition: AgentSnapshotDefinition,
     pub profile: AgentSnapshotProfile,
     pub memory: AgentSnapshotMemory,
+}
+
+/// Parse a portable allowlist member and return the protocol-native public
+/// key. Snapshot v1 readers accept both canonical npub and the legacy hex
+/// representation so existing cards remain importable.
+fn parse_snapshot_allowlist_pubkey(value: &str) -> Result<PublicKey, String> {
+    let (public_key, _) = parse_public_key_compat(value)
+        .map_err(|_| "invalid public key in snapshot respondToAllowlist".to_string())?;
+    public_key
+        .xonly()
+        .map_err(|_| "invalid public key in snapshot respondToAllowlist".to_string())?;
+    Ok(public_key)
+}
+
+/// Normalize a portable allowlist to the lowercase hex form consumed by
+/// Nostr authorization and event-filter internals. Duplicate identities are
+/// removed while preserving their first-seen order.
+fn normalize_respond_to_allowlist(input: &[String]) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::with_capacity(input.len());
+    for entry in input {
+        let hex = parse_snapshot_allowlist_pubkey(entry)?.to_hex();
+        if seen.insert(hex.clone()) {
+            normalized.push(hex);
+        }
+    }
+    Ok(normalized)
+}
+
+fn serialize_respond_to_allowlist<S>(input: &[String], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let canonical = input
+        .iter()
+        .map(|entry| {
+            let public_key =
+                parse_snapshot_allowlist_pubkey(entry).map_err(serde::ser::Error::custom)?;
+            public_key_to_npub(&public_key).map_err(serde::ser::Error::custom)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    canonical.serialize(serializer)
+}
+
+fn deserialize_respond_to_allowlist<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let input = Vec::<String>::deserialize(deserializer)?;
+    normalize_respond_to_allowlist(&input).map_err(serde::de::Error::custom)
 }
 
 // ── Builder / encoder ────────────────────────────────────────────────────────
@@ -419,6 +481,7 @@ pub(crate) fn validate_snapshot(snapshot: &AgentSnapshot) -> Result<(), String> 
             .unwrap_or_default(),
     )
     .map_err(|error| format!("Snapshot definition is unsafe: {error}"))?;
+    normalize_respond_to_allowlist(&snapshot.definition.respond_to_allowlist)?;
     Ok(())
 }
 

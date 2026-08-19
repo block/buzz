@@ -76,7 +76,7 @@ relayUrl: ""
 mediaBaseUrl: ""
 
 # ── Owner ────────────────────────────────────────────────────────────────────
-# 64-char lowercase hex Nostr pubkey of the relay operator. Required when
+# NIP-19 npub of the relay operator. Required when
 # relay.requireRelayMembership=true (the production default).
 ownerPubkey: ""
 
@@ -86,7 +86,7 @@ ownerPubkey: ""
 # Secret falls back to chart-side autogen (only effective at first install).
 #
 # Expected keys (all optional unless required by relay config):
-#   BUZZ_RELAY_PRIVATE_KEY        — 64-char hex; relay identity (rotation = identity change)
+#   BUZZ_RELAY_PRIVATE_KEY        — nsec; relay identity (rotation = identity change)
 #   BUZZ_GIT_HOOK_HMAC_SECRET     — 32+ chars; required when replicaCount > 1
 #   DATABASE_URL                  — full Postgres URL (preferred over externalPostgresql.url)
 #   READ_DATABASE_URL             — optional Postgres read-replica URL; omit to keep all reads on the writer

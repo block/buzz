@@ -14,9 +14,8 @@ use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
-
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str as npub, AppState},
     managed_agents::{
         current_instance_id, discovery_env_with_baked_floor, find_managed_agent_mut,
         known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
@@ -61,7 +60,7 @@ pub async fn get_agent_models(
         let record = records
             .iter()
             .find(|r| r.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            .ok_or_else(|| format!("agent {} not found", npub(&pubkey)))?;
 
         let resolved = resolve_command(&record.acp_command)
             .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
@@ -162,7 +161,8 @@ pub async fn get_agent_models(
 /// contract spawn and summary rows honor.
 fn model_discovery_error(pubkey: &str, error: &str) -> String {
     format!(
-        "cannot discover models for {pubkey}: {}",
+        "cannot discover models for {}: {}",
+        npub(pubkey),
         crate::managed_agents::user_facing_harness_error(error)
     )
 }

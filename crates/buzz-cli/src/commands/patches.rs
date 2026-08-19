@@ -2,7 +2,8 @@ use crate::client::BuzzClient;
 use crate::commands::with_git_provenance;
 use crate::error::CliError;
 use crate::validate::{
-    read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
+    normalize_pubkey, read_file_or_stdin, read_or_stdin, reject_secret_key_input, sdk_err,
+    validate_hex64, validate_repo_id,
 };
 use buzz_sdk::{GitAppliedPatchRef, GitPatchMeta, GitRepoCoord, GitStatus, GitStatusMeta};
 
@@ -22,9 +23,13 @@ pub async fn cmd_send_patch(
     commit_pgp_sig: Option<&str>,
     committer: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
+    let repo_owner = normalize_pubkey(repo_owner)?;
     validate_repo_id(repo_id)?;
     let content = read_file_or_stdin(patch)?;
+    let recipients = to
+        .iter()
+        .map(|pubkey| normalize_pubkey(pubkey))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let committer = match committer {
         Some(spec) => Some(parse_committer(spec)?),
@@ -33,7 +38,7 @@ pub async fn cmd_send_patch(
 
     let meta = GitPatchMeta {
         euc: euc.map(str::to_string),
-        recipients: to.to_vec(),
+        recipients,
         reply_to: reply_to.map(str::to_string),
         root,
         root_revision,
@@ -44,7 +49,7 @@ pub async fn cmd_send_patch(
     };
 
     let repo = GitRepoCoord {
-        owner: repo_owner.to_string(),
+        owner: repo_owner,
         id: repo_id.to_string(),
     };
 
@@ -90,7 +95,7 @@ pub async fn cmd_list_patches(
     author: Option<&str>,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    validate_hex64(repo_owner)?;
+    let repo_owner = normalize_pubkey(repo_owner)?;
     validate_repo_id(repo_id)?;
 
     let a_value = format!("30617:{repo_owner}:{repo_id}");
@@ -100,7 +105,7 @@ pub async fn cmd_list_patches(
     });
 
     if let Some(pk) = author {
-        validate_hex64(pk)?;
+        let pk = normalize_pubkey(pk)?;
         filter["authors"] = serde_json::json!([pk]);
     }
     if let Some(n) = limit {
@@ -136,10 +141,10 @@ pub async fn cmd_patch_status(
 
     let repo = match (repo_owner, repo_id) {
         (Some(owner), Some(id)) => {
-            validate_hex64(owner)?;
+            let owner = normalize_pubkey(owner)?;
             validate_repo_id(id)?;
             Some(GitRepoCoord {
-                owner: owner.to_string(),
+                owner,
                 id: id.to_string(),
             })
         }
@@ -160,15 +165,15 @@ pub async fn cmd_patch_status(
         recipients.push(repo.owner.clone());
     }
     for recipient in to {
-        validate_hex64(recipient)?;
-        if !recipients.contains(recipient) {
-            recipients.push(recipient.clone());
+        let recipient = normalize_pubkey(recipient)?;
+        if !recipients.contains(&recipient) {
+            recipients.push(recipient);
         }
     }
 
     let applied_patches = q
         .iter()
-        .map(|spec| GitAppliedPatchRef::parse(spec).map_err(sdk_err))
+        .map(|spec| parse_applied_patch_ref(spec))
         .collect::<Result<Vec<_>, _>>()?;
 
     let meta = GitStatusMeta {
@@ -188,6 +193,29 @@ pub async fn cmd_patch_status(
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
+}
+
+fn parse_applied_patch_ref(spec: &str) -> Result<GitAppliedPatchRef, CliError> {
+    if let Some((_, trailing_hint)) = spec.rsplit_once(':') {
+        reject_secret_key_input(trailing_hint)?;
+    }
+    let parsed = GitAppliedPatchRef::parse(spec).map_err(sdk_err)?;
+    if parsed.pubkey.is_some() {
+        return Ok(parsed);
+    }
+
+    let Some((prefix, candidate)) = spec.rsplit_once(':') else {
+        return Ok(parsed);
+    };
+    let Some((_, relay_hint)) = prefix.split_once(':') else {
+        return Ok(parsed);
+    };
+    if relay_hint.is_empty() || !candidate.starts_with("npub1") {
+        return Ok(parsed);
+    }
+
+    let author_hex = normalize_pubkey(candidate)?;
+    GitAppliedPatchRef::parse(&format!("{prefix}:{author_hex}")).map_err(sdk_err)
 }
 
 /// Parse the CLI's status word into a `GitStatus`. `merged` and `resolved`
@@ -322,5 +350,50 @@ mod tests {
     fn parse_status_rejects_unknown_word() {
         let err = parse_status("merge").unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn applied_patch_ref_normalizes_npub_author_hint_to_protocol_hex() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = crate::validate::format_npub(&hex).expect("public key formats");
+        let event_id = "a".repeat(64);
+
+        let parsed =
+            parse_applied_patch_ref(&format!("{event_id}:wss://relay.example/path:{npub}"))
+                .expect("npub hint parses");
+
+        assert_eq!(parsed.id, event_id);
+        assert_eq!(parsed.relay.as_deref(), Some("wss://relay.example/path"));
+        assert_eq!(parsed.pubkey.as_deref(), Some(hex.as_str()));
+    }
+
+    #[test]
+    fn applied_patch_ref_keeps_legacy_hex_author_hint_compatible() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let event_id = "b".repeat(64);
+
+        let parsed = parse_applied_patch_ref(&format!("{event_id}:wss://relay.example/path:{hex}"))
+            .expect("legacy hex hint parses");
+
+        assert_eq!(parsed.pubkey.as_deref(), Some(hex.as_str()));
+    }
+
+    #[test]
+    fn applied_patch_ref_rejects_secret_shaped_author_hint_without_echo() {
+        let event_id = "c".repeat(64);
+        for secret in [
+            "nsec1secret-shaped",
+            "nostr:nsec1secret-shaped",
+            "NSEC1SECRET-SHAPED",
+            "NOSTR:NSEC1SECRET-SHAPED",
+        ] {
+            let supplied = format!("{event_id}:wss://relay.example/path:{secret}");
+            let error = parse_applied_patch_ref(&supplied)
+                .expect_err("secret author hint must be rejected");
+            assert!(!error.to_string().contains(secret));
+            assert!(!error.to_string().contains(&supplied));
+        }
     }
 }

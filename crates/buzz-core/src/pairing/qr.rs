@@ -127,13 +127,13 @@ pub fn decode_qr(uri: &str) -> Result<QrPayload, PairingError> {
 
     // Validate pubkey: must be exactly 64 lowercase hex chars (NIP-AB §QR Code Format).
     if pubkey_hex.len() != 64 || !pubkey_hex.chars().all(is_lowercase_hex) {
-        return Err(PairingError::InvalidQr(format!(
-            "pubkey must be 64 lowercase hex chars, got {:?}",
-            pubkey_hex
-        )));
+        return Err(PairingError::InvalidQr(
+            "pubkey must be 64 lowercase hex chars".into(),
+        ));
     }
-    let source_pubkey = PublicKey::from_hex(pubkey_hex)
-        .map_err(|e| PairingError::InvalidQr(format!("invalid pubkey: {e}")))?;
+    let source_pubkey = PublicKey::from_hex(pubkey_hex).map_err(|_| {
+        PairingError::InvalidQr("pubkey is not a valid secp256k1 x-only public key".into())
+    })?;
 
     // Parse query parameters.
     let mut secret_hex: Option<&str> = None;
@@ -164,10 +164,9 @@ pub fn decode_qr(uri: &str) -> Result<QrPayload, PairingError> {
         .ok_or_else(|| PairingError::InvalidQr("missing 'secret' query parameter".into()))?;
 
     if secret_str.len() != 64 || !secret_str.chars().all(is_lowercase_hex) {
-        return Err(PairingError::InvalidQr(format!(
-            "secret must be 64 lowercase hex chars, got {:?}",
-            secret_str
-        )));
+        return Err(PairingError::InvalidQr(
+            "secret must be 64 lowercase hex chars".into(),
+        ));
     }
     let secret_bytes = hex::decode(secret_str)
         .map_err(|e| PairingError::InvalidQr(format!("invalid secret hex: {e}")))?;
@@ -353,6 +352,23 @@ mod tests {
         );
         let err = decode_qr(&uri).unwrap_err();
         assert!(matches!(err, PairingError::InvalidQr(_)));
+    }
+
+    #[test]
+    fn malformed_ephemeral_pubkey_error_does_not_echo_raw_input() {
+        let bad_pubkey = "not-a-public-key-containing-private-input";
+        let secret = hex::encode([0xab; 32]);
+        let relay_encoded = url_encode("wss://relay.example.com");
+        let uri = format!(
+            "nostrpair://{}?secret={}&relay={}",
+            bad_pubkey, secret, relay_encoded
+        );
+        let err = decode_qr(&uri).unwrap_err();
+        assert!(matches!(err, PairingError::InvalidQr(_)));
+        assert!(
+            !err.to_string().contains(bad_pubkey),
+            "pairing errors must not echo the malformed ephemeral public key"
+        );
     }
 
     // 6. Reject invalid hex in secret
@@ -583,6 +599,10 @@ mod tests {
         assert!(
             matches!(err, PairingError::InvalidQr(ref msg) if msg.contains("lowercase")),
             "expected lowercase rejection for secret, got {err:?}"
+        );
+        assert!(
+            !err.to_string().contains(&secret_upper),
+            "pairing errors must not echo the session secret"
         );
     }
 }

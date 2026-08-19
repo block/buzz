@@ -8,6 +8,7 @@ import {
   type ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { usePreviewFeatureWarning } from "@/shared/features";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 const PulseScreen = React.lazy(async () => {
@@ -26,8 +27,8 @@ function validatePulseSearch(
 ): PulseRouteSearch {
   return {
     profile:
-      typeof search.profile === "string" && search.profile.length > 0
-        ? search.profile
+      typeof search.profile === "string"
+        ? (safeNpub(search.profile) ?? undefined)
         : undefined,
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,

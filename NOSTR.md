@@ -223,9 +223,8 @@ Use `buzz-admin` — the operator CLI shipped in the relay image — to manage r
 In a Docker Compose deployment, use `run.sh`:
 
 ```bash
-# Add a member (accepts bech32 npub or 64-char hex; default role: member)
+# Add a member by npub (default role: member)
 ./run.sh add-member npub1abc...
-./run.sh add-member <64-char-hex-pubkey>
 ./run.sh add-member npub1abc... --role admin
 
 # Remove a member
@@ -262,7 +261,7 @@ docker compose exec relay buzz-admin list-members
 |----------|-------|
 | `DATABASE_URL` | Postgres connection string |
 | `REDIS_URL` | Redis connection string |
-| `BUZZ_RELAY_PRIVATE_KEY` | Hex private key — required to sign kind:13534 events |
+| `BUZZ_RELAY_PRIVATE_KEY` | NIP-19 `nsec` — required to sign kind:13534 events |
 
 ### NIP-43 Admin Events (WebSocket)
 
@@ -335,7 +334,7 @@ but only admins/owners can set it. Full spec:
 | Variable | Required | Default | Description |
 |----------|:--------:|---------|-------------|
 | `BUZZ_PUBKEY_ALLOWLIST` | ❌ | `false` | Enable pubkey allowlist for NIP-42 pubkey-only auth |
-| `BUZZ_RELAY_PRIVATE_KEY` | ❌ | random | Hex secret key for relay signing (discovery events, system messages) |
+| `BUZZ_RELAY_PRIVATE_KEY` | ❌ | random | NIP-19 `nsec` for relay signing (discovery events, system messages) |
 | `BUZZ_REQUIRE_AUTH_TOKEN` | ❌ | `false` | Require authenticated NIP-42 for all connections |
 
 ---

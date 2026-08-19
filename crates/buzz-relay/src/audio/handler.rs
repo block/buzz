@@ -31,7 +31,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use buzz_auth::generate_challenge;
-use buzz_core::tenant::TenantContext;
+use buzz_core::{nostr_identity::public_key_to_npub_or_invalid, tenant::TenantContext};
 use buzz_db::channel::MemberRole;
 
 use buzz_core::StoredEvent;
@@ -243,6 +243,7 @@ async fn handle_active_audio_connection(
 
     let pubkey = auth_ctx.pubkey;
     let pubkey_hex = pubkey.to_hex();
+    let pubkey_npub = public_key_to_npub_or_invalid(&pubkey);
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let parent_channel_id = auth_msg.parent_channel_id;
 
@@ -255,7 +256,7 @@ async fn handle_active_audio_connection(
     .await
     .is_err()
     {
-        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio: relay membership denied");
+        warn!(channel_id = %channel_id, pubkey = %pubkey_npub, "audio: relay membership denied");
         let _ = ws_send
             .send(WsMessage::Text(
                 serde_json::json!({"type": "error", "message": "restricted: not a relay member"})
@@ -278,7 +279,7 @@ async fn handle_active_audio_connection(
     {
         Ok(parent_id) => parent_id,
         Err(e) => {
-            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership denied: {e}");
+            warn!(channel_id = %channel_id, pubkey = %pubkey_npub, "audio membership denied: {e}");
             let _ = ws_send
                 .send(WsMessage::Text(
                     serde_json::json!({"type":"error","message":"not a member"})
@@ -340,7 +341,7 @@ async fn handle_active_audio_connection(
                 Err(e) => {
                     warn!(
                         channel_id = %channel_id,
-                        pubkey = %pubkey_hex,
+                        pubkey = %pubkey_npub,
                         "huddle join rejected by fence: {e}"
                     );
                     let _ = ws_send
@@ -362,7 +363,7 @@ async fn handle_active_audio_connection(
             if !state.config.huddle_audio_available {
                 debug!(
                     channel_id = %channel_id,
-                    pubkey = %pubkey_hex,
+                    pubkey = %pubkey_npub,
                     "huddle audio unavailable under horizontal scaling — rejecting join"
                 );
                 let _ = ws_send
@@ -422,7 +423,7 @@ async fn handle_active_audio_connection(
     if requested_version == 0 || requested_version > CURRENT_PROTOCOL_VERSION {
         warn!(
             channel_id = %channel_id,
-            pubkey = %pubkey_hex,
+            pubkey = %pubkey_npub,
             requested_version,
             current = CURRENT_PROTOCOL_VERSION,
             "audio: client requested unsupported protocol version"
@@ -478,7 +479,7 @@ async fn handle_active_audio_connection(
                 remote_fence = Some(Arc::clone(&mesh.audio_fence));
             }
             Err(crate::audio::join::DialError::Rejected(reason)) => {
-                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner rejected registration: {reason:?}");
+                warn!(channel_id = %channel_id, pubkey = %pubkey_npub, "huddle owner rejected registration: {reason:?}");
                 let _ = ws_send
                     .send(WsMessage::Text(
                         remote_rejection_ws_error(&reason).to_string().into(),
@@ -490,7 +491,7 @@ async fn handle_active_audio_connection(
                 return;
             }
             Err(crate::audio::join::DialError::Mesh(e)) => {
-                warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "huddle owner registration failed: {e}");
+                warn!(channel_id = %channel_id, pubkey = %pubkey_npub, "huddle owner registration failed: {e}");
                 let _ = ws_send
                     .send(WsMessage::Text(
                         serde_json::json!({
@@ -538,7 +539,7 @@ async fn handle_active_audio_connection(
             return;
         }
         Err(crate::audio::room::AdmissionError::VersionMismatch { pinned, requested }) => {
-            info!(channel_id = %channel_id, pubkey = %pubkey_hex, pinned, requested, "audio: protocol version mismatch — upgrade required");
+            info!(channel_id = %channel_id, pubkey = %pubkey_npub, pinned, requested, "audio: protocol version mismatch — upgrade required");
             let _ = ws_send.send(WsMessage::Text(serde_json::json!({
                 "type": "error", "code": "upgrade_required",
                 "message": format!("this huddle is using audio protocol v{pinned}; your client requested v{requested}"),
@@ -555,7 +556,7 @@ async fn handle_active_audio_connection(
 
     info!(
         channel_id = %channel_id,
-        pubkey = %pubkey_hex,
+        pubkey = %pubkey_npub,
         peer_index,
         "audio peer joined"
     );
@@ -890,7 +891,7 @@ async fn handle_active_audio_connection(
 
     info!(
         channel_id = %channel_id,
-        pubkey = %pubkey_hex,
+        pubkey = %pubkey_npub,
         "audio peer left"
     );
 }

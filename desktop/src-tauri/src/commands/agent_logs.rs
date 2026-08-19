@@ -1,7 +1,7 @@
 use tauri::{AppHandle, Manager};
 
 use crate::{
-    app_state::AppState,
+    app_state::{identity_npub_for_log_str, AppState},
     managed_agents::{
         latest_managed_agent_log_path, load_managed_agents, read_log_tail, BackendKind,
         ManagedAgentLogResponse,
@@ -24,7 +24,7 @@ pub async fn get_managed_agent_log(
         let record = records
             .iter()
             .find(|record| record.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+            .ok_or_else(|| format!("agent {} not found", identity_npub_for_log_str(&pubkey)))?;
         if record.backend != BackendKind::Local {
             return Err("logs are not available for remote agents".to_string());
         }
@@ -32,6 +32,7 @@ pub async fn get_managed_agent_log(
         let log_path = latest_managed_agent_log_path(&app, &pubkey)?;
         Ok(ManagedAgentLogResponse {
             content: read_log_tail(&log_path, line_count.unwrap_or(120) as usize)?,
+            log_display_label: format!("{}.log", identity_npub_for_log_str(&record.pubkey)),
             log_path: log_path.display().to_string(),
         })
     })

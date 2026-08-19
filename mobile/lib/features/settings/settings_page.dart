@@ -5,12 +5,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
+import '../../shared/nostr/nostr_keys.dart';
 import '../../shared/relay/relay.dart';
 import '../pairing/pairing_provider.dart';
 import '../../shared/theme/theme.dart';

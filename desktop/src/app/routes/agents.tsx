@@ -7,6 +7,7 @@ import {
   type ProfilePanelTab,
   type ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
+import { safeNpub } from "@/shared/lib/nostrUtils";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type AgentsRouteSearch = {
@@ -24,7 +25,10 @@ function validateAgentsSearch(
   search: Record<string, unknown>,
 ): AgentsRouteSearch {
   return {
-    profile: nonEmptyString(search.profile),
+    profile:
+      typeof search.profile === "string"
+        ? (safeNpub(search.profile) ?? undefined)
+        : undefined,
     profilePersona: nonEmptyString(search.profilePersona),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,

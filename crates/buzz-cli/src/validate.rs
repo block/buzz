@@ -1,4 +1,5 @@
 use crate::error::CliError;
+use buzz_core::nostr_identity::{parse_public_key_compat, public_key_to_npub};
 
 /// Maximum content size in bytes (64 KiB).
 pub const MAX_CONTENT_BYTES: usize = 65_536;
@@ -21,18 +22,50 @@ pub fn parse_uuid(s: &str) -> Result<uuid::Uuid, CliError> {
 
 /// Validate UUID string. Returns CliError::Usage on failure.
 pub fn validate_uuid(s: &str) -> Result<(), CliError> {
-    uuid::Uuid::parse_str(s).map_err(|_| CliError::Usage(format!("invalid UUID: {s}")))?;
+    uuid::Uuid::parse_str(s).map_err(|_| CliError::Usage("invalid UUID".to_string()))?;
     Ok(())
 }
 
 /// Validate 64-character lowercase hex string (event_id, pubkey).
 pub fn validate_hex64(s: &str) -> Result<(), CliError> {
     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(CliError::Usage(format!(
-            "must be a 64-character hex string: {s}"
-        )));
+        return Err(CliError::Usage(
+            "must be a 64-character hexadecimal value".to_string(),
+        ));
     }
     Ok(())
+}
+
+/// Reject input that is shaped like a NIP-19 secret before a dual key/name
+/// argument can fall through to a relay-backed name search.
+///
+/// The diagnostic deliberately never includes the supplied secret.
+pub fn reject_secret_key_input(s: &str) -> Result<(), CliError> {
+    let normalized = s.trim().to_ascii_lowercase();
+    let nip19 = normalized
+        .strip_prefix("nostr:")
+        .unwrap_or(normalized.as_str());
+    if nip19.starts_with("nsec1") {
+        return Err(CliError::Usage(
+            "secret keys cannot be used as public identities".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse a human-facing npub (or compatibility-only hex) to protocol hex.
+pub fn normalize_pubkey(s: &str) -> Result<String, CliError> {
+    parse_public_key_compat(s)
+        .map(|(public_key, _)| public_key.to_hex())
+        .map_err(|_| CliError::Usage("expected a valid npub".to_string()))
+}
+
+/// Convert a protocol-native public key to canonical human-facing npub.
+pub fn format_npub(s: &str) -> Result<String, CliError> {
+    let (public_key, _) = parse_public_key_compat(s)
+        .map_err(|_| CliError::Other("relay returned an invalid public key".to_string()))?;
+    public_key_to_npub(&public_key)
+        .map_err(|_| CliError::Other("failed to encode public key as npub".to_string()))
 }
 
 /// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
@@ -210,14 +243,24 @@ mod tests {
 
     #[test]
     fn validate_uuid_malformed() {
-        let err = validate_uuid("not-a-uuid").unwrap_err();
-        assert!(matches!(err, CliError::Usage(_)));
+        let supplied = "not-a-uuid";
+        let err = validate_uuid(supplied).unwrap_err();
+        assert!(matches!(&err, CliError::Usage(_)));
+        assert!(!err.to_string().contains(supplied));
     }
 
     #[test]
     fn validate_uuid_empty() {
         let err = validate_uuid("").unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn validate_uuid_never_echoes_secret_shaped_input() {
+        for supplied in ["nsec1secret-shaped", "NOSTR:NSEC1SECRET-SHAPED"] {
+            let error = validate_uuid(supplied).expect_err("secret shape is not a UUID");
+            assert!(!error.to_string().contains(supplied));
+        }
     }
 
     // --- validate_hex64 ---
@@ -253,7 +296,39 @@ mod tests {
         let mut hex = "a".repeat(63);
         hex.push('z'); // 'z' is not a hex digit
         let err = validate_hex64(&hex).unwrap_err();
-        assert!(matches!(err, CliError::Usage(_)));
+        assert!(matches!(&err, CliError::Usage(_)));
+        assert!(!err.to_string().contains(&hex));
+    }
+
+    #[test]
+    fn validate_hex64_error_never_echoes_input() {
+        let supplied = "private-looking-but-not-hex";
+        let error = validate_hex64(supplied).expect_err("input must be rejected");
+        assert!(!error.to_string().contains(supplied));
+    }
+
+    #[test]
+    fn secret_shaped_public_identity_input_is_rejected_without_echo() {
+        for supplied in [
+            "nsec1not-a-real-secret",
+            "nostr:nsec1not-a-real-secret",
+            "NSEC1NOT-A-REAL-SECRET",
+            "NOSTR:NSEC1NOT-A-REAL-SECRET",
+        ] {
+            let error = reject_secret_key_input(supplied).expect_err("secret shape must fail");
+            assert!(!error.to_string().contains(supplied));
+        }
+        assert!(reject_secret_key_input("npub1public-shape").is_ok());
+        assert!(reject_secret_key_input("Aaron").is_ok());
+    }
+
+    #[test]
+    fn normalize_pubkey_accepts_npub_and_legacy_hex() {
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = public_key_to_npub(&keys.public_key()).unwrap();
+        assert_eq!(normalize_pubkey(&npub).unwrap(), hex);
+        assert_eq!(normalize_pubkey(&hex).unwrap(), hex);
     }
 
     // --- validate_content_size ---

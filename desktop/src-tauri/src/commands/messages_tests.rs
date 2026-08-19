@@ -87,7 +87,9 @@ fn managed_agent_message_builder_rejects_invalid_mentions() {
 }
 #[test]
 fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
-    let filter = build_search_messages_filter("  pro  ", 12, Some("channel-1"), None, None, None);
+    let filter =
+        build_search_messages_filter("  pro  ", 12, Some("channel-1"), None, None, None, None)
+            .expect("default search mode should remain prefix");
 
     assert_eq!(filter["search"], serde_json::json!("pro"));
     assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
@@ -99,6 +101,33 @@ fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
 }
 
 #[test]
+fn search_messages_filter_maps_full_text_to_relay_word_mode() {
+    let filter = build_search_messages_filter(
+        "alpha OR beta",
+        500,
+        None,
+        Some(" fullText "),
+        None,
+        None,
+        None,
+    )
+    .expect("full-text search mode should be supported");
+
+    assert_eq!(filter["search"], serde_json::json!("alpha OR beta"));
+    assert_eq!(filter["search_mode"], serde_json::json!("word"));
+}
+
+#[test]
+fn search_messages_filter_rejects_unknown_mode_without_echoing_it() {
+    let invalid = "word-and-prefix-secret";
+    let error = build_search_messages_filter("deploy", 20, None, Some(invalid), None, None, None)
+        .expect_err("unknown search modes must fail before querying the relay");
+
+    assert_eq!(error, "unsupported search mode");
+    assert!(!error.contains(invalid));
+}
+
+#[test]
 fn search_messages_filter_emits_operator_fields() {
     let authors =
         vec!["aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899".to_string()];
@@ -106,10 +135,12 @@ fn search_messages_filter_emits_operator_fields() {
         "deploy",
         20,
         Some("channel-uuid"),
+        Some("prefix"),
         Some(&authors),
         Some(1_700_000_000),
         Some(1_700_086_400),
-    );
+    )
+    .expect("prefix search mode should be supported");
 
     assert_eq!(filter["search"], serde_json::json!("deploy"));
     assert_eq!(filter["#h"], serde_json::json!(["channel-uuid"]));

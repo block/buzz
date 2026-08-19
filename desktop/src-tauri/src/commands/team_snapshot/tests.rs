@@ -502,14 +502,19 @@ fn rollback_aggregates_multiple_errors() {
     let mut errors = vec![original_err.clone()];
 
     // Simulate a keyring cleanup failure.
-    errors.push("keyring cleanup pubkey-1: keyring unreachable".to_string());
+    const PUBKEY_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    let pubkey_display = crate::app_state::identity_npub_for_log_str(PUBKEY_HEX);
+    errors.push(format!(
+        "keyring cleanup {pubkey_display}: keyring unreachable"
+    ));
 
     // Simulate a disk restore failure.
     errors.push("agent store restore: permission denied".to_string());
 
     let combined = errors.join("; ");
     assert!(combined.contains("save_teams failed"));
-    assert!(combined.contains("keyring cleanup pubkey-1"));
+    assert!(combined.contains(&format!("keyring cleanup {pubkey_display}")));
+    assert!(!combined.contains(PUBKEY_HEX));
     assert!(combined.contains("agent store restore"));
     assert_eq!(
         combined.matches(';').count(),
@@ -586,7 +591,10 @@ fn full_rollback_at_teams_boundary_existing_agents_store() {
 
     for pk in &minted_pubkeys {
         if let Err(e) = try_delete_key(pk) {
-            errors.push(format!("keyring cleanup {pk}: {e}"));
+            errors.push(format!(
+                "keyring cleanup {}: {e}",
+                crate::app_state::identity_npub_for_log_str(pk)
+            ));
         }
     }
     let agents_restore = match &agents_snap {

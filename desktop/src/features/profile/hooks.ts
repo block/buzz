@@ -46,6 +46,7 @@ import {
 } from "@/features/profile/lib/userLabelStorage";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
+import { prepareRelaySearchInput } from "@/features/search/lib/searchInputSafety";
 
 export const profileQueryKey = ["profile"] as const;
 export const contactListQueryKey = (pubkey: string) =>
@@ -420,9 +421,10 @@ export function useUserSearchQuery(
     limit?: number;
   },
 ) {
-  const normalizedQuery = query.trim().toLowerCase();
+  const { normalizedQuery, safe } = prepareRelaySearchInput(query);
   const enabled =
     (options?.enabled ?? true) &&
+    safe &&
     (options?.allowEmpty === true || normalizedQuery.length > 0);
 
   return useQuery<UserSearchResult[]>({
@@ -443,9 +445,10 @@ export function useInfiniteUserSearchQuery(
     limit?: number;
   },
 ) {
-  const normalizedQuery = query.trim().toLowerCase();
+  const { normalizedQuery, safe } = prepareRelaySearchInput(query);
   const enabled =
     (options?.enabled ?? true) &&
+    safe &&
     (options?.allowEmpty === true || normalizedQuery.length > 0);
 
   return useInfiniteQuery<UserSearchPage>({

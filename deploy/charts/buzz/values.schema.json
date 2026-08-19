@@ -39,15 +39,19 @@
     },
     "ownerPubkey": {
       "type": "string",
-      "pattern": "^([0-9a-f]{64})?$",
-      "description": "64-char lowercase hex Nostr pubkey of the relay operator. Required when relay.requireRelayMembership=true."
+      "pattern": "^$|^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$|^[0-9a-f]{64}$",
+      "description": "NIP-19 npub of the relay operator. Required when relay.requireRelayMembership=true. Legacy lowercase hex is accepted for upgrade compatibility."
     },
     "secrets": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "existingSecret": { "type": "string", "description": "Name of an externally managed Secret. Production / GitOps path." },
-        "relayPrivateKey": { "type": "string" },
+        "relayPrivateKey": {
+          "type": "string",
+          "pattern": "^$|^nsec1[023456789acdefghjklmnpqrstuvwxyz]{58}$|^[0-9a-fA-F]{64}$",
+          "description": "Relay identity in NIP-19 nsec form. Legacy hex is accepted for upgrade compatibility."
+        },
         "gitHookHmacSecret": { "type": "string" }
       }
     },

@@ -2,16 +2,30 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  commitAuthorDisplayName,
   commitAuthorPubkeysFromPullRequests,
   gitContributorPubkeysFromCommits,
+  gitAuthorFieldDisplayValue,
   profileForCommit,
+  profileForContributor,
   projectContributorActivityCounts,
   signedProjectContributorPubkeys,
 } from "./projectContributorMatching.ts";
 import { pubkeyToNpub } from "../../../shared/lib/nostrUtils.ts";
 
-const AGENT_PUBKEY = "a".repeat(64);
-const USER_PUBKEY = "b".repeat(64);
+const AGENT_PUBKEY =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const USER_PUBKEY =
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+const REVIEWER_PUBKEY =
+  "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+const COMMENTER_ONE_PUBKEY =
+  "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13";
+const COMMENTER_TWO_PUBKEY =
+  "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4";
+const MISSING_PROFILE_PUBKEY =
+  "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556";
+const USER_NPUB = pubkeyToNpub(USER_PUBKEY);
 
 const PROFILES = {
   [AGENT_PUBKEY]: {
@@ -39,8 +53,8 @@ function makeCommit(overrides = {}) {
 }
 
 test("collects declared humans and signed agent activity without assignments", () => {
-  const reviewer = "c".repeat(64);
-  const commenters = ["d".repeat(64), "e".repeat(64)];
+  const reviewer = REVIEWER_PUBKEY;
+  const commenters = [COMMENTER_ONE_PUBKEY, COMMENTER_TWO_PUBKEY];
   const contributors = signedProjectContributorPubkeys({
     owner: USER_PUBKEY,
     contributors: [AGENT_PUBKEY],
@@ -197,10 +211,65 @@ test("profileForCommit falls back to exact git author matching", () => {
 });
 
 test("profileForCommit resolves an npub git author to its profile", () => {
-  const commit = makeCommit({ authorName: pubkeyToNpub(USER_PUBKEY) });
+  const commit = makeCommit({ authorName: USER_NPUB });
   const matched = profileForCommit(commit, PROFILES, new Map());
   assert.equal(matched?.pubkey, USER_PUBKEY);
   assert.equal(matched?.profile.displayName, "Thomas P");
+});
+
+test("profileForContributor resolves canonical npub git emails", () => {
+  const matched = profileForContributor(
+    {
+      name: "Ordinary Git Name",
+      email: USER_NPUB,
+      commitCount: 1,
+      lastCommitAt: 1_700_000_000,
+    },
+    PROFILES,
+  );
+  assert.equal(matched?.pubkey, USER_PUBKEY);
+  assert.equal(matched?.profile.displayName, "Thomas P");
+});
+
+test("commitAuthorDisplayName canonicalizes keys and preserves ordinary Git text", () => {
+  assert.equal(
+    commitAuthorDisplayName(
+      makeCommit({ authorName: USER_PUBKEY, authorEmail: "" }),
+    ),
+    USER_NPUB,
+  );
+  assert.equal(
+    commitAuthorDisplayName(
+      makeCommit({ authorName: USER_NPUB, authorEmail: "" }),
+    ),
+    USER_NPUB,
+  );
+  assert.equal(
+    commitAuthorDisplayName(
+      makeCommit({ authorName: "Ordinary Git Name", authorEmail: USER_PUBKEY }),
+    ),
+    USER_NPUB,
+  );
+  assert.equal(commitAuthorDisplayName(makeCommit()), "Thomas Petersen");
+  assert.equal(
+    commitAuthorDisplayName(
+      makeCommit({ authorName: "", authorEmail: "thomas@example.com" }),
+    ),
+    "thomas@example.com",
+  );
+  assert.equal(
+    commitAuthorDisplayName(makeCommit({ authorName: "", authorEmail: "" })),
+    "Unknown author",
+  );
+});
+
+test("gitAuthorFieldDisplayValue canonicalizes identity-shaped secondary text", () => {
+  assert.equal(gitAuthorFieldDisplayValue(USER_PUBKEY), USER_NPUB);
+  assert.equal(gitAuthorFieldDisplayValue(USER_NPUB), USER_NPUB);
+  assert.equal(
+    gitAuthorFieldDisplayValue(" thomas@example.com "),
+    "thomas@example.com",
+  );
 });
 
 test("profileForCommit ignores malformed npub git authors", () => {
@@ -218,7 +287,7 @@ test("profileForCommit returns null when nothing matches", () => {
 
 test("mapped pubkey without a fetched profile falls back to git author", () => {
   const commit = makeCommit({ authorEmail: "thomasp@example.com" });
-  const map = new Map([[commit.hash, "f".repeat(64)]]);
+  const map = new Map([[commit.hash, MISSING_PROFILE_PUBKEY]]);
   const matched = profileForCommit(commit, PROFILES, map);
   assert.equal(matched?.pubkey, USER_PUBKEY);
 });

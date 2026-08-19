@@ -8,11 +8,19 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
     EnvFilter::new(rust_log.unwrap_or("buzz_relay=info"))
 }
+
+fn relay_owner_npub(owner_pubkey: &str) -> anyhow::Result<String> {
+    let owner = nostr::PublicKey::from_hex(owner_pubkey).map_err(|error| {
+        anyhow::anyhow!("invalid relay owner public key after validation: {error}")
+    })?;
+    public_key_to_npub(&owner)
+        .map_err(|error| anyhow::anyhow!("failed to encode relay owner npub: {error}"))
+}
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
-use buzz_core::CommunityId;
+use buzz_core::{nostr_identity::public_key_to_npub, CommunityId};
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
@@ -234,7 +242,7 @@ async fn main() -> anyhow::Result<()> {
     if config.require_relay_membership && config.relay_owner_pubkey.is_none() {
         error!(
             "BUZZ_REQUIRE_RELAY_MEMBERSHIP=true but RELAY_OWNER_PUBKEY is not set or invalid. \
-             Set RELAY_OWNER_PUBKEY to a valid 64-char hex pubkey."
+             Set RELAY_OWNER_PUBKEY to a valid npub."
         );
         return Err(anyhow::anyhow!(
             "RELAY_OWNER_PUBKEY required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true"
@@ -324,8 +332,9 @@ async fn main() -> anyhow::Result<()> {
     if let (Some(community), Some(owner_pubkey)) =
         (deployment_community, config.relay_owner_pubkey.as_ref())
     {
+        let owner_npub = relay_owner_npub(owner_pubkey)?;
         match db.bootstrap_owner(community, owner_pubkey).await {
-            Ok(()) => info!(pubkey = %owner_pubkey, "Relay owner bootstrapped"),
+            Ok(()) => info!(pubkey = %owner_npub, "Relay owner bootstrapped"),
             Err(e) => {
                 if config.require_relay_membership {
                     // Membership enforcement is on — a missing owner means no one
@@ -422,9 +431,9 @@ async fn main() -> anyhow::Result<()> {
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
 
-    let relay_keypair = if let Some(hex) = &config.relay_private_key {
-        nostr::Keys::parse(hex)
-            .map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))?
+    let relay_keypair = if let Some(nsec) = &config.relay_private_key {
+        nostr::Keys::parse(nsec)
+            .map_err(|_| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY after validation"))?
     } else if !config.require_auth_token {
         // Dev mode: use a deterministic keypair so addressable events (kind:39000/39001/39002)
         // replace correctly across restarts. Without this, each restart generates a new pubkey
@@ -432,8 +441,10 @@ async fn main() -> anyhow::Result<()> {
         const DEV_RELAY_PRIVKEY: &str =
             "0000000000000000000000000000000000000000000000000000000000000001";
         let keys = nostr::Keys::parse(DEV_RELAY_PRIVKEY).expect("hardcoded dev key is valid");
+        let relay_npub = public_key_to_npub(&keys.public_key())
+            .map_err(|error| anyhow::anyhow!("failed to encode relay npub: {error}"))?;
         tracing::warn!(
-            pubkey = %keys.public_key().to_hex(),
+            pubkey = %relay_npub,
             "Using hardcoded dev relay keypair (BUZZ_REQUIRE_AUTH_TOKEN=false). \
              Set BUZZ_RELAY_PRIVATE_KEY for production."
         );
@@ -1120,9 +1131,18 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod env_filter_tests {
-    use super::log_env_filter;
+    use super::{log_env_filter, relay_owner_npub};
     use buzz_relay::telemetry::otel_env_filter;
     use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn relay_owner_log_identity_is_npub_not_hex() {
+        let hex = nostr::Keys::generate().public_key().to_hex();
+        let displayed = relay_owner_npub(&hex).expect("relay owner formats");
+        assert!(displayed.starts_with("npub1"));
+        assert_ne!(displayed, hex);
+        assert!(!displayed.contains(&hex));
+    }
 
     #[test]
     fn unset_enables_datastore_only_for_otel_filter() {

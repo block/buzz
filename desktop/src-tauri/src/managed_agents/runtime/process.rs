@@ -437,7 +437,9 @@ pub(super) fn terminate_runtime_receipt_with(
     }
     Err(format!(
         "prior runtime {} for pair {} on {} did not exit",
-        receipt.pid, receipt.key.pubkey, receipt.key.relay_url
+        receipt.pid,
+        crate::app_state::identity_npub_for_log_str(&receipt.key.pubkey),
+        receipt.key.relay_url
     ))
 }
 

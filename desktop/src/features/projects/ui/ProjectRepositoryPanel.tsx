@@ -26,6 +26,10 @@ import type {
   ProjectRepoFile,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import {
+  commitAuthorDisplayName,
+  profileForCommitAuthor,
+} from "@/features/projects/lib/projectContributorMatching";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -67,10 +71,6 @@ function formatFileSize(size: number | null) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function normalizeAuthorLookupValue(value: string | null | undefined) {
-  return value?.trim().toLowerCase() ?? "";
-}
-
 type CommitAuthorProfile = {
   avatarUrl: string | null;
   displayName: string | null;
@@ -79,40 +79,12 @@ type CommitAuthorProfile = {
   ownerPubkey?: string | null;
 };
 
-function profileMatchesCommitAuthor(
-  commit: ProjectRepoFile["latestCommit"],
-  profile: CommitAuthorProfile,
-  pubkey?: string,
-) {
-  if (!commit) return false;
-
-  const authorName = normalizeAuthorLookupValue(commit.authorName);
-  const authorEmail = normalizeAuthorLookupValue(commit.authorEmail);
-  if (!authorName && !authorEmail) return false;
-
-  const candidates = [
-    pubkey,
-    profile.displayName,
-    profile.nip05Handle,
-    profile.ownerPubkey,
-  ].map(normalizeAuthorLookupValue);
-
-  return candidates.includes(authorName) || candidates.includes(authorEmail);
-}
-
-function profileForCommitAuthor(
+function knownProfileForCommitAuthor(
   commit: ProjectRepoFile["latestCommit"],
   profiles: UserProfileLookup | undefined,
 ) {
   if (!commit || !profiles) return null;
-
-  for (const [pubkey, profile] of Object.entries(profiles)) {
-    if (profileMatchesCommitAuthor(commit, profile, pubkey)) {
-      return profile;
-    }
-  }
-
-  return null;
+  return profileForCommitAuthor(commit, profiles)?.profile ?? null;
 }
 
 function searchedProfileForCommitAuthor(
@@ -120,12 +92,10 @@ function searchedProfileForCommitAuthor(
   users: UserSearchResult[] | undefined,
 ) {
   if (!commit || !users?.length) return null;
-
-  return (
-    users.find((user) =>
-      profileMatchesCommitAuthor(commit, user, user.pubkey),
-    ) ?? users[0]
+  const profiles = Object.fromEntries(
+    users.map((user) => [normalizePubkey(user.pubkey), user]),
   );
+  return profileForCommitAuthor(commit, profiles)?.profile ?? users[0];
 }
 
 function commitAuthorLabel(
@@ -137,7 +107,7 @@ function commitAuthorLabel(
   return (
     profile?.displayName?.trim() ||
     profile?.nip05Handle?.trim() ||
-    commit.authorName
+    commitAuthorDisplayName(commit)
   );
 }
 
@@ -154,8 +124,11 @@ function RepositoryCommitCell({
     <p className="truncate text-xs text-foreground">
       {commit.subject}
       <span className="text-muted-foreground">
-        {" "}
-        · {commitAuthorLabel(commit, profileForCommitAuthor(commit, profiles))}
+        {" · "}
+        {commitAuthorLabel(
+          commit,
+          knownProfileForCommitAuthor(commit, profiles),
+        )}
       </span>
     </p>
   );
@@ -653,7 +626,7 @@ export function RepositoryFilesPanel({
   const visibleEntries = entries.slice(0, 200);
   const latestCommit = snapshot?.latestCommit ?? null;
   const knownLatestCommitProfile = React.useMemo(
-    () => profileForCommitAuthor(latestCommit, profiles),
+    () => knownProfileForCommitAuthor(latestCommit, profiles),
     [latestCommit, profiles],
   );
   const fallbackLatestCommitProfile = fallbackAuthorPubkey

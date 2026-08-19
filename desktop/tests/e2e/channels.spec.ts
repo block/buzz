@@ -23,7 +23,7 @@ const CACHED_PROFILE_LABELS_TAG = "@cached-profile-labels";
 // owned-by-viewer via its mockProfiles owner_pubkey, so the sidebar
 // view-activity gate (memberIsBot && viewerIsOwner) opens for it.
 const OWNED_RELAY_AGENT_PUBKEY =
-  "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const DM_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 

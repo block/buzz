@@ -1,7 +1,10 @@
-use crate::managed_agents::{
-    command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
-    DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
-    DEFAULT_ACP_COMMAND,
+use crate::{
+    app_state::identity_npub_for_log_str as npub,
+    managed_agents::{
+        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
+        DEFAULT_ACP_COMMAND,
+    },
 };
 
 mod post_install_verification;
@@ -546,20 +549,20 @@ async fn restart_single_agent_after_install(
             save_managed_agents(&app_for_stop, &records)?;
         }
 
-        // Re-verify eligibility under lock.
+        let who = npub(&pubkey_owned);
         let record = records
             .iter()
             .find(|r| r.pubkey == pubkey_owned)
-            .ok_or_else(|| format!("agent {pubkey_owned} not found"))?;
+            .ok_or_else(|| format!("agent {who} not found"))?;
 
         if record.backend != BackendKind::Local {
-            return Err(format!("agent {pubkey_owned} is no longer a local agent"));
+            return Err(format!("agent {who} is no longer a local agent"));
         }
         let runtime_keys =
             crate::managed_agents::managed_agent_runtime_keys(&runtimes, &pubkey_owned);
         if runtime_keys.is_empty() {
             return Err(format!(
-                "agent {pubkey_owned} no longer has a live pair runtime after sync"
+                "agent {who} no longer has a live pair runtime after sync"
             ));
         }
 
@@ -571,7 +574,7 @@ async fn restart_single_agent_after_install(
             known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
         if !runtime_matches {
             return Err(format!(
-                "agent {pubkey_owned} runtime no longer matches {runtime_id_owned} under lock"
+                "agent {who} runtime no longer matches {runtime_id_owned} under lock"
             ));
         }
 
@@ -582,7 +585,7 @@ async fn restart_single_agent_after_install(
             .unwrap_or(false);
         if !setup_mode {
             return Err(format!(
-                "agent {pubkey_owned} is not in setup mode under lock — skipping"
+                "agent {who} is not in setup mode under lock — skipping"
             ));
         }
 
@@ -590,7 +593,7 @@ async fn restart_single_agent_after_install(
         let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
         if !matches!(agent_readiness(&effective), AgentReadiness::Ready) {
             return Err(format!(
-                "agent {pubkey_owned} readiness is still NotReady after install — not bouncing"
+                "agent {who} readiness is still NotReady after install — not bouncing"
             ));
         }
 
@@ -603,15 +606,16 @@ async fn restart_single_agent_after_install(
     })
     .await;
 
+    let who = npub(pubkey);
     let runtime_keys = match stop_result {
         Ok(Ok(runtime_keys)) => runtime_keys,
         Ok(Err(e)) => {
-            eprintln!("buzz-desktop: install_acp_runtime: skipping restart of {pubkey}: {e}");
+            eprintln!("buzz-desktop: install_acp_runtime: skipping restart of {who}: {e}");
             return InstallRestartOutcome::Skipped;
         }
         Err(e) => {
             eprintln!(
-                "buzz-desktop: install_acp_runtime: spawn_blocking failed for stop of {pubkey}: {e}"
+                "buzz-desktop: install_acp_runtime: spawn_blocking failed for stop of {who}: {e}"
             );
             return InstallRestartOutcome::Skipped;
         }
@@ -624,17 +628,17 @@ async fn restart_single_agent_after_install(
     {
         Ok(_) => {
             eprintln!(
-                "buzz-desktop: install_acp_runtime: restarted setup-mode agent {pubkey} after install"
+                "buzz-desktop: install_acp_runtime: restarted setup-mode agent {who} after install"
             );
             InstallRestartOutcome::Restarted
         }
         Err(e) => {
             eprintln!(
-                "buzz-desktop: install_acp_runtime: failed to start {pubkey} after install: {e}"
+                "buzz-desktop: install_acp_runtime: failed to start {who} after install: {e}"
             );
             if let Err(save_err) = persist_last_error_on_install(app, pubkey, &e) {
                 eprintln!(
-                    "buzz-desktop: install_acp_runtime: failed to persist last_error for {pubkey}: {save_err}"
+                    "buzz-desktop: install_acp_runtime: failed to persist last_error for {who}: {save_err}"
                 );
             }
             InstallRestartOutcome::FailedAfterStop

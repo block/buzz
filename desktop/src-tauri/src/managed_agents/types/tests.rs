@@ -756,6 +756,7 @@ fn summary_fixture(
         last_error_code: None,
         start_on_app_launch: false,
         auto_restart_on_config_change: false,
+        log_display_label: "npub1example.log".into(),
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),
@@ -773,6 +774,10 @@ fn summary_without_drift_omits_restart_diff_from_the_wire() {
     assert!(
         wire.get("restart_diff").is_none(),
         "empty restart_diff must be omitted, got: {wire}"
+    );
+    assert_eq!(
+        wire.get("log_display_label"),
+        Some(&serde_json::json!("npub1example.log"))
     );
 }
 

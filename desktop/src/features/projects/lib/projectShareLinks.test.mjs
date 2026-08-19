@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { npubEncode } from "nostr-tools/nip19";
 
 import {
   issueShareLink,
@@ -12,6 +13,7 @@ import {
 } from "./projectShareLinks.ts";
 
 const OWNER = "a".repeat(64);
+const OWNER_NPUB = npubEncode(OWNER);
 const EVENT_ID = "b".repeat(64);
 const REPO_ADDRESS = `30617:${OWNER}:flappy-bee`;
 const PROJECT_ADDRESS = `30621:${OWNER}:pollinator`;
@@ -47,19 +49,19 @@ test("parseAddressableCoordinate rejects malformed coordinates", () => {
 test("projectShareLink links explicit projects by their 30621 coordinate", () => {
   assert.equal(
     projectShareLink({ projectAddress: PROJECT_ADDRESS }),
-    `buzz://project?owner=${OWNER}&d=pollinator`,
+    `buzz://project?owner=${OWNER_NPUB}&d=pollinator`,
   );
 });
 
 test("projectShareLink carries the active workspace tab for both link kinds", () => {
   assert.equal(
     projectShareLink({ projectAddress: PROJECT_ADDRESS }, "prs"),
-    `buzz://project?owner=${OWNER}&d=pollinator&tab=prs`,
+    `buzz://project?owner=${OWNER_NPUB}&d=pollinator&tab=prs`,
   );
   // Legacy projects share as buzz://repo and keep the tab too.
   assert.equal(
     projectShareLink({ projectAddress: REPO_ADDRESS }, "issues"),
-    `buzz://repo?owner=${OWNER}&d=flappy-bee&tab=issues`,
+    `buzz://repo?owner=${OWNER_NPUB}&d=flappy-bee&tab=issues`,
   );
 });
 
@@ -80,7 +82,7 @@ test("workspace tab ids map onto link tabs and back", () => {
 test("projectShareLink links legacy projects as their backing repository", () => {
   assert.equal(
     projectShareLink({ projectAddress: REPO_ADDRESS }),
-    `buzz://repo?owner=${OWNER}&d=flappy-bee`,
+    `buzz://repo?owner=${OWNER_NPUB}&d=flappy-bee`,
   );
 });
 
@@ -105,7 +107,7 @@ test("projectShareLink declines coordinates the link format cannot express", () 
 test("repositoryShareLink links the repository coordinate", () => {
   assert.equal(
     repositoryShareLink({ repoAddress: REPO_ADDRESS }),
-    `buzz://repo?owner=${OWNER}&d=flappy-bee`,
+    `buzz://repo?owner=${OWNER_NPUB}&d=flappy-bee`,
   );
   assert.equal(
     repositoryShareLink({ repoAddress: PROJECT_ADDRESS }),
@@ -117,11 +119,11 @@ test("repositoryShareLink links the repository coordinate", () => {
 test("issue and pull request links carry the event id and repo coordinate", () => {
   assert.equal(
     issueShareLink({ id: EVENT_ID, repoAddress: REPO_ADDRESS }),
-    `buzz://issue?id=${EVENT_ID}&owner=${OWNER}&d=flappy-bee`,
+    `buzz://issue?id=${EVENT_ID}&owner=${OWNER_NPUB}&d=flappy-bee`,
   );
   assert.equal(
     pullRequestShareLink({ id: EVENT_ID, repoAddress: REPO_ADDRESS }),
-    `buzz://pr?id=${EVENT_ID}&owner=${OWNER}&d=flappy-bee`,
+    `buzz://pr?id=${EVENT_ID}&owner=${OWNER_NPUB}&d=flappy-bee`,
   );
 });
 

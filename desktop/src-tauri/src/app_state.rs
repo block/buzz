@@ -12,6 +12,9 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
+pub(crate) use crate::identity_display::{
+    identity_from_env, identity_npub_for_log, identity_npub_for_log_str,
+};
 pub(crate) use crate::identity_storage::{IdentityStorage, RecoveryState, ResolvedIdentity};
 use crate::managed_agents::config_bridge::SessionConfigCache;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
@@ -131,28 +134,6 @@ pub struct AppState {
     pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
 }
 
-/// Parse the `BUZZ_PRIVATE_KEY` env var into identity keys. `Some` means the
-/// env var was present and valid and MUST win over any persisted/keyring key
-/// (the dev/CI/harness override). `None` means absent or malformed — callers
-/// fall through to persisted resolution. A malformed value is logged and
-/// treated as absent rather than left on an ephemeral identity.
-fn identity_from_env() -> Option<Keys> {
-    match std::env::var("BUZZ_PRIVATE_KEY") {
-        Ok(nsec) => match Keys::parse(nsec.trim()) {
-            Ok(keys) => Some(keys),
-            Err(error) => {
-                eprintln!("buzz-desktop: invalid BUZZ_PRIVATE_KEY: {error}");
-                None
-            }
-        },
-        Err(std::env::VarError::NotUnicode(_)) => {
-            eprintln!("buzz-desktop: BUZZ_PRIVATE_KEY contains invalid UTF-8");
-            None
-        }
-        Err(std::env::VarError::NotPresent) => None,
-    }
-}
-
 /// Build the no-redirect HTTP client used for authenticated relay media
 /// fetches (download / copy).
 ///
@@ -181,7 +162,7 @@ pub fn build_app_state() -> AppState {
         Some(keys) => {
             eprintln!(
                 "buzz-desktop: configured identity pubkey {}",
-                keys.public_key().to_hex()
+                identity_npub_for_log(&keys.public_key())
             );
             (keys, IdentityStorage::Environment)
         }
@@ -477,7 +458,7 @@ fn resolve_identity_with_store(
                     Ok(keyring_keys) => {
                         eprintln!(
                             "buzz-desktop: persisted identity pubkey {}",
-                            keyring_keys.public_key().to_hex()
+                            identity_npub_for_log(&keyring_keys.public_key())
                         );
                         // Check for a leftover identity.key. If it holds a
                         // DIFFERENT pubkey, the user imported that key after
@@ -493,7 +474,7 @@ fn resolve_identity_with_store(
                                     eprintln!(
                                         "buzz-desktop: identity.key differs from keyring; \
                                          adopting imported key {}",
-                                        file_keys.public_key().to_hex()
+                                        identity_npub_for_log(&file_keys.public_key())
                                     );
                                     // Delegate the store→read-back-verify→marker→delete
                                     // sequence to `persist_identity_to_keyring`, which owns
@@ -604,7 +585,7 @@ fn resolve_identity_with_store(
                 eprintln!(
                     "buzz-desktop: identity lost — keyring was empty despite migration marker; \
                      using ephemeral key {}, awaiting user re-import",
-                    ephemeral.public_key().to_hex()
+                    identity_npub_for_log(&ephemeral.public_key())
                 );
                 return Ok(ResolvedIdentity {
                     keys: ephemeral,
@@ -633,7 +614,7 @@ fn resolve_identity_with_store(
                     "buzz-desktop: keyring unreachable but migration marker present; \
                      booting keyring-locked recovery with ephemeral key {} — \
                      unlock the keyring and relaunch",
-                    ephemeral.public_key().to_hex()
+                    identity_npub_for_log(&ephemeral.public_key())
                 );
                 return Ok(ResolvedIdentity {
                     keys: ephemeral,
@@ -693,7 +674,7 @@ fn recover_from_keyring(
             "buzz-desktop: identity lost — keyring had corrupt data and no valid identity.key \
              backup; prior identity (migration marker present) is unrecoverable; \
              using ephemeral key {}, awaiting user re-import",
-            ephemeral.public_key().to_hex()
+            identity_npub_for_log(&ephemeral.public_key())
         );
         return Ok(ResolvedIdentity {
             keys: ephemeral,
@@ -721,7 +702,7 @@ fn load_file_or_generate(
             Ok(keys) => {
                 eprintln!(
                     "buzz-desktop: persisted identity pubkey {}",
-                    keys.public_key().to_hex()
+                    identity_npub_for_log(&keys.public_key())
                 );
                 return Ok(keys);
             }
@@ -732,7 +713,7 @@ fn load_file_or_generate(
     save_key_file(legacy_path, &keys)?;
     eprintln!(
         "buzz-desktop: generated and saved identity pubkey {}",
-        keys.public_key().to_hex()
+        identity_npub_for_log(&keys.public_key())
     );
     Ok(keys)
 }
@@ -948,7 +929,7 @@ fn generate_and_persist(
     }
     eprintln!(
         "buzz-desktop: generated and saved identity pubkey {}",
-        keys.public_key().to_hex()
+        identity_npub_for_log(&keys.public_key())
     );
     Ok((keys, storage))
 }

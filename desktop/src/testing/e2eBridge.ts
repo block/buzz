@@ -65,7 +65,7 @@ import {
   ensureRelayOriginFetch,
   resetMediaCaches,
 } from "@/shared/lib/mediaUrl";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import {
   isValidLinkPreviewSnapshotCanonicalUrl,
   parseLinkPreviewSnapshots,
@@ -1501,7 +1501,7 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 // sidebar's owner-gate path (`viewerIsOwner`), distinct from the local-managed
 // path that `mira` (profile-only) and managed-agent fixtures cover.
 const OWNED_RELAY_AGENT_PUBKEY =
-  "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
 const STARTER_GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const STARTER_WELCOME_CHANNEL_ID = "5f0b1b3c-2a37-5366-9b8c-31a4b21d8e77";
@@ -1670,7 +1670,7 @@ function syncMockChannel(channel: MockChannel) {
 
   channel.participant_pubkeys = channel.members.map((member) => member.pubkey);
   channel.participants = channel.members.map(
-    (member) => member.display_name ?? member.pubkey.slice(0, 8),
+    (member) => member.display_name ?? truncatePubkey(member.pubkey),
   );
 }
 
@@ -3801,7 +3801,7 @@ function importMockIdentity(nsec: string) {
   }
 
   return {
-    pubkey,
+    pubkey: npubEncode(pubkey),
     display_name: username,
   };
 }
@@ -8650,11 +8650,18 @@ async function handleCreateManagedAgent(
   const avatarUrl = args.input.avatarUrl?.trim() || personaAvatarUrl;
   const name = args.input.name.trim();
   const now = new Date().toISOString();
-  const pubkey = crypto
-    .randomUUID()
-    .replace(/-/g, "")
-    .padEnd(64, "0")
-    .slice(0, 64);
+  let pubkey: string;
+  for (;;) {
+    const secretKey = new Uint8Array(32);
+    crypto.getRandomValues(secretKey);
+    try {
+      pubkey = getPublicKey(secretKey);
+      break;
+    } catch {
+      // Retry the vanishingly unlikely invalid scalar so every mock identity
+      // is a real x-only secp256k1 public key.
+    }
+  }
   const agentCommand = args.input.agentCommand ?? "buzz-agent";
   const agentArgs =
     args.input.agentArgs && args.input.agentArgs.length > 0
@@ -9001,6 +9008,7 @@ export function mockSearchHitMatches(
     /** Lowercased FTS query; empty matches everything. */
     query: string;
     channelId?: string;
+    searchMode?: "prefix" | "fullText";
     authorSet: Set<string> | null;
     since?: number;
     until?: number;
@@ -9021,9 +9029,22 @@ export function mockSearchHitMatches(
   if (!filters.query) {
     return true;
   }
-  return (
-    hit.content.toLowerCase().includes(filters.query) ||
-    (hit.channel_name?.toLowerCase().includes(filters.query) ?? false)
+  const fields = [hit.content, hit.channel_name ?? ""].map((value) =>
+    value.toLowerCase(),
+  );
+  if (filters.searchMode !== "fullText") {
+    return fields.some((field) => field.includes(filters.query));
+  }
+
+  // Production full-text mode uses websearch_to_tsquery('simple', ...):
+  // whitespace within an arm is AND and a literal OR separates alternatives.
+  // Token matching also mirrors how URL punctuation splits entity links.
+  const alternatives = filters.query
+    .split(/\s+or\s+/i)
+    .map((alternative) => alternative.trim().split(/\s+/).filter(Boolean))
+    .filter((alternative) => alternative.length > 0);
+  return alternatives.some((terms) =>
+    fields.some((field) => terms.every((term) => field.includes(term))),
   );
 }
 
@@ -9032,6 +9053,7 @@ async function handleSearchMessages(
     q: string;
     limit?: number;
     channelId?: string;
+    searchMode?: "prefix" | "fullText";
     authors?: string[];
     since?: number;
     until?: number;
@@ -9126,6 +9148,7 @@ async function handleSearchMessages(
         mockSearchHitMatches(hit, {
           query,
           channelId: args.channelId,
+          searchMode: args.searchMode,
           authorSet,
           since: args.since,
           until: args.until,
@@ -9144,6 +9167,7 @@ async function handleSearchMessages(
   const filter: Record<string, unknown> = {
     kinds: [9, 40002, 45001, 45003],
     search: args.q,
+    search_mode: args.searchMode === "fullText" ? "word" : "prefix",
     limit,
   };
   if (args.channelId) {
@@ -11326,7 +11350,7 @@ export function maybeInstallE2eTauriMocks() {
         const activeIdentity = identity ?? DEFAULT_MOCK_IDENTITY;
         const nextIdentity = {
           pubkey_hex: activeIdentity.pubkey,
-          npub: `npub1${activeIdentity.pubkey}`,
+          npub: npubEncode(activeIdentity.pubkey),
         };
         if (activeConfig?.mock)
           activeConfig.mock.builderlabIdentity = nextIdentity;
@@ -11413,14 +11437,19 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig?.mock?.identityLocked === true;
         if (identity) {
           return {
-            pubkey: identity.pubkey,
+            pubkey: npubEncode(identity.pubkey),
             display_name: identity.username,
             lost: false,
             locked: false,
           };
         }
 
-        return { ...DEFAULT_MOCK_IDENTITY, lost: isLost, locked: isLocked };
+        return {
+          ...DEFAULT_MOCK_IDENTITY,
+          pubkey: npubEncode(DEFAULT_MOCK_IDENTITY.pubkey),
+          lost: isLost,
+          locked: isLocked,
+        };
       }
       case "sign_nostr_identity_binding": {
         const request = payload as {
@@ -11504,8 +11533,7 @@ export function maybeInstallE2eTauriMocks() {
         const pubkey = pubkeys[Math.min(index, pubkeys.length - 1)];
         backupVerificationCallCount += 1;
         return {
-          pubkey,
-          npub: npubEncode(pubkey),
+          pubkey: npubEncode(pubkey),
           matchesCurrentIdentity:
             pubkey === (identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey),
         };
@@ -11536,7 +11564,7 @@ export function maybeInstallE2eTauriMocks() {
         const currentDisplayName =
           identity?.username ?? DEFAULT_MOCK_IDENTITY.display_name;
         return {
-          pubkey: currentPubkey,
+          pubkey: npubEncode(currentPubkey),
           display_name: currentDisplayName,
           lost: false,
           locked: false,

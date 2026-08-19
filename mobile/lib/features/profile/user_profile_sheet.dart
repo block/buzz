@@ -8,6 +8,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/animated_avatar.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/nostr/nostr_keys.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -86,11 +87,12 @@ class UserProfileSheet extends HookConsumerWidget {
     final displayName = profile?.displayName;
     final avatarUrl = profile?.avatarUrl;
     final nip05 = profile?.nip05Handle;
-    final initial =
-        profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
+    final npub = tryNpubFromPublicKey(pubkey);
+    final initial = profile?.initial ?? pubkeyAvatarInitial(pubkey);
 
     Future<void> copyPublicKey() async {
-      await Clipboard.setData(ClipboardData(text: pubkey));
+      if (npub == null) return;
+      await Clipboard.setData(ClipboardData(text: npub));
       if (!context.mounted) return;
       copied.value = true;
       _showProfileCopyToast(context);
@@ -237,7 +239,7 @@ class UserProfileSheet extends HookConsumerWidget {
                             icon: copied.value
                                 ? LucideIcons.check
                                 : LucideIcons.key,
-                            label: copied.value ? 'Copied' : 'Copy public key',
+                            label: copied.value ? 'Copied' : 'Copy npub',
                             onTap: copyPublicKey,
                           ),
                         ),
@@ -308,7 +310,7 @@ void _showProfileCopyToast(BuildContext context) {
             children: [
               Icon(LucideIcons.check, size: 18, color: colors.onInverseSurface),
               const SizedBox(width: Grid.xxs),
-              Text('Public key copied', style: textStyle),
+              Text('npub copied', style: textStyle),
             ],
           ),
         ),

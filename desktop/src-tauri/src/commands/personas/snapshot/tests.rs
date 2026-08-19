@@ -179,6 +179,27 @@ fn resolve_unknown_id_returns_error() {
     assert!(result.unwrap_err().contains("ghost"));
 }
 
+#[test]
+fn resolve_unknown_identity_reports_npub_without_hex() {
+    let pubkey = nostr::Keys::generate().public_key();
+    let hex = pubkey.to_hex();
+    let npub = crate::app_state::identity_npub_for_log(&pubkey);
+
+    let error = resolve_from_lists(&hex, &[], &[]).unwrap_err();
+    assert!(error.contains(&npub), "error must use npub: {error}");
+    assert!(!error.contains(&hex), "error must not expose hex: {error}");
+}
+
+#[test]
+fn resolve_mistaken_nsec_shaped_id_does_not_echo_secret() {
+    let supplied = "nostr:NSEC1malformed-and-truncated";
+    let error = resolve_from_lists(supplied, &[], &[]).unwrap_err();
+
+    assert!(error.contains("<invalid identity>"));
+    assert!(!error.contains(supplied));
+    assert!(!error.to_ascii_lowercase().contains("nsec1"));
+}
+
 // ── Validator fail-closed cases ───────────────────────────────────────────
 
 #[test]
@@ -215,6 +236,17 @@ fn direct_instance_export_with_nonmatching_memory_pubkey_fails() {
         result.unwrap_err().contains("does not match agent"),
         "cross-agent memory pairing must fail closed"
     );
+}
+
+#[test]
+fn invalid_memory_source_error_reports_npub_without_hex() {
+    let pubkey = nostr::Keys::generate().public_key();
+    let hex = pubkey.to_hex();
+    let npub = crate::app_state::identity_npub_for_log(&pubkey);
+
+    let error = validate_memory_source(&hex, true, "my-agent", &[]).unwrap_err();
+    assert!(error.contains(&npub), "error must use npub: {error}");
+    assert!(!error.contains(&hex), "error must not expose hex: {error}");
 }
 
 // ── Import: decode_snapshot_from_bytes ────────────────────────────────────

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { compareHostedCommunityIdentity } from "@/features/communities/hostedCommunityIdentity";
 import {
   HOSTED_COMMUNITY_LIMIT as MAX_COMMUNITIES,
   HOSTED_COMMUNITY_SUFFIX as HOST_SUFFIX,
@@ -206,14 +207,8 @@ export function HostedCommunitiesSettingsCard() {
   // Connect buttons operate on the *bound* npub's communities, so "Connect"
   // would drop you into a relay your local key isn't a member of. Detect it and
   // block Connect + Create until the identities match.
-  const boundPubkey = identity?.pubkey_hex ?? null;
-  const identityMismatch = Boolean(
-    identity &&
-      boundPubkey &&
-      localPubkey &&
-      boundPubkey.toLowerCase() !== localPubkey.toLowerCase(),
-  );
-  const localNpub = localPubkey ? safeNpub(localPubkey) : null;
+  const { boundNpub, localNpub, identityMismatch } =
+    compareHostedCommunityIdentity(identity, localPubkey);
 
   const switchToDeviceIdentity = () =>
     run("Switching identity…", async () => {
@@ -522,12 +517,14 @@ export function HostedCommunitiesSettingsCard() {
                     <div className="flex flex-wrap gap-x-2">
                       <dt className="text-muted-foreground">Account uses</dt>
                       <dd className="font-mono">
-                        {identity.npub ?? boundPubkey}
+                        {boundNpub ?? "Unavailable"}
                       </dd>
                     </div>
                     <div className="flex flex-wrap gap-x-2">
                       <dt className="text-muted-foreground">This device</dt>
-                      <dd className="font-mono">{localNpub ?? localPubkey}</dd>
+                      <dd className="font-mono">
+                        {localNpub ?? "Unavailable"}
+                      </dd>
                     </div>
                   </dl>
                 </div>
@@ -548,8 +545,8 @@ export function HostedCommunitiesSettingsCard() {
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <CheckCircle2 className="h-4 w-4 text-emerald-500" /> Buzz
                 identity connected
-                {identity.npub ? (
-                  <span className="font-mono text-xs">{identity.npub}</span>
+                {boundNpub ? (
+                  <span className="font-mono text-xs">{boundNpub}</span>
                 ) : null}
               </div>
               <UnpairIdentityButton
@@ -897,7 +894,8 @@ function TransferOwnershipDialog({
   onTransfer: (npub: string) => Promise<boolean>;
 }) {
   const [npub, setNpub] = React.useState("");
-  const npubIsValid = npub.startsWith("npub1") && npub.length >= 50;
+  const canonicalNpub = safeNpub(npub);
+  const npubIsValid = canonicalNpub !== null;
 
   React.useEffect(() => {
     if (!open) setNpub("");
@@ -905,7 +903,8 @@ function TransferOwnershipDialog({
 
   const submit = async () => {
     if (!npubIsValid) return;
-    const ok = await onTransfer(npub.trim());
+    if (!canonicalNpub) return;
+    const ok = await onTransfer(canonicalNpub);
     if (ok) onOpenChange(false);
   };
 

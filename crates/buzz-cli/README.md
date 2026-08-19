@@ -35,7 +35,7 @@ buzz messages send --channel <uuid> --content - < message.md   # read body from 
 buzz messages get --channel <uuid> --limit 20
 buzz messages thread --channel <uuid> --event <event-id>
 buzz messages search --query "architecture"
-buzz messages search --author <pubkey|npub|name> --since <unix-ts>
+buzz messages search --author <npub|name> --since <unix-ts>
 buzz messages edit --event <event-id> --content "Updated text"
 buzz messages delete --event <event-id>
 
@@ -54,15 +54,15 @@ buzz reactions get --event <event-id>
 
 # Users & Presence
 buzz users get                          # your own profile
-buzz users get --pubkey <hex>           # single user
-buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
+buzz users get --pubkey <npub>           # single user
+buzz users get --pubkey <npub> --pubkey <npub>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
 buzz users set-presence --status online
 buzz users set-status --text "heads down on the CLI" --emoji "🚀"
 buzz users set-status --clear                 # remove your status
 
 # DMs
-buzz dms open --pubkey <hex>
+buzz dms open --pubkey <npub>
 buzz dms list
 
 # Workflows

@@ -1,5 +1,6 @@
 import { relayClient } from "@/shared/api/relayClient";
 import { getRelayHttpUrl, signRelayEvent } from "@/shared/api/tauri";
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
 import {
   KIND_MODERATION_BAN,
   KIND_MODERATION_RESOLVE_REPORT,
@@ -83,8 +84,11 @@ export type CommunityRestriction = {
   updatedAt: string;
 };
 
-function normalizePubkey(pubkey: string): string {
-  return pubkey.trim().toLowerCase();
+/** Convert an API/UI npub (or legacy compatibility hex) to NIP-01 tag hex. */
+export function moderationPubkeyToProtocolHex(pubkey: string): string {
+  const protocolHex = parsePubkeyInput(pubkey);
+  if (!protocolHex) throw new Error("Expected a valid npub.");
+  return protocolHex;
 }
 
 // --- Writes: signed events over the WS publish path ---
@@ -111,7 +115,7 @@ export async function submitReport(input: {
   note?: string;
 }): Promise<void> {
   const tags: string[][] = [
-    ["p", normalizePubkey(input.authorPubkey)],
+    ["p", moderationPubkeyToProtocolHex(input.authorPubkey)],
     ["e", input.eventId, input.reportType],
   ];
   const event = await signRelayEvent({
@@ -132,7 +136,7 @@ export async function banMember(input: {
   expiresAt?: number;
   reason?: string;
 }): Promise<void> {
-  const tags: string[][] = [["p", normalizePubkey(input.pubkey)]];
+  const tags: string[][] = [["p", moderationPubkeyToProtocolHex(input.pubkey)]];
   if (input.expiresAt != null)
     tags.push(["expiration", String(input.expiresAt)]);
   if (input.reason?.trim()) tags.push(["reason", input.reason.trim()]);
@@ -148,7 +152,7 @@ export async function banMember(input: {
 export async function unbanMember(pubkey: string): Promise<void> {
   await publishModerationEvent(
     KIND_MODERATION_UNBAN,
-    [["p", normalizePubkey(pubkey)]],
+    [["p", moderationPubkeyToProtocolHex(pubkey)]],
     "Timed out while lifting the ban.",
     "Failed to lift the ban.",
   );
@@ -161,7 +165,7 @@ export async function timeoutMember(input: {
   reason?: string;
 }): Promise<void> {
   const tags: string[][] = [
-    ["p", normalizePubkey(input.pubkey)],
+    ["p", moderationPubkeyToProtocolHex(input.pubkey)],
     ["expiration", String(input.expiresAt)],
   ];
   if (input.reason?.trim()) tags.push(["reason", input.reason.trim()]);
@@ -177,7 +181,7 @@ export async function timeoutMember(input: {
 export async function untimeoutMember(pubkey: string): Promise<void> {
   await publishModerationEvent(
     KIND_MODERATION_UNTIMEOUT,
-    [["p", normalizePubkey(pubkey)]],
+    [["p", moderationPubkeyToProtocolHex(pubkey)]],
     "Timed out while lifting the timeout.",
     "Failed to lift the timeout.",
   );
@@ -196,7 +200,7 @@ export async function resolveReport(input: {
   reason?: string;
 }): Promise<void> {
   const tags: string[][] = [
-    ["report", normalizePubkey(input.reportEventId)],
+    ["report", input.reportEventId.trim().toLowerCase()],
     ["status", input.status],
     ["action", input.action],
   ];
@@ -252,13 +256,16 @@ type RawReport = {
   id: string;
   report_event_id: string;
   reporter_pubkey: string;
+  reporter_npub?: string;
   target_kind: "event" | "pubkey" | "blob";
   target: string;
+  target_npub?: string | null;
   channel_id: string | null;
   report_type: string;
   note: string | null;
   status: string;
   resolved_by: string | null;
+  resolved_by_npub?: string | null;
   resolved_at: string | null;
   action_id: string | null;
   created_at: string;
@@ -267,8 +274,10 @@ type RawReport = {
 type RawAction = {
   id: string;
   actor_pubkey: string;
+  actor_npub?: string;
   action: string;
   target_pubkey: string | null;
+  target_npub?: string | null;
   target_event_id: string | null;
   channel_id: string | null;
   reason_code: string | null;
@@ -280,39 +289,50 @@ type RawAction = {
 
 type RawRestriction = {
   pubkey: string;
+  npub?: string;
   banned: boolean;
   ban_expires_at: string | null;
   ban_reason: string | null;
   muted_until: string | null;
   mute_reason: string | null;
   actor_pubkey: string;
+  actor_npub?: string;
   updated_at: string;
 };
 
-function toReport(r: RawReport): ModerationReport {
+export function toReport(r: RawReport): ModerationReport {
+  const resolvedBy = r.resolved_by_npub ?? r.resolved_by;
   return {
     id: r.id,
     reportEventId: r.report_event_id,
-    reporterPubkey: r.reporter_pubkey,
+    reporterPubkey: moderationPubkeyToProtocolHex(
+      r.reporter_npub ?? r.reporter_pubkey,
+    ),
     targetKind: r.target_kind,
-    target: r.target,
+    target:
+      r.target_kind === "pubkey"
+        ? moderationPubkeyToProtocolHex(r.target_npub ?? r.target)
+        : r.target,
     channelId: r.channel_id,
     reportType: r.report_type,
     note: r.note,
     status: r.status,
-    resolvedBy: r.resolved_by,
+    resolvedBy: resolvedBy ? moderationPubkeyToProtocolHex(resolvedBy) : null,
     resolvedAt: r.resolved_at,
     actionId: r.action_id,
     createdAt: r.created_at,
   };
 }
 
-function toAction(a: RawAction): ModerationAction {
+export function toAction(a: RawAction): ModerationAction {
+  const targetPubkey = a.target_npub ?? a.target_pubkey;
   return {
     id: a.id,
-    actorPubkey: a.actor_pubkey,
+    actorPubkey: moderationPubkeyToProtocolHex(a.actor_npub ?? a.actor_pubkey),
     action: a.action,
-    targetPubkey: a.target_pubkey,
+    targetPubkey: targetPubkey
+      ? moderationPubkeyToProtocolHex(targetPubkey)
+      : null,
     targetEventId: a.target_event_id,
     channelId: a.channel_id,
     reasonCode: a.reason_code,
@@ -323,15 +343,15 @@ function toAction(a: RawAction): ModerationAction {
   };
 }
 
-function toRestriction(b: RawRestriction): CommunityRestriction {
+export function toRestriction(b: RawRestriction): CommunityRestriction {
   return {
-    pubkey: b.pubkey,
+    pubkey: moderationPubkeyToProtocolHex(b.npub ?? b.pubkey),
     banned: b.banned,
     banExpiresAt: b.ban_expires_at,
     banReason: b.ban_reason,
     mutedUntil: b.muted_until,
     muteReason: b.mute_reason,
-    actorPubkey: b.actor_pubkey,
+    actorPubkey: moderationPubkeyToProtocolHex(b.actor_npub ?? b.actor_pubkey),
     updatedAt: b.updated_at,
   };
 }
