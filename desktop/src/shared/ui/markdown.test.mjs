@@ -533,6 +533,9 @@ test("rehypeImageGallery: leaves a single trailing image in the text flow", () =
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import remarkMath from "remark-math";
+import { normalizeMathDelimiters } from "./markdown/nodeCache.ts";
 
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
 import { parseEntityLink } from "../lib/entityLink.ts";
@@ -566,6 +569,22 @@ test("messageLinkUrlTransform: preserves buzz://message href", () => {
   );
   // HTML-encoded `&` in attributes is fine — the browser decodes back to `&`.
   assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
+});
+
+test("markdown math: renders inline and block LaTeX as KaTeX", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(
+      ReactMarkdown,
+      { rehypePlugins: [rehypeKatex], remarkPlugins: [remarkMath] },
+      normalizeMathDelimiters(
+        "Inline $Fe^{3+}$ and block:\n\n[\n\\mathrm{Au^0} \\rightarrow Au^I + e^-\n]",
+      ),
+    ),
+  );
+
+  assert.match(html, /class="katex"/);
+  assert.match(html, /katex-display/);
+  assert.match(html, /Au/);
 });
 
 test("messageLinkUrlTransform: preserves buzz://message autolink href", () => {

@@ -11,7 +11,11 @@ export function buildUnifiedGroups(
   const ungrouped: ManagedAgent[] = [];
 
   for (const agent of agents) {
-    if (!agent.personaId) {
+    // Codex task agents are user-created instances whose configuration lives
+    // on the agent record. A migration may manufacture a persona link for
+    // them, but that internal link must not move them out of Custom agents or
+    // remove their instance-level edit affordance.
+    if (!agent.personaId || agent.codexTaskBinding) {
       ungrouped.push(agent);
     } else {
       const list = byPersonaId.get(agent.personaId) ?? [];

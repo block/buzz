@@ -1,7 +1,9 @@
 import type * as React from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
@@ -41,6 +43,25 @@ const MARKDOWN_NODE_CACHE_LIMIT = 1000;
  * both the key and the element tree. Mirrors the searchQuery bypass. */
 const MARKDOWN_NODE_CACHE_MAX_CONTENT_LENGTH = 32_000;
 const markdownNodeCache = new Map<string, React.ReactElement>();
+
+/** Accept the bracket-only display math commonly emitted by agents. */
+export function normalizeMathDelimiters(content: string): string {
+  const lines = content.split("\n");
+  let inBracketMath = false;
+  return lines
+    .map((line) => {
+      if (/^\s*\\?\[\s*$/.test(line) && !inBracketMath) {
+        inBracketMath = true;
+        return "$$";
+      }
+      if (/^\s*\\?\]\s*$/.test(line) && inBracketMath) {
+        inBracketMath = false;
+        return "$$";
+      }
+      return line;
+    })
+    .join("\n");
+}
 
 /** Community switches swap relays; drop parses keyed against the old
  * community's mention/channel-name space (see `resetCommunityState`). */
@@ -83,7 +104,7 @@ function listSegment(values: readonly string[] | undefined): string {
 function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   markdownParseCount += 1;
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-  const rehypePlugins: any[] = [rehypeImageGallery];
+  const rehypePlugins: any[] = [rehypeKatex, rehypeImageGallery];
   if (input.searchQuery && input.searchQuery.trim().length >= 2) {
     rehypePlugins.push([rehypeSearchHighlight, { query: input.searchQuery }]);
   }
@@ -92,11 +113,12 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
   // variant is `MarkdownHooks`), so this returns the parsed element tree
   // directly, which is what lets it live in a module-level cache.
   return ReactMarkdown({
-    children: input.content,
+    children: normalizeMathDelimiters(input.content),
     components: input.components,
     remarkPlugins: [
       remarkGfm,
       remarkBreaks,
+      remarkMath,
       remarkSpoilers,
       remarkMessageLinks,
       [remarkMentions, { mentionNames: input.mentionNames }],

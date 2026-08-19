@@ -1,5 +1,11 @@
 import * as React from "react";
-import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  EllipsisVertical,
+  Pencil,
+} from "lucide-react";
 
 import {
   isAgentCardAvatarLoading,
@@ -12,7 +18,14 @@ import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { requestOpenEditAgent } from "@/features/agents/openEditAgentEvent";
 import { Badge } from "@/shared/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
@@ -364,6 +377,14 @@ function StandaloneAgentCard({
 
   return (
     <AgentIdentityCard
+      actions={
+        <StandaloneAgentActionsMenu
+          onEdit={() => {
+            onOpenAgentProfile(agent.pubkey);
+            requestOpenEditAgent(agent.pubkey);
+          }}
+        />
+      }
       ariaLabel={`${title} agent profile`}
       avatar={
         <AgentRuntimeAvatarControl
@@ -411,6 +432,31 @@ function StandaloneAgentCard({
         ) : null
       }
     />
+  );
+}
+
+function StandaloneAgentActionsMenu({ onEdit }: { onEdit: () => void }) {
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <button
+          aria-label="Open agent actions"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          type="button"
+        >
+          <EllipsisVertical className="h-4 w-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        onCloseAutoFocus={(event) => event.preventDefault()}
+      >
+        <DropdownMenuItem onClick={onEdit}>
+          <Pencil className="h-4 w-4" />
+          Edit
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
