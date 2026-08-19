@@ -11,6 +11,14 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
@@ -32,7 +40,6 @@ export const MessageComposerToolbar = React.memo(
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
-    isStoppingAgent = false,
     isUploading,
     onCaptureSelection,
     onEmojiPickerOpenChange,
@@ -41,8 +48,10 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
-    onStopAgent,
+    onStopAgents,
     sendDisabled,
+    stoppingAgentPubkeys = [],
+    stoppableAgents = [],
   }: {
     composerDisabled: boolean;
     editor: Editor | null;
@@ -51,7 +60,6 @@ export const MessageComposerToolbar = React.memo(
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
-    isStoppingAgent?: boolean;
     isUploading: boolean;
     onCaptureSelection: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
@@ -60,9 +68,43 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
-    onStopAgent?: () => void;
+    onStopAgents?: (pubkeys: readonly string[]) => void;
     sendDisabled: boolean;
+    stoppingAgentPubkeys?: readonly string[];
+    stoppableAgents?: readonly { name: string; pubkey: string }[];
   }) {
+    const stoppingAgentSet = new Set(stoppingAgentPubkeys);
+    const isStoppingAgent = stoppingAgentPubkeys.length > 0;
+    const stopButton = (
+      <Button
+        aria-label={
+          stoppableAgents.length > 1
+            ? "Choose agent to stop"
+            : "Stop agent output"
+        }
+        className="rounded-full"
+        data-testid="stop-agent-output"
+        disabled={isStoppingAgent && stoppableAgents.length === 1}
+        onClick={
+          stoppableAgents.length === 1
+            ? () => onStopAgents?.([stoppableAgents[0].pubkey])
+            : undefined
+        }
+        size="icon"
+        type="button"
+        variant="destructive"
+      >
+        {isStoppingAgent && stoppableAgents.length === 1 ? (
+          <span
+            aria-hidden
+            className="h-4 w-4 animate-spin rounded-full border-2 border-destructive-foreground border-t-transparent"
+          />
+        ) : (
+          <Square aria-hidden className="fill-current" />
+        )}
+      </Button>
+    );
+
     return (
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
         <SelectionFormattingTray
@@ -242,31 +284,57 @@ export const MessageComposerToolbar = React.memo(
 
         <div className="flex items-center gap-2">
           {extraActions}
-          {onStopAgent ? (
-            <Tooltip disableHoverableContent>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label="Stop agent output"
-                  className="rounded-full"
-                  data-testid="stop-agent-output"
-                  disabled={isStoppingAgent}
-                  onClick={onStopAgent}
-                  size="icon"
-                  type="button"
-                  variant="destructive"
-                >
-                  {isStoppingAgent ? (
-                    <span
-                      aria-hidden
-                      className="h-4 w-4 animate-spin rounded-full border-2 border-destructive-foreground border-t-transparent"
-                    />
-                  ) : (
+          {onStopAgents && stoppableAgents.length > 0 ? (
+            stoppableAgents.length > 1 ? (
+              <DropdownMenu>
+                <Tooltip disableHoverableContent>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      {stopButton}
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>Choose agent to stop</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuLabel>Stop agent output</DropdownMenuLabel>
+                  {stoppableAgents.map((agent) => {
+                    const isStopping = stoppingAgentSet.has(agent.pubkey);
+                    return (
+                      <DropdownMenuItem
+                        disabled={isStopping}
+                        key={agent.pubkey}
+                        onSelect={() => onStopAgents([agent.pubkey])}
+                      >
+                        {isStopping ? (
+                          <span
+                            aria-hidden
+                            className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
+                          />
+                        ) : (
+                          <Square aria-hidden className="fill-current" />
+                        )}
+                        Stop {agent.name}
+                      </DropdownMenuItem>
+                    );
+                  })}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={isStoppingAgent}
+                    onSelect={() =>
+                      onStopAgents(stoppableAgents.map((agent) => agent.pubkey))
+                    }
+                  >
                     <Square aria-hidden className="fill-current" />
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Stop agent output</TooltipContent>
-            </Tooltip>
+                    Stop all agents
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <Tooltip disableHoverableContent>
+                <TooltipTrigger asChild>{stopButton}</TooltipTrigger>
+                <TooltipContent>Stop {stoppableAgents[0].name}</TooltipContent>
+              </Tooltip>
+            )
           ) : (
             <Button
               aria-label={isSending ? "Sending" : "Send message"}

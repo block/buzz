@@ -162,7 +162,7 @@ function MessageComposerImpl({
   const media = mediaController ?? internalMedia;
   const [isDeferredEditPending, setDeferredEditPending] = React.useState(false);
   const composerDisabled = disabled || isDeferredEditPending;
-  const interruptibleAgentPubkeys = React.useMemo(() => {
+  const interruptibleAgents = React.useMemo(() => {
     if (!channelId || editTarget != null) return [];
     const activeChannel = activeAgentTurns.find(
       (turn) => turn.channelId === channelId,
@@ -175,35 +175,59 @@ function MessageComposerImpl({
         )
         .map((agent) => [normalizePubkey(agent.pubkey), agent]),
     );
-    return activeChannel.agentPubkeys.filter((pubkey) =>
-      managedAgentsByPubkey.has(normalizePubkey(pubkey)),
-    );
+    return activeChannel.agentPubkeys.flatMap((pubkey) => {
+      const agent = managedAgentsByPubkey.get(normalizePubkey(pubkey));
+      return agent ? [{ name: agent.name, pubkey: agent.pubkey }] : [];
+    });
   }, [activeAgentTurns, channelId, editTarget, managedAgentsQuery.data]);
-  const [isStoppingAgent, setIsStoppingAgent] = React.useState(false);
-  const handleStopAgent = React.useCallback(async () => {
-    if (!channelId || interruptibleAgentPubkeys.length === 0 || isStoppingAgent)
-      return;
-    setIsStoppingAgent(true);
-    const results = await Promise.allSettled(
-      interruptibleAgentPubkeys.map((pubkey) =>
-        cancelManagedAgentTurn(pubkey, channelId),
-      ),
-    );
-    const failed = results.filter((result) => result.status === "rejected");
-    if (failed.length === 0) {
-      toast.success("Stop signal sent to the agent.");
-    } else if (failed.length === results.length) {
-      const firstError = failed[0].reason;
-      toast.error(
-        firstError instanceof Error
-          ? firstError.message
-          : "Failed to stop agent output.",
+  const [stoppingAgentPubkeys, setStoppingAgentPubkeys] = React.useState<
+    string[]
+  >([]);
+  const handleStopAgents = React.useCallback(
+    async (pubkeys: readonly string[]) => {
+      if (!channelId || pubkeys.length === 0) return;
+      const stoppingSet = new Set(stoppingAgentPubkeys.map(normalizePubkey));
+      const targets = pubkeys.filter(
+        (pubkey) => !stoppingSet.has(normalizePubkey(pubkey)),
       );
-    } else {
-      toast.error("Some agents could not be stopped.");
-    }
-    setIsStoppingAgent(false);
-  }, [channelId, interruptibleAgentPubkeys, isStoppingAgent]);
+      if (targets.length === 0) return;
+      setStoppingAgentPubkeys((current) => [...current, ...targets]);
+      const results = await Promise.allSettled(
+        targets.map((pubkey) => cancelManagedAgentTurn(pubkey, channelId)),
+      );
+      const failed = results.filter((result) => result.status === "rejected");
+      if (failed.length === 0) {
+        const targetNames = targets
+          .map(
+            (pubkey) =>
+              interruptibleAgents.find(
+                (agent) =>
+                  normalizePubkey(agent.pubkey) === normalizePubkey(pubkey),
+              )?.name,
+          )
+          .filter((name): name is string => Boolean(name));
+        toast.success(
+          targets.length === 1 && targetNames[0]
+            ? `Stop signal sent to ${targetNames[0]}.`
+            : "Stop signal sent to all selected agents.",
+        );
+      } else if (failed.length === results.length) {
+        const firstError = failed[0].reason;
+        toast.error(
+          firstError instanceof Error
+            ? firstError.message
+            : "Failed to stop agent output.",
+        );
+      } else {
+        toast.error("Some agents could not be stopped.");
+      }
+      const targetSet = new Set(targets.map(normalizePubkey));
+      setStoppingAgentPubkeys((current) =>
+        current.filter((pubkey) => !targetSet.has(normalizePubkey(pubkey))),
+      );
+    },
+    [channelId, interruptibleAgents, stoppingAgentPubkeys],
+  );
   const isEditSubmissionLocked =
     isSending || media.isUploading || isDeferredEditPending;
   const canRestoreEditDraftRef = React.useRef(false);
@@ -1038,7 +1062,6 @@ function MessageComposerImpl({
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending}
-              isStoppingAgent={isStoppingAgent}
               isUploading={media.isUploading}
               onCaptureSelection={handleCaptureSelection}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
@@ -1047,12 +1070,12 @@ function MessageComposerImpl({
               onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={openMentionPicker}
               onPaperclip={handlePaperclipClick}
-              onStopAgent={
-                interruptibleAgentPubkeys.length > 0
-                  ? handleStopAgent
-                  : undefined
+              onStopAgents={
+                interruptibleAgents.length > 0 ? handleStopAgents : undefined
               }
               sendDisabled={sendDisabled}
+              stoppableAgents={interruptibleAgents}
+              stoppingAgentPubkeys={stoppingAgentPubkeys}
             />
           </form>
         </div>
