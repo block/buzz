@@ -1406,6 +1406,7 @@ dependencies = [
  "hex",
  "ort",
  "ort-sys",
+ "prost 0.13.5",
  "rand 0.10.1",
  "sentencepiece-model",
  "serde",

@@ -22,4 +22,5 @@ symphonia = { version = "0.5", default-features = false, features = ["aac", "aif
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
+prost = "0.13"
 tempfile = "3"
