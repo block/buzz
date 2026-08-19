@@ -56,6 +56,10 @@ const _landingHighlightDelay = Duration(milliseconds: 50);
 const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
 const _landingHighlightOpacity = 0.12;
 
+// Keep the direct-position correction finite in case the viewport cannot
+// expose its tail (for example, continuously changing media dimensions).
+const _latestTailCorrectionLimit = 8;
+
 /// Full-screen thread detail page.
 ///
 /// Shows the thread head message, direct replies, typing indicators scoped to
@@ -426,7 +430,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       followsThreadTail.value = true;
       tailCorrectionInProgress.value = true;
 
-      void finishAtTail(int attemptsRemaining) {
+      void finishAtTail(int corrections) {
         if (!context.mounted) return;
         // A finger drag interrupts ScrollPosition.animateTo. Do not follow it
         // with a corrective jump that would take control back from the user.
@@ -437,10 +441,13 @@ class ThreadDetailPage extends HookConsumerWidget {
           return;
         }
         final reachedTail = threadTailIsVisible();
-        if (!reachedTail && attemptsRemaining > 0) {
+        // Lazy children can revise maxScrollExtent for several frames. Keep
+        // moving the same active position until the measured tail is visible;
+        // the cap only guards pathological layouts that never stabilize.
+        if (!reachedTail && corrections < _latestTailCorrectionLimit) {
           jumpActiveScrollPositionToTail();
           WidgetsBinding.instance.addPostFrameCallback(
-            (_) => finishAtTail(attemptsRemaining - 1),
+            (_) => finishAtTail(corrections + 1),
           );
           WidgetsBinding.instance.scheduleFrame();
           return;
@@ -455,7 +462,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           tailCorrectionInProgress.value = false;
           return;
         }
-        finishAtTail(3);
+        finishAtTail(0);
       }
 
       unawaited(navigateToTail());

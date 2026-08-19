@@ -7880,6 +7880,99 @@ void main() {
       expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
     });
 
+    testWidgets('thread Latest settles across expanding lazy scroll extents', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(400, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: 1000,
+      );
+      final replies = [
+        for (var i = 0; i < 160; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: [
+              'Reply $i',
+              ...List.filled(
+                1 + (i ~/ 6),
+                'Variable-height reply line for lazy layout.',
+              ),
+            ].join('\n'),
+            createdAt: 1100 + i,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: {'thread-root': replies},
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+          home: ThreadDetailPage(
+            threadHead: formatTimeline([rootEvent]).single,
+            allMessages: formatTimeline([rootEvent, replies[5]]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+            initialMessageId: 'reply-5',
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-5')),
+        findsOneWidget,
+      );
+      const latestButton = ValueKey('thread-jump-to-latest');
+      expect(find.byKey(latestButton), findsOneWidget);
+      final scrollable = tester.state<ScrollableState>(
+        find
+            .descendant(
+              of: find.byKey(const ValueKey('thread-message-list')),
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      final initialMaxScrollExtent = scrollable.position.maxScrollExtent;
+
+      await tester.tap(find.byKey(latestButton));
+      await tester.pumpAndSettle();
+
+      expect(
+        scrollable.position.maxScrollExtent,
+        greaterThan(initialMaxScrollExtent),
+        reason:
+            'The fixture must exercise a lazy extent that expands after '
+            'Latest starts.',
+      );
+      expect(
+        find.byKey(const ValueKey('thread-message-group-reply-159')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest-hidden')),
+        findsOneWidget,
+        reason:
+            'Latest must keep correcting after the lazy extent expands '
+            'beyond the first three layout frames.',
+      );
+    });
+
     testWidgets(
       'thread shows Latest after browsing history and returns to tail',
       (tester) async {
