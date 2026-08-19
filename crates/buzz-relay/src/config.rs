@@ -217,6 +217,10 @@ pub struct Config {
     ///
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
+    /// Whether an agent's published `respond_to` policy governs who may mention
+    /// it, rather than each client's own build-time policy. Operator-set,
+    /// advertised in NIP-11 as the `agent-access-published-policy` extension.
+    pub agent_access_published_policy: bool,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -628,6 +632,13 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        // Whether this deployment lets an agent's own published, NIP-OA-attested
+        // access policy decide who may mention it. Advertised in NIP-11 so a
+        // stock client needs no local configuration; see `nip11.rs`.
+        let agent_access_published_policy = std::env::var("BUZZ_AGENT_ACCESS_PUBLISHED_POLICY")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
         let relay_owner_pubkey = std::env::var("RELAY_OWNER_PUBKEY")
@@ -1019,6 +1030,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
+            agent_access_published_policy,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,

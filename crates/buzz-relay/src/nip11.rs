@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use crate::config::DEFAULT_MAX_FRAME_BYTES;
 
+/// NIP-11 `supported_extensions` identifier for [`crate::config::Config::agent_access_published_policy`].
+///
+/// A client that sees this MAY let an agent's published `respond_to` /
+/// `respond_to_allowlist` decide who can mention it, in place of its own
+/// build-time policy. Absent, clients keep whatever default they ship with.
+pub const AGENT_ACCESS_PUBLISHED_POLICY_EXTENSION: &str = "agent-access-published-policy";
+
 /// NIPs unconditionally supported by this relay, advertised in the NIP-11
 /// document. Kept as a module-level constant so tests can verify it without
 /// constructing a full `Config` (which reads env vars and races with
@@ -255,6 +262,17 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     } else {
         None
     };
+    // Operator opt-in: this deployment defers to each agent's own published,
+    // NIP-OA-attested access policy for who may mention it. Advertised here so
+    // that honouring it costs a client nothing but reading NIP-11 — a relay's
+    // users must not each have to configure their own app for the operator's
+    // decision to take effect.
+    if state.config.agent_access_published_policy {
+        info.supported_extensions
+            .get_or_insert_default()
+            .push(AGENT_ACCESS_PUBLISHED_POLICY_EXTENSION.to_string());
+    }
+
     if let Some(push) = push_descriptor(
         state.config.push_gateway_delivery_url.is_some(),
         &state.config.relay_url,

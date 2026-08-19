@@ -43,6 +43,14 @@ pub(crate) type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
 /// Release packaging sets `BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY`; OSS/custom
 /// builds do not.
+///
+/// This is the *enforcement* source, used by local spawn and provider
+/// deployment. The mention gate reads
+/// [`crate::commands::agent_access_owner_only`] instead, which additionally
+/// defers to a relay advertising the `agent-access-published-policy` NIP-11
+/// extension — see that function. Keep the two apart: what Desktop *displays*
+/// for an agent it does not run is a different question from what it clamps on
+/// an agent it starts, and relaxing the first must never relax the second.
 pub(crate) fn owner_only_access_build() -> bool {
     option_env!("BUZZ_DESKTOP_BUILD_AGENT_ACCESS_OWNER_ONLY").is_some()
 }
