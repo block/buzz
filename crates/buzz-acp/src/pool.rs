@@ -2648,6 +2648,7 @@ pub async fn run_prompt_task(
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
+    let mut turn_profile_lookup: Option<PromptProfileLookup> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -2726,7 +2727,7 @@ pub async fn run_prompt_task(
             );
         }
 
-        crate::queue::format_prompt(
+        let prompt = crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
                 agent_core: standing.agent_core,
@@ -2744,7 +2745,9 @@ pub async fn run_prompt_task(
                 task_handoff: task_handoff.as_deref(),
                 task_bound_auto_delivery: ctx.codex_task_binding.is_some(),
             },
-        )
+        );
+        turn_profile_lookup = profile_lookup;
+        prompt
     } else {
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
@@ -3036,8 +3039,14 @@ pub async fn run_prompt_task(
             }
 
             let final_answer = agent.acp.take_turn_final_answer();
-            publish_task_bound_final_answer(&ctx, &source, batch.as_ref(), final_answer.as_deref())
-                .await;
+            publish_task_bound_final_answer(
+                &ctx,
+                &source,
+                batch.as_ref(),
+                final_answer.as_deref(),
+                turn_profile_lookup.as_ref(),
+            )
+            .await;
             let should_rotate = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
@@ -4951,6 +4960,101 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+/// Resolve visible @mentions in an automatically published task-bound reply
+/// to the profile keys already loaded for the current prompt.
+fn task_bound_reply_mentions(
+    content: &str,
+    profiles: Option<&PromptProfileLookup>,
+    sender_pubkey: &str,
+) -> Vec<String> {
+    let Some(profiles) = profiles else {
+        return Vec::new();
+    };
+    let known_names: Vec<&str> = profiles
+        .values()
+        .flat_map(|profile| {
+            [
+                profile.display_name.as_deref(),
+                profile.nip05_handle.as_deref(),
+            ]
+        })
+        .flatten()
+        .collect();
+    let stripped = buzz_sdk::mentions::strip_code_regions(content);
+    let names = buzz_sdk::mentions::extract_at_mentions_with_known(&stripped, &known_names);
+    let sender = sender_pubkey.to_ascii_lowercase();
+    let mut mentioned = Vec::new();
+    for (pubkey, profile) in profiles {
+        let matches = [
+            profile.display_name.as_deref(),
+            profile.nip05_handle.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|name| {
+            names
+                .iter()
+                .any(|mention| mention.eq_ignore_ascii_case(name))
+        });
+        if matches && pubkey != &sender && !mentioned.contains(pubkey) {
+            mentioned.push(pubkey.clone());
+        }
+    }
+    mentioned
+}
+
+async fn fetch_channel_member_profiles(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<PromptProfileLookup> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let members_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(
+            SingleLetterTag::lowercase(Alphabet::D),
+            [channel_id.to_string()],
+        )
+        .limit(1);
+    let members = timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&[members_filter]))
+        .await
+        .ok()?
+        .ok()?;
+    let member_pubkeys: Vec<nostr::PublicKey> = members
+        .as_array()?
+        .iter()
+        .flat_map(|event| {
+            event
+                .get("tags")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|tag| {
+            let parts = tag.as_array()?;
+            (parts.first()?.as_str()? == "p")
+                .then(|| parts.get(1)?.as_str())
+                .flatten()
+        })
+        .filter_map(|pubkey| nostr::PublicKey::from_hex(pubkey).ok())
+        .collect();
+    if member_pubkeys.is_empty() {
+        return None;
+    }
+
+    let profiles_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .authors(member_pubkeys.clone())
+        .limit(member_pubkeys.len());
+    let profiles = timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&[profiles_filter]))
+        .await
+        .ok()?
+        .ok()?;
+    parse_kind0_profile_lookup(profiles)
+}
+
 /// Publish the final ACP answer for a task-bound Codex identity.
 ///
 /// The harness already owns this managed agent's signing key. Keeping delivery
@@ -4961,6 +5065,7 @@ async fn publish_task_bound_final_answer(
     source: &PromptSource,
     batch: Option<&FlushBatch>,
     content: Option<&str>,
+    profiles: Option<&PromptProfileLookup>,
 ) {
     if ctx.codex_task_binding.is_none() {
         return;
@@ -4986,14 +5091,33 @@ async fn publish_task_bound_final_answer(
         root_event_id: root_id,
         parent_event_id: root_id,
     };
-    let builder =
-        match buzz_sdk::build_message(*channel_id, content, Some(&thread_ref), &[], false, &[]) {
-            Ok(builder) => builder,
-            Err(error) => {
-                tracing::warn!(channel = %channel_id, "task-bound reply build failed: {error}");
-                return;
-            }
-        };
+    let channel_profiles = if content.contains('@') {
+        fetch_channel_member_profiles(*channel_id, &ctx.rest_client).await
+    } else {
+        None
+    };
+    let mention_pubkeys = task_bound_reply_mentions(
+        content,
+        channel_profiles.as_ref().or(profiles),
+        &ctx.rest_client.keys.public_key().to_hex(),
+    );
+    let builder = match buzz_sdk::build_message(
+        *channel_id,
+        content,
+        Some(&thread_ref),
+        &mention_pubkeys
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        false,
+        &[],
+    ) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(channel = %channel_id, "task-bound reply build failed: {error}");
+            return;
+        }
+    };
     let event = match builder.sign_with_keys(&ctx.rest_client.keys) {
         Ok(event) => event,
         Err(error) => {
@@ -6401,6 +6525,40 @@ mod tests {
         expected.sort();
 
         assert_eq!(pubkeys, expected);
+    }
+
+    #[test]
+    fn task_bound_reply_mentions_resolve_member_names_and_ignore_code() {
+        let sender = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let target = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut profiles = PromptProfileLookup::new();
+        profiles.insert(
+            sender.to_string(),
+            PromptProfile {
+                display_name: Some("Debug".into()),
+                ..Default::default()
+            },
+        );
+        profiles.insert(
+            target.to_string(),
+            PromptProfile {
+                display_name: Some("H2O2".into()),
+                is_agent: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            task_bound_reply_mentions("@h2o2 please review", Some(&profiles), sender),
+            vec![target]
+        );
+        assert!(task_bound_reply_mentions(
+            "`@H2O2` is an example\n\n```text\n@H2O2\n```",
+            Some(&profiles),
+            sender,
+        )
+        .is_empty());
+        assert!(task_bound_reply_mentions("@Debug self note", Some(&profiles), sender).is_empty());
     }
 
     #[test]

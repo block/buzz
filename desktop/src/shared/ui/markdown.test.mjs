@@ -587,6 +587,23 @@ test("markdown math: renders inline and block LaTeX as KaTeX", () => {
   assert.match(html, /Au/);
 });
 
+test("markdown math: normalizes LaTeX paren delimiters without touching code", () => {
+  const content = normalizeMathDelimiters(
+    "Inline \\(v_{\\mathrm{tip}}\\) and `\\(literal\\)`\n\n```\\n\\(code\\)\\n```",
+  );
+  const html = renderToStaticMarkup(
+    React.createElement(
+      ReactMarkdown,
+      { rehypePlugins: [rehypeKatex], remarkPlugins: [remarkMath] },
+      content,
+    ),
+  );
+
+  assert.match(html, /class="katex"/);
+  assert.match(html, /literal/);
+  assert.match(html, /\\\(code\\\)/);
+});
+
 test("messageLinkUrlTransform: preserves buzz://message autolink href", () => {
   const html = renderMarkdown("<buzz://message?channel=abc&id=xyz>");
   assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);

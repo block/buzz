@@ -44,11 +44,20 @@ const MARKDOWN_NODE_CACHE_LIMIT = 1000;
 const MARKDOWN_NODE_CACHE_MAX_CONTENT_LENGTH = 32_000;
 const markdownNodeCache = new Map<string, React.ReactElement>();
 
-/** Accept the bracket-only display math commonly emitted by agents. */
+/** Normalize the math delimiters commonly emitted by agents. */
 export function normalizeMathDelimiters(content: string): string {
-  const lines = content.split("\n");
+  const protectedTokens: string[] = [];
+  const protectedContent = content.replace(
+    /(```[\s\S]*?```|`[^`\n]*`)/g,
+    (token) => {
+      const index = protectedTokens.push(token) - 1;
+      return `\u{e000}BUZZ_MATH_CODE_${index}\u{e001}`;
+    },
+  );
+
+  const lines = protectedContent.split("\n");
   let inBracketMath = false;
-  return lines
+  let normalized = lines
     .map((line) => {
       if (/^\s*\\?\[\s*$/.test(line) && !inBracketMath) {
         inBracketMath = true;
@@ -61,6 +70,18 @@ export function normalizeMathDelimiters(content: string): string {
       return line;
     })
     .join("\n");
+
+  normalized = normalized
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_match, math: string) => `$$${math}$$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_match, math: string) => `$${math}$`);
+
+  for (const [index, token] of protectedTokens.entries()) {
+    normalized = normalized.replaceAll(
+      `\u{e000}BUZZ_MATH_CODE_${index}\u{e001}`,
+      token,
+    );
+  }
+  return normalized;
 }
 
 /** Community switches swap relays; drop parses keyed against the old
