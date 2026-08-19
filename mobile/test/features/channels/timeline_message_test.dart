@@ -404,26 +404,60 @@ void main() {
       expect(result[0].edited, false);
     });
 
-    test('displays a relay-signed workflow message as its actor', () {
+    nostr.Event workflowEvent() {
       const actorPubkey =
           'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
-      final event = nostr.Event.from(
+      return nostr.Event.from(
         kind: EventKind.streamMessage,
         content: 'workflow result',
         secretKey:
             '1111111111111111111111111111111111111111111111111111111111111111',
         createdAt: 1700000000,
         tags: const [
+          ['p', actorPubkey],
           ['h', 'ch1'],
-          ['actor', actorPubkey],
+          ['buzz:workflow', 'true'],
         ],
       );
+    }
+
+    test('displays a relay-signed workflow message as its actor', () {
+      const actorPubkey =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final event = workflowEvent();
 
       final result = formatTimeline([
         NostrEvent.fromJson(event.toMap()),
       ], relaySelfPubkey: event.pubkey);
 
       expect(result.single.pubkey, actorPubkey);
+    });
+
+    test('keeps the signer for a workflow message not signed by the relay', () {
+      const relayPubkey =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      final event = workflowEvent();
+
+      final result = formatTimeline([
+        NostrEvent.fromJson(event.toMap()),
+      ], relaySelfPubkey: relayPubkey);
+
+      expect(result.single.pubkey, event.pubkey);
+    });
+
+    test('keeps the signer for a workflow message with a tampered signature', () {
+      final event = workflowEvent();
+      final tamperedEvent = NostrEvent.fromJson({
+        ...event.toMap(),
+        'sig':
+            '${event.sig.substring(0, 127)}${event.sig.endsWith('0') ? '1' : '0'}',
+      });
+
+      final result = formatTimeline([
+        tamperedEvent,
+      ], relaySelfPubkey: event.pubkey);
+
+      expect(result.single.pubkey, event.pubkey);
     });
 
     test('filters deleted messages', () {
