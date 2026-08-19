@@ -27,11 +27,11 @@ import type {
   Channel,
   ChannelDetail,
   CreateChannelInput,
-  OpenDmInput,
   SetChannelPurposeInput,
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
+import type { OpenDmInput } from "@/shared/api/tauriChannels";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";

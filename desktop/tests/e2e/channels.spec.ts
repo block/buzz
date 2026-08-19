@@ -1869,7 +1869,11 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to general",
   );
@@ -2441,7 +2445,11 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await expect(page.getByTestId("message-dm-intro")).toContainText(
     "This is the beginning of your direct message with",
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Unread update for the DM",
   );

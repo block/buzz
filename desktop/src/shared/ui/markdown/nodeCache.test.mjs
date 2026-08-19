@@ -207,6 +207,26 @@ test("oversized content bypasses the cache", () => {
   assert.notEqual(first, second);
 });
 
+test("hardLineBreaks changes the parse and the cache key", () => {
+  clearMarkdownNodeCache();
+  const content = "hello\nworld";
+  const withBreaks = renderCachedMarkdown({ ...BASE, content });
+  const withoutBreaks = renderCachedMarkdown({
+    ...BASE,
+    content,
+    hardLineBreaks: false,
+  });
+  assert.notEqual(withBreaks, withoutBreaks);
+  assert.match(renderToStaticMarkup(withBreaks), /<br/i);
+  assert.doesNotMatch(renderToStaticMarkup(withoutBreaks), /<br/i);
+  const withoutBreaksAgain = renderCachedMarkdown({
+    ...BASE,
+    content,
+    hardLineBreaks: false,
+  });
+  assert.equal(withoutBreaks, withoutBreaksAgain);
+});
+
 test("active search queries bypass the cache", () => {
   clearMarkdownNodeCache();
   const first = renderCachedMarkdown({ ...BASE, searchQuery: "bold" });

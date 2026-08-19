@@ -285,6 +285,9 @@ type MockBridgeOptions = {
   clearPendingNavigationDeepLinksError?: string;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
+   * community mid-startup and observe the fail-closed scope check. */
+  startManagedAgentDelayMs?: number;
   /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
   mediaProxyInitiallyUnavailable?: boolean;
   /** Hold mock send live echoes until the E2E release seam is invoked. */

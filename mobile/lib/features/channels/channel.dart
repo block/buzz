@@ -141,16 +141,18 @@ class Channel {
   );
 
   Channel copyWith({
+    String? name,
+    String? description,
     Object? lastMessageAt = _sentinel,
     Object? archivedAt = _sentinel,
     int? memberCount,
     bool? isMember,
   }) => Channel(
     id: id,
-    name: name,
+    name: name ?? this.name,
     channelType: channelType,
     visibility: visibility,
-    description: description,
+    description: description ?? this.description,
     topic: topic,
     purpose: purpose,
     createdBy: createdBy,

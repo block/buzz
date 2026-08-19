@@ -188,14 +188,14 @@ test("parseSupportedLinkPreview parses buzz:// PR and issue deep links", () => {
       href: `buzz://pr?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
       provider: "Buzz",
       title: "buzz-world #c3b589fa",
-      typeLabel: "PR",
+      typeLabel: "Review",
     },
   );
   assert.deepEqual(
     parseSupportedLinkPreview(
       `buzz://issue?id=${BUZZ_EVENT_ID}&owner=${BUZZ_OWNER}&d=buzz-world`,
     )?.typeLabel,
-    "issue",
+    "Task",
   );
   assert.deepEqual(
     parseSupportedLinkPreview(`buzz://repo?owner=${BUZZ_OWNER}&d=buzz-world`),

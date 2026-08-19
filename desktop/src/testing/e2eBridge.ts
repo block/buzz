@@ -189,6 +189,12 @@ type E2eConfig = {
     pocketVoiceImportResult?: "success" | "cancel" | "invalid";
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
+    /** Override the repository access channel for project authorization states. */
+    projectAccessChannelId?: string;
+    /** Make remote project snapshots fail with this git-facing message. */
+    projectRepoSnapshotError?: string;
+    /** Delay remote repository snapshots so project loading UI is observable. */
+    projectRepoSnapshotDelayMs?: number;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -335,6 +341,9 @@ type E2eConfig = {
     clearPendingNavigationDeepLinksError?: string;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
+     *  community mid-startup and observe the fail-closed scope check. */
+    startManagedAgentDelayMs?: number;
     /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
     mediaProxyInitiallyUnavailable?: boolean;
     /** Hold mock send live echoes until the E2E release seam is invoked. */
@@ -1266,6 +1275,8 @@ declare global {
     __BUZZ_E2E_REJECT_PROJECT_QUERY_KINDS__?: number[];
     /** Captured aggregate project-history filters for request-count assertions. */
     __BUZZ_E2E_PROJECT_QUERY_FILTERS__?: MockFilter[];
+    /** Optional local repository snapshot returned for project branch tests. */
+    __BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__?: unknown;
     __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
       local_path: string | null;
       local_branch: string | null;
@@ -3807,6 +3818,71 @@ function getRelayWsUrl(config: E2eConfig | undefined): string {
   return config?.relayWsUrl ?? DEFAULT_RELAY_WS_URL;
 }
 
+/**
+ * Mirror of the backend's `assert_expected_relay_scope`: a caller-captured
+ * tenant scope must still match the active community when the command runs.
+ * The mock's "active relay" is the active community's relayUrl in
+ * localStorage (specs switch communities by rewriting it), falling back to
+ * the configured mock relay. Lets specs drive the mid-flight community
+ * switch with `openDmDelayMs` / `sendMessageDelayMs` and prove the send
+ * fails closed.
+ */
+function assertExpectedRelayScope(
+  expectedRelayUrl: string | null | undefined,
+  config: E2eConfig | undefined,
+): void {
+  const expected = expectedRelayUrl?.trim();
+  if (!expected) return;
+  let active: string | null = null;
+  try {
+    const activeId = window.localStorage.getItem("buzz-active-community-id");
+    const communities = JSON.parse(
+      window.localStorage.getItem("buzz-communities") ?? "[]",
+    ) as { id: string; relayUrl: string }[];
+    active =
+      communities.find((community) => community.id === activeId)?.relayUrl ??
+      null;
+  } catch {
+    active = null;
+  }
+  if (
+    normalizeMockRelayUrl(active ?? getRelayWsUrl(config)) !==
+    normalizeMockRelayUrl(expected)
+  ) {
+    throw new Error(
+      "active community changed before the message was submitted; not sent",
+    );
+  }
+}
+
+/** Same ws(s) normalization the app applies to community relay URLs. */
+function normalizeMockRelayUrl(url: string): string {
+  if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
+    return `wss://${url}`;
+  }
+  return url;
+}
+
+/**
+ * Mirror of the backend's `assert_expected_signer`: a caller-captured signer
+ * identity must still match the active identity when the command runs. The
+ * real backend reads relay and keys under separate locks, so the signer scope
+ * is asserted independently of the relay scope.
+ */
+function assertExpectedSigner(
+  expectedSignerPubkey: string | null | undefined,
+  config: E2eConfig | undefined,
+): void {
+  const expected = expectedSignerPubkey?.trim();
+  if (!expected) return;
+  const active = getMockMemberPubkey(config);
+  if (expected.toLowerCase() !== active.toLowerCase()) {
+    throw new Error(
+      "active identity changed before the message was submitted; not sent",
+    );
+  }
+}
+
 function getIdentity(config: E2eConfig | undefined): TestIdentity | undefined {
   if (!isRelayMode(config)) {
     return undefined;
@@ -5389,6 +5465,7 @@ const MOCK_PROJECT_SEEDS = [
     description:
       "Relay, desktop, and mobile clients for the Buzz community platform.",
     cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${MOCK_IDENTITY_PUBKEY}/buzz`,
+    webUrl: null,
     owner: MOCK_IDENTITY_PUBKEY,
     contributors: [ALICE_PUBKEY, BOB_PUBKEY, CHARLIE_PUBKEY],
     activityLevel: 4,
@@ -5398,6 +5475,7 @@ const MOCK_PROJECT_SEEDS = [
     name: "relay-tools",
     description: "Operator tooling and admin CLI for relay deployments.",
     cloneUrl: "https://github.com/block/relay-tools.git",
+    webUrl: "https://github.com/block/relay-tools",
     owner: ALICE_PUBKEY,
     contributors: [MOCK_IDENTITY_PUBKEY, BOB_PUBKEY],
     activityLevel: 2,
@@ -5407,6 +5485,7 @@ const MOCK_PROJECT_SEEDS = [
     name: "design-system",
     description: "Shared UI tokens, typography ramps, and component library.",
     cloneUrl: `${DEFAULT_RELAY_HTTP_URL}/git/${BOB_PUBKEY}/design-system`,
+    webUrl: null,
     owner: BOB_PUBKEY,
     contributors: [ALICE_PUBKEY],
     activityLevel: 1,
@@ -5504,8 +5583,13 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["d", seed.dtag],
           ["name", seed.name],
           ["description", seed.description],
-          ["buzz-channel", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
+          [
+            "buzz-channel",
+            getConfig()?.mock?.projectAccessChannelId ??
+              "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+          ],
           ["clone", seed.cloneUrl],
+          ...(seed.webUrl ? [["web", seed.webUrl]] : []),
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
         ],
         owner,
@@ -6505,6 +6589,8 @@ async function handleCreateChannel(
 async function handleOpenDm(
   args: {
     pubkeys: string[];
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config: E2eConfig | undefined,
 ) {
@@ -6512,6 +6598,11 @@ async function handleOpenDm(
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
   }
+  // After the injected delay, like the real command's post-await check: a
+  // caller-captured tenant scope and signer identity must still match the
+  // active community/identity.
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
 
   const normalizedPubkeys = normalizeParticipantPubkeys(args.pubkeys);
   if (normalizedPubkeys.length === 0) {
@@ -8714,9 +8805,21 @@ function isRelayMeshManagedAgent(agent: MockManagedAgent): boolean {
 async function handleStartManagedAgent(
   args: {
     pubkey: string;
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config?: E2eConfig,
 ): Promise<RawManagedAgent> {
+  const delayMs = config?.mock?.startManagedAgentDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+  // After the injected delay, like the real command's checks before any
+  // spawn/deploy side effect: a caller-captured tenant scope and signer
+  // identity must still match the active community/identity.
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
+
   const startError = config?.mock?.startManagedAgentErrors?.shift();
   if (startError) {
     throw new Error(startError);
@@ -9173,6 +9276,8 @@ async function handleSendChannelMessage(
     linkPreviewTags?: string[][] | null;
     sentFromThreadTag?: string[] | null;
     suppressLinkPreviews?: boolean;
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -9183,6 +9288,11 @@ async function handleSendChannelMessage(
       window.setTimeout(resolve, sendMessageDelayMs),
     );
   }
+  // After the injected delay, like the real command's post-await check: a
+  // caller-captured tenant scope and signer identity must still match the
+  // active community/identity.
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
 
   // Mirror the WebSocket send path's failure injection so specs that route
   // the first message through the acknowledged HTTP transport still exercise
@@ -11570,6 +11680,17 @@ export function maybeInstallE2eTauriMocks() {
         // viewer-identity avatar attribution is exercised in e2e.
         return { name: "Thomas P", email: "thomasp@example.com" };
       case "get_project_repo_snapshot":
+        if (activeConfig?.mock?.projectRepoSnapshotDelayMs) {
+          await new Promise((resolve) =>
+            window.setTimeout(
+              resolve,
+              activeConfig.mock?.projectRepoSnapshotDelayMs,
+            ),
+          );
+        }
+        if (activeConfig?.mock?.projectRepoSnapshotError) {
+          throw new Error(activeConfig.mock.projectRepoSnapshotError);
+        }
         return {
           latest_commit: {
             hash: "0123456789abcdef0123456789abcdef01234567",
@@ -11665,7 +11786,7 @@ export function maybeInstallE2eTauriMocks() {
           ],
         };
       case "get_project_local_repo_snapshot":
-        return null;
+        return window.__BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__ ?? null;
       case "get_project_repo_diff":
         return {
           additions: 27,

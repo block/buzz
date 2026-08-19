@@ -2,8 +2,8 @@ import 'dart:async';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/crypto/nip_oa.dart';
-import '../../shared/relay/relay.dart';
+import '../crypto/nip_oa.dart';
+import '../relay/relay.dart';
 import 'user_profile.dart';
 
 /// In-memory cache of user profiles, fetched in batches from the relay.
