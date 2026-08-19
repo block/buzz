@@ -535,24 +535,29 @@ def semantic_probe_server(path: pathlib.Path, token: str) -> tuple[http.server.T
     return server, f"http://127.0.0.1:{server.server_port}/snapshot"
 
 
+def build_native_review_app(isolation: dict[str, str]) -> pathlib.Path:
+    config = json.dumps({
+        "identifier": isolation["bundle_id"], "productName": "Buzz Native Review",
+        "bundle": {"externalBin": []},
+    }, separators=(",", ":"))
+    build_env = scrubbed_environment(include_home=True)
+    build_env["VITE_NATIVE_REVIEW"] = "1"
+    run(["pnpm", "exec", "tauri", "build", "--debug", "--bundles", "app", "--config", config],
+        cwd=ROOT / "desktop", env=build_env, capture=False)
+    app_binary = (ROOT / "desktop" / "src-tauri" / "target" / "debug" / "bundle" / "macos" /
+                  "Buzz Native Review.app" / "Contents" / "MacOS" / "buzz-desktop")
+    if not app_binary.is_file():
+        raise HarnessError(f"Tauri build succeeded without app binary: {app_binary}")
+    return app_binary
+
+
 def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: dict[str, Any],
                      probe_url: str, probe_token: str,
                      app_binary: pathlib.Path | None = None) -> tuple[subprocess.Popen[str], pathlib.Path, int]:
-    # Build once per benchmark cohort, then launch that immutable executable
-    # with run-specific fixture and probe coordinates supplied over Tauri IPC.
+    # A benchmark prepares one immutable executable for every measured run.
+    # Standalone journeys build their executable here before launch.
     if app_binary is None:
-        config = json.dumps({
-            "identifier": isolation["bundle_id"], "productName": "Buzz Native Review",
-            "bundle": {"externalBin": []},
-        }, separators=(",", ":"))
-        build_env = scrubbed_environment(include_home=True)
-        build_env["VITE_NATIVE_REVIEW"] = "1"
-        run(["pnpm", "exec", "tauri", "build", "--debug", "--bundles", "app", "--config", config],
-            cwd=ROOT / "desktop", env=build_env, capture=False)
-        app_binary = (ROOT / "desktop" / "src-tauri" / "target" / "debug" / "bundle" / "macos" /
-                      "Buzz Native Review.app" / "Contents" / "MacOS" / "buzz-desktop")
-        if not app_binary.is_file():
-            raise HarnessError(f"Tauri build succeeded without app binary: {app_binary}")
+        app_binary = build_native_review_app(isolation)
     elif not app_binary.is_file():
         raise HarnessError(f"prepared native review app does not exist: {app_binary}")
 
@@ -796,23 +801,30 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
 
 def benchmark(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
               runs: int) -> list[pathlib.Path]:
-    """Capture a cohort from one immutable app artifact."""
+    """Capture a cohort whose every run identifies one immutable app artifact."""
     cohort_id = f"benchmark-{dt.datetime.now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(3)}"
+    isolation = isolation_manifest(cohort_id, relay_url)
+    built_binary = build_native_review_app(isolation)
+    cohort_binary = output_root / ".cohorts" / cohort_id / "buzz-desktop"
+    cohort_binary.parent.mkdir(parents=True, exist_ok=True)
+    built_sha = sha256(built_binary)
+    shutil.copy2(built_binary, cohort_binary)
+    if sha256(cohort_binary) != built_sha:
+        raise HarnessError("prepared benchmark artifact changed while being copied")
+
     receipts: list[pathlib.Path] = []
-    app_binary: pathlib.Path | None = None
     for _ in range(runs):
+        if sha256(cohort_binary) != built_sha:
+            raise HarnessError("immutable benchmark artifact changed before launch")
         receipt_path = run_journey(
-            path, relay_url, output_root, app_binary=app_binary, isolation_id=cohort_id
+            path, relay_url, output_root, app_binary=cohort_binary, isolation_id=cohort_id
         ) / "receipt.json"
-        if app_binary is None:
-            receipt = json.loads(receipt_path.read_text())
-            built_binary = pathlib.Path(receipt["provenance"]["artifact_path"])
-            cohort_binary = output_root / ".cohorts" / cohort_id / "buzz-desktop"
-            cohort_binary.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(built_binary, cohort_binary)
-            if sha256(cohort_binary) != receipt["provenance"]["artifact_sha256"]:
-                raise HarnessError("prepared benchmark artifact changed while being copied")
-            app_binary = cohort_binary
+        receipt = json.loads(receipt_path.read_text())
+        provenance = receipt.get("provenance", {})
+        if (provenance.get("artifact_path") != str(cohort_binary)
+                or provenance.get("artifact_sha256") != built_sha
+                or sha256(cohort_binary) != built_sha):
+            raise HarnessError("benchmark receipt does not identify the immutable cohort artifact")
         receipts.append(receipt_path)
     return receipts
 

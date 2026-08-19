@@ -76,7 +76,11 @@ cohort, wrong flows, missing metrics, too few samples, different host IDs,
 or different machine/OS fingerprints. Baseline and candidate therefore need to
 run on the same host;
 thermal/load noise is reduced by repeated samples, not disguised as universal
-lab-grade benchmarking. Recording overhead is intentionally present in both
+lab-grade benchmarking. Receipts include an unsalted SHA-256 of the macOS
+`IOPlatformUUID` so the comparator can reject same-model runs from different
+hosts. This avoids storing the raw identifier but remains a stable device
+fingerprint; treat receipts as review evidence with device-linkability risk and
+do not publish them beyond the intended review audience. Recording overhead is intentionally present in both
 cohorts because this tool measures the reviewer-visible workflow.
 
 ## Current limits

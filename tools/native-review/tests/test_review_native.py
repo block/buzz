@@ -402,11 +402,12 @@ metrics:
             with self.assertRaisesRegex(review_native.HarnessError, "incompatible machines"):
                 review_native.compare_performance(baseline, candidate, self.budget(root / "budget.yaml"))
 
-    def test_benchmark_reuses_first_run_artifact(self):
+    def test_benchmark_reuses_one_verifiable_cohort_artifact_for_every_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            artifact = root / "buzz-desktop"
-            artifact.write_text("immutable")
+            target = root / "target" / "buzz-desktop"
+            target.parent.mkdir()
+            target.write_text("immutable")
             calls = []
 
             def fake_run_journey(_path, _relay, output, *, app_binary, isolation_id):
@@ -415,20 +416,51 @@ metrics:
                 run_dir.mkdir(parents=True)
                 (run_dir / "receipt.json").write_text(json.dumps({
                     "provenance": {
-                        "artifact_path": str(artifact),
-                        "artifact_sha256": review_native.sha256(artifact),
+                        "artifact_path": str(app_binary),
+                        "artifact_sha256": review_native.sha256(app_binary),
                     }
                 }))
                 return run_dir
 
-            with mock.patch.object(review_native, "run_journey", side_effect=fake_run_journey):
+            with (mock.patch.object(review_native, "build_native_review_app", return_value=target),
+                  mock.patch.object(review_native, "run_journey", side_effect=fake_run_journey)):
                 receipts = review_native.benchmark(pathlib.Path("journey.yaml"), "ws://localhost:3030", root, 3)
             self.assertEqual(len(receipts), 3)
-            self.assertIsNone(calls[0][0])
             prepared = root / ".cohorts" / calls[0][1] / "buzz-desktop"
-            self.assertEqual([call[0] for call in calls[1:]], [prepared, prepared])
-            self.assertEqual(prepared.read_text(), "immutable")
+            self.assertEqual([call[0] for call in calls], [prepared] * 3)
             self.assertEqual(len({call[1] for call in calls}), 1)
+            target.write_text("subsequent build output")
+            for receipt_path in receipts:
+                provenance = json.loads(receipt_path.read_text())["provenance"]
+                self.assertEqual(provenance["artifact_path"], str(prepared))
+                self.assertEqual(provenance["artifact_sha256"], review_native.sha256(prepared))
+
+    def test_benchmark_rejects_cohort_artifact_mutation_before_next_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            target = root / "buzz-desktop"
+            target.write_text("original")
+            calls = 0
+
+            def fake_run_journey(_path, _relay, output, *, app_binary, isolation_id):
+                nonlocal calls
+                calls += 1
+                run_dir = output / f"run-{calls}"
+                run_dir.mkdir(parents=True)
+                (run_dir / "receipt.json").write_text(json.dumps({
+                    "provenance": {
+                        "artifact_path": str(app_binary),
+                        "artifact_sha256": review_native.sha256(app_binary),
+                    }
+                }))
+                app_binary.write_text("mutated")
+                return run_dir
+
+            with (mock.patch.object(review_native, "build_native_review_app", return_value=target),
+                  mock.patch.object(review_native, "run_journey", side_effect=fake_run_journey)):
+                with self.assertRaisesRegex(review_native.HarnessError, "cohort artifact"):
+                    review_native.benchmark(pathlib.Path("journey.yaml"), "ws://localhost:3030", root, 3)
+            self.assertEqual(calls, 1)
 
     def test_comparison_rejects_mixed_revisions(self):
         with tempfile.TemporaryDirectory() as directory:

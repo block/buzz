@@ -24,6 +24,7 @@ import { initializeConversationDensityPreference } from "@/shared/lib/conversati
 import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
 import { invoke } from "@tauri-apps/api/core";
 import { installNativeReviewSemanticProbe } from "@/testing/nativeReviewSemanticProbe";
+import { parseNativeReviewRelay } from "@/testing/nativeReviewConfig";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -47,30 +48,8 @@ async function configureNativeReviewFixtureFromRuntime() {
 
   const config = await invoke<NativeReviewConfig>("native_review_config");
   const { relayUrl, pubkey } = config;
-  let relay: URL;
-  try {
-    relay = new URL(relayUrl ?? "");
-  } catch {
-    throw new Error(
-      "native review bootstrap requires a loopback relay and pubkey",
-    );
-  }
-  const loopbackHost = ["localhost", "127.0.0.1", "[::1]"].includes(
-    relay.hostname,
-  );
-  if (
-    !relayUrl ||
-    !pubkey ||
-    !/^[0-9a-f]{64}$/.test(pubkey) ||
-    !["ws:", "http:"].includes(relay.protocol) ||
-    !loopbackHost ||
-    !relay.port ||
-    (relay.pathname !== "/" && relay.pathname !== "") ||
-    relay.username ||
-    relay.password ||
-    relay.search ||
-    relay.hash
-  ) {
+  const relay = parseNativeReviewRelay(relayUrl);
+  if (!relay || !pubkey || !/^[0-9a-f]{64}$/.test(pubkey)) {
     throw new Error(
       "native review bootstrap requires a loopback relay and pubkey",
     );

@@ -1,3 +1,4 @@
+import { isNativeReviewProbeConfig } from "./nativeReviewConfig";
 type SemanticNode = {
   id?: string;
   role?: string;
@@ -92,16 +93,7 @@ export function installNativeReviewSemanticProbe(config: {
   probeToken: string;
 }): void {
   const { probeUrl, probeToken } = config;
-  const parsed = new URL(probeUrl);
-  if (
-    parsed.protocol !== "http:" ||
-    parsed.hostname !== "127.0.0.1" ||
-    !parsed.port ||
-    parsed.pathname !== "/snapshot" ||
-    parsed.search ||
-    parsed.hash ||
-    !probeToken
-  ) {
+  if (!isNativeReviewProbeConfig(probeUrl, probeToken)) {
     throw new Error("native review semantic probe destination is invalid");
   }
   let scheduled = false;
