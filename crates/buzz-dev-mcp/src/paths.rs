@@ -91,14 +91,49 @@ fn expand_tilde(path: &str, home: Option<&str>) -> Option<String> {
     Some(joined.to_string_lossy().into_owned())
 }
 
-/// The user's home directory from the environment: `%USERPROFILE%` on Windows,
-/// `$HOME` elsewhere. Returns `None` if the variable is unset or not UTF-8.
+/// The user's home directory from the environment. Reads `$HOME` first, falling
+/// back to `%USERPROFILE%` on Windows, then hands the raw values to `select_home`
+/// (pure, so it is testable without mutating process env). Returns `None` if no
+/// usable value is set or the value is not UTF-8.
 fn home_dir() -> Option<String> {
+    let home = std::env::var_os("HOME").and_then(|v| v.into_string().ok());
     #[cfg(windows)]
-    let var = std::env::var_os("USERPROFILE");
+    let userprofile = std::env::var_os("USERPROFILE").and_then(|v| v.into_string().ok());
     #[cfg(not(windows))]
-    let var = std::env::var_os("HOME");
-    var?.to_str().map(str::to_string)
+    let userprofile: Option<String> = None;
+    select_home(home.as_deref(), userprofile.as_deref())
+}
+
+/// Choose the home directory from the two env candidates, preferring `$HOME`.
+///
+/// `$HOME` is preferred because that is exactly what bash — and therefore the
+/// `shell` tool — expands `~` against, and `HOME` is passed through to the MCP
+/// child on every platform (see `buzz-agent`'s `PASSTHROUGH_ENV`). Picking
+/// `USERPROFILE` first on Windows would diverge from the shell tool whenever the
+/// two differ (a git-bash `HOME=/c/Users/x`, or an `mcpServers[].env` override),
+/// which is precisely the "match the shell tool" contract this fix exists for.
+/// `USERPROFILE` is only a Windows fallback for when `HOME` is unset.
+///
+/// On Windows the chosen value is passed through `msys_to_windows` so an MSYS
+/// `HOME` (`/c/Users/x`) becomes a native path (`C:\Users\x`) — `~` expansion
+/// happens after `msys_to_windows` in `resolve_path`, so the spliced-in home
+/// would otherwise never be translated and `canonicalize` would reject it. An
+/// MSYS form with no Windows equivalent (`/home/x`) falls through untranslated
+/// and fails with the clear `path not accessible` error, the correct outcome.
+/// Empty strings are treated as unset.
+fn select_home(home: Option<&str>, userprofile: Option<&str>) -> Option<String> {
+    fn non_empty(v: Option<&str>) -> Option<&str> {
+        v.filter(|s| !s.is_empty())
+    }
+    let chosen = non_empty(home).or_else(|| non_empty(userprofile))?;
+    #[cfg(windows)]
+    {
+        Some(msys_to_windows(chosen))
+    }
+    #[cfg(not(windows))]
+    {
+        Some(chosen.to_string())
+    }
 }
 
 /// Translate the MSYS/Cygwin absolute path forms bash would accept into a
@@ -297,6 +332,28 @@ mod tests {
         assert_eq!(expand_tilde("~/rest", Some("")), None);
     }
 
+    // `select_home` is pure (both env candidates passed in), so it exercises the
+    // HOME-first preference and empty/unset handling without mutating process
+    // env or racing parallel tests. `select_home` itself does not gate the
+    // fallback by platform — `home_dir` is what only supplies `userprofile` on
+    // Windows — so these assertions hold identically on every platform.
+    #[test]
+    fn select_home_prefers_home() {
+        // $HOME wins when both are set.
+        assert_eq!(
+            select_home(Some("/home/agent"), Some("/other")),
+            Some("/home/agent".to_string())
+        );
+        // Empty $HOME is treated as unset -> fall back to the second candidate.
+        assert_eq!(
+            select_home(Some(""), Some("/other")),
+            Some("/other".to_string())
+        );
+        // No usable candidate -> None.
+        assert_eq!(select_home(None, None), None);
+        assert_eq!(select_home(Some(""), Some("")), None);
+    }
+
     // End-to-end through `resolve_path`, exercising the real `home_dir()` env
     // read: a `~/...` path resolves against the actual home directory, not the
     // workspace root. Uses a temp file created under the real home so it does
@@ -349,6 +406,39 @@ mod tests {
         fn windows_absolute_passes_through_unchanged() {
             // Already a native Windows path — must not be mangled.
             assert_eq!(msys_to_windows(r"C:\Users\x"), r"C:\Users\x");
+        }
+
+        // Windows `select_home` behavior: HOME still wins over USERPROFILE, and
+        // an MSYS-form HOME is translated to a native path so the value spliced
+        // in during `~` expansion (which runs after `msys_to_windows`) resolves.
+        // Both candidates are passed in, so this needs no process-env mutation
+        // and does not silently no-op the way a real-env read would when HOME is
+        // unset on CI.
+        #[test]
+        fn select_home_translates_msys_home_and_prefers_it() {
+            // Divergent HOME/USERPROFILE: HOME wins, and its MSYS cygdrive form
+            // is translated to the native path so canonicalize can use it.
+            assert_eq!(
+                select_home(Some("/c/Users/agent"), Some(r"C:\Users\other")),
+                Some(r"C:\Users\agent".to_string())
+            );
+            // A native-form HOME is preferred and passes through unchanged.
+            assert_eq!(
+                select_home(Some(r"C:\Users\agent"), Some(r"C:\Users\other")),
+                Some(r"C:\Users\agent".to_string())
+            );
+            // HOME unset -> fall back to USERPROFILE (already native).
+            assert_eq!(
+                select_home(None, Some(r"C:\Users\other")),
+                Some(r"C:\Users\other".to_string())
+            );
+            // An MSYS HOME with no Windows equivalent (`/home/x`) is left
+            // untranslated; it fails downstream with a clear error rather than
+            // being mis-mapped — the intended conservative outcome.
+            assert_eq!(
+                select_home(Some("/home/agent"), None),
+                Some("/home/agent".to_string())
+            );
         }
 
         #[test]
