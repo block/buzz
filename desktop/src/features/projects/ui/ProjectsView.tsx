@@ -1,4 +1,4 @@
-import { Info, MessageCircle, Search } from "lucide-react";
+import { MessageCircle, Search } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -35,7 +35,10 @@ import {
 } from "@/features/projects/lib/projectRepoHost";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import { ProjectsChannelsList } from "@/features/projects/ui/ProjectsChannelsList";
-import { ProjectsOverviewContextSheet } from "@/features/projects/ui/ProjectsOverviewContextSheet";
+import {
+  ProjectsOverviewContextSheet,
+  ProjectsOverviewNarrowContextToggle,
+} from "@/features/projects/ui/ProjectsOverviewContextSheet";
 import {
   ProjectsActivityIntro,
   ProjectsOverviewContextPanel,
@@ -698,32 +701,15 @@ export function ProjectsView() {
     : overviewPanelOpen;
   const chromeActions = (
     <>
-      <Button
-        aria-label={
-          contextOpen ? "Hide project context" : "Show project context"
-        }
-        aria-pressed={contextOpen}
-        className="h-7 w-7 text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-        data-testid="projects-overview-context-toggle"
-        onClick={() =>
+      <ProjectsOverviewNarrowContextToggle
+        onToggle={() =>
           isNarrowProjectsLayout
             ? setNarrowContextOpen((open) => !open)
             : setOverviewPanelOpen((open) => !open)
         }
+        open={contextOpen}
         ref={contextToggleRef}
-        size="icon"
-        title={contextOpen ? "Hide project context" : "Show project context"}
-        type="button"
-        variant="ghost"
-      >
-        <Info
-          className={cn(
-            "h-4 w-4 transition-opacity duration-200 ease-linear",
-            contextOpen ? "opacity-100" : "opacity-60",
-          )}
-          data-testid="projects-overview-context-icon"
-        />
-      </Button>
+      />
     </>
   );
 
