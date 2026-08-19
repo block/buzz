@@ -193,7 +193,7 @@ export function buildChannelMentionCandidate(
   return {
     kind: "channel",
     channelMembers,
-    displayName: "Everyone in this channel",
+    displayName: "everyone",
     isAgent: false,
     isMember: false,
   };

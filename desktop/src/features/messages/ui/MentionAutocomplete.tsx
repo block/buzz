@@ -147,7 +147,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   className="min-w-0 break-words font-medium leading-snug"
                   title={suggestion.displayName}
                 >
-                  {suggestion.displayName}
+                  {suggestion.kind === "channel"
+                    ? `@${suggestion.displayName}`
+                    : suggestion.displayName}
                 </span>
                 {suggestion.kind === "team" ||
                 suggestion.kind === "channel" ||

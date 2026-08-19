@@ -92,7 +92,7 @@ test("channel mention expands every other uniquely named channel member", () => 
       { displayName: "Nyx", kind: "identity", pubkey: "2".repeat(64) },
       { displayName: "Solace", kind: "identity", pubkey: "3".repeat(64) },
     ],
-    displayName: "Everyone in this channel",
+    displayName: "everyone",
     isAgent: false,
     isMember: false,
   });

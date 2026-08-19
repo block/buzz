@@ -350,12 +350,12 @@ test("channel mention selects every other current member", async ({ page }) => {
 
   const composer = page.getByTestId("message-composer");
   const input = composer.getByTestId("message-input");
-  await input.fill("Notify @");
+  await input.fill("Notify @everyone");
 
   const channelMention = composer.getByTestId(
     "mention-suggestion-channel-members",
   );
-  await expect(channelMention).toContainText("Everyone in this channel");
+  await expect(channelMention).toContainText("@everyone");
   await expect(channelMention).toContainText("everyone · 2 members");
   await channelMention.click();
 
