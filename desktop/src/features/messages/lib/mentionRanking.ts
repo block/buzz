@@ -100,3 +100,18 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
         a.groupRank - b.groupRank || a.score - b.score || a.order - b.order,
     );
 }
+
+/** Keep an empty @ menu local to the current conversation.
+ *
+ * Non-member people, personas, teams, and agents remain searchable once the
+ * author types a query, but do not leak directory status rows into the default
+ * picker.
+ */
+export function mentionCandidatesForQuery<T extends MentionCandidateForRanking>(
+  candidates: readonly T[],
+  query: string,
+): readonly T[] {
+  return query.trim().length === 0
+    ? candidates.filter((candidate) => candidate.isMember)
+    : candidates;
+}

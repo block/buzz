@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { rankMentionCandidates } from "./mentionRanking.ts";
+import {
+  mentionCandidatesForQuery,
+  rankMentionCandidates,
+} from "./mentionRanking.ts";
 
 const CHANNEL_BRAIN_PUBKEY = "1".repeat(64);
 const OTHER_BRAIN_PUBKEY = "2".repeat(64);
@@ -137,5 +140,31 @@ test("rankMentionCandidates: owned teams rank with runnable personas", () => {
       (item) => item.candidate.kind,
     ),
     ["team", "identity"],
+  );
+});
+
+test("mentionCandidatesForQuery: empty @ menu contains channel members only", () => {
+  const member = candidate({
+    displayName: "Ariel",
+    isMember: true,
+    pubkey: CHANNEL_BRAIN_PUBKEY,
+  });
+  const remoteAgent = candidate({
+    displayName: "Fizz",
+    isAgent: true,
+    pubkey: OTHER_BRAIN_PUBKEY,
+  });
+
+  assert.deepEqual(
+    mentionCandidatesForQuery([member, remoteAgent], "").map(
+      (item) => item.pubkey,
+    ),
+    [CHANNEL_BRAIN_PUBKEY],
+  );
+  assert.deepEqual(
+    mentionCandidatesForQuery([member, remoteAgent], "fizz").map(
+      (item) => item.pubkey,
+    ),
+    [CHANNEL_BRAIN_PUBKEY, OTHER_BRAIN_PUBKEY],
   );
 });

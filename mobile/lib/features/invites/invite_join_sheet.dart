@@ -17,11 +17,24 @@ Future<void> showInviteJoinSheet(BuildContext context, WidgetRef ref) {
   );
 }
 
-class InviteJoinSheet extends ConsumerWidget {
+class InviteJoinSheet extends ConsumerStatefulWidget {
   const InviteJoinSheet({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<InviteJoinSheet> createState() => _InviteJoinSheetState();
+}
+
+class _InviteJoinSheetState extends ConsumerState<InviteJoinSheet> {
+  final _nameController = TextEditingController();
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(inviteJoinProvider);
     final isClaiming = state.status == InviteJoinStatus.claiming;
     final host = state.host ?? 'unknown host';
@@ -79,13 +92,26 @@ class InviteJoinSheet extends ConsumerWidget {
               ),
             ],
             const SizedBox(height: Grid.sm),
+            TextField(
+              controller: _nameController,
+              enabled: !isClaiming,
+              textCapitalization: TextCapitalization.words,
+              autofillHints: const [AutofillHints.name],
+              decoration: const InputDecoration(
+                labelText: 'Your name',
+                hintText: 'How people will see you',
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: Grid.sm),
             Text(
               'This phone is the only copy of this identity. If you lose it before pairing or backing up, you’ll lose access as this member.',
               style: context.textTheme.bodyMedium?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
             ),
-            if (state.status == InviteJoinStatus.error &&
+            if ((state.status == InviteJoinStatus.error ||
+                    state.status == InviteJoinStatus.profileError) &&
                 state.errorMessage != null) ...[
               const SizedBox(height: Grid.sm),
               Text(
@@ -109,11 +135,14 @@ class InviteJoinSheet extends ConsumerWidget {
                 const SizedBox(width: Grid.sm),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: isClaiming || state.requiresFreshInvite
+                    onPressed:
+                        isClaiming ||
+                            state.requiresFreshInvite ||
+                            _nameController.text.trim().isEmpty
                         ? null
                         : () => ref
                               .read(inviteJoinProvider.notifier)
-                              .confirmJoin(),
+                              .confirmJoin(displayName: _nameController.text),
                     icon: isClaiming
                         ? SizedBox(
                             width: 16,
@@ -124,7 +153,13 @@ class InviteJoinSheet extends ConsumerWidget {
                             ),
                           )
                         : const Icon(LucideIcons.check),
-                    label: Text(isClaiming ? 'Joining…' : 'Join'),
+                    label: Text(
+                      isClaiming
+                          ? 'Saving…'
+                          : state.status == InviteJoinStatus.profileError
+                          ? 'Save name'
+                          : 'Join',
+                    ),
                   ),
                 ),
               ],

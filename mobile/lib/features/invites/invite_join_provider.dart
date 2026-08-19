@@ -8,6 +8,7 @@ import '../../shared/auth/auth.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay_session.dart';
 import '../../shared/relay/relay_validation.dart';
+import '../profile/profile_provider.dart';
 
 final inviteJoinHttpClientProvider = Provider<http.Client>((ref) {
   final client = http.Client();
@@ -25,6 +26,7 @@ enum InviteJoinStatus {
   idle,
   confirming,
   claiming,
+  profileError,
   success,
   switchedExisting,
   error,
@@ -65,6 +67,8 @@ class InviteJoinState {
 }
 
 class InviteJoinNotifier extends Notifier<InviteJoinState> {
+  Community? _joinedCommunity;
+
   @override
   InviteJoinState build() => const InviteJoinState();
 
@@ -93,12 +97,20 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
     );
   }
 
-  Future<void> confirmJoin() async {
+  Future<void> confirmJoin({required String displayName}) async {
     final invite = state.invite;
+    final normalizedName = displayName.trim();
     if (invite == null ||
+        normalizedName.isEmpty ||
         state.requiresFreshInvite ||
         (state.status != InviteJoinStatus.confirming &&
-            state.status != InviteJoinStatus.error)) {
+            state.status != InviteJoinStatus.error &&
+            state.status != InviteJoinStatus.profileError)) {
+      return;
+    }
+
+    if (state.status == InviteJoinStatus.profileError) {
+      await _retryProfile(normalizedName);
       return;
     }
 
@@ -164,6 +176,24 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
       await ref
           .read(authProvider.notifier)
           .authenticateWithCommunity(community);
+      _joinedCommunity = community;
+      try {
+        await publishProfileOverHttp(
+          client: ref.read(inviteJoinHttpClientProvider),
+          relayUrl: invite.relayUrl,
+          nsec: keys.nsec,
+          displayName: normalizedName,
+        );
+        ref.invalidate(profileProvider);
+      } catch (_) {
+        state = state.copyWith(
+          status: InviteJoinStatus.profileError,
+          errorMessage:
+              'You joined, but Buzz could not save your name. Try again.',
+          requiresFreshInvite: false,
+        );
+        return;
+      }
       state = state.copyWith(
         status: InviteJoinStatus.success,
         communityName: community.name,
@@ -179,7 +209,33 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
   }
 
   void reset() {
+    _joinedCommunity = null;
     state = const InviteJoinState();
+  }
+
+  Future<void> _retryProfile(String displayName) async {
+    final community = _joinedCommunity;
+    if (community?.nsec == null) return;
+    state = state.copyWith(status: InviteJoinStatus.claiming, errorMessage: '');
+    try {
+      await publishProfileOverHttp(
+        client: ref.read(inviteJoinHttpClientProvider),
+        relayUrl: community!.relayUrl,
+        nsec: community.nsec!,
+        displayName: displayName,
+      );
+      ref.invalidate(profileProvider);
+      state = state.copyWith(
+        status: InviteJoinStatus.success,
+        communityName: community.name,
+        errorMessage: '',
+      );
+    } catch (_) {
+      state = state.copyWith(
+        status: InviteJoinStatus.profileError,
+        errorMessage: 'Buzz still could not save your name. Try again.',
+      );
+    }
   }
 }
 

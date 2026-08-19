@@ -20,6 +20,33 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('opens name recovery from the profile header', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          presenceProvider.overrideWith(() => _FakePresenceNotifier('online')),
+          userStatusProvider.overrideWith(() => _FakeUserStatusNotifier(null)),
+          customEmojiListProvider.overrideWithValue(const []),
+        ],
+        child: const SettingsProfileHeader(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('settings-edit-profile')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Edit profile'), findsOneWidget);
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('edit-profile-name')))
+          .controller
+          ?.text,
+      'Test',
+    );
+  });
+
   testWidgets('shows the poster until the animated avatar is ready', (
     tester,
   ) async {
