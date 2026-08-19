@@ -584,7 +584,6 @@ fn name_matches_interpreter_rejects_node_prefix() {
 
 #[test]
 fn claude_spawn_uses_the_probed_cli_executable() {
-    let _guard = crate::managed_agents::lock_path_mutex();
     let temp = tempfile::tempdir().expect("temp dir");
     let cli = temp
         .path()
@@ -596,17 +595,23 @@ fn claude_spawn_uses_the_probed_cli_executable() {
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
             .expect("make fake cli executable");
     }
-    let original_path = std::env::var_os("PATH");
-    std::env::set_var("PATH", temp.path());
+
+    // Holding the PATH mutex is not enough on its own: `resolve_command`
+    // caches by command name for the life of the process, ignoring PATH. Any
+    // earlier test that resolved a real `claude` therefore satisfied this
+    // lookup from cache and the assertion below compared it against the temp
+    // fake and failed — deterministically under `--test-threads=1`, and
+    // seemingly at random otherwise, because parallel scheduling decides
+    // whether a poisoning test ran first. CI never saw it: there is no Claude
+    // Code on those runners, so nothing was ever cached to leak.
+    //
+    // `PathOverride` clears the cache on entry and on drop, so this test both
+    // starts clean and cannot poison the tests that follow it.
+    let _path = crate::managed_agents::PathOverride::set(temp.path());
 
     let mut command = std::process::Command::new("buzz-acp");
     super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
 
-    if let Some(path) = original_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
     assert!(command
         .get_envs()
         .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
@@ -628,8 +633,10 @@ fn codex_spawn_does_not_set_a_claude_executable() {
 ///
 /// These tests exercise `is_batch_shim` directly — a pure path predicate with
 /// no global PATH or resolve_command cache involvement — so they run on every
-/// host and cannot be poisoned by the `claude_spawn_uses_the_probed_cli_executable`
-/// test that runs before them.
+/// host. (`claude_spawn_uses_the_probed_cli_executable` above used to leak its
+/// temp-directory resolution into the shared cache; it now scopes that through
+/// `PathOverride`, but keeping these tests cache-free is still the right shape
+/// for a pure predicate.)
 #[test]
 fn batch_shim_cmd_extension_is_rejected() {
     assert!(

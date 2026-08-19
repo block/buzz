@@ -53,6 +53,56 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
     PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Swap `PATH` for the duration of a test, holding [`lock_path_mutex`] and
+/// keeping the `resolve_command` cache consistent with it.
+///
+/// Taking the mutex is not sufficient on its own. `resolve_command` caches
+/// results keyed on the **command name alone** — not on `PATH` — for the life
+/// of the process, so a test that changes `PATH` without clearing that cache
+/// leaks in both directions: a resolution made under the real `PATH` is
+/// returned for a lookup that should hit the test's temp directory, and the
+/// test's own temp-directory resolution outlives its `TempDir` and is handed to
+/// every later test.
+///
+/// That is not hypothetical. `claude_spawn_uses_the_probed_cli_executable`
+/// asserted that its fake CLI was picked up, but read a real `claude` cached by
+/// an earlier test instead — and only on machines where Claude Code is actually
+/// installed, so it failed for developers and never once in CI.
+///
+/// Restoration happens in `Drop`, so a panicking assertion no longer leaves the
+/// process with a temp-directory `PATH`.
+#[cfg(test)]
+pub(crate) struct PathOverride {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    original: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl PathOverride {
+    /// Replace `PATH` entirely with `path`.
+    pub(crate) fn set(path: impl AsRef<std::ffi::OsStr>) -> Self {
+        let guard = lock_path_mutex();
+        let original = std::env::var_os("PATH");
+        std::env::set_var("PATH", path);
+        discovery::clear_resolve_cache();
+        Self {
+            _guard: guard,
+            original,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for PathOverride {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        discovery::clear_resolve_cache();
+    }
+}
+
 pub use backend::*;
 pub(crate) use definition_validation::{
     validate_agent_definition_text, validate_managed_agent_definition_text,
