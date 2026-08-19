@@ -18,6 +18,7 @@ pub(crate) mod effective_config;
 mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
+mod launch_log;
 mod managed_node_paths;
 mod nest;
 pub(crate) mod parallelism;
@@ -67,6 +68,7 @@ pub(crate) use global_config::{
     load_global_agent_config, resolve_effective_model_provider, save_global_agent_config,
     validate_global_config, GlobalAgentConfig,
 };
+pub(crate) use launch_log::*;
 pub(crate) use managed_node_paths::*;
 pub use nest::*;
 pub use parallelism::{acp_agents_value, effective_parallelism, harness_max_parallelism};

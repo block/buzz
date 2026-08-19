@@ -830,3 +830,27 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
         );
     }
 }
+
+// ── runtime logs ─────────────────────────────────────────────────────────────
+
+/// Agent stdout/stderr (what runtime logs capture) can echo credentials from
+/// installers and CLIs, so `0o600` must come from the create itself — a
+/// post-write `chmod` would leave a window where the umask decides and the log
+/// is briefly readable to other local users.
+#[cfg(unix)]
+#[test]
+fn open_log_file_creates_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("agent.log");
+
+    super::open_log_file(&path).expect("open runtime log");
+
+    let mode = std::fs::metadata(&path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "runtime logs must be owner-only");
+}

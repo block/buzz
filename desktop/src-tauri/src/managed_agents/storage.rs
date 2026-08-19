@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
@@ -733,11 +735,19 @@ fn maybe_rotate_log(path: &Path) {
     let _ = fs::rename(path, &rotated);
 }
 
+/// Open a managed-agent runtime log for appending, owner-only on Unix.
+///
+/// Agent stdout/stderr can echo installers' and CLIs' credentials, so like
+/// `open_install_log` the mode is set *in the create* — never chmod'd after, so
+/// the file is not briefly readable to other local users. An existing file's
+/// mode is left as-is, since `OpenOptions::mode` only applies on creation.
 pub(crate) fn open_log_file(path: &Path) -> Result<File, String> {
     maybe_rotate_log(path);
-    OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
         .open(path)
         .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
 }
@@ -796,11 +806,6 @@ fn open_install_log(path: &Path, truncate: bool) -> Result<File, String> {
     options
         .open(path)
         .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
-}
-
-pub(crate) fn append_log_marker(path: &Path, message: &str) -> Result<(), String> {
-    let mut file = open_log_file(path)?;
-    writeln!(file, "{message}").map_err(|error| format!("failed to write log marker: {error}"))
 }
 
 fn agent_pids_dir<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
