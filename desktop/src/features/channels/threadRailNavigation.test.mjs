@@ -23,6 +23,7 @@ test("threadRailPinToChannelNavigation restores a nested return anchor under the
       channelId: "channel-a",
       thread: "root-a",
       messageId: "nested-reply-a",
+      threadRail: true,
       threadRootId: "root-a",
     },
   );
@@ -33,6 +34,7 @@ test("threadRailPinToChannelNavigation opens the pin canonical root", () => {
     channelId: "channel-a",
     thread: "root-a",
     messageId: "root-a",
+    threadRail: true,
     threadRootId: "root-a",
   });
 });

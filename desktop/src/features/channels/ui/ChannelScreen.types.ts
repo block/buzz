@@ -23,4 +23,5 @@ export type ChannelScreenProps = {
   targetMessageEvents: RelayEvent[];
   targetMessageId: string | null;
   targetMessageLoadSettled: boolean;
+  threadRailNavigation: boolean;
 };

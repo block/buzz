@@ -75,6 +75,7 @@ export function useChannelRouteTarget({
   setProfilePanelPubkey,
   setThreadReplyTargetId,
   setThreadScrollTargetId,
+  suppressReplyTarget = false,
   targetMessageId,
   timelineMessages,
 }: {
@@ -87,6 +88,7 @@ export function useChannelRouteTarget({
   setProfilePanelPubkey: PanelValueSetter;
   setThreadReplyTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
+  suppressReplyTarget?: boolean;
   targetMessageId: string | null;
   timelineMessages: TimelineMessage[];
 }) {
@@ -141,7 +143,7 @@ export function useChannelRouteTarget({
       setProfilePanelPubkey(null, { replace: true });
       setEditTargetId(null);
       setOpenThreadHeadId(targetMessage.id, { replace: true });
-      setThreadReplyTargetId(targetMessage.id);
+      setThreadReplyTargetId(suppressReplyTarget ? null : targetMessage.id);
       setThreadScrollTargetId(null);
       setExpandedThreadReplyIds(new Set());
       handledThreadRouteTargetRef.current = targetKey;
@@ -166,7 +168,9 @@ export function useChannelRouteTarget({
     setProfilePanelPubkey(null, { replace: true });
     setEditTargetId(null);
     setOpenThreadHeadId(routeTarget.threadHeadId, { replace: true });
-    setThreadReplyTargetId(routeTarget.threadHeadId);
+    setThreadReplyTargetId(
+      suppressReplyTarget ? null : routeTarget.threadHeadId,
+    );
     setThreadScrollTargetId(targetMessageId);
     setExpandedThreadReplyIds(routeTarget.expandedReplyIds);
     handledThreadRouteTargetRef.current = targetKey;
@@ -180,6 +184,7 @@ export function useChannelRouteTarget({
     setProfilePanelPubkey,
     setThreadReplyTargetId,
     setThreadScrollTargetId,
+    suppressReplyTarget,
     targetMessageId,
     timelineMessageById,
   ]);

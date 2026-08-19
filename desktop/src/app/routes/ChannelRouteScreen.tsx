@@ -23,13 +23,32 @@ type ChannelRouteScreenProps = {
   targetMessageId: string | null;
   targetReplyId: string | null;
   targetThreadRootId: string | null;
+  threadRailNavigation?: boolean;
 };
 
 const MAX_ROUTE_ANCESTOR_HOPS = 50;
+const MAX_ROUTE_EVENT_CACHE = 500;
+const routeEventCache = new Map<string, RelayEvent>();
+
+function cacheRouteEvent(event: RelayEvent): void {
+  routeEventCache.delete(event.id);
+  routeEventCache.set(event.id, event);
+  if (routeEventCache.size > MAX_ROUTE_EVENT_CACHE) {
+    routeEventCache.delete(routeEventCache.keys().next().value as string);
+  }
+}
+
+function getCachedRouteEvent(eventId: string): RelayEvent | null {
+  return routeEventCache.get(eventId) ?? null;
+}
 
 async function fetchRouteEvent(eventId: string): Promise<RelayEvent | null> {
+  const cached = getCachedRouteEvent(eventId);
+  if (cached) return cached;
   try {
-    return await getEventById(eventId);
+    const event = await getEventById(eventId);
+    if (event) cacheRouteEvent(event);
+    return event;
   } catch (error) {
     console.error("Failed to load route event", eventId, error);
     return null;
@@ -103,6 +122,7 @@ export function ChannelRouteScreen({
   targetMessageId,
   targetReplyId,
   targetThreadRootId,
+  threadRailNavigation = false,
 }: ChannelRouteScreenProps) {
   const isHuddleTranscript = huddleWindowChannelId() !== null;
   const { closeForumPost, goForumPost } = useAppNavigation();
@@ -230,6 +250,7 @@ export function ChannelRouteScreen({
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
       targetMessageLoadSettled={targetMessageLoadSettled}
+      threadRailNavigation={threadRailNavigation}
     />
   );
 }

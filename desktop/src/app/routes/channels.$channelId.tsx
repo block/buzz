@@ -24,6 +24,7 @@ type ChannelRouteSearch = {
   profileTab?: ProfilePanelTab;
   profileView?: ProfilePanelView;
   thread?: string;
+  threadRail?: boolean;
   threadRootId?: string;
 };
 
@@ -42,6 +43,7 @@ function validateChannelSearch(
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,
     thread: nonEmptyString(search.thread),
+    threadRail: search.threadRail === "1",
     threadRootId: nonEmptyString(search.threadRootId),
   };
 }
@@ -78,6 +80,7 @@ function ChannelRouteComponent() {
         targetMessageId={search.messageId ?? null}
         targetReplyId={null}
         targetThreadRootId={search.threadRootId ?? search.thread ?? null}
+        threadRailNavigation={search.threadRail ?? false}
       />
     </React.Suspense>
   );

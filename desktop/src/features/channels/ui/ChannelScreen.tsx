@@ -101,6 +101,7 @@ export function ChannelScreen({
   targetMessageEvents,
   targetMessageId,
   targetMessageLoadSettled,
+  threadRailNavigation,
 }: ChannelScreenProps) {
   const { goHome } = useAppNavigation();
   const threadRail = useThreadRailContext();
@@ -651,6 +652,11 @@ export function ChannelScreen({
   React.useEffect(() => {
     resetComposerTargets(activeChannelId);
   }, [activeChannelId, resetComposerTargets]);
+  const threadRailTargetKey = threadRailNavigation ? targetMessageId : null;
+  React.useLayoutEffect(() => {
+    if (!threadRailTargetKey) return;
+    resetComposerTargets(activeChannelId);
+  }, [activeChannelId, resetComposerTargets, threadRailTargetKey]);
   const { mainTimelineTargetMessageId, routeTargetReady } =
     useChannelRouteTarget({
       activeChannel,
@@ -663,6 +669,7 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
       targetMessageId,
+      suppressReplyTarget: threadRailNavigation,
       timelineMessages,
     });
   useThreadTargetSync({
@@ -677,6 +684,7 @@ export function ChannelScreen({
     setOpenThreadHeadId,
     setThreadReplyTargetId,
     setThreadScrollTargetId,
+    suppressDefaultReplyTarget: threadRailNavigation,
     threadReplyTargetId,
     threadReplyTargetMessage,
   });

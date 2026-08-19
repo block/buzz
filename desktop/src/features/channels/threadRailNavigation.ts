@@ -12,6 +12,7 @@ export function threadRailPinToChannelNavigation(pin: ThreadRailPin) {
     channelId: pin.channelId,
     thread: pin.rootId,
     messageId: pin.returnAnchorId ?? pin.rootId,
+    threadRail: true,
     threadRootId: pin.rootId,
   };
 }
