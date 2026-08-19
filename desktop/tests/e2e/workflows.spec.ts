@@ -555,6 +555,45 @@ test("deleting the open workflow closes its editor", async ({ page }) => {
   await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
 });
 
+test("rejected deletion keeps the confirmation, editor, and draft", async ({
+  page,
+}) => {
+  const workflowName = `delete_rejected_${Date.now()}`;
+
+  await navigateToWorkflows(page);
+  await createWorkflow(page, workflowName);
+  await page.getByRole("button", { name: `View ${workflowName}` }).click();
+  const editor = page.getByRole("dialog", { name: "Edit workflow" });
+  await editor.getByRole("tab", { name: "YAML" }).click();
+  const yamlEditor = editor.getByRole("textbox", { name: "Workflow YAML" });
+  await yamlEditor.fill(
+    (await yamlEditor.inputValue()).replace(
+      workflowName,
+      `${workflowName}_draft`,
+    ),
+  );
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ ??= {};
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.workflowDeleteError = "relay refused deletion";
+  });
+
+  await editor.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Delete" }).click();
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Delete workflow?",
+  });
+  await confirmation.getByRole("button", { name: "Delete" }).click();
+
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation.getByRole("alert")).toContainText(
+    "relay refused deletion",
+  );
+  await confirmation.getByRole("button", { name: "Cancel" }).click();
+  await expect(editor).toBeVisible();
+  await expect(yamlEditor).toContainText(`${workflowName}_draft`);
+});
+
 test("captures the built editor at desktop and narrow widths", async ({
   page,
 }) => {

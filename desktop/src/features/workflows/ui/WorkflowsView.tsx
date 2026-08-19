@@ -197,14 +197,18 @@ export function WorkflowsView({
     [],
   );
 
-  const deleteOne = deleteMutation.mutate;
+  const deleteOne = deleteMutation.mutateAsync;
   const handleConfirmDelete = React.useCallback(
-    (workflow: Workflow) => {
-      deleteOne(workflow.id);
-      setDeleteTarget(null);
-      // Deleting the workflow the editor is pointed at would otherwise leave
-      // that editor open on a workflow that no longer exists.
-      if (workflow.id === editorWorkflowId) onCloseEditor();
+    async (workflow: Workflow) => {
+      try {
+        await deleteOne(workflow.id);
+        setDeleteTarget(null);
+        // Deleting the workflow the editor is pointed at would otherwise leave
+        // that editor open on a workflow that no longer exists.
+        if (workflow.id === editorWorkflowId) onCloseEditor();
+      } catch {
+        // React Query stores the error; keep the confirmation and editor open.
+      }
     },
     [deleteOne, editorWorkflowId, onCloseEditor],
   );
@@ -313,9 +317,18 @@ export function WorkflowsView({
       />
 
       <WorkflowDeleteDialog
+        error={
+          deleteMutation.error instanceof Error
+            ? deleteMutation.error.message
+            : null
+        }
+        isPending={deleteMutation.isPending}
         onConfirm={handleConfirmDelete}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
+          if (!open) {
+            deleteMutation.reset();
+            setDeleteTarget(null);
+          }
         }}
         open={deleteTarget !== null}
         workflow={deleteTarget}

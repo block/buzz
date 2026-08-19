@@ -121,12 +121,16 @@ export function AppWorkflowEditorOverlayProvider({
     [triggerOne],
   );
 
-  const deleteOne = deleteMutation.mutate;
+  const deleteOne = deleteMutation.mutateAsync;
   const handleConfirmDelete = React.useCallback(
-    (workflow: Workflow) => {
-      deleteOne(workflow.id);
-      setDeleteTarget(null);
-      closeEditor();
+    async (workflow: Workflow) => {
+      try {
+        await deleteOne(workflow.id);
+        setDeleteTarget(null);
+        closeEditor();
+      } catch {
+        // React Query stores the error; keep the confirmation and editor open.
+      }
     },
     [closeEditor, deleteOne],
   );
@@ -149,9 +153,18 @@ export function AppWorkflowEditorOverlayProvider({
         workflowHint={workflowHint}
       />
       <WorkflowDeleteDialog
+        error={
+          deleteMutation.error instanceof Error
+            ? deleteMutation.error.message
+            : null
+        }
+        isPending={deleteMutation.isPending}
         onConfirm={handleConfirmDelete}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
+          if (!open) {
+            deleteMutation.reset();
+            setDeleteTarget(null);
+          }
         }}
         open={deleteTarget !== null}
         workflow={deleteTarget}
