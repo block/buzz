@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   isThreadRailVisible,
   projectThreadRailLayout,
-  threadRailColumnClassName,
   threadRailEntryClassName,
   threadRailHeaderClassName,
   threadRailShellClassName,
@@ -15,18 +14,6 @@ test("isThreadRailVisible hides the rail at and below the desktop breakpoint", (
   assert.equal(isThreadRailVisible(599, 1), false);
   assert.equal(isThreadRailVisible(601, 1), true);
   assert.equal(isThreadRailVisible(601, 0), false);
-});
-
-test("Thread Rail column is layout-only and owns no paint", () => {
-  const className = threadRailColumnClassName();
-
-  assert.match(className, /self-stretch/);
-  assert.match(className, /shrink-0/);
-  assert.doesNotMatch(className, /buzz-theme-gradient-underlay/);
-  assert.doesNotMatch(className, /rounded/);
-  assert.doesNotMatch(className, /bg-/);
-  assert.doesNotMatch(className, /shadow/);
-  assert.doesNotMatch(className, /ring/);
 });
 
 test("Thread Rail paints one full-height rounded panel inside the unframed column", () => {
