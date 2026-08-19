@@ -17,20 +17,23 @@ const agentB = "b".repeat(64);
 const agentC = "c".repeat(64);
 const ownerA = "1".repeat(64);
 const ownerB = "2".repeat(64);
-const storageKey = "buzz:persistent-agent-audiences:v2";
+const storageKey = (communityId = "community-a") =>
+  `buzz:persistent-agent-audiences:v3:${communityId}`;
 
 let loadSequence = 0;
 
 async function loadStore(offset = 0) {
   globalThis.window = { localStorage: createStorage() };
   loadSequence += 1;
-  return import(
+  const store = await import(
     `./persistentAgentAudience.ts?test=${Date.now()}-${offset}-${loadSequence}`
   );
+  store.initPersistentAgentAudienceStore("community-a");
+  return store;
 }
 
-function savedAudiences() {
-  return JSON.parse(window.localStorage.getItem(storageKey));
+function savedAudiences(communityId = "community-a") {
+  return JSON.parse(window.localStorage.getItem(storageKey(communityId)));
 }
 
 test("audience scopes isolate identities and channels", async () => {
@@ -157,6 +160,7 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
   const store = await import(
     `./persistentAgentAudience.ts?test=${Date.now()}-touch-${loadSequence}`
   );
+  store.initPersistentAgentAudienceStore("community-a");
   const touchedScope = "scope-0";
   store.setPersistentAgentAudience(touchedScope, [agentA]);
   for (let index = 1; index < store.MAX_PERSISTENT_AGENT_AUDIENCES; index++) {
@@ -181,7 +185,7 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
   });
 
   assert.equal(writes.length, 1);
-  assert.equal(writes[0][0], storageKey);
+  assert.equal(writes[0][0], storageKey());
   assert.deepEqual(JSON.parse(writes[0][1])[touchedScope], [agentA]);
   assert.equal(Object.keys(JSON.parse(writes[0][1])).at(-1), touchedScope);
   assert.equal(renderCount, renderCountBeforeTouch);
@@ -202,6 +206,28 @@ test("an unchanged touch refreshes LRU without revision or emit", async () => {
   assert.deepEqual(saved["scope-new"], [agentB]);
   await React.act(async () => root.unmount());
   dom.window.close();
+});
+
+test("community switches isolate and restore address locks", async () => {
+  const store = await loadStore(12);
+  const scope = store.getPersistentAgentAudienceScope({
+    ownerPubkey: ownerA,
+    channelId: "shared-channel-id",
+  });
+
+  store.setPersistentAgentAudience(scope, [agentA]);
+  store.resetPersistentAgentAudienceStore();
+  store.initPersistentAgentAudienceStore("community-b");
+  assert.deepEqual(savedAudiences("community-a"), { [scope]: [agentA] });
+  assert.deepEqual(store.getPersistentAgentAudienceSnapshot().audiences, {});
+
+  store.setPersistentAgentAudience(scope, [agentB]);
+  store.resetPersistentAgentAudienceStore();
+  store.initPersistentAgentAudienceStore("community-a");
+  assert.deepEqual(store.getPersistentAgentAudienceSnapshot().audiences, {
+    [scope]: [agentA],
+  });
+  assert.deepEqual(savedAudiences("community-b"), { [scope]: [agentB] });
 });
 
 test("channel and thread composers share the channel audience scope", async () => {

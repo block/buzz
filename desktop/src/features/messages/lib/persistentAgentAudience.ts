@@ -1,10 +1,11 @@
 import * as React from "react";
 
-const AUDIENCES_STORAGE_KEY = "buzz:persistent-agent-audiences:v2";
+const AUDIENCES_STORAGE_KEY_PREFIX = "buzz:persistent-agent-audiences:v3";
 export const MAX_PERSISTENT_AGENT_AUDIENCES = 200;
 
 const listeners = new Set<() => void>();
-let audiences = readAudiences();
+let activeCommunityId: string | null = null;
+let audiences: Record<string, string[]> = {};
 let snapshot = buildSnapshot();
 
 export type PersistentAgentAudienceSnapshot = Readonly<{
@@ -32,11 +33,15 @@ function boundAudiences(
     : Object.fromEntries(entries.slice(-MAX_PERSISTENT_AGENT_AUDIENCES));
 }
 
-function readAudiences(): Record<string, string[]> {
+function getAudiencesStorageKey(communityId: string): string {
+  return `${AUDIENCES_STORAGE_KEY_PREFIX}:${encodeURIComponent(communityId)}`;
+}
+
+function readAudiences(communityId: string): Record<string, string[]> {
   if (typeof window === "undefined") return {};
   try {
     const parsed: unknown = JSON.parse(
-      window.localStorage.getItem(AUDIENCES_STORAGE_KEY) ?? "{}",
+      window.localStorage.getItem(getAudiencesStorageKey(communityId)) ?? "{}",
     );
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
       return {};
@@ -65,9 +70,10 @@ function emit(): void {
 }
 
 function persistAudiences(): void {
+  if (!activeCommunityId) return;
   try {
     window.localStorage.setItem(
-      AUDIENCES_STORAGE_KEY,
+      getAudiencesStorageKey(activeCommunityId),
       JSON.stringify(audiences),
     );
   } catch {
@@ -83,6 +89,23 @@ export function getPersistentAgentAudienceScope({
   if (!/^[0-9a-f]{64}$/.test(owner) || !channelId) return null;
   // Thread composers intentionally share their parent channel's audience.
   return `${owner}:${channelId}:channel`;
+}
+
+export function initPersistentAgentAudienceStore(communityId: string): void {
+  const normalizedCommunityId = communityId.trim();
+  if (!normalizedCommunityId) {
+    resetPersistentAgentAudienceStore();
+    return;
+  }
+  activeCommunityId = normalizedCommunityId;
+  audiences = readAudiences(normalizedCommunityId);
+  emit();
+}
+
+export function resetPersistentAgentAudienceStore(): void {
+  activeCommunityId = null;
+  audiences = {};
+  emit();
 }
 
 export function setPersistentAgentAudience(
@@ -136,8 +159,12 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-function getSnapshot(): PersistentAgentAudienceSnapshot {
+export function getPersistentAgentAudienceSnapshot(): PersistentAgentAudienceSnapshot {
   return snapshot;
+}
+
+function getSnapshot(): PersistentAgentAudienceSnapshot {
+  return getPersistentAgentAudienceSnapshot();
 }
 
 const serverSnapshot: PersistentAgentAudienceSnapshot = {

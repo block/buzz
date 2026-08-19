@@ -128,7 +128,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
           return (
             <div
               className={cn(
-                "flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-1.5 text-left text-sm",
+                "relative flex w-full items-stretch rounded-lg text-left text-sm",
                 index === selectedIndex
                   ? "bg-accent text-accent-foreground"
                   : "text-popover-foreground hover:bg-accent/50",
@@ -139,7 +139,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             >
               <button
                 aria-label={`Mention ${suggestion.displayName}`}
-                className="h-6 w-6 shrink-0"
+                className={cn(
+                  "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left",
+                  canAlwaysAddress && "pr-11",
+                )}
                 onMouseDown={(event) => {
                   event.preventDefault();
                   onSelect(suggestion);
@@ -148,7 +151,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 type="button"
               >
                 {suggestion.kind === "team" ? (
-                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary">
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
                     <Users aria-hidden="true" className="h-4 w-4" />
                   </span>
                 ) : (
@@ -159,16 +162,6 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     testId="mention-suggestion-avatar"
                   />
                 )}
-              </button>
-              <button
-                className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  onSelect(suggestion);
-                }}
-                tabIndex={-1}
-                type="button"
-              >
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span
                     className="min-w-0 break-words font-medium leading-snug"
@@ -250,7 +243,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               {canAlwaysAddress ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <span className="inline-flex shrink-0">
+                    <span className="absolute right-3 top-1/2 inline-flex -translate-y-1/2">
                       <Toggle
                         aria-label={`Always address ${suggestion.displayName}`}
                         className="h-6 w-6 p-0 data-[state=on]:bg-primary/15 data-[state=on]:text-primary"

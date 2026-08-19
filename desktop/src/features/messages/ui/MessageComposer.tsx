@@ -394,6 +394,7 @@ function MessageComposerImpl({
     [richText.replacePlainTextRange],
   );
   const {
+    announcement: addressLockAnnouncement,
     lockedAgents,
     lockedAgentPubkeys,
     selectMentionSuggestion,
@@ -908,6 +909,13 @@ function MessageComposerImpl({
             ) : null}
 
             {composerLinkPreviews}
+            <output
+              aria-live="polite"
+              className="sr-only"
+              data-testid="composer-address-lock-status"
+            >
+              {addressLockAnnouncement}
+            </output>
             {((lockedAgents.length > 0 && editTarget == null) ||
               media.pendingImeta.length > 0 ||
               media.queuedAttachments.length > 0 ||

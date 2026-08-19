@@ -65,6 +65,12 @@ test("agent rows offer an Always address pin", async () => {
     view.queryByText("Hover an agent avatar to keep it addressed"),
     null,
   );
+  const rowAction = view.getByRole("button", {
+    name: "Mention Agent Ada",
+  });
+  fireEvent.mouseDown(rowAction);
+  assert.deepEqual(selected, [suggestion]);
+
   const action = view.getByRole("button", {
     name: "Always address Agent Ada",
   });
@@ -72,7 +78,7 @@ test("agent rows offer an Always address pin", async () => {
   assert.equal(action.getAttribute("data-state"), "off");
   fireEvent.click(action);
   assert.deepEqual(toggled, [suggestion]);
-  assert.deepEqual(selected, []);
+  assert.deepEqual(selected, [suggestion]);
 
   view.rerender(
     renderAutocomplete({

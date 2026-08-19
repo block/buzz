@@ -77,6 +77,7 @@ test("always addressing an agent keeps autocomplete open, adds the lock, and pul
   assert.equal(cancelCount, 0);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
+  assert.equal(result.current.announcement, "Always addressing Agent Ada");
 });
 
 test("toggling an addressed agent keeps autocomplete open and removes the lock", async () => {
@@ -136,6 +137,10 @@ test("toggling an addressed agent keeps autocomplete open and removes the lock",
   assert.equal(cancelCount, 0);
   assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, []);
+  assert.equal(
+    result.current.announcement,
+    "Stopped always addressing Agent Ada",
+  );
 });
 
 test("selecting an already addressed agent removes the query and pulses its badge", async () => {

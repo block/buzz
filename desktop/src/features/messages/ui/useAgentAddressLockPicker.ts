@@ -73,6 +73,7 @@ export function useAgentAddressLockPicker({
     [audience.pubkeys],
   );
   const lockedAgentNamesRef = React.useRef(new Map<string, string>());
+  const [announcement, setAnnouncement] = React.useState("");
   const lockedAgents = React.useMemo<ComposerAddressLock[]>(
     () =>
       audience.pubkeys.map((pubkey) => {
@@ -139,9 +140,11 @@ export function useAgentAddressLockPicker({
 
       if (lockedAgentPubkeys.has(pubkey)) {
         audience.removePubkey(pubkey);
+        setAnnouncement(`Stopped always addressing ${suggestion.displayName}`);
       } else {
         audience.addPubkey(pubkey);
         onPulseAddressLock(pubkey);
+        setAnnouncement(`Always addressing ${suggestion.displayName}`);
       }
 
       if (mentions.isMentionOpen) {
@@ -201,6 +204,7 @@ export function useAgentAddressLockPicker({
   );
 
   return {
+    announcement,
     lockedAgents,
     lockedAgentPubkeys,
     selectMentionSuggestion,

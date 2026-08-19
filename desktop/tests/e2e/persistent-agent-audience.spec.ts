@@ -15,7 +15,7 @@ async function seedAudience(page: Page, pubkeys: string[], theme = "buzz") {
   await page.addInitScript(
     ({ audience, scope, selectedTheme }) => {
       window.localStorage.setItem(
-        "buzz:persistent-agent-audiences:v2",
+        "buzz:persistent-agent-audiences:v3:e2e-default-community",
         JSON.stringify({ [scope]: audience }),
       );
       window.localStorage.setItem("buzz-theme", selectedTheme);
@@ -170,7 +170,9 @@ test("always addresses multiple agents without closing the mention picker", asyn
       page.evaluate(
         ({ scope }) => {
           const stored = JSON.parse(
-            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
           );
           return stored[scope] ?? null;
         },
@@ -265,7 +267,9 @@ test("the ingress opens the mention menu without editing the draft", async ({
       page.evaluate(
         ({ scope }) => {
           const stored = JSON.parse(
-            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
           );
           return stored[scope] ?? [];
         },
@@ -281,7 +285,9 @@ test("the ingress opens the mention menu without editing the draft", async ({
       page.evaluate(
         ({ scope }) => {
           const stored = JSON.parse(
-            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
           );
           return stored[scope] ?? [];
         },
@@ -478,7 +484,9 @@ test("always-mentioned agents restore and can be removed independently", async (
       page.evaluate(
         ({ scope }) => {
           const stored = JSON.parse(
-            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
           );
           return stored[scope] ?? [];
         },
@@ -537,7 +545,9 @@ test("channel always-mentions carry into threads and stay synchronized", async (
       page.evaluate(
         ({ scope }) => {
           const stored = JSON.parse(
-            localStorage.getItem("buzz:persistent-agent-audiences:v2") ?? "{}",
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
           );
           return stored[scope] ?? null;
         },
