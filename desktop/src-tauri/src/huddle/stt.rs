@@ -31,7 +31,12 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::turn_gate::{action_after_vad_silence, SilenceAction, TurnDecision};
+use buzz_voice_pkg::{SmartTurnClassifier, SmartTurnDecision as ModelTurnDecision};
+
+use super::{
+    models,
+    turn_gate::{action_after_vad_silence, SilenceAction, TurnDecision},
+};
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
@@ -215,12 +220,6 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
-/// Experimental Smart Turn gate. Default off until the local model path is
-/// integrated and measured.
-fn huddle_smart_turn_enabled() -> bool {
-    std::env::var("BUZZ_HUDDLE_SMART_TURN").is_ok_and(|v| v == "1")
-}
-
 fn stt_worker(
     model_dir: PathBuf,
     audio_rx: Receiver<Vec<u8>>,
@@ -282,7 +281,30 @@ fn stt_worker(
         }
     };
 
-    // ── 4. Processing state ───────────────────────────────────────────────────
+    // ── 4. Initialise the optional semantic turn classifier ─────────────────
+    // Missing or invalid model bytes fail open to today's VAD-only flush.
+    let smart_turn_enabled = models::smart_turn_feature_enabled();
+    let mut smart_turn = if smart_turn_enabled {
+        match models::smart_turn_model_path() {
+            Some(path) => match SmartTurnClassifier::load(&path) {
+                Ok(classifier) => Some(classifier),
+                Err(error) => {
+                    eprintln!(
+                        "buzz-desktop: Smart Turn model failed to load; using VAD-only turns: {error}"
+                    );
+                    None
+                }
+            },
+            None => {
+                eprintln!("buzz-desktop: Smart Turn model is not ready; using VAD-only turns");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // ── 5. Processing state ───────────────────────────────────────────────────
     // Leftover 48 kHz samples that didn't fill a full resampler chunk.
     let mut input_buf_48k: Vec<f32> = Vec::with_capacity(chunk_in * 2);
     // Leftover 16 kHz samples that didn't fill a full VAD frame.
@@ -301,10 +323,8 @@ fn stt_worker(
     // computed at. Valid only while no new voiced frame has arrived since.
     let speculative_enabled = stt_speculative_decode();
     let mut speculative: Option<(String, usize)> = None;
-    // A missing classifier decision fails open to today's flush behavior.
-    let smart_turn_enabled = huddle_smart_turn_enabled();
 
-    // ── 5. Main loop ──────────────────────────────────────────────────────────
+    // ── 6. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
         .as_ref()
         .is_some_and(|ptt| ptt.load(Ordering::Acquire))
@@ -367,6 +387,7 @@ fn stt_worker(
                     &mut voiced_frames,
                     flush_frames,
                     smart_turn_enabled,
+                    &mut smart_turn,
                     (speculative_enabled, &mut speculative),
                     &recognizer,
                     &text_tx,
@@ -430,6 +451,7 @@ fn process_16k_samples(
     voiced_frames: &mut usize,
     flush_frames: usize,
     smart_turn_enabled: bool,
+    smart_turn: &mut Option<SmartTurnClassifier>,
     speculative: (bool, &mut Option<(String, usize)>),
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
@@ -496,10 +518,11 @@ fn process_16k_samples(
             // A manually open microphone behaves like normal VAD. A held
             // shortcut keeps the utterance grouped until key release.
             if vad_flush_allowed && *silence_frames >= flush_frames {
+                let decision = classify_turn(smart_turn, speech_buf);
                 on_silence_threshold(
                     smart_turn_enabled,
                     vad_flush_allowed,
-                    None,
+                    decision,
                     speech_buf,
                     silence_frames,
                     in_speech,
@@ -517,6 +540,24 @@ fn process_16k_samples(
             }
         }
         // If not in speech and not accumulating, just discard the frame.
+    }
+}
+
+/// Run the optional classifier. Any runtime failure disables it for the rest
+/// of this worker and fails open to the existing VAD-only flush.
+fn classify_turn(
+    classifier: &mut Option<SmartTurnClassifier>,
+    speech_buf: &[f32],
+) -> Option<TurnDecision> {
+    let result = classifier.as_mut()?.classify(speech_buf);
+    match result {
+        Ok((ModelTurnDecision::Hold, _probability)) => Some(TurnDecision::Hold),
+        Ok((ModelTurnDecision::Shift, _probability)) => Some(TurnDecision::Shift),
+        Err(error) => {
+            eprintln!("buzz-desktop: Smart Turn inference failed; using VAD-only turns: {error}");
+            classifier.take();
+            None
+        }
     }
 }
 

@@ -1,7 +1,8 @@
-//! Model download manager for STT (Parakeet TDT-CTC 110M) and TTS (Pocket TTS) models.
+//! Model download manager for STT, Smart Turn, and TTS models.
 //!
 //! Mental model:
 //!   app launch → start_stt_download (background) → ~/.buzz/models/parakeet-tdt-ctc-110m-en/
+//!   feature flag → Smart Turn download (background) → ~/.buzz/models/smart-turn-v3.1/
 //!   app launch → start_tts_download (background) → ~/.buzz/models/pocket-tts/
 //!   STT pipeline → is_stt_ready() → stt_model_dir() → run inference
 //!   TTS pipeline → is_tts_ready() → tts_model_dir() → run synthesis
@@ -45,6 +46,14 @@ mod voice_upgrade;
 /// (sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2).
 /// Computed from a known-good download. Update when upgrading model versions.
 const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
+
+const SMART_TURN_MODEL_FILENAME: &str = "smart-turn-v3.1-cpu.onnx";
+const SMART_TURN_MODEL_REVISION: &str = "16c8130e06d3af59663be3fd7c9ac80624850e6c";
+const SMART_TURN_MODEL_SHA256: &str =
+    "fb68d55c2d542ce79e44b12013bfd571e90df8594ab096d757198e851b0c6594";
+const SMART_TURN_MODEL_SIZE: u64 = 8_679_180;
+const SMART_TURN_DOWNLOAD_URL: &str = "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/\
+     16c8130e06d3af59663be3fd7c9ac80624850e6c/smart-turn-v3.1-cpu.onnx";
 
 fn pocket_artifact_url(filename: &str) -> String {
     format!(
@@ -98,6 +107,9 @@ const STT_MODEL_VERSION: &str = "2";
 /// Identifies the April INT8 asset set plus the official VCTK presets.
 const TTS_MODEL_VERSION: &str = "5";
 
+/// Identifies the pinned Pipecat Smart Turn v3.1 CPU graph.
+const SMART_TURN_MODEL_VERSION: &str = "1";
+
 /// Filename for the version manifest written alongside model files.
 const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
 
@@ -109,6 +121,9 @@ const MAX_STT_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 /// Maximum expected Pocket TTS file size. The largest pinned INT8 artifact is
 /// `flow_lm_main_int8.onnx` at 76,341,079 bytes.
 const MAX_TTS_FILE_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Maximum Smart Turn model size (16 MB — pinned graph is 8,679,180 bytes).
+const MAX_SMART_TURN_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
 
 /// NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx by
 /// k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
@@ -125,6 +140,11 @@ const STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-3600
 
 /// Final directory name under `~/.buzz/models/`.
 const STT_MODEL_DIR_NAME: &str = "parakeet-tdt-ctc-110m-en";
+
+/// Final directory name under `~/.buzz/models/`.
+const SMART_TURN_MODEL_DIR_NAME: &str = "smart-turn-v3.1";
+
+const SMART_TURN_EXPECTED_FILES: &[&str] = &[SMART_TURN_MODEL_FILENAME];
 
 /// All files that must be present for the model to be considered ready.
 ///
@@ -373,7 +393,7 @@ where
 
 // ── ModelSlot ─────────────────────────────────────────────────────────────────
 
-/// Per-model state + config. `ModelManager` owns two of these (stt, tts).
+/// Per-model state + config. `ModelManager` owns one per cached voice model.
 #[derive(Clone)]
 struct ModelSlot {
     dir_name: &'static str,                  // subdir under ~/.buzz/models/
@@ -587,9 +607,22 @@ fn tts_model_slot() -> ModelSlot {
         .with_expected_sizes(tts_expected_size)
 }
 
+fn smart_turn_expected_size(filename: &str) -> Option<u64> {
+    (filename == SMART_TURN_MODEL_FILENAME).then_some(SMART_TURN_MODEL_SIZE)
+}
+
+fn smart_turn_model_slot() -> ModelSlot {
+    ModelSlot::new(
+        SMART_TURN_MODEL_DIR_NAME,
+        SMART_TURN_EXPECTED_FILES,
+        SMART_TURN_MODEL_VERSION,
+    )
+    .with_expected_sizes(smart_turn_expected_size)
+}
+
 // ── ModelManager ──────────────────────────────────────────────────────────────
 
-/// Manages download and location of STT/TTS model files.
+/// Manages download and location of STT, Smart Turn, and TTS model files.
 ///
 /// Cheap to clone — all inner state is behind `Arc`.
 #[derive(Clone)]
@@ -597,6 +630,7 @@ pub struct ModelManager {
     /// `~/.buzz/models/`
     models_dir: PathBuf,
     stt: ModelSlot,
+    smart_turn: ModelSlot,
     tts: ModelSlot,
 }
 
@@ -609,8 +643,12 @@ impl ModelManager {
         let manager = Self {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
+            smart_turn: smart_turn_model_slot(),
             tts: tts_model_slot(),
         };
+        manager
+            .smart_turn
+            .recover_interrupted_install(&manager.models_dir);
         manager.tts.recover_interrupted_install(&manager.models_dir);
         Some(manager)
     }
@@ -632,6 +670,13 @@ impl ModelManager {
     /// Returns `true` once when the STT model just became ready. Resets the flag.
     pub fn take_stt_ready(&self) -> bool {
         self.stt.take_ready()
+    }
+
+    /// Path to the pinned Smart Turn graph, or `None` if its cache is not ready.
+    pub fn smart_turn_model_path(&self) -> Option<PathBuf> {
+        self.smart_turn
+            .dir_if_ready(&self.models_dir)
+            .map(|directory| directory.join(SMART_TURN_MODEL_FILENAME))
     }
 
     // ── TTS accessors ─────────────────────────────────────────────────────────
@@ -667,6 +712,9 @@ impl ModelManager {
     /// ~100 MB download fails. The post-install path inside
     /// `download_stt_model` handles cleanup once the new install reaches Ready.
     pub fn start_stt_download(&self, http_client: reqwest::Client) {
+        if smart_turn_feature_enabled() {
+            self.start_smart_turn_download(http_client.clone());
+        }
         let manager = self.clone();
         self.stt.start_download(
             &self.models_dir,
@@ -696,6 +744,17 @@ impl ModelManager {
             http_client,
             "tts",
             move |client| async move { manager.download_tts_model(client).await },
+        );
+    }
+
+    /// Start the optional Smart Turn download. Only called while its flag is on.
+    fn start_smart_turn_download(&self, http_client: reqwest::Client) {
+        let manager = self.clone();
+        self.smart_turn.start_download(
+            &self.models_dir,
+            http_client,
+            "Smart Turn",
+            move |client| async move { manager.download_smart_turn_model(client).await },
         );
     }
 
@@ -797,6 +856,80 @@ impl ModelManager {
         eprintln!(
             "buzz-desktop: STT model ready at {}",
             self.stt.model_dir(&self.models_dir).display()
+        );
+        Ok(())
+    }
+
+    /// Download and verify the pinned Smart Turn v3.1 CPU graph.
+    async fn download_smart_turn_model(&self, http_client: reqwest::Client) -> Result<(), String> {
+        tokio::fs::create_dir_all(&self.models_dir)
+            .await
+            .map_err(|e| format!("create models dir: {e}"))?;
+        let temp_dir = self
+            .models_dir
+            .join(format!("{SMART_TURN_MODEL_DIR_NAME}.tmp"));
+        fresh_temp_dir(&temp_dir).await?;
+        let destination = temp_dir.join(SMART_TURN_MODEL_FILENAME);
+
+        eprintln!(
+            "buzz-desktop: downloading Smart Turn v3.1 CPU model from {SMART_TURN_DOWNLOAD_URL}"
+        );
+        let response = fetch_url(
+            &http_client,
+            SMART_TURN_DOWNLOAD_URL,
+            "Smart Turn v3.1 CPU model",
+        )
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        })?;
+        let slot = self.smart_turn.clone();
+        let bytes = download_file(
+            response,
+            &destination,
+            MAX_SMART_TURN_DOWNLOAD_BYTES,
+            "Smart Turn v3.1 CPU model",
+            move |downloaded, content_length| {
+                if let Some(percent) =
+                    content_length.and_then(|total| (downloaded * 89).checked_div(total))
+                {
+                    slot.set_status(ModelStatus::Downloading {
+                        progress_percent: percent.min(89) as u8,
+                    });
+                }
+            },
+        )
+        .await
+        .inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        })?;
+        if bytes != SMART_TURN_MODEL_SIZE {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            return Err(format!(
+                "Smart Turn model size check failed: expected {SMART_TURN_MODEL_SIZE}, got {bytes}"
+            ));
+        }
+        let hash = sha256_file(&destination).await?;
+        if hash != SMART_TURN_MODEL_SHA256 {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            return Err(format!(
+                "Smart Turn model integrity check failed at revision {SMART_TURN_MODEL_REVISION}: \
+                 expected {SMART_TURN_MODEL_SHA256}, got {hash}"
+            ));
+        }
+
+        self.smart_turn.set_status(ModelStatus::Downloading {
+            progress_percent: 90,
+        });
+        self.smart_turn
+            .verify_and_install(&self.models_dir, &temp_dir, None)
+            .await
+            .inspect_err(|_| {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            })?;
+        eprintln!(
+            "buzz-desktop: Smart Turn v3.1 CPU model ready at {}",
+            self.smart_turn.model_dir(&self.models_dir).display()
         );
         Ok(())
     }
@@ -946,6 +1079,16 @@ pub fn is_stt_ready() -> bool {
     global_model_manager()
         .map(|m| m.is_stt_ready())
         .unwrap_or(false)
+}
+
+/// Whether the experimental semantic turn gate is enabled for this process.
+pub(super) fn smart_turn_feature_enabled() -> bool {
+    std::env::var("BUZZ_HUDDLE_SMART_TURN").is_ok_and(|value| value == "1")
+}
+
+/// Path to the pinned Smart Turn graph, or `None` when its cache is incomplete.
+pub(super) fn smart_turn_model_path() -> Option<PathBuf> {
+    global_model_manager()?.smart_turn_model_path()
 }
 
 /// Best-effort cleanup of the legacy Moonshine STT model directory.

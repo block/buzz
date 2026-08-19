@@ -16,6 +16,34 @@ fn create_ready_model_dir(root: &Path) -> PathBuf {
     model_dir
 }
 
+fn create_ready_smart_turn_dir(root: &Path) -> PathBuf {
+    let model_dir = root.join(SMART_TURN_MODEL_DIR_NAME);
+    std::fs::create_dir_all(&model_dir).expect("create Smart Turn model dir");
+    std::fs::File::create(model_dir.join(SMART_TURN_MODEL_FILENAME))
+        .expect("create Smart Turn model")
+        .set_len(SMART_TURN_MODEL_SIZE)
+        .expect("size Smart Turn model");
+    std::fs::write(model_dir.join(MANIFEST_FILENAME), SMART_TURN_MODEL_VERSION)
+        .expect("Smart Turn manifest");
+    model_dir
+}
+
+#[test]
+fn smart_turn_readiness_pins_filename_size_and_version() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let slot = smart_turn_model_slot();
+    let model_dir = create_ready_smart_turn_dir(temp.path());
+
+    assert!(slot.is_ready(temp.path()));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(model_dir.join(SMART_TURN_MODEL_FILENAME))
+        .expect("open Smart Turn model")
+        .set_len(SMART_TURN_MODEL_SIZE - 1)
+        .expect("truncate Smart Turn model");
+    assert!(!slot.is_ready(temp.path()));
+}
+
 #[test]
 fn expected_files_match_april_int8_metadata() {
     let mut expected = april_model_info()
