@@ -1,5 +1,6 @@
 import * as React from "react";
 import { AppHuddleBar } from "@/app/AppHuddleBar";
+import { appHuddleSurfaceClassName } from "@/app/appHuddleSurfaceLayout";
 import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
 import { HuddleProvider, useHuddle } from "@/features/huddle";
 import { HUDDLE_SHORTCUT_EVENT } from "@/shared/lib/keyboard-shortcuts";
@@ -81,7 +82,7 @@ export function AppHuddleShell({
             />
             <div
               className={cn(
-                "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
+                appHuddleSurfaceClassName(isRoom),
                 isDrawerOpen &&
                   (isRoom
                     ? "buzz-huddle-app-surface-room-open"
