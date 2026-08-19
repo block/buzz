@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 
@@ -41,18 +41,31 @@ export const acpRuntimesForcedQueryKey = ["acp-runtimes", "forced"] as const;
 export async function refreshAcpRuntimes(
   queryClient: ReturnType<typeof useQueryClient>,
 ) {
-  const result = await queryClient.fetchQuery({
-    queryKey: acpRuntimesForcedQueryKey,
-    queryFn: () => discoverAcpRuntimes({ force: true }),
-    staleTime: 0,
-    gcTime: 0,
-  });
-  queryClient.setQueryData(acpRuntimesQueryKey, result);
-  // A hot-surface cheap fetch may already be in flight on the shared key; cancel
-  // it so its (older, cached) result cannot land after and clobber the fresh
-  // forced catalog we just wrote.
-  await queryClient.cancelQueries({ queryKey: acpRuntimesQueryKey });
-  return result;
+  try {
+    const result = await queryClient.fetchQuery({
+      queryKey: acpRuntimesForcedQueryKey,
+      queryFn: () => discoverAcpRuntimes({ force: true }),
+      staleTime: 0,
+      gcTime: 0,
+    });
+    queryClient.setQueryData(acpRuntimesQueryKey, result);
+    // A hot-surface cheap fetch may already be in flight on the shared key; cancel
+    // it so its (older, cached) result cannot land after and clobber the fresh
+    // forced catalog we just wrote.
+    await queryClient.cancelQueries({ queryKey: acpRuntimesQueryKey });
+    return result;
+  } catch {
+    // The forced probe rejected. `fetchQuery` has already recorded the error in
+    // the forced key's query state, where `useAcpRuntimesQueryForced` projects
+    // it into the hook's returned `error`/`isError`. Swallow the rejection here
+    // — at the single source — so the many fire-and-forget callers (mount,
+    // sign-in polling, refresh buttons, and the four mutation `onSettled`
+    // paths) can keep `void refreshAcpRuntimes(...)` without ever leaking an
+    // unhandled rejection, and a new call site can never reintroduce one. The
+    // shared cache is left untouched so consumers keep the last good catalog
+    // alongside the surfaced error.
+    return undefined;
+  }
 }
 
 /**
@@ -62,9 +75,10 @@ export async function refreshAcpRuntimes(
  * It reads the shared runtime catalog (`enabled: false`, so it never fires its
  * own cheap fetch — the forced probe below is the only fetcher) and re-renders
  * whenever `refreshAcpRuntimes` writes a fresh catalog into that cache. Loading
- * state is taken from the forced key via `useIsFetching`, so refresh buttons and
- * the onboarding spinner reflect the forced probe even though the data observer
- * is disabled. `forceRefresh` drives explicit refresh buttons and sign-in
+ * *and error* state are taken from a disabled observer on the forced key, so
+ * refresh buttons and the onboarding spinner reflect the forced probe and a
+ * failed probe surfaces as `error`/`isError` rather than a silent empty
+ * catalog. `forceRefresh` drives explicit refresh buttons and sign-in
  * polling.
  *
  * `forceOnMount` (default `true`) is the surface owner's one force-on-mount.
@@ -91,8 +105,16 @@ export function useAcpRuntimesQueryForced(options?: {
     // overwrite the fresh forced result with cached data).
     enabled: false,
   });
-  const forcedFetchCount = useIsFetching({
+  // Read-only observer on the forced key so the hook surfaces the forced
+  // probe's fetching *and error* state. `refreshAcpRuntimes` runs the fetch
+  // imperatively via `fetchQuery`; this disabled observer never fetches itself
+  // but reflects that query's state, so a rejected forced probe becomes a
+  // visible `error`/`isError` instead of an unhandled rejection with a silent
+  // empty/stale catalog.
+  const forcedQuery = useQuery({
     queryKey: acpRuntimesForcedQueryKey,
+    queryFn: () => discoverAcpRuntimes({ force: true }),
+    enabled: false,
   });
   const forceRefresh = React.useCallback(
     () => refreshAcpRuntimes(queryClient),
@@ -101,9 +123,11 @@ export function useAcpRuntimesQueryForced(options?: {
   React.useEffect(() => {
     if (enabled && forceOnMount) void forceRefresh();
   }, [enabled, forceOnMount, forceRefresh]);
-  const isFetching = query.isFetching || forcedFetchCount > 0;
+  const isFetching = query.isFetching || forcedQuery.isFetching;
   return {
     ...query,
+    error: forcedQuery.error ?? query.error,
+    isError: forcedQuery.isError || query.isError,
     isFetching,
     isLoading: isFetching && query.data === undefined,
     forceRefresh,

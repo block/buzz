@@ -277,6 +277,139 @@ describe("refreshAcpRuntimes cannot dedup onto an in-flight cheap request", () =
   });
 });
 
+describe("useAcpRuntimesQueryForced surfaces forced-probe failures", () => {
+  it("projects a mount-time forced rejection into error with no unhandled rejection", async () => {
+    const unhandled = [];
+    const onUnhandled = (err) => unhandled.push(err);
+    process.on("unhandledRejection", onUnhandled);
+
+    const queryClient = makeQueryClient();
+    discoverHandler = (args) =>
+      args?.force === true
+        ? Promise.reject(new Error("forced probe failed"))
+        : Promise.resolve([]);
+
+    let latest = null;
+    function Consumer() {
+      latest = useAcpRuntimesQueryForced();
+      return null;
+    }
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          React.createElement(Consumer),
+        ),
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    assert.equal(
+      latest?.error instanceof Error && latest.error.message,
+      "forced probe failed",
+      "mount-time forced rejection must surface as the hook's error",
+    );
+    assert.equal(
+      latest?.isError,
+      true,
+      "isError must reflect the forced failure",
+    );
+
+    // Drain the microtask queue so any stray rejection would have fired.
+    await new Promise((r) => setTimeout(r, 10));
+    process.off("unhandledRejection", onUnhandled);
+    assert.deepEqual(
+      unhandled,
+      [],
+      "no unhandled rejection may escape the fire-and-forget mount force",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("surfaces an explicit-refresh rejection and clears it on the next success", async () => {
+    const unhandled = [];
+    const onUnhandled = (err) => unhandled.push(err);
+    process.on("unhandledRejection", onUnhandled);
+
+    const queryClient = makeQueryClient();
+    let failForced = true;
+    discoverHandler = (args) => {
+      if (args?.force !== true) return Promise.resolve([]);
+      return failForced
+        ? Promise.reject(new Error("refresh failed"))
+        : Promise.resolve([rawEntry("codex", "logged_in")]);
+    };
+
+    let latest = null;
+    function Consumer() {
+      // forceOnMount:false so the only forced probe is the explicit refresh.
+      latest = useAcpRuntimesQueryForced({ forceOnMount: false });
+      return null;
+    }
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          React.createElement(Consumer),
+        ),
+      );
+    });
+
+    // Explicit refresh (button/polling shape): void-called, must not reject.
+    await act(async () => {
+      void latest.forceRefresh();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    assert.equal(
+      latest?.error instanceof Error && latest.error.message,
+      "refresh failed",
+      "explicit-refresh rejection must surface as the hook's error",
+    );
+
+    // A subsequent successful refresh clears the error and delivers data.
+    failForced = false;
+    await act(async () => {
+      void latest.forceRefresh();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    assert.equal(
+      latest?.error,
+      null,
+      "a later successful refresh clears the error",
+    );
+    assert.equal(
+      queryClient.getQueryData(acpRuntimesQueryKey)?.[0]?.authStatus.status,
+      "logged_in",
+      "successful refresh writes the fresh catalog into the shared cache",
+    );
+
+    await new Promise((r) => setTimeout(r, 10));
+    process.off("unhandledRejection", onUnhandled);
+    assert.deepEqual(
+      unhandled,
+      [],
+      "no unhandled rejection may escape a void forceRefresh() call",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+});
+
 describe("useAcpRuntimesQueryForced force-on-mount ownership", () => {
   it("a later-mounted row does not fire a second forced probe", async () => {
     const queryClient = makeQueryClient();

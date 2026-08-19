@@ -559,13 +559,16 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
         }
     }
 
-    // Slow path: resolve and cache.
+    // Slow path: resolve and cache. Negative results are cached too: an absent
+    // command must not re-run `resolve_command_uncached` (which spawns a login
+    // shell via `find_via_login_shell`) on every cheap discovery — that spawn
+    // on the channel-switch/composer hot path is exactly what this cache exists
+    // to prevent. `clear_resolve_cache` (run by every forced discovery) is the
+    // invalidation seam, so a newly-installed binary is still found on refresh.
     let result = resolve_command_uncached(command);
 
-    if result.is_some() {
-        if let Ok(mut guard) = cache.lock() {
-            guard.insert(command.to_string(), result.clone());
-        }
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(command.to_string(), result.clone());
     }
 
     result
@@ -777,9 +780,16 @@ fn login_shell_candidates() -> Vec<PathBuf> {
     }
 }
 
+/// Test-only counter for login-shell spawn attempts (see submodule).
+#[cfg(test)]
+#[path = "discovery/login_shell_spawn_probe.rs"]
+pub(crate) mod login_shell_spawn_probe;
+
 /// Run a command in a login shell (tries zsh then bash on Unix, Git Bash on Windows).
 /// Returns trimmed stdout if the command succeeds with non-empty output.
 fn run_in_login_shell(args: &[&str]) -> Option<String> {
+    #[cfg(test)]
+    login_shell_spawn_probe::record();
     for shell in login_shell_candidates() {
         let mut cmd = Command::new(&shell);
         cmd.args(args);
