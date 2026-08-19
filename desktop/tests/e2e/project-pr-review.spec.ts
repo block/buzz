@@ -1419,6 +1419,73 @@ test("external repositories stay on local source after a branch round trip", asy
   await expect(page.getByText("Code hosted on github.com")).toHaveCount(0);
 });
 
+test("repository files beyond the eager preview limit load on demand", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    const deferredFiles = [
+      ...Array.from({ length: 250 }, (_, index) => ({
+        path: `.agents/generated-${String(index).padStart(3, "0")}.txt`,
+        kind: "blob",
+        size: 7,
+        preview_content: "preview",
+        last_changed_at: null,
+        latest_commit: null,
+      })),
+      {
+        path: "README.md",
+        kind: "blob",
+        size: 17,
+        preview_content: null,
+        last_changed_at: null,
+        latest_commit: null,
+      },
+      {
+        path: "src/application.rs",
+        kind: "blob",
+        size: 16,
+        preview_content: null,
+        last_changed_at: null,
+        latest_commit: null,
+      },
+    ];
+    window.__BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__ = {
+      path: "/tmp/buzz/REPOS/relay-tools",
+      snapshot: {
+        latest_commit: null,
+        commits: [],
+        contributors: [],
+        files: deferredFiles,
+      },
+    };
+    window.__BUZZ_E2E_PROJECT_REPO_FILE_CONTENTS__ = {
+      "README.md": "# Deferred README",
+      "src/application.rs": "fn deferred() {}",
+    };
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await addProjectToSidebar(page, "buzz");
+  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Deferred README" }),
+  ).toBeVisible();
+
+  await page.getByRole("tab", { name: "Files" }).click();
+  await page.getByRole("row", { name: "Open directory src" }).click();
+  await page.getByRole("row", { name: "Open file application.rs" }).click();
+  await expect(
+    page.getByText("fn deferred() {}", { exact: true }),
+  ).toBeVisible();
+
+  const commands = await page.evaluate(
+    () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commands).toContain("get_project_local_repo_file_content");
+});
+
 test("pushed local branch can open a pull request", async ({ page }) => {
   await enableProjectsFeature(page);
   await page.addInitScript(() => {
