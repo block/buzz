@@ -472,10 +472,7 @@ pub(super) fn handle_cancel_or_shutdown(
             "buzz-desktop: tts stage=cancellation reason=shutdown route_id={}",
             active_route_id.unwrap_or(0)
         );
-        if let Some(playback) = playback {
-            playback.cancel_if_live(|| true);
-        }
-        tts_active.store(false, Ordering::Release);
+        release_playback(playback, tts_active);
         return true;
     }
     if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
@@ -501,16 +498,27 @@ pub(super) fn handle_cancel_or_shutdown(
             })
             .flatten();
         retain_cancelled_text(deferred_text, current_text, text_rx, preserve_generation);
-        if let Some(playback) = playback {
-            // Consume the flag at the coordinator serialization point: once
-            // released with `cancel == false`, a stale monitor observation
-            // cannot replace fresh post-cancel playback.
-            playback.cancel_if_live(|| true);
-        }
-        tts_active.store(false, Ordering::Release);
+        // Consume the flag at the coordinator serialization point: once
+        // released with `cancel == false`, a stale monitor observation cannot
+        // replace fresh post-cancel playback.
+        release_playback(playback, tts_active);
         return true;
     }
     false
+}
+
+/// Silence playback and release the mic gate as one transition. When a player
+/// is live the release is published inside the replacement, so an append that
+/// wins the coordinator handoff cannot have its own activity publication
+/// overwritten by this `false`. With nothing live there is no transition to
+/// join and the gate is released directly.
+fn release_playback(playback: Option<&PlaybackCoordinator>, tts_active: &AtomicBool) {
+    let released = playback.is_some_and(|playback| {
+        playback.cancel_if_live(|| true, || tts_active.store(false, Ordering::Release))
+    });
+    if !released {
+        tts_active.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -526,6 +534,7 @@ mod speaker_generation_tests {
             playback.append_if(
                 rodio::buffer::SamplesBuffer::new(channels, sample_rate, vec![0.0; 24_000]),
                 |_| true,
+                || {},
             );
         }
         let probe = PlaybackProbe::new();
@@ -541,6 +550,43 @@ mod speaker_generation_tests {
             speaker_generation,
             voice_reference: Some("pocket:mary".to_string()),
             text: "Hello".to_string(),
+        }
+    }
+
+    /// A cancellation releases the mic gate whether or not there was audio to
+    /// silence. With a live player the release rides inside the replacement;
+    /// with nothing live there is no transition to join, and skipping the
+    /// release would strand the gate open with the worker already past the
+    /// utterance.
+    #[test]
+    fn cancellation_releases_the_mic_gate_with_or_without_live_playback() {
+        for playback_live in [false, true] {
+            let probe = playback_probe(playback_live);
+            let playback = probe.playback().expect("installed coordinator");
+            let cancel = AtomicBool::new(true);
+            let voice_cancel = AtomicBool::new(false);
+            let shutdown = AtomicBool::new(false);
+            let tts_active = AtomicBool::new(true);
+            let voice_change_ack = Arc::new(Mutex::new(None));
+            let (_text_tx, text_rx) = mpsc::channel();
+            let mut deferred_text = VecDeque::new();
+            let mut current_text = None;
+
+            assert!(handle_cancel_or_shutdown(
+                (&cancel, &voice_cancel),
+                &shutdown,
+                &tts_active,
+                (&text_rx, &mut deferred_text, &mut current_text),
+                &voice_change_ack,
+                None,
+                Some(&playback),
+            ));
+
+            assert!(
+                !tts_active.load(Ordering::Acquire),
+                "cancellation must release the mic gate (playback_live={playback_live})"
+            );
+            assert!(playback.empty(), "cancellation silences any queued audio");
         }
     }
 

@@ -12,9 +12,8 @@ fn chunk_lead_in_is_sane() {
 /// receives its onset cushion and trailing sentence gap.
 #[test]
 fn token_split_units_do_not_add_sentence_boundary_padding() {
-    let mut first = true;
-    let first_unit = build_sentence_append_buffer(&mut first, vec![0.5; 100], false);
-    let last_unit = build_sentence_append_buffer(&mut first, vec![0.25; 100], false);
+    let first_unit = build_sentence_append_buffer(vec![0.5; 100], false);
+    let last_unit = build_sentence_append_buffer(vec![0.25; 100], false);
 
     assert_eq!(first_unit.len(), 100);
     assert_eq!(first_unit.last(), Some(&0.5));

@@ -63,9 +63,9 @@ pub(super) fn synthesize_streaming(
         }
         let chunk_index = delta_index;
         delta_index += 1;
-        if let Some(prepared) = playback.prepare_audio(|first_append, empty| {
-            playback_audio.push(samples, chunk_index, first_append, empty)
-        }) {
+        if let Some(prepared) =
+            playback.prepare_audio(|empty| playback_audio.push(samples, chunk_index, empty))
+        {
             if !append_audio(prepared) {
                 return false;
             }
@@ -74,9 +74,7 @@ pub(super) fn synthesize_streaming(
     });
     match stream_result {
         Ok(true) => {
-            if let Some(prepared) = playback
-                .prepare_audio(|first_append, empty| playback_audio.finish(first_append, empty))
-            {
+            if let Some(prepared) = playback.prepare_audio(|empty| playback_audio.finish(empty)) {
                 if !append_audio(prepared) {
                     return Some("cancelled");
                 }

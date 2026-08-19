@@ -499,6 +499,11 @@ fn tts_worker(
                 }
                 true
             },
+            // Publish activity under the coordinator: an append and the mic
+            // gate it implies are one transition, so a cancellation that
+            // replaces this player cannot have its release overwritten by a
+            // `true` landing after the fact.
+            || tts_active.store(true, Ordering::Release),
         );
         if !accepted {
             return false;
@@ -506,7 +511,6 @@ fn tts_worker(
         eprintln!(
             "buzz-desktop: tts stage=player status=append_accepted route_id={route_id} chunk_index={chunk_index} sample_count={sample_count}"
         );
-        tts_active.store(true, Ordering::Release);
         true
     };
 
@@ -820,9 +824,9 @@ fn tts_worker(
                 }
                 match synthesis {
                     Ok(samples) if !samples.is_empty() => {
-                        if let Some(prepared) = playback.prepare_audio(|first_append, empty| {
-                            playback_audio.push(samples, chunk_index, first_append, empty)
-                        }) {
+                        if let Some(prepared) = playback
+                            .prepare_audio(|empty| playback_audio.push(samples, chunk_index, empty))
+                        {
                             if !append_audio(
                                 prepared,
                                 route_id,
@@ -850,9 +854,7 @@ fn tts_worker(
                     }
                 }
             }
-            if let Some(prepared) = playback
-                .prepare_audio(|first_append, empty| playback_audio.finish(first_append, empty))
-            {
+            if let Some(prepared) = playback.prepare_audio(|empty| playback_audio.finish(empty)) {
                 if !append_audio(
                     prepared,
                     route_id,
