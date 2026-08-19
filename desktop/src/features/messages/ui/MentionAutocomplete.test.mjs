@@ -95,6 +95,45 @@ test("agent rows offer an Always address pin", async () => {
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });
 
+test("collision npubs sit inline with agent metadata", async () => {
+  const React = await import("react");
+  const { render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const suggestions = [
+    {
+      pubkey: "a".repeat(64),
+      displayName: "Same Name",
+      isAgent: true,
+      ownerLabel: "you",
+    },
+    {
+      pubkey: "b".repeat(64),
+      displayName: "Same Name",
+      isAgent: true,
+      ownerLabel: "you",
+    },
+  ];
+  const view = render(
+    React.createElement(MentionAutocomplete, {
+      suggestions,
+      selectedIndex: 0,
+      onSelect: () => {},
+    }),
+  );
+
+  const agentIcons = view.getAllByTestId("mention-agent-icon");
+  const collisionNpubs = view.getAllByTestId("mention-collision-npub");
+  assert.equal(collisionNpubs.length, 2);
+  for (const [index, npub] of collisionNpubs.entries()) {
+    const agentMetadata = agentIcons[index].closest("span")?.parentElement;
+    assert.equal(npub.parentElement, agentMetadata);
+    assert.match(agentMetadata?.textContent ?? "", /agentmanaged by younpub1/);
+    assert.match(npub.className, /(?:^|\s)-translate-y-0\.5(?:\s|$)/);
+    assert.match(npub.className, /(?:^|\s)leading-none(?:\s|$)/);
+    assert.match(agentMetadata?.className ?? "", /(?:^|\s)min-h-3\.5(?:\s|$)/);
+  }
+});
+
 test("does not intercept Tab from the editor", async () => {
   const React = await import("react");
   const { fireEvent, render } = await import("@testing-library/react");

@@ -115,6 +115,13 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             hasNameCollision && suggestion.pubkey
               ? safeNpub(suggestion.pubkey)
               : null;
+          const hasMetadataBeforeNpub = Boolean(
+            suggestion.kind === "team" ||
+              suggestion.isAgent ||
+              suggestion.role ||
+              suggestion.ownerLabel ||
+              suggestion.notInChannel,
+          );
           const canAlwaysAddress = Boolean(
             onToggleAlwaysAddressAgent &&
               suggestion.isAgent &&
@@ -169,14 +176,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   >
                     {suggestion.displayName}
                   </span>
-                  {suggestion.kind === "team" ||
-                  suggestion.isAgent ||
-                  suggestion.role ||
-                  suggestion.ownerLabel ||
-                  suggestion.notInChannel ? (
+                  {hasMetadataBeforeNpub || collisionNpub ? (
                     <span
                       className={cn(
-                        "flex min-w-0 items-center gap-1.5 text-2xs leading-none",
+                        "flex min-h-3.5 min-w-0 items-center gap-1.5 text-2xs leading-none",
                         index === selectedIndex
                           ? "text-accent-foreground/60"
                           : "text-muted-foreground",
@@ -222,20 +225,15 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                               : "not in channel"}
                         </span>
                       ) : null}
-                    </span>
-                  ) : null}
-                  {collisionNpub ? (
-                    <span
-                      className={cn(
-                        "min-w-0 truncate font-mono text-2xs leading-snug",
-                        index === selectedIndex
-                          ? "text-accent-foreground/60"
-                          : "text-muted-foreground",
-                      )}
-                      data-testid="mention-collision-npub"
-                      title={collisionNpub}
-                    >
-                      {truncatePubkey(collisionNpub)}
+                      {collisionNpub ? (
+                        <span
+                          className="-translate-y-0.5 shrink-0 font-mono leading-none"
+                          data-testid="mention-collision-npub"
+                          title={collisionNpub}
+                        >
+                          {truncatePubkey(collisionNpub)}
+                        </span>
+                      ) : null}
                     </span>
                   ) : null}
                 </span>
