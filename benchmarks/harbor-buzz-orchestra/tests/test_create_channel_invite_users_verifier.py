@@ -4,15 +4,9 @@ from pathlib import Path
 
 from harbor_buzz_orchestra.task_fixtures import TARGET_BOTS, TARGET_USERS, fixture_for
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-VERIFIER = (
-    PACKAGE_ROOT
-    / "datasets"
-    / "buzz-native"
-    / "create-channel-invite-users"
-    / "tests"
-    / "verify.py"
-)
+# The Buzz-native tasks are a sibling dataset of this harness package.
+DATASET_ROOT = Path(__file__).resolve().parents[2] / "buzz-dataset"
+VERIFIER = DATASET_ROOT / "create-channel-invite-users" / "tests" / "verify.py"
 SPEC = importlib.util.spec_from_file_location("create_channel_verifier", VERIFIER)
 verifier = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

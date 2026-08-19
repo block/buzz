@@ -56,9 +56,10 @@ reply-to-thread/
 
 ```bash
 just benchmark \
-  --path benchmarks/harbor-buzz-orchestra/datasets/buzz-native/reply-to-thread \
+  --path benchmarks/buzz-dataset/reply-to-thread \
   --attempts 1 \
-  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-sonnet.yaml \
+  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-luna.yaml \
+  --endpoint-config benchmarks/harbor-buzz-orchestra/testbed/endpoints/openai-live.json \
   --n-concurrent 1
 ```
 
@@ -66,4 +67,5 @@ just benchmark \
 shipped: the Oracle agent replaces `BuzzOrchestraAgent`, so no relay trial is
 provisioned and no evidence snapshot is exported. The verifier is covered
 instead by positive and negative fixture tests in
-`tests/test_reply_to_thread_verifier.py` (run `uv run pytest tests/`).
+`../harbor-buzz-orchestra/tests/test_reply_to_thread_verifier.py` (run from
+`benchmarks/harbor-buzz-orchestra`: `uv run --extra dev pytest -q`).

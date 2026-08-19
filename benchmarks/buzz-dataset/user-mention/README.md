@@ -52,13 +52,15 @@ user-mention/
 
 ```bash
 just benchmark \
-  --path benchmarks/harbor-buzz-orchestra/datasets/buzz-native/user-mention \
+  --path benchmarks/buzz-dataset/user-mention \
   --attempts 1 \
-  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-sonnet.yaml \
+  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-luna.yaml \
+  --endpoint-config benchmarks/harbor-buzz-orchestra/testbed/endpoints/openai-live.json \
   --n-concurrent 1
 ```
 
 `harbor run -a oracle` does **not** work here, and no `solution/solve.sh` is
 shipped: the Oracle agent replaces `BuzzOrchestraAgent`, so no relay trial is
 provisioned and no evidence snapshot is exported. The verifier is covered
-instead by fixture tests in `tests/test_user_mention_verifier.py`.
+instead by fixture tests in
+`../harbor-buzz-orchestra/tests/test_user_mention_verifier.py`.

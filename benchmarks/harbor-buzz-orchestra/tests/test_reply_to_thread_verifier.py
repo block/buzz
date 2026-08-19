@@ -6,16 +6,10 @@ from pathlib import Path
 from harbor_buzz_orchestra.evidence import build_buzz_evidence
 from harbor_buzz_orchestra.provisioning import AgentCredential, TrialHandle
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+# The Buzz-native tasks are a sibling dataset of this harness package.
+DATASET_ROOT = Path(__file__).resolve().parents[2] / "buzz-dataset"
 FIXTURES = Path(__file__).parent / "fixtures" / "transcripts"
-VERIFIER = (
-    PACKAGE_ROOT
-    / "datasets"
-    / "buzz-native"
-    / "reply-to-thread"
-    / "tests"
-    / "verify.py"
-)
+VERIFIER = DATASET_ROOT / "reply-to-thread" / "tests" / "verify.py"
 SPEC = importlib.util.spec_from_file_location("reply_to_thread_verifier", VERIFIER)
 verifier = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

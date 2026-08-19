@@ -1015,6 +1015,11 @@ benchmark-check:
             uvx "ruff@$ruff_pin" format --check .
         )
     done
+    # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
+    # need the harness config passed explicitly to stay linted.
+    echo "── buzz-dataset (ruff $ruff_pin)"
+    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
+    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:

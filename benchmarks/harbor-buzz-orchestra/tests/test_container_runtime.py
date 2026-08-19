@@ -13,6 +13,7 @@ from harbor_buzz_orchestra.container_runtime import (
     REMOTE_BIN,
     REMOTE_EVIDENCE,
     REMOTE_LOGS,
+    THINKING_EFFORT,
     BuzzContainerRuntime,
     EndpointLaunchConfig,
     RuntimeLaunchError,
@@ -626,3 +627,32 @@ def test_only_evidence_grading_tasks_fail_on_a_missing_snapshot():
     assert fixture_for("create-channel-invite-users").requires_evidence
     assert not fixture_for("cobol-modernization").requires_evidence
     assert not fixture_for(None).requires_evidence
+
+
+@pytest.mark.parametrize(
+    ("pinned", "expected"), [(None, THINKING_EFFORT), ("high", "high")]
+)
+async def test_thinking_effort_reaches_the_agent(tmp_path, pinned, expected):
+    manifest = write_manifest(tmp_path)
+    agent_class = manifest.roster[0]
+    if pinned is not None:
+        agent_class = agent_class.model_copy(
+            update={
+                "generation": agent_class.generation.model_copy(
+                    update={"thinking_effort": pinned}
+                )
+            }
+        )
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    environment = Environment(
+        responses={"buzz-acp": ExecResult(stdout="4242\n", stderr="", return_code=0)}
+    )
+    await runtime(tmp_path)._launch_agent(
+        environment=environment,
+        trial=trial_handle((orch,)),
+        credential=orch,
+        agent_class=agent_class,
+        trial_dir=tmp_path,
+    )
+    _, env = environment.commands[-1]
+    assert env["BUZZ_AGENT_THINKING_EFFORT"] == expected

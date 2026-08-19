@@ -64,22 +64,38 @@ artifacts) available for analysis.
 
 ### Buzz-native tasks
 
-The local `datasets/buzz-native` suite scores Buzz product behavior alongside
-task correctness. It currently covers direct thread replies, callback user
+The local [`benchmarks/buzz-dataset`](../buzz-dataset) suite — a sibling
+directory of this harness, not a subdirectory of it — scores Buzz product
+behavior alongside task correctness. It currently covers direct thread replies, callback user
 mentions, targeted reads of user-named paths outside the workspace, and exact
 channel creation/membership. Run one task with the production base prompt from
 the checked-out source build:
 
 ```bash
 just benchmark \
-  --path benchmarks/harbor-buzz-orchestra/datasets/buzz-native/reply-to-thread \
+  --path benchmarks/buzz-dataset/reply-to-thread \
   --attempts 1 \
-  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-sonnet.yaml \
+  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-luna.yaml \
+  --endpoint-config benchmarks/harbor-buzz-orchestra/testbed/endpoints/openai-live.json \
   --n-concurrent 1
 ```
 
-Replace the path with
-`benchmarks/harbor-buzz-orchestra/datasets/buzz-native/create-channel-invite-users`
+The default condition is `buzz-native-solo-luna.yaml` — one solo agent on
+`gpt-5.6-luna` at `thinking_effort: medium`. What this suite scores comes from
+the base prompt rather than from model strength, so the cheap model at a
+middling effort is the right yardstick: a weak result here is a prompt finding,
+not a model finding. It needs `OPENAI_COMPAT_API_KEY` and the explicit
+`--endpoint-config` above, because `--endpoint-config` defaults to
+`anthropic-live.json`. Swap in `buzz-native-solo-sonnet.yaml` (no
+`--endpoint-config`, needs `ANTHROPIC_API_KEY`) to compare against Sonnet 4.6.
+
+A roster entry that does not pin `generation.thinking_effort` runs at the
+runtime default (`THINKING_EFFORT`, currently `medium`) rather than at whatever
+the provider defaults to, so the level is always recorded. Leaving it unset
+does not change a condition's hash — manifests written before the effort axis
+existed keep their identity and stay comparable to their earlier receipts.
+
+Replace the path with `benchmarks/buzz-dataset/create-channel-invite-users`
 to run the channel task. Its provisioner seeds a stable directory of 50 users
 and 10 bots, while the verifier checks the created channel's TTL and exact
 membership through post-agent CLI evidence.

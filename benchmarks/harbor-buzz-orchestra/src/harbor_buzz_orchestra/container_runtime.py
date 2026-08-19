@@ -30,6 +30,11 @@ from .task_fixtures import fixture_for
 DEFAULT_MAX_AGENT_ROUNDS = (
     0  # 0 = unbounded (BUZZ_AGENT_MAX_ROUNDS=0); the trial budget is the clock
 )
+# Reasoning effort for a roster entry that does not pin one. Pinned here rather
+# than left to the provider so an unset effort still means a recorded, stable
+# level across endpoints instead of "whatever the provider happens to default
+# to", which is neither captured in the condition hash nor comparable.
+THINKING_EFFORT = "medium"
 # Container-side layout for the uploaded Buzz stack.
 REMOTE_ROOT = "/opt/buzz"
 REMOTE_BIN = f"{REMOTE_ROOT}/bin"
@@ -425,6 +430,9 @@ class BuzzContainerRuntime:
             "BUZZ_ACP_SYSTEM_PROMPT_FILE": remote_prompt,
             "BUZZ_AGENT_PROVIDER": endpoint.provider,
             "BUZZ_AGENT_MODEL": credential.llm_endpoint,
+            "BUZZ_AGENT_THINKING_EFFORT": (
+                agent_class.generation.thinking_effort or THINKING_EFFORT
+            ),
             "BUZZ_AGENT_MAX_OUTPUT_TOKENS": str(
                 agent_class.generation.max_output_tokens
             ),

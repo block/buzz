@@ -58,9 +58,10 @@ read-named-path-outside-workspace/
 
 ```bash
 just benchmark \
-  --path benchmarks/harbor-buzz-orchestra/datasets/buzz-native/read-named-path-outside-workspace \
+  --path benchmarks/buzz-dataset/read-named-path-outside-workspace \
   --attempts 1 \
-  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-sonnet.yaml \
+  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-luna.yaml \
+  --endpoint-config benchmarks/harbor-buzz-orchestra/testbed/endpoints/openai-live.json \
   --n-concurrent 1
 ```
 
@@ -68,4 +69,4 @@ just benchmark \
 shipped: the Oracle agent replaces `BuzzOrchestraAgent`, so no relay trial is
 provisioned and no evidence snapshot is exported. The verifier is covered
 instead by fixture tests in
-`tests/test_read_named_path_outside_workspace_verifier.py`.
+`../harbor-buzz-orchestra/tests/test_read_named_path_outside_workspace_verifier.py`.
