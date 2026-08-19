@@ -954,6 +954,7 @@ export function AppShell() {
                         onNavigate={(destination) =>
                           void goChannel(destination.channelId, destination)
                         }
+                        onRename={threadRail.rename}
                         onToggleCollapsed={threadRail.toggleCollapsed}
                         onUnpin={threadRail.unpin}
                         openThreadRootId={openThreadRootId}

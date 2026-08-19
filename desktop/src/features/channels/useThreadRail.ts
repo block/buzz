@@ -4,6 +4,7 @@ import {
   DEFAULT_THREAD_RAIL_STORE,
   addThreadRailPin,
   readThreadRailStore,
+  renameThreadRailPin,
   removeThreadRailPin,
   toggleThreadRailCollapsed,
   updateThreadRailExpandedReplyIds,
@@ -34,6 +35,10 @@ export type ThreadRail = {
   collapsed: boolean;
   isScoped: boolean;
   pin: (pin: ThreadRailPin) => void;
+  rename: (
+    pin: Pick<ThreadRailPin, "channelId" | "rootId">,
+    customTitle: string,
+  ) => void;
   unpin: (pin: Pick<ThreadRailPin, "channelId" | "rootId">) => void;
   updateAnchor: (
     pin: Pick<ThreadRailPin, "channelId" | "rootId">,
@@ -93,6 +98,16 @@ export function useThreadRail(
       updateStore((store) => addThreadRailPin(store, pinToAdd)),
     [updateStore],
   );
+  const rename = React.useCallback(
+    (
+      pinToRename: Pick<ThreadRailPin, "channelId" | "rootId">,
+      customTitle: string,
+    ) =>
+      updateStore((store) =>
+        renameThreadRailPin(store, pinToRename, customTitle),
+      ),
+    [updateStore],
+  );
   const unpin = React.useCallback(
     (pinToRemove: Pick<ThreadRailPin, "channelId" | "rootId">) =>
       updateStore((store) => removeThreadRailPin(store, pinToRemove)),
@@ -133,6 +148,7 @@ export function useThreadRail(
       collapsed: store.collapsed,
       isScoped: scope !== null,
       pin,
+      rename,
       unpin,
       updateAnchor,
       updateExpandedReplyIds,
@@ -140,6 +156,7 @@ export function useThreadRail(
     }),
     [
       pin,
+      rename,
       scope,
       store,
       toggleCollapsed,

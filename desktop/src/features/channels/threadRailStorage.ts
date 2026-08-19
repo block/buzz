@@ -4,6 +4,7 @@ import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota"
 const STORAGE_PREFIX = "buzz-thread-rail.v1";
 export const MAX_THREAD_RAIL_PINS = 50;
 const MAX_EXPANDED_REPLY_IDS_PER_PIN = 100;
+const MAX_THREAD_RAIL_CUSTOM_TITLE_LENGTH = 128;
 const MAX_THREAD_RAIL_ID_LENGTH = 256;
 const MAX_THREAD_RAIL_CHANNEL_NAME_LENGTH = 128;
 const MAX_THREAD_RAIL_EXCERPT_LENGTH = 512;
@@ -20,6 +21,7 @@ export type ThreadRailPin = {
   returnAnchorId?: string;
   /** Local branch expansion state for this pinned canonical thread. */
   expandedReplyIds?: string[];
+  customTitle?: string;
   channelName?: string;
   rootExcerpt?: string;
   pinnedAt: number;
@@ -228,6 +230,27 @@ export function updateThreadRailExpandedReplyIds(
     pins[index] = pinWithoutExpandedReplies;
   } else {
     pins[index] = { ...pins[index], expandedReplyIds: nextExpandedReplyIds };
+  }
+  return { ...store, pins };
+}
+
+export function renameThreadRailPin(
+  store: ThreadRailStore,
+  pin: Pick<ThreadRailPin, "channelId" | "rootId">,
+  customTitle: string,
+): ThreadRailStore {
+  const index = store.pins.findIndex((existing) => samePin(existing, pin));
+  if (index < 0) return store;
+  const normalizedTitle = customTitle
+    .trim()
+    .slice(0, MAX_THREAD_RAIL_CUSTOM_TITLE_LENGTH);
+  if ((store.pins[index].customTitle ?? "") === normalizedTitle) return store;
+  const pins = [...store.pins];
+  if (normalizedTitle) {
+    pins[index] = { ...pins[index], customTitle: normalizedTitle };
+  } else {
+    const { customTitle: _customTitle, ...pinWithoutCustomTitle } = pins[index];
+    pins[index] = pinWithoutCustomTitle;
   }
   return { ...store, pins };
 }

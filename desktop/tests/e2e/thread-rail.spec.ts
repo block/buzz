@@ -160,6 +160,12 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
   expect(visualContract.rowBackground).not.toBe("rgba(0, 0, 0, 0)");
   expect(visualContract.entryBackground).toBe("rgba(0, 0, 0, 0)");
 
+  await rail.getByTestId(`edit-thread-rail-title-${root.id}`).click();
+  const titleInput = rail.getByTestId(`thread-rail-title-input-${root.id}`);
+  await titleInput.fill("Roadmap");
+  await titleInput.press("Enter");
+  await expect(entry).toHaveAttribute("aria-label", "Roadmap");
+
   const expandedWidth = await rail.evaluate((element) =>
     Math.round(element.getBoundingClientRect().width),
   );
@@ -179,6 +185,7 @@ test("pins a canonical thread, switches it from the collapsible rail, and unpins
 
   await page.getByTestId("channel-random").click();
   await entry.click();
+  await expect(entry).toHaveAttribute("aria-label", "Roadmap");
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(panel).toBeVisible();
   await expect(panel.getByTestId("message-thread-head")).toContainText(

@@ -8,6 +8,7 @@ const EMPTY_RAIL: ThreadRail = {
   collapsed: false,
   isScoped: false,
   pin: () => {},
+  rename: () => {},
   unpin: () => {},
   updateAnchor: () => {},
   updateExpandedReplyIds: () => {},

@@ -7,6 +7,7 @@ import {
   MAX_THREAD_RAIL_PINS,
   parseThreadRailStore,
   readThreadRailStore,
+  renameThreadRailPin,
   removeThreadRailPin,
   updateThreadRailExpandedReplyIds,
   updateThreadRailPinAnchor,
@@ -226,6 +227,25 @@ test("parse rejects oversized durable identifiers", () => {
     pins: [PIN_A, { ...PIN_B, rootId: "r".repeat(257) }],
   });
   assert.deepEqual(parsed?.pins, [PIN_A]);
+});
+
+test("renames a pin locally, bounds its title, and clears it without changing identity", () => {
+  const store = { collapsed: false, pins: [PIN_A, PIN_B], version: 1 };
+  const renamed = renameThreadRailPin(store, PIN_A, `  ${"T".repeat(140)}  `);
+
+  assert.equal(renamed.pins[0].customTitle, "T".repeat(128));
+  assert.deepEqual(renamed.pins[1], PIN_B);
+  assert.equal(renamed.pins[0].channelId, PIN_A.channelId);
+  assert.equal(renamed.pins[0].rootId, PIN_A.rootId);
+  assert.deepEqual(renameThreadRailPin(renamed, PIN_A, "   "), {
+    collapsed: false,
+    pins: [PIN_A, PIN_B],
+    version: 1,
+  });
+  assert.equal(
+    renameThreadRailPin(store, { ...PIN_A, rootId: "missing" }, "Name"),
+    store,
+  );
 });
 
 test("write failure leaves the caller-owned in-memory store usable", () => {
