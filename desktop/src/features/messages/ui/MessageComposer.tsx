@@ -1,5 +1,7 @@
 import * as React from "react";
 import { EditorContent } from "@tiptap/react";
+import { Clock } from "lucide-react";
+import { toast } from "sonner";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
@@ -60,6 +62,12 @@ import { submitMessageEdit } from "./submitMessageEdit";
 import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { Button } from "@/shared/ui/button";
+import { ScheduleMessageDialog } from "@/features/scheduled/ui/ScheduleMessageDialog";
+import { ScheduledMessagesDialog } from "@/features/scheduled/ui/ScheduledMessagesDialog";
+import { formatSchedulePill } from "@/features/scheduled/lib/scheduledMessages";
+import type { ScheduledMessage } from "@/shared/api/scheduledMessages";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
   audienceContext = null,
@@ -223,6 +231,28 @@ function MessageComposerImpl({
     emojiAutocomplete.isEmojiAutocompleteOpen;
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
+  // ── Schedule for later ────────────────────────────────────────────────
+  const [isScheduleDialogOpen, setIsScheduleDialogOpen] = React.useState(false);
+  const [isScheduledViewOpen, setIsScheduledViewOpen] = React.useState(false);
+  const [scheduleContent, setScheduleContent] = React.useState("");
+  const [scheduleMentionPubkeys, setScheduleMentionPubkeys] = React.useState<
+    string[]
+  >([]);
+  const [scheduleParentEventId, setScheduleParentEventId] = React.useState<
+    string | null
+  >(null);
+  const [lastScheduledFor, setLastScheduledFor] = React.useState<number | null>(
+    null,
+  );
+  const schedulePillTimerRef = React.useRef<number | null>(null);
+  React.useEffect(
+    () => () => {
+      if (schedulePillTimerRef.current != null) {
+        window.clearTimeout(schedulePillTimerRef.current);
+      }
+    },
+    [],
+  );
   // Set after `useLinkEditor` exists below; the editor's link-click handler
   // delegates through this ref to break the hook ordering cycle (the editor
   // needs `onEditLink`, but the link editor needs the editor's `richText`).
@@ -670,6 +700,94 @@ function MessageComposerImpl({
     },
     [submitMessage],
   );
+  // ── Schedule for later: open the picker with the current draft captured ──
+  const openScheduleDialog = React.useCallback(() => {
+    if (editTargetRef.current || channelId == null) return;
+    const trimmed = syncComposerContentFromEditor().trim();
+    if (!trimmed) return;
+    const threadContext = onCaptureSendContext?.() ?? null;
+    setScheduleContent(trimmed);
+    setScheduleMentionPubkeys(extractMentionPubkeysRef.current(trimmed));
+    setScheduleParentEventId(threadContext?.parentEventId ?? null);
+    setIsScheduleDialogOpen(true);
+  }, [channelId, onCaptureSendContext, syncComposerContentFromEditor]);
+  const clearComposerForSchedule = React.useCallback(() => {
+    setComposerContent("");
+    richText.clearContent();
+    media.setPendingImeta([]);
+    media.clearQueuedAttachments();
+    setSpoileredAttachmentUrls(new Set());
+    mentions.clearMentions();
+    channelLinks.clearChannels();
+    emojiAutocomplete.clearEmojis();
+    setIsEmojiPickerOpen(false);
+  }, [
+    channelLinks.clearChannels,
+    emojiAutocomplete.clearEmojis,
+    media.clearQueuedAttachments,
+    media.setPendingImeta,
+    mentions.clearMentions,
+    richText.clearContent,
+    setComposerContent,
+  ]);
+  const handleMessageScheduled = React.useCallback(
+    (message: ScheduledMessage) => {
+      setLastScheduledFor(message.scheduledAt);
+      if (schedulePillTimerRef.current != null) {
+        window.clearTimeout(schedulePillTimerRef.current);
+      }
+      schedulePillTimerRef.current = window.setTimeout(
+        () => setLastScheduledFor(null),
+        6_000,
+      );
+      clearComposerForSchedule();
+      toast.success("Message scheduled for later");
+    },
+    [clearComposerForSchedule],
+  );
+  const hasMediaForSchedule =
+    media.pendingImeta.length > 0 || media.queuedAttachments.length > 0;
+  const scheduleButton = (
+    <Tooltip disableHoverableContent>
+      <TooltipTrigger asChild>
+        <Button
+          aria-label="Schedule for later"
+          data-testid="schedule-message"
+          disabled={
+            composerDisabled ||
+            editTarget != null ||
+            channelId == null ||
+            isContentEmpty ||
+            hasMediaForSchedule ||
+            isSending ||
+            media.isUploading ||
+            mentionSendFlow.isPreparingMentionSend
+          }
+          onClick={openScheduleDialog}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          <Clock aria-hidden />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Schedule for later</TooltipContent>
+    </Tooltip>
+  );
+  const composerExtraActions = (
+    <>
+      {lastScheduledFor != null ? (
+        <span
+          className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400"
+          data-testid="scheduled-confirmation-pill"
+        >
+          <Clock aria-hidden className="size-3" />
+          Scheduled for {formatSchedulePill(lastScheduledFor)}
+        </span>
+      ) : null}
+      {scheduleButton}
+    </>
+  );
   // ── Keyboard handling ───────────────────────────────────────────────
   // Tiptap handles formatting shortcuts (⌘B, ⌘I, etc.) natively.
   // Plain Enter → submit is now handled inside the Tiptap `submitOnEnter`
@@ -976,7 +1094,12 @@ function MessageComposerImpl({
               layoutMode={layoutMode}
               composerDisabled={composerDisabled}
               editor={richText.editor}
-              extraActions={toolbarExtraActions}
+              extraActions={
+                <>
+                  {toolbarExtraActions}
+                  {composerExtraActions}
+                </>
+              }
               formattingDisabled={composerDisabled}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
@@ -999,6 +1122,25 @@ function MessageComposerImpl({
 
       {linkEditor.card}
       {linkEditor.dialog}
+
+      <ScheduleMessageDialog
+        channelId={channelId}
+        channelName={channelName}
+        content={scheduleContent}
+        mentionPubkeys={scheduleMentionPubkeys}
+        onOpenChange={setIsScheduleDialogOpen}
+        onScheduled={handleMessageScheduled}
+        onViewScheduled={() => {
+          setIsScheduleDialogOpen(false);
+          setIsScheduledViewOpen(true);
+        }}
+        open={isScheduleDialogOpen}
+        parentEventId={scheduleParentEventId}
+      />
+      <ScheduledMessagesDialog
+        onOpenChange={setIsScheduledViewOpen}
+        open={isScheduledViewOpen}
+      />
     </>
   );
 }

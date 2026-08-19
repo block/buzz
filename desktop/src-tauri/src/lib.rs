@@ -34,6 +34,7 @@ mod ptt_shortcut;
 mod relay;
 mod relay_admission;
 mod reset;
+mod scheduled;
 mod secret_store;
 mod shutdown;
 mod templates;
@@ -810,6 +811,12 @@ pub fn run() {
             update_channel_template,
             delete_channel_template,
             duplicate_channel_template,
+            scheduled_list,
+            scheduled_enqueue,
+            scheduled_cancel,
+            scheduled_reenqueue,
+            scheduled_take_due,
+            scheduled_next_due,
             list_teams,
             create_team,
             update_team,

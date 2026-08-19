@@ -95,6 +95,7 @@ import { SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
+import { ScheduledMessageDelivery } from "@/features/scheduled/ScheduledMessageDelivery";
 import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
 import { LazySettingsScreen } from "@/app/LazySettingsScreen";
 const EMPTY_CHANNELS: Channel[] = [];
@@ -679,6 +680,7 @@ export function AppShell() {
           openCreateChannel={handleOpenCreateChannel}
         />
       ) : null}
+      <ScheduledMessageDelivery />
       <ChannelNavigationProvider channels={channels}>
         <AppShellProvider
           value={{
