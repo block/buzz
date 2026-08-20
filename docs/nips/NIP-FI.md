@@ -383,22 +383,27 @@ Two verified assertion results are **equivalent** when:
 1. identity-class fields are byte-equal: `iss`, `sub`, asserted-key presence and
    value, canonical claims/capabilities, `assertion_policy_id`, and
    `transport_contract_id`;
-2. each bounds-class deadline is live now and is no later than its prepared
-   value; and
+2. each bounds-class deadline — every `authority_deadlines` member, the
+   key-snapshot hard deadline, and any status deadline — is live now and is no
+   later than its prepared value; and
 3. provenance-class fields — snapshot version, verification-key identity,
-   cache metadata, ordering, and retrieval time — are ignored after successful
+   status source and version, binding, lifecycle, local-policy, and resource
+   versions, proof and replay witnesses, the confidential JWS handle, cache
+   metadata, ordering, and retrieval time — are ignored after successful
    current revalidation.
 
-Any new or unclassified field belongs to the identity class. A fresher assertion
-cannot silently extend a prepared decision. [FI-TRACE-PREPARED-STALE]
+Every `revalidation_dependencies` member is bounds-class if it is a deadline
+and provenance-class otherwise. Any new or unclassified assertion-content field
+belongs to the identity class. A fresher assertion cannot silently extend a
+prepared decision. [FI-TRACE-PREPARED-STALE]
 
 Final admission atomically rereads binding, tombstone, revocation, enrollment,
-policy, resource, replay, receipt, and invalidation witnesses; recomputes the
-complete decision; claims applicable proof replay identities; creates an
-eligible proposed binding; and appends its request-bound receipt and required
-authorization evidence. All commit or none. A concurrent identical enrollment
-may recompute as the same `existing` binding; conflicting enrollment commits at
-most one winner. [FI-TRACE-CONCURRENT-ENROLLMENT]
+policy, resource, status, replay, receipt, and invalidation witnesses;
+recomputes the complete decision; claims applicable proof replay identities;
+creates an eligible proposed binding; and appends its request-bound receipt and
+required authorization evidence. All commit or none. A concurrent identical
+enrollment may recompute as the same `existing` binding; conflicting enrollment
+commits at most one winner. [FI-TRACE-CONCURRENT-ENROLLMENT]
 
 A failed admission rolls back all authority mutation. The application operation
 runs only after committed authorization. If it cannot share the transaction, a
