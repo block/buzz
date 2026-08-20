@@ -623,9 +623,32 @@ impl AcpClient {
 
     /// Send the ACP `authenticate` request for an adapter-advertised method.
     pub async fn authenticate(&mut self, method_id: &str) -> Result<serde_json::Value, AcpError> {
-        let params = serde_json::json!({
-            "methodId": method_id,
-        });
+        self.authenticate_with_meta(method_id, false).await
+    }
+
+    /// Headless authenticate. Grok's ACP example requires `_meta.headless`
+    /// before `session/new`; without it the worker dies with
+    /// `Auth(AuthorizationRequired)` on the first mention.
+    pub async fn authenticate_headless(
+        &mut self,
+        method_id: &str,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.authenticate_with_meta(method_id, true).await
+    }
+
+    async fn authenticate_with_meta(
+        &mut self,
+        method_id: &str,
+        headless: bool,
+    ) -> Result<serde_json::Value, AcpError> {
+        let params = if headless {
+            serde_json::json!({
+                "methodId": method_id,
+                "_meta": { "headless": true },
+            })
+        } else {
+            serde_json::json!({ "methodId": method_id })
+        };
         self.send_request("authenticate", params).await
     }
 

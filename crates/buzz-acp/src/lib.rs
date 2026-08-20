@@ -4649,6 +4649,12 @@ async fn initialize_agent_pool(
                 match initialize_result {
                     Ok(Ok(init_result)) => {
                         tracing::info!(agent = i, "agent initialized: {init_result}");
+                        if let Err(e) = authenticate_if_needed(&mut acp, &init_result).await {
+                            tracing::error!(agent = i, "{e}");
+                            acp.shutdown().await;
+                            agent_slots.push(None);
+                            continue;
+                        }
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
                         tracing::info!(
@@ -4742,6 +4748,10 @@ async fn spawn_and_init(
     match acp.initialize().await {
         Ok(init_result) => {
             tracing::info!("agent initialized: {init_result}");
+            if let Err(e) = authenticate_if_needed(&mut acp, &init_result).await {
+                acp.shutdown().await;
+                return Err(e);
+            }
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
             acp.observe(
                 "agent_initialized",
@@ -4768,12 +4778,111 @@ async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpE
     AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
 }
 
+/// Call ACP `authenticate` when the agent advertised a non-interactive method.
+///
+/// The harness already exposes `buzz-acp authenticate` as a one-shot CLI, but
+/// the live pool never sent it. Agents that require auth before `session/new`
+/// (Grok's `cached_token`) then fail the first turn. Goose and Claude advertise
+/// no such method and skip this path.
+async fn authenticate_if_needed(
+    acp: &mut AcpClient,
+    init_result: &serde_json::Value,
+) -> Result<()> {
+    let Some(method_id) = preferred_headless_auth_method(init_result) else {
+        tracing::debug!("ACP headless auth skipped (no cached_token / xai.api_key)");
+        return Ok(());
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        acp.authenticate_headless(&method_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {
+            tracing::info!(method_id, "agent authenticated");
+            Ok(())
+        }
+        Ok(Err(e)) => Err(anyhow::anyhow!(
+            "agent authenticate ({method_id}) failed: {e}"
+        )),
+        Err(_) => Err(anyhow::anyhow!(
+            "agent authenticate ({method_id}) timed out (30s)"
+        )),
+    }
+}
+
 fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
     init_result
         .get("authMethods")
         .and_then(|methods| methods.as_array())
         .cloned()
         .unwrap_or_default()
+}
+
+/// Pick a non-interactive ACP auth method advertised on `initialize`.
+///
+/// Prefer `cached_token` (Grok subscription / `~/.grok/auth.json`), then
+/// `xai.api_key` when `XAI_API_KEY` is set. Never `grok.com` — that opens a
+/// browser. Returns `None` for adapters that do not require authenticate
+/// (Goose, Claude) so their session/new path is unchanged.
+fn preferred_headless_auth_method(init_result: &serde_json::Value) -> Option<String> {
+    let ids: Vec<String> = extract_auth_methods(init_result)
+        .iter()
+        .filter_map(|method| {
+            method
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    if ids.iter().any(|id| id == "cached_token") {
+        return Some("cached_token".into());
+    }
+    if std::env::var_os("XAI_API_KEY").is_some() && ids.iter().any(|id| id == "xai.api_key") {
+        return Some("xai.api_key".into());
+    }
+    None
+}
+
+#[cfg(test)]
+mod headless_auth_method_tests {
+    use super::preferred_headless_auth_method;
+
+    fn init_with_methods(ids: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "authMethods": ids.iter().map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    fn prefers_cached_token_over_browser_login() {
+        let init = init_with_methods(&["grok.com", "cached_token"]);
+        assert_eq!(
+            preferred_headless_auth_method(&init).as_deref(),
+            Some("cached_token")
+        );
+    }
+
+    #[test]
+    fn skips_when_only_browser_login_is_advertised() {
+        let init = init_with_methods(&["grok.com"]);
+        assert_eq!(preferred_headless_auth_method(&init), None);
+    }
+
+    #[test]
+    fn skips_adapters_with_no_auth_methods() {
+        let init = serde_json::json!({});
+        assert_eq!(preferred_headless_auth_method(&init), None);
+    }
+
+    #[test]
+    fn skips_api_key_when_env_is_unset() {
+        if std::env::var_os("XAI_API_KEY").is_some() {
+            return;
+        }
+        let init = init_with_methods(&["xai.api_key"]);
+        assert_eq!(preferred_headless_auth_method(&init), None);
+    }
 }
 
 /// `buzz-acp auth-methods` — spawn an adapter, initialize it, print authMethods.
