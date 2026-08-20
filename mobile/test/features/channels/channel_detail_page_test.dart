@@ -8893,6 +8893,14 @@ void main() {
         await tester.pump();
 
         expect(
+          find.byKey(const ValueKey('thread-jump-to-latest-hidden')),
+          findsOneWidget,
+          reason:
+              'Latest should leave immediately once its navigation starts, '
+              'rather than lingering over the thread at the tail.',
+        );
+
+        expect(
           find.descendant(of: list, matching: find.byType(Scrollable)),
           findsOneWidget,
           reason:
