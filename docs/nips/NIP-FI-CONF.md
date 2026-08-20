@@ -233,8 +233,8 @@ each produce, from NIP-FI core and any claimed profile documents alone:
 - one valid `client-attached` request, over WebSocket upgrade and over HTTP,
   compared over its signing inputs as defined below; and
 - one byte-exact public denial response for each of the four public classes,
-  on both transports, compared over the interoperability compared object
-  under **Denial fixtures**.
+  on each transport where the class can be decided, compared over the
+  interoperability compared object under **Denial fixtures**.
 
 Independence is a claim about code, not inputs: two implementations given
 different issuers, keys, or clocks cannot produce equal bytes. The run is
