@@ -309,6 +309,41 @@ test("message quick reaction tray stays neutral after selecting a tray emoji", a
   );
 });
 
+test("emoji picker keeps Frequently used live within the app session", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("emoji-mart.frequently", "{}");
+    window.localStorage.removeItem("emoji-mart.last");
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+
+  let picker = page.locator("em-emoji-picker");
+  await expect(
+    picker.getByRole("button", { name: "Frequently used" }),
+  ).toBeVisible();
+
+  await picker.locator("input[type='search']").fill("unicorn");
+  await picker.getByRole("button", { name: "🦄" }).first().click();
+  await expect(row.getByLabel("Toggle 🦄 reaction")).toBeVisible();
+
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+  picker = page.locator("em-emoji-picker");
+  await picker.getByRole("button", { name: "Frequently used" }).click();
+  await expect(
+    picker.getByRole("button", { name: "🦄" }).first(),
+  ).toBeVisible();
+});
+
 test("reacting with a custom emoji renders via the loopback media proxy", async ({
   page,
 }) => {

@@ -891,6 +891,9 @@ export function AppShell() {
                           })
                         }
                         profile={profileQuery.data}
+                        projectsOverviewActive={
+                          location.pathname === "/projects"
+                        }
                         selfUserStatus={
                           deferredPubkey
                             ? (selfStatusQuery.data?.[

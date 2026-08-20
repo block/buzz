@@ -155,12 +155,14 @@ function TweetPreview({
   onRemove,
   preview,
   showControls,
+  showExpandControl,
 }: {
   className?: string;
   ImageLightbox: LinkPreviewImageLightboxComponent;
   onRemove?: () => void;
   preview: ResolvedLinkPreview;
   showControls: boolean;
+  showExpandControl: boolean;
 }) {
   const [contentExpanded, setContentExpanded] = useState(true);
   const reserveImage = preview.imageState !== "none";
@@ -208,7 +210,7 @@ function TweetPreview({
           preview={preview}
         />
       ) : null}
-      {hasExpandableContent ? (
+      {showExpandControl && hasExpandableContent ? (
         <button
           aria-expanded={contentExpanded}
           className="mt-1 flex items-center gap-1 text-xs leading-4 text-muted-foreground hover:text-foreground"
@@ -237,6 +239,7 @@ export function RichLinkPreviewAttachment({
   onRemove,
   preview,
   showControls = false,
+  showExpandControl = true,
 }: {
   className?: string;
   ImageLightbox: LinkPreviewImageLightboxComponent;
@@ -244,6 +247,7 @@ export function RichLinkPreviewAttachment({
   onRemove?: () => void;
   preview: ResolvedLinkPreview;
   showControls?: boolean;
+  showExpandControl?: boolean;
 }) {
   const [contentExpanded, setContentExpanded] = useState(true);
 
@@ -255,6 +259,7 @@ export function RichLinkPreviewAttachment({
         onRemove={onRemove}
         preview={preview}
         showControls={showControls}
+        showExpandControl={showExpandControl}
       />
     );
   }
@@ -327,7 +332,7 @@ export function RichLinkPreviewAttachment({
           preview={preview}
         />
       ) : null}
-      {hasExpandableContent ? (
+      {showExpandControl && hasExpandableContent ? (
         <button
           aria-expanded={contentExpanded}
           className="mt-1 flex items-center gap-1 text-xs leading-4 text-muted-foreground hover:text-foreground"

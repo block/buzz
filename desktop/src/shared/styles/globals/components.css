@@ -786,10 +786,11 @@
 }
 
 /*
- * Repository context is a sibling pod, not a column inside the app's
- * standard content card. This deliberately sits outside the cascade layers
- * so it can unframe the utility-styled content surface. Chat removes the
- * marker and restores the normal framed surface.
+ * Project context (repository detail and the projects overview rail) is a
+ * sibling pod, not a column inside the app's standard content card. This
+ * deliberately sits outside the cascade layers so it can unframe the
+ * utility-styled content surface. Closing the panel or opening chat removes
+ * the marker and restores the normal framed surface.
  */
 [data-buzz-content-surface]:has([data-project-detail-screen]),
 :root[data-buzz-sidebar]:not(.dark)
