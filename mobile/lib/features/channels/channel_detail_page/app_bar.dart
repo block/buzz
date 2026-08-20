@@ -4,63 +4,6 @@ const _dmHeaderAvatarSize = 32.0;
 const _channelHeaderAvatarSize = 40.0;
 const _dmPresenceDotRatio = 8 / 14;
 
-class _ChannelIosGlassBackButton extends HookWidget {
-  const _ChannelIosGlassBackButton();
-
-  static const _viewType = 'buzz/channel_back_glass';
-  static const _buttonCenterX = 38.0;
-
-  @override
-  Widget build(BuildContext context) {
-    final nativeChannel = useState<MethodChannel?>(null);
-    final brightness = context.theme.brightness.name;
-    final primaryColor = context.colors.primary.toARGB32();
-
-    useEffect(() {
-      final channel = nativeChannel.value;
-      if (channel == null) return null;
-      channel.setMethodCallHandler((call) async {
-        if (call.method == 'pressed' && context.mounted) {
-          await Navigator.of(context).maybePop();
-        }
-      });
-      return () => channel.setMethodCallHandler(null);
-    }, [nativeChannel.value]);
-
-    useEffect(() {
-      final channel = nativeChannel.value;
-      if (channel != null) {
-        unawaited(
-          channel.invokeMethod<void>('setAppearance', <String, Object>{
-            'brightness': brightness,
-            'foregroundColor': primaryColor,
-          }),
-        );
-      }
-      return null;
-    }, [nativeChannel.value, brightness, primaryColor]);
-
-    return SizedBox(
-      key: const ValueKey('channel-ios-glass-back'),
-      width: 58,
-      height: 48,
-      child: UiKitView(
-        viewType: _viewType,
-        hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-        creationParams: <String, Object>{
-          'brightness': brightness,
-          'foregroundColor': primaryColor,
-          'buttonCenterX': _buttonCenterX,
-        },
-        creationParamsCodec: const StandardMessageCodec(),
-        onPlatformViewCreated: (viewId) {
-          nativeChannel.value = MethodChannel('$_viewType/$viewId');
-        },
-      ),
-    );
-  }
-}
-
 bool _showsMembersAction(Channel channel) {
   if (!channel.isDm) return true;
   final participants = channel.participantPubkeys

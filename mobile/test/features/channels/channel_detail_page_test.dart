@@ -44,6 +44,7 @@ import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -5195,6 +5196,93 @@ void main() {
   });
 
   group('App bar', () {
+    testWidgets('matches the channel header placement on iOS', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const nativeChannel = MethodChannel('buzz/navigation_glass/43');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        nativeChannel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          nativeChannel,
+          null,
+        ),
+      );
+
+      final root = _textMsg(
+        id: 'thread-header-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+      );
+      final timelineMessages = formatTimeline([root]);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [root],
+          textScaler: const TextScaler.linear(2),
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ThreadDetailPage(
+                      threadHead: timelineMessages.single,
+                      allMessages: timelineMessages,
+                      channelId: _testChannel.id,
+                      currentPubkey: null,
+                      isMember: true,
+                      isArchived: false,
+                    ),
+                  ),
+                ),
+                child: const Text('Open thread'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open thread'));
+      await tester.pumpAndSettle();
+
+      final backFinder = find.byKey(const ValueKey('thread-ios-glass-back'));
+      final nativeView = tester.widget<UiKitView>(
+        find.descendant(of: backFinder, matching: find.byType(UiKitView)),
+      );
+      expect(nativeView.viewType, IosGlassNavigationButton.viewType);
+      expect(
+        (nativeView.creationParams as Map<String, Object>)['buttonCenterX'],
+        iosGlassChannelHeaderButtonCenterX,
+      );
+
+      final backRect = tester.getRect(backFinder);
+      final titleRect = tester.getRect(
+        find.byKey(const ValueKey('thread-app-bar-title')),
+      );
+      expect(backRect.width, iosGlassChannelHeaderLeadingWidth);
+      expect(
+        titleRect.left - backRect.right,
+        moreOrLessEquals(iosGlassChannelHeaderTitleSpacing),
+      );
+      expect(tester.takeException(), isNull);
+
+      nativeView.onPlatformViewCreated!(43);
+      await tester.pump();
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        nativeChannel.name,
+        nativeChannel.codec.encodeMethodCall(const MethodCall('pressed')),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ThreadDetailPage), findsNothing);
+      expect(find.text('Open thread'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
     testWidgets(
       'keeps the native iOS glass header aligned at large text sizes',
       (tester) async {
@@ -5239,7 +5327,11 @@ void main() {
           matching: find.byType(UiKitView),
         );
         final nativeView = tester.widget<UiKitView>(nativeViewFinder);
-        expect(nativeView.viewType, 'buzz/channel_back_glass');
+        expect(nativeView.viewType, 'buzz/navigation_glass');
+        expect(
+          (nativeView.creationParams as Map<String, Object>)['icon'],
+          'back',
+        );
         expect(
           (nativeView.creationParams as Map<String, Object>)['brightness'],
           'light',

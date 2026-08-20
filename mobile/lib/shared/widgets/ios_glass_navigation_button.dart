@@ -1,0 +1,108 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
+import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+
+import '../theme/theme.dart';
+
+/// The navigation glyph displayed by [IosGlassNavigationButton].
+enum IosGlassNavigationIcon { back, close }
+
+/// Leading width used by iOS channel-style headers.
+const iosGlassChannelHeaderLeadingWidth = 58.0;
+
+/// Horizontal center of the native button inside a channel-style leading.
+const iosGlassChannelHeaderButtonCenterX = 38.0;
+
+/// Space between the leading region and a channel-style title.
+const iosGlassChannelHeaderTitleSpacing = Grid.xs;
+
+/// A native iOS navigation control using the system glass button treatment.
+///
+/// Callers should only insert this widget on iOS and retain their existing
+/// Flutter control on other platforms.
+class IosGlassNavigationButton extends HookWidget {
+  const IosGlassNavigationButton({
+    super.key,
+    required this.icon,
+    required this.semanticLabel,
+    required this.onPressed,
+    this.width = 48,
+    this.height = 48,
+    this.buttonCenterX,
+    this.foregroundColor,
+  });
+
+  static const viewType = 'buzz/navigation_glass';
+
+  final IosGlassNavigationIcon icon;
+  final String semanticLabel;
+  final VoidCallback? onPressed;
+  final double width;
+  final double height;
+  final double? buttonCenterX;
+  final Color? foregroundColor;
+
+  @override
+  Widget build(BuildContext context) {
+    assert(defaultTargetPlatform == TargetPlatform.iOS);
+    final nativeChannel = useState<MethodChannel?>(null);
+    final onPressedRef = useRef(onPressed)..value = onPressed;
+    final brightness = context.theme.brightness.name;
+    final effectiveForeground = foregroundColor ?? context.colors.primary;
+    final foregroundValue = effectiveForeground.toARGB32();
+    final enabled = onPressed != null;
+
+    useEffect(() {
+      final channel = nativeChannel.value;
+      if (channel == null) return null;
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'pressed') {
+          onPressedRef.value?.call();
+        }
+      });
+      return () => channel.setMethodCallHandler(null);
+    }, [nativeChannel.value]);
+
+    useEffect(() {
+      final channel = nativeChannel.value;
+      if (channel != null) {
+        unawaited(
+          channel.invokeMethod<void>('setAppearance', <String, Object>{
+            'brightness': brightness,
+            'foregroundColor': foregroundValue,
+            'enabled': enabled,
+          }),
+        );
+      }
+      return null;
+    }, [nativeChannel.value, brightness, foregroundValue, enabled]);
+
+    return Tooltip(
+      message: semanticLabel,
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: UiKitView(
+          viewType: viewType,
+          hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+          creationParams: <String, Object>{
+            'icon': icon.name,
+            'accessibilityLabel': semanticLabel,
+            'brightness': brightness,
+            'foregroundColor': foregroundValue,
+            'enabled': enabled,
+            'buttonCenterX': buttonCenterX ?? width / 2,
+          },
+          creationParamsCodec: const StandardMessageCodec(),
+          onPlatformViewCreated: (viewId) {
+            nativeChannel.value = MethodChannel('$viewType/$viewId');
+          },
+        ),
+      ),
+    );
+  }
+}

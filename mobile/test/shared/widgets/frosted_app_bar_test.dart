@@ -1,6 +1,7 @@
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -82,5 +83,41 @@ void main() {
     expect(tester.getSize(clip).height, closeTo(reportedHeight, 0.01));
     expect(reportedHeight, closeTo(titleContentHeight + Grid.xs + 1, 0.01));
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('uses the native glass back control on iOS', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light(),
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const Stack(
+                  children: [FrostedAppBar(title: Text('Destination'))],
+                ),
+              ),
+            ),
+            child: const Text('Open'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    final nativeBack = tester.widget<UiKitView>(find.byType(UiKitView));
+    expect(nativeBack.viewType, 'buzz/navigation_glass');
+    expect(nativeBack.creationParams, containsPair('icon', 'back'));
+    expect(
+      nativeBack.creationParams,
+      containsPair('accessibilityLabel', 'Back'),
+    );
+    expect(find.byTooltip('Back'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
   });
 }

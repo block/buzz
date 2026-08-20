@@ -12,6 +12,7 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -817,11 +818,32 @@ class ThreadDetailPage extends HookConsumerWidget {
         channelNamesMap[ch.name.toLowerCase()] = ch.id;
       }
     });
+    final usesNativeIosGlassBackButton =
+        Navigator.canPop(context) &&
+        Theme.of(context).platform == TargetPlatform.iOS;
 
     return FrostedScaffold(
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
-      appBar: const FrostedAppBar(
-        title: Text('Thread'),
+      appBar: FrostedAppBar(
+        leading: usesNativeIosGlassBackButton
+            ? IosGlassNavigationButton(
+                key: const ValueKey('thread-ios-glass-back'),
+                icon: IosGlassNavigationIcon.back,
+                semanticLabel: 'Back',
+                onPressed: () => Navigator.of(context).maybePop(),
+                width: iosGlassChannelHeaderLeadingWidth,
+                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+              )
+            : null,
+        iconColor: context.colors.primary,
+        title: Padding(
+          padding: EdgeInsets.only(
+            left: usesNativeIosGlassBackButton
+                ? iosGlassChannelHeaderTitleSpacing
+                : 0,
+          ),
+          child: const Text('Thread', key: ValueKey('thread-app-bar-title')),
+        ),
         titleStyle: channelTitleTextStyle,
       ),
       body: Stack(

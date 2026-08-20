@@ -99,12 +99,12 @@ import UserNotifications
       )
     }
 
-    if let channelBackGlassRegistrar = engineBridge.pluginRegistry.registrar(
-      forPlugin: "BuzzChannelBackGlassButton"
+    if let navigationGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNavigationGlassButton"
     ) {
-      channelBackGlassRegistrar.register(
-        ChannelBackGlassButtonFactory(messenger: messenger),
-        withId: "buzz/channel_back_glass"
+      navigationGlassRegistrar.register(
+        NavigationGlassButtonFactory(messenger: messenger),
+        withId: "buzz/navigation_glass"
       )
     }
 

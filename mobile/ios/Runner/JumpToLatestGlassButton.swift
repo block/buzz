@@ -124,7 +124,7 @@ final class JumpToLatestGlassButtonPlatformView: NSObject, FlutterPlatformView {
   }
 }
 
-final class ChannelBackGlassButtonFactory: NSObject, FlutterPlatformViewFactory {
+final class NavigationGlassButtonFactory: NSObject, FlutterPlatformViewFactory {
   private let messenger: FlutterBinaryMessenger
 
   init(messenger: FlutterBinaryMessenger) {
@@ -141,7 +141,7 @@ final class ChannelBackGlassButtonFactory: NSObject, FlutterPlatformViewFactory 
     viewIdentifier viewId: Int64,
     arguments args: Any?
   ) -> FlutterPlatformView {
-    ChannelBackGlassButtonPlatformView(
+    NavigationGlassButtonPlatformView(
       frame: frame,
       viewIdentifier: viewId,
       arguments: args,
@@ -150,7 +150,7 @@ final class ChannelBackGlassButtonFactory: NSObject, FlutterPlatformViewFactory 
   }
 }
 
-final class ChannelBackGlassButtonPlatformView: NSObject, FlutterPlatformView {
+final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let containerView: UIView
   private let channel: FlutterMethodChannel
   private let button = UIButton(type: .system)
@@ -163,15 +163,18 @@ final class ChannelBackGlassButtonPlatformView: NSObject, FlutterPlatformView {
   ) {
     containerView = UIView(frame: frame)
     channel = FlutterMethodChannel(
-      name: "buzz/channel_back_glass/\(viewId)",
+      name: "buzz/navigation_glass/\(viewId)",
       binaryMessenger: messenger
     )
     super.init()
 
     containerView.backgroundColor = .clear
     containerView.isOpaque = false
+    let arguments = args as? [String: Any]
     let buttonCenterX =
-      ((args as? [String: Any])?["buttonCenterX"] as? NSNumber)?.doubleValue ?? 38
+      (arguments?["buttonCenterX"] as? NSNumber)?.doubleValue ?? 24
+    let icon = arguments?["icon"] as? String
+    let symbolName = icon == "close" ? "xmark" : "chevron.backward"
 
     var configuration: UIButton.Configuration
     if #available(iOS 26.0, *) {
@@ -182,14 +185,14 @@ final class ChannelBackGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     configuration.cornerStyle = .capsule
     configuration.image = UIImage(
-      systemName: "chevron.backward",
+      systemName: symbolName,
       withConfiguration: UIImage.SymbolConfiguration(
         pointSize: 17,
         weight: .semibold
       )
     )
     button.configuration = configuration
-    button.accessibilityLabel = "Back"
+    button.accessibilityLabel = arguments?["accessibilityLabel"] as? String ?? "Back"
     button.translatesAutoresizingMaskIntoConstraints = false
     button.addAction(
       UIAction { [weak self] _ in
@@ -229,9 +232,11 @@ final class ChannelBackGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let brightness = arguments?["brightness"] as? String
     let interfaceStyle: UIUserInterfaceStyle = brightness == "dark" ? .dark : .light
     let colorValue = (arguments?["foregroundColor"] as? NSNumber)?.uint32Value
+    let enabled = arguments?["enabled"] as? Bool ?? true
 
     containerView.overrideUserInterfaceStyle = interfaceStyle
     button.overrideUserInterfaceStyle = interfaceStyle
+    button.isEnabled = enabled
     if let colorValue {
       button.configuration?.baseForegroundColor = Self.color(from: colorValue)
     }

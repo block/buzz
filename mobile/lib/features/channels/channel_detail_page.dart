@@ -2,9 +2,7 @@ import 'dart:async';
 import 'dart:math' show max, min;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart'
-    show PlatformViewHitTestBehavior, ScrollDirection;
-import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -19,6 +17,7 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -327,14 +326,23 @@ class ChannelDetailPage extends HookConsumerWidget {
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         leading: usesNativeIosGlassBackButton
-            ? const _ChannelIosGlassBackButton()
+            ? IosGlassNavigationButton(
+                key: const ValueKey('channel-ios-glass-back'),
+                icon: IosGlassNavigationIcon.back,
+                semanticLabel: 'Back',
+                onPressed: () => Navigator.of(context).maybePop(),
+                width: iosGlassChannelHeaderLeadingWidth,
+                buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+              )
             : null,
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,
         title: Padding(
           padding: EdgeInsets.only(
-            left: Navigator.canPop(context) ? Grid.xs : 0,
+            left: Navigator.canPop(context)
+                ? iosGlassChannelHeaderTitleSpacing
+                : 0,
           ),
           child: resolvedChannel.isDm
               ? _DmAppBarTitle(
