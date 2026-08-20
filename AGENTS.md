@@ -202,15 +202,16 @@ or invoke with the full path.
 ### Deep Links
 
 `buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
-thread. To read the linked thread:
+thread. Pass the link directly to the CLI:
 
 ```bash
-buzz --format compact messages thread --channel <uuid> --event <hex>
+buzz --format compact messages thread --link '<buzz://message?...>'
 ```
 
-Extract `channel` and `id` from the URL query parameters. The optional
-`thread` parameter (root event ID) can be ignored — `messages thread` resolves
-the full thread from the event ID alone.
+The selected message ID is authoritative: `messages thread` verifies its
+channel and derives its containing root. An optional `thread` parameter is
+accepted only when it matches that derived root. The explicit
+`--channel <uuid> --event <hex>` form remains available.
 
 All reads return sig-stripped JSON arrays; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
