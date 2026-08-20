@@ -4,6 +4,19 @@ const _dmHeaderAvatarSize = 32.0;
 const _channelHeaderAvatarSize = 40.0;
 const _dmPresenceDotRatio = 8 / 14;
 
+Widget _channelCupertinoBackButton(BuildContext context) {
+  return SizedBox(
+    width: 52,
+    height: 48,
+    child: CupertinoNavigationBarBackButton(
+      key: const ValueKey('channel-cupertino-back'),
+      color: context.colors.primary,
+      previousPageTitle: '',
+      onPressed: () => Navigator.of(context).maybePop(),
+    ),
+  );
+}
+
 bool _showsMembersAction(Channel channel) {
   if (!channel.isDm) return true;
   final participants = channel.participantPubkeys

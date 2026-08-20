@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection, SemanticsAction;
 import 'package:flutter/services.dart';
@@ -5195,50 +5196,58 @@ void main() {
   });
 
   group('App bar', () {
-    testWidgets('uses native back placement with clear channel icon spacing', (
-      tester,
-    ) async {
-      final message = _textMsg(
-        id: 'avatar-alignment',
-        pubkey: 'alice',
-        content: 'Hello',
-        createdAt: 1000,
-      );
+    testWidgets(
+      'uses a Cupertino back button with clear channel icon spacing',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
 
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [message],
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => ChannelDetailPage(channel: _testChannel),
+        final message = _textMsg(
+          id: 'avatar-alignment',
+          pubkey: 'alice',
+          content: 'Hello',
+          createdAt: 1000,
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [message],
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            },
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => ChannelDetailPage(channel: _testChannel),
+                    ),
                   ),
+                  child: const Text('Open channel'),
                 ),
-                child: const Text('Open channel'),
               ),
             ),
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
+        );
+        await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Open channel'));
-      await tester.pumpAndSettle();
+        await tester.tap(find.text('Open channel'));
+        await tester.pumpAndSettle();
 
-      final backButtonRect = tester.getRect(find.byTooltip('Back'));
-      final channelIconRect = tester.getRect(
-        find.byKey(const ValueKey('channel-header-avatar')),
-      );
-      expect(
-        channelIconRect.left - backButtonRect.right,
-        moreOrLessEquals(Grid.xs),
-      );
-    });
+        expect(find.byType(CupertinoNavigationBarBackButton), findsOneWidget);
+        final backButtonRect = tester.getRect(
+          find.byKey(const ValueKey('channel-cupertino-back')),
+        );
+        final channelIconRect = tester.getRect(
+          find.byKey(const ValueKey('channel-header-avatar')),
+        );
+        expect(
+          channelIconRect.left - backButtonRect.right,
+          moreOrLessEquals(Grid.xs),
+        );
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
 
     testWidgets('shows a tappable channel name and collective member count', (
       tester,
