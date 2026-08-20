@@ -169,7 +169,9 @@ time.
 - **Client peer:** Serialize the exact canonical ASCII field value.
 
 No authorization decision, target, resource, capability, or effect selector
-derives from any request component outside the protected pre-MAC components;
+derives from any request component outside the protected pre-MAC components,
+except the independent NIP-98 proof conveyed in the `Authorization` field,
+whose integrity is protected by its own signed event rather than by this MAC;
 body interpretation follows the server-resolved body semantics, never
 unprotected transport metadata such as `Content-Type` or `Content-Encoding`.
 
