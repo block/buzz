@@ -51,10 +51,25 @@ class RelayConfig {
     return scheme == null ? _baseUrl : uri.replace(scheme: scheme).toString();
   }
 
-  /// Derive the websocket URL from the HTTP base URL.
-  String get wsUrl {
+  /// Derive the HTTP URL while preserving the relay's TLS posture.
+  String get httpUrl => _urlForTransport(webSocket: false);
+
+  /// Derive the WebSocket URL while preserving the relay's TLS posture.
+  String get wsUrl => _urlForTransport(webSocket: true);
+
+  String _urlForTransport({required bool webSocket}) {
     final uri = Uri.parse(baseUrl);
-    final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
+    final secure = switch (uri.scheme) {
+      'https' || 'wss' => true,
+      'http' || 'ws' => false,
+      _ => throw FormatException('Unsupported relay URL scheme: ${uri.scheme}'),
+    };
+    final scheme = switch ((webSocket, secure)) {
+      (true, true) => 'wss',
+      (true, false) => 'ws',
+      (false, true) => 'https',
+      (false, false) => 'http',
+    };
     return uri.replace(scheme: scheme).toString();
   }
 }
@@ -120,7 +135,7 @@ final myPubkeyProvider = Provider<String?>((ref) {
 /// through the relay WebSocket session.
 final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final client = RelayClient(baseUrl: config.baseUrl);
+  final client = RelayClient(baseUrl: config.httpUrl);
   ref.onDispose(client.dispose);
   return client;
 });

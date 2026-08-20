@@ -873,9 +873,7 @@ class PairingNotifier extends Notifier<PairingState> {
     if (nsec == null || nsec.isEmpty) {
       throw const FormatException('Pairing payload missing nsec');
     }
-    final uri = Uri.parse(relayUrl);
-    final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
-    final wsUrl = uri.replace(scheme: scheme).toString();
+    final wsUrl = RelayConfig(baseUrl: relayUrl).wsUrl;
 
     final socket = RelaySocket(
       wsUrl: wsUrl,
