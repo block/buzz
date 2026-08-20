@@ -76,6 +76,40 @@ import {
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
+/**
+ * Await `promise` but reject with `timeoutMessage` once `deadlineAt` passes.
+ * The underlying promise is not cancelled; a late rejection is swallowed so an
+ * abandoned connect/gate wait cannot surface as an unhandled rejection.
+ */
+async function raceWithDeadline<T>(
+  promise: Promise<T>,
+  deadlineAt: number,
+  timeoutMessage: string,
+): Promise<T> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    promise.catch(() => {});
+    throw new Error(timeoutMessage);
+  }
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = window.setTimeout(
+          () => reject(new Error(timeoutMessage)),
+          remainingMs,
+        );
+      }),
+    ]);
+  } catch (error) {
+    promise.catch(() => {});
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export class RelayClient {
   private wsId: number | null = null;
   private relayUrl: string | null = null;
@@ -254,8 +288,7 @@ export class RelayClient {
     mentionPubkeys: string[] = [],
     extraTags: string[][] = [],
   ) {
-    await this.ensureConnected();
-
+    // Connection is established inside publishEvent, bounded by its deadline.
     const tags: string[][] = [["h", channelId]];
     for (const pubkey of mentionPubkeys) {
       tags.push(["p", pubkey]);
@@ -278,8 +311,6 @@ export class RelayClient {
   }
 
   async sendPresence(status: PresenceStatus) {
-    await this.ensureConnected();
-
     const event = await signRelayEvent({
       kind: 20001,
       content: status,
@@ -377,7 +408,6 @@ export class RelayClient {
   }
 
   async publishUserStatus(text: string, emoji: string): Promise<void> {
-    await this.ensureConnected();
     const tags: string[][] = [["d", "general"]];
     if (emoji) tags.push(["emoji", emoji]);
     const event = await signRelayEvent({
@@ -709,14 +739,26 @@ export class RelayClient {
     timeoutMessage: string,
     sendErrorMessage: string,
   ) {
-    // Await the gate before sending EVENT; op timeout starts after the wait.
-    await waitForRateLimit();
+    // One deadline covers the whole publish: the rate-limit gate, any in-flight
+    // reconnect (which resolves only after subscription replay), and the OK
+    // round trip. Arming the timer only after those waits left sends pending
+    // unbounded — visible as messages stuck in "Sending…" for minutes.
+    const deadlineAt = Date.now() + PUBLISH_TIMEOUT_MS;
+    await raceWithDeadline(waitForRateLimit(), deadlineAt, timeoutMessage);
+    await raceWithDeadline(
+      this.ensureConnected(),
+      deadlineAt,
+      timeoutMessage,
+    );
 
     return new Promise<RelayEvent>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        this.pendingEvents.delete(event.id);
-        reject(new Error(timeoutMessage));
-      }, PUBLISH_TIMEOUT_MS);
+      const timeout = window.setTimeout(
+        () => {
+          this.pendingEvents.delete(event.id);
+          reject(new Error(timeoutMessage));
+        },
+        Math.max(0, deadlineAt - Date.now()),
+      );
 
       this.pendingEvents.set(event.id, {
         event,
@@ -924,6 +966,11 @@ export class RelayClient {
     if (success) {
       pendingEvent.resolve(pendingEvent.event);
     } else {
+      // The relay signals admission rejections as OK false with a
+      // `rate-limited:` reason — activate the gate just like a NOTICE.
+      if (message.startsWith("rate-limited:")) {
+        activateRateLimit(parseRateLimitHint(message));
+      }
       pendingEvent.reject(new Error(message || "Relay rejected the event."));
     }
   }
