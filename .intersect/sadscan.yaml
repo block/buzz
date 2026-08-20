@@ -2,3 +2,6 @@
 exclude_rules_for_files:
   sq.pii.cc.visa:
     - Cargo.lock
+  # Vector path coordinates in the reviewed Buzz icon are geometry, not Canadian SIN data.
+  sq.pii.sin.ca:
+    - buzz-foreground.svg
