@@ -35,6 +35,22 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+/// Smallest meaningful process TTL. Below this the harness would routinely be
+/// killed mid-turn, which presents as a flaky agent rather than as the
+/// misconfiguration it is.
+pub(crate) const MIN_TTL_SECS: u64 = 60;
+
+/// Reject a TTL that is non-zero but too short to complete useful work.
+/// 0 disables the TTL entirely (the default — unchanged legacy behaviour).
+pub(crate) fn validate_ttl(secs: u64) -> Result<(), ConfigError> {
+    if secs > 0 && secs < MIN_TTL_SECS {
+        return Err(ConfigError::ConfigFile(format!(
+            "ttl must be 0 (disabled) or ≥{MIN_TTL_SECS} seconds"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -308,6 +324,20 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_TURN_LIVENESS_SECS", default_value_t = 10)]
     pub turn_liveness_secs: u64,
 
+    /// Total process lifetime in seconds. After this much wall-clock time the
+    /// harness shuts down gracefully, exactly as if it had received SIGTERM or
+    /// an owner `!shutdown`. 0 = disabled (run forever).
+    ///
+    /// This is a *process* lifetime, not a turn timeout. `--idle-timeout`
+    /// bounds a single silent turn and `--max-turn-duration` bounds one turn's
+    /// wall-clock; neither can stop a harness that keeps getting work. A
+    /// self-prompting `--heartbeat-interval` generates that work forever, so an
+    /// ephemeral harness nobody is talking to still bills a model call every
+    /// heartbeat until something kills it. Set a TTL on any short-lived or
+    /// scripted harness so it cannot outlive the job that spawned it.
+    #[arg(long, env = "BUZZ_ACP_TTL", default_value_t = 0)]
+    pub ttl: u64,
+
     /// Heartbeat prompt text. Conflicts with --heartbeat-prompt-file.
     #[arg(
         long,
@@ -529,6 +559,12 @@ pub struct Config {
     /// `heartbeat_interval_secs` (agent self-prompting) — this is the desktop
     /// crash-backstop signal.
     pub turn_liveness_secs: u64,
+    /// Total process lifetime in seconds. 0 = disabled (run forever).
+    ///
+    /// Bounds the whole harness, not a turn: on expiry the run loop takes the
+    /// normal graceful-shutdown path. Set this on ephemeral/scripted harnesses
+    /// so they cannot outlive the job that spawned them.
+    pub ttl_secs: u64,
     pub heartbeat_prompt: Option<String>,
     pub system_prompt: Option<String>,
     /// Team-owned instructions layered separately from the agent system prompt.
@@ -893,6 +929,8 @@ impl Config {
             ));
         }
 
+        validate_ttl(args.ttl)?;
+
         if args.turn_liveness_secs > 0 && args.turn_liveness_secs < 5 {
             return Err(ConfigError::ConfigFile(
                 "turn liveness interval must be 0 (disabled) or ≥5 seconds".into(),
@@ -1102,6 +1140,7 @@ impl Config {
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
+            ttl_secs: args.ttl,
             heartbeat_prompt,
             system_prompt,
             team_instructions: args
@@ -1511,6 +1550,7 @@ mod tests {
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
+            ttl_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             agent_owner: None,
@@ -2225,6 +2265,32 @@ channels = "ALL"
             "120",
         ]);
         assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
+    fn ttl_defaults_disabled_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.ttl, 0, "TTL must stay opt-in");
+
+        let configured = CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--ttl", "3600"]);
+        assert_eq!(configured.ttl, 3600);
+    }
+
+    #[test]
+    fn ttl_zero_is_allowed_and_means_disabled() {
+        assert!(validate_ttl(0).is_ok());
+    }
+
+    #[test]
+    fn ttl_at_minimum_is_allowed() {
+        assert!(validate_ttl(MIN_TTL_SECS).is_ok());
+    }
+
+    #[test]
+    fn ttl_below_minimum_is_rejected() {
+        let err = validate_ttl(MIN_TTL_SECS - 1).unwrap_err();
+        assert!(err.to_string().contains("ttl must be 0"));
     }
 
     #[test]
