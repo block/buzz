@@ -392,6 +392,22 @@ struct NativeEmojiSectionOffsetsKey: PreferenceKey {
   }
 }
 
+/// Keeps scroll-driven category selection out of the picker view's own state.
+/// The category buttons observe this object directly, so updating the rail does
+/// not invalidate and rebuild the scroll container underneath an active drag.
+final class NativeEmojiCategorySelection: ObservableObject {
+  @Published private(set) var selectedSectionID: String?
+
+  init(initialSectionID: String?) {
+    selectedSectionID = initialSectionID
+  }
+
+  func select(_ sectionID: String?) {
+    guard sectionID != selectedSectionID else { return }
+    selectedSectionID = sectionID
+  }
+}
+
 /// Pure selection logic: the highlighted section is the last one whose header
 /// has scrolled to or above the top of the viewport. Extracted so the
 /// scroll-tracking behaviour can be unit-tested without a live scroll view.
@@ -401,7 +417,8 @@ enum NativeEmojiCategoryTracker {
     offsets: [String: CGFloat],
     viewportTop: CGFloat,
     viewportBottom: CGFloat? = nil,
-    contentBottom: CGFloat? = nil
+    contentBottom: CGFloat? = nil,
+    currentSelection: String? = nil
   ) -> String? {
     // At the clamped bottom of an overflowing list, a final section shorter
     // than the viewport can never scroll its header to the top, so the
@@ -432,6 +449,44 @@ enum NativeEmojiCategoryTracker {
         break
       }
     }
-    return selected ?? order.first
+
+    let candidate = selected ?? currentSelection ?? order.first
+    guard
+      let candidate,
+      let currentSelection,
+      let candidateIndex = order.firstIndex(of: candidate),
+      let currentIndex = order.firstIndex(of: currentSelection),
+      candidateIndex < currentIndex
+    else {
+      return candidate
+    }
+
+    // Pinned headers can briefly report competing or incomplete positions as
+    // one section pushes another off the top. Once the next section is active,
+    // retain it through that small boundary jitter. A real upward scroll moves
+    // its header clearly back into the viewport and then releases the latch.
+    guard let currentTop = offsets[currentSelection] else {
+      // A LazyVStack can discard the old pinned header after a fast upward
+      // fling. Once an earlier header is a valid candidate, absence of the old
+      // header is evidence to release the latch rather than retain it forever.
+      return candidate
+    }
+    if currentTop <= viewportTop + 8 {
+      return currentSelection
+    }
+
+    // The final, short section is selected from the content boundary rather
+    // than its header. Keep that bottom selection stable until the content end
+    // has visibly moved away from the viewport edge.
+    if currentSelection == order.last {
+      guard let viewportBottom, let contentBottom else {
+        return currentSelection
+      }
+      if contentBottom <= viewportBottom + 8 {
+        return currentSelection
+      }
+    }
+
+    return candidate
   }
 }

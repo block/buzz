@@ -10,7 +10,10 @@ import type {
   ProjectPullRequest,
   ProjectRepoContributor,
   ProjectRepoSnapshot,
+  Repository,
 } from "@/features/projects/hooks";
+import { selectionItemFromCommit } from "@/features/projects/lib/projectSelection";
+import { commitShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoCommit } from "@/shared/api/types";
 import { truncatePubkey } from "@/shared/lib/pubkey";
@@ -36,6 +39,22 @@ import { ProjectWorkItemRow } from "./ProjectWorkItemRow";
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function commitSelectionItem(
+  commit: ProjectRepoCommit,
+  repository: Repository,
+  projectId: string,
+  author?: string | null,
+) {
+  return selectionItemFromCommit({
+    author,
+    channelId: repository.channelId,
+    commitHash: commit.hash,
+    projectId,
+    shareLink: commitShareLink(repository, commit.hash),
+    title: commit.subject,
+  });
 }
 
 export function ContributorsPanel({
@@ -222,6 +241,8 @@ export function ActivityPanel({
   error,
   onSelectCommit,
   profiles,
+  project,
+  projectId,
   pullRequests,
   repoContributors,
   viewerGitIdentity,
@@ -232,6 +253,8 @@ export function ActivityPanel({
   error: unknown;
   onSelectCommit?: (commit: ProjectRepoCommit) => void;
   profiles?: UserProfileLookup;
+  project: Repository;
+  projectId: string;
   pullRequests?: ProjectPullRequest[];
   repoContributors: ProjectRepoContributor[];
   viewerGitIdentity?: ViewerGitIdentity | null;
@@ -240,6 +263,20 @@ export function ActivityPanel({
   const commitAuthorPubkeys = commitAuthorPubkeysFromPullRequests(
     pullRequests ?? [],
   );
+  const rangeItems = commits.map((commit) => {
+    const matchedProfile = profileForCommit(
+      commit,
+      profiles,
+      commitAuthorPubkeys,
+      viewerGitIdentity,
+    );
+    return commitSelectionItem(
+      commit,
+      project,
+      projectId,
+      matchedProfile?.pubkey,
+    );
+  });
 
   if (isLoading) {
     return <BuzzLoadingState label="Loading activity" />;
@@ -298,6 +335,15 @@ export function ActivityPanel({
                 ) : undefined
               }
               onOpen={onSelectCommit ? () => onSelectCommit(commit) : undefined}
+              selection={{
+                item: commitSelectionItem(
+                  commit,
+                  project,
+                  projectId,
+                  matchedProfile?.pubkey,
+                ),
+                rangeItems,
+              }}
               statusIcon={
                 <GitCommitHorizontal className="h-3.5 w-3.5 text-muted-foreground/70" />
               }
@@ -328,11 +374,11 @@ export function ActivityPanel({
                     />
                   </span>
                   <CopyCommitHashButton
-                    className="h-5 w-5 shrink-0 text-muted-foreground/70"
+                    className="h-5 w-5 shrink-0 text-muted-foreground/60"
                     hash={commit.hash}
                   />
                   <span
-                    className="hidden w-20 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground/70 sm:block"
+                    className="hidden w-20 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground/55 sm:block"
                     data-testid="project-commit-row-date"
                     title={new Date(commit.timestamp * 1_000).toLocaleString()}
                   >

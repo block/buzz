@@ -93,6 +93,17 @@ class BuzzCli:
             "member",
         )
 
+    def profiles(self, pubkeys: list[str]) -> list[dict[str, Any]]:
+        """Return the profiles currently published for the given pubkeys."""
+        args = ["users", "get"]
+        for pubkey in pubkeys:
+            args.extend(("--pubkey", pubkey))
+        response = self.run(*args)
+        return response if isinstance(response, list) else []
+
+    def set_profile(self, name: str) -> None:
+        self.run("users", "set-profile", "--name", name)
+
     def archive_channel(self, channel_id: str) -> None:
         self.run("channels", "archive", "--channel", channel_id)
 

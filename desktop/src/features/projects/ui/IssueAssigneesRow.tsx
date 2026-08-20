@@ -1,4 +1,4 @@
-import { Search, X } from "lucide-react";
+import { Check, Search, UserPlus, Users, X } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -12,6 +12,7 @@ import type { ProjectIssue } from "@/features/projects/projectIssues.mjs";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -25,6 +26,7 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { PROJECT_CONTEXT_ACTION_BUTTON_CLASS } from "./projectContextActionStyles";
 
 function profileForPubkey(pubkey: string, profiles?: UserProfileLookup) {
   return profiles?.[normalizePubkey(pubkey)] ?? null;
@@ -92,17 +94,25 @@ export function IssueAssigneeFacepile({
  */
 export function IssueAssigneesRow({
   canAssignOthers,
+  contextActions = false,
   issue,
   profiles,
   project,
   signAsManagedOwner,
+  showAssignees = true,
+  showSelfAssignmentState = false,
+  testIdPrefix = "project-issue",
   viewerPubkey,
 }: {
   canAssignOthers: boolean;
+  contextActions?: boolean;
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
   signAsManagedOwner: boolean;
+  showAssignees?: boolean;
+  showSelfAssignmentState?: boolean;
+  testIdPrefix?: string;
   viewerPubkey: string | null;
 }) {
   const [pickerOpen, setPickerOpen] = React.useState(false);
@@ -194,16 +204,24 @@ export function IssueAssigneesRow({
     if (!pickerOpen) setAssigneeQuery("");
   }, [pickerOpen]);
 
-  const canSelfAssign =
-    viewer !== null && !canAssignOthers && !currentAssignees.has(viewer);
+  const canSelfAssign = viewer !== null && !currentAssignees.has(viewer);
+  const isSelfAssigned = viewer !== null && currentAssignees.has(viewer);
 
   if (issue.assignees.length === 0 && !canAssignOthers && !canSelfAssign) {
     return null;
   }
+  const displayedAssignees = showAssignees ? issue.assignees : [];
 
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-      {issue.assignees.map((pubkey) => {
+    <div
+      className={cn(
+        "min-w-0 text-muted-foreground",
+        contextActions
+          ? "grid gap-0.5"
+          : "flex flex-wrap items-center gap-1.5 text-xs",
+      )}
+    >
+      {displayedAssignees.map((pubkey) => {
         const profile = profileForPubkey(pubkey, profiles);
         const label = labelForPubkey(pubkey, profiles);
         const canUnassign =
@@ -224,7 +242,7 @@ export function IssueAssigneesRow({
                 <button
                   aria-label={`Unassign ${label}`}
                   className="group relative inline-flex rounded-full"
-                  data-testid={`project-issue-unassign-${normalizePubkey(pubkey)}`}
+                  data-testid={`${testIdPrefix}-unassign-${normalizePubkey(pubkey)}`}
                   disabled={unassignMutation.isPending}
                   onClick={() => {
                     void handleUnassign(pubkey, label);
@@ -248,8 +266,11 @@ export function IssueAssigneesRow({
       })}
       {canSelfAssign && viewer ? (
         <Button
-          className="h-5 px-1 text-xs text-muted-foreground hover:text-foreground"
-          data-testid="project-issue-self-assign"
+          className={cn(
+            "h-5 px-1 text-xs text-muted-foreground hover:text-foreground",
+            contextActions && PROJECT_CONTEXT_ACTION_BUTTON_CLASS,
+          )}
+          data-testid={`${testIdPrefix}-self-assign`}
           disabled={assignMutation.isPending || unassignMutation.isPending}
           onClick={() => {
             void handleAssign(viewer, labelForPubkey(viewer, profiles));
@@ -258,20 +279,40 @@ export function IssueAssigneesRow({
           type="button"
           variant="ghost"
         >
+          {contextActions ? <UserPlus /> : null}
           Assign to me
+        </Button>
+      ) : null}
+      {showSelfAssignmentState && isSelfAssigned ? (
+        <Button
+          className={cn(
+            "h-5 gap-1 px-1 text-xs text-muted-foreground disabled:opacity-100",
+            contextActions && PROJECT_CONTEXT_ACTION_BUTTON_CLASS,
+          )}
+          disabled
+          size="xs"
+          type="button"
+          variant="ghost"
+        >
+          <Check className="h-3 w-3" />
+          Assigned to me
         </Button>
       ) : null}
       {canAssignOthers ? (
         <Dialog onOpenChange={setPickerOpen} open={pickerOpen}>
           <DialogTrigger asChild>
             <Button
-              className="h-5 px-1 text-xs text-muted-foreground hover:text-foreground"
-              data-testid="project-issue-assign"
+              className={cn(
+                "h-5 px-1 text-xs text-muted-foreground hover:text-foreground",
+                contextActions && PROJECT_CONTEXT_ACTION_BUTTON_CLASS,
+              )}
+              data-testid={`${testIdPrefix}-assign`}
               disabled={assignMutation.isPending || unassignMutation.isPending}
               size="xs"
               type="button"
               variant="ghost"
             >
+              {contextActions ? <Users /> : null}
               Assign
             </Button>
           </DialogTrigger>
