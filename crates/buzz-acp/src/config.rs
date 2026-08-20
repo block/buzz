@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use clap::ValueEnum;
 use nostr::Keys;
+use nostr::ToBech32;
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -756,6 +757,31 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
     }
 }
 
+/// Buzz delivery credentials for Hermes agent subprocesses.
+///
+/// Hermes executes the Buzz CLI inside the managed ACP session process, not only
+/// through session MCP servers. Inject relay identity into the agent env so
+/// managed Hermes sessions can authenticate delivery without manual setup.
+pub(crate) fn hermes_buzz_delivery_env_vars(
+    agent_command: &str,
+    keys: &nostr::Keys,
+    relay_url: &str,
+) -> Vec<(String, String)> {
+    match normalize_agent_command_identity(agent_command).as_str() {
+        "hermes" | "hermes-agent" | "hermes-acp" => {
+            let private_key = keys
+                .secret_key()
+                .to_bech32()
+                .expect("agent secret key bech32 encoding should never fail");
+            vec![
+                ("BUZZ_PRIVATE_KEY".into(), private_key),
+                ("BUZZ_RELAY_URL".into(), relay_url.to_string()),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
 /// network access in Codex's macOS Seatbelt sandbox.
 ///
@@ -1088,6 +1114,11 @@ impl Config {
             } else {
                 false
             };
+        persona_env_vars.extend(hermes_buzz_delivery_env_vars(
+            &agent_command,
+            &keys,
+            &args.relay_url,
+        ));
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
@@ -1697,6 +1728,26 @@ mod tests {
                 "non-Hermes command must have no env defaults: {command}"
             );
         }
+    }
+
+    #[test]
+    fn hermes_buzz_delivery_env_vars_injects_relay_credentials() {
+        let keys = nostr::Keys::generate();
+        let relay_url = "ws://localhost:3000";
+        let vars = hermes_buzz_delivery_env_vars("hermes-acp", &keys, relay_url);
+        assert_eq!(vars.len(), 2);
+        let map: std::collections::HashMap<_, _> = vars.into_iter().collect();
+        assert_eq!(
+            map.get("BUZZ_RELAY_URL").map(String::as_str),
+            Some(relay_url)
+        );
+        assert!(map.contains_key("BUZZ_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn hermes_buzz_delivery_env_vars_noop_for_other_runtimes() {
+        let keys = nostr::Keys::generate();
+        assert!(hermes_buzz_delivery_env_vars("goose", &keys, "ws://localhost:3000").is_empty());
     }
 
     #[test]
