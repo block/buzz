@@ -77,38 +77,42 @@ class _ChannelAppBarTitle extends ConsumerWidget {
               ),
               const SizedBox(width: Grid.xxs),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: Text(
-                            channel.name,
-                            key: const ValueKey('channel-header-name'),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.titleSmall,
+                child: SizedBox(
+                  key: const ValueKey('channel-header-text-stack'),
+                  height: _channelHeaderAvatarSize,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              channel.name,
+                              key: const ValueKey('channel-header-name'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: context.textTheme.titleSmall,
+                            ),
                           ),
-                        ),
-                        if (channel.isEphemeral) ...[
-                          const SizedBox(width: Grid.quarter),
-                          _HeaderEphemeralBadge(channel: channel),
+                          if (channel.isEphemeral) ...[
+                            const SizedBox(width: Grid.quarter),
+                            _HeaderEphemeralBadge(channel: channel),
+                          ],
                         ],
-                      ],
-                    ),
-                    Text(
-                      memberLabel,
-                      key: const ValueKey('channel-header-member-count'),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.textTheme.bodySmall?.copyWith(
-                        color: context.colors.primary.withValues(alpha: 0.8),
                       ),
-                    ),
-                  ],
+                      Text(
+                        memberLabel,
+                        key: const ValueKey('channel-header-member-count'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.textTheme.bodySmall?.copyWith(
+                          color: context.colors.primary.withValues(alpha: 0.65),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],

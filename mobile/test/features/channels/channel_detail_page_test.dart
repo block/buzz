@@ -5221,6 +5221,17 @@ void main() {
         tester.getSize(find.byKey(const ValueKey('channel-header-avatar'))),
         const Size.square(40),
       );
+      final channelHeaderAvatarRect = tester.getRect(
+        find.byKey(const ValueKey('channel-header-avatar')),
+      );
+      final channelHeaderTextStackRect = tester.getRect(
+        find.byKey(const ValueKey('channel-header-text-stack')),
+      );
+      expect(channelHeaderTextStackRect.height, 40);
+      expect(
+        channelHeaderTextStackRect.center.dy,
+        moreOrLessEquals(channelHeaderAvatarRect.center.dy),
+      );
       expect(
         tester
             .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
@@ -5262,7 +5273,7 @@ void main() {
             )
             .style
             ?.color,
-        AppTheme.light().colorScheme.primary.withValues(alpha: 0.8),
+        AppTheme.light().colorScheme.primary.withValues(alpha: 0.65),
       );
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Channel actions'), findsNothing);
