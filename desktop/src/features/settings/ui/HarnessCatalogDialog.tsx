@@ -165,7 +165,7 @@ export function HarnessCatalogDialog({
                     cold/empty/filter chain so it stays visible in every
                     non-cold state — including a cached-empty catalog and a
                     search that filters every row away, where the branches
-                    below render only "No runtimes match". `isRefreshing` and
+                    below render only the empty-state copy. `isRefreshing` and
                     `isWarmError` are false during cold load/error (data is
                     undefined), so this renders nothing there. */}
                 {isRefreshing ? (
@@ -211,7 +211,7 @@ export function HarnessCatalogDialog({
                   </div>
                 ) : filtered.length === 0 ? (
                   <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
-                    No runtimes match.
+                    {isSearching ? "No runtimes match." : "No runtimes found."}
                   </p>
                 ) : (
                   <>

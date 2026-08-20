@@ -483,6 +483,18 @@ describe("HarnessCatalogDialog forced-probe rendering — P2 regression (mounted
       "warm-error status must render over a cached empty catalog, not be hidden by 'No runtimes match'",
     );
 
+    const emptyCatalogText = document.body.querySelector(
+      '[data-testid="harness-catalog-list"]',
+    )?.textContent;
+    assert.ok(
+      emptyCatalogText?.includes("No runtimes found."),
+      "an empty catalog with no active search must show the truthful empty-catalog copy",
+    );
+    assert.ok(
+      !emptyCatalogText?.includes("No runtimes match."),
+      "the search-specific copy must not appear when no search is active",
+    );
+
     await act(async () => {
       root.unmount();
     });
