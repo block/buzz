@@ -132,18 +132,24 @@ function maskMarkdownCode(text: string): string {
  * Check whether `text` contains an @mention of `name`.
  *
  * Matches `@Name` preceded by start-of-string, whitespace, an opening
- * parenthesis (for team expansions), markdown
+ * bracket of any kind — `(`, `[`, `{`, which is exactly what
+ * `detectPrefixQuery` lets open an autocomplete query — markdown
  * bold/italic markers (`*`, `**`, `***`, `_`, `__`, `___`), or spoiler
  * delimiters (`||`). This handles the case where a mention is pasted from the
  * chat area and TipTap's Bold extension wraps it in bold marks (font-weight >=
  * 500 -> bold), plus messages whose visible mention text is spoilered.
+ *
+ * The mention must be followed by whitespace, closing punctuation, a spoiler
+ * delimiter, an apostrophe, or end-of-string. The apostrophe — straight and
+ * the curly U+2019 that macOS substitutes as you type — is what makes the
+ * possessive `@Alice's PR` a mention of Alice rather than of nobody.
  *
  * Exported separately so it can be unit-tested without importing React.
  */
 export function getMentionOffsets(text: string, name: string): number[] {
   const escaped = escapeRegExp(name);
   const pattern = new RegExp(
-    `(^|\\s|\\(|[*_]{1,3}|\\|\\|)(@${escaped})(?=\\|\\||[\\s,;.!?:)\\]}*_]|$)`,
+    `(^|\\s|[([{]|[*_]{1,3}|\\|\\|)(@${escaped})(?=\\|\\||[\\s,;.!?:)\\]}*_'\u2019]|$)`,
     "gi",
   );
   const maskedText = maskMarkdownCode(text);
