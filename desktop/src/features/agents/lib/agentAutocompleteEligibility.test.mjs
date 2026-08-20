@@ -201,7 +201,7 @@ test("shouldHideAgentFromMentions: hides non-member non-invocable agents", () =>
   );
 });
 
-test("shouldHideAgentFromMentions: hides member agents with an explicit not-invocable directory entry (Fizz)", () => {
+test("shouldHideAgentFromMentions: keeps active room members mentionable when directory policy is not invocable", () => {
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
@@ -210,7 +210,7 @@ test("shouldHideAgentFromMentions: hides member agents with an explicit not-invo
       mentionableAgentPubkeys: new Set(),
       directoryAgentPubkeys: new Set([PUB_A]),
     }),
-    true,
+    false,
   );
 });
 
@@ -227,19 +227,19 @@ test("shouldHideAgentFromMentions: shows member agents with unknown invocability
   );
 });
 
-test("shouldHideAgentFromMentions: normalizes the pubkey before lookup", () => {
+test("shouldHideAgentFromMentions: normalizes invocable pubkeys before lookup", () => {
   const mixedCase = "Ab".repeat(32);
   const normalized = mixedCase.toLowerCase();
 
   assert.equal(
     shouldHideAgentFromMentions({
       isAgent: true,
-      isMember: true,
+      isMember: false,
       pubkey: mixedCase,
-      mentionableAgentPubkeys: new Set(),
-      directoryAgentPubkeys: new Set([normalized]),
+      mentionableAgentPubkeys: new Set([normalized]),
+      directoryAgentPubkeys: new Set(),
     }),
-    true,
+    false,
   );
 });
 
