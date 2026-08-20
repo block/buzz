@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:math' show max, min;
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/rendering.dart'
+    show PlatformViewHitTestBehavior, ScrollDirection;
+import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -265,7 +266,7 @@ class ChannelDetailPage extends HookConsumerWidget {
       context,
       isDm: resolvedChannel.isDm,
     );
-    final usesCupertinoBackButton =
+    final usesNativeIosGlassBackButton =
         Navigator.canPop(context) &&
         Theme.of(context).platform == TargetPlatform.iOS;
     final readTimestamp = _channelReadTimestamp(
@@ -325,8 +326,8 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
-        leading: usesCupertinoBackButton
-            ? _channelCupertinoBackButton(context)
+        leading: usesNativeIosGlassBackButton
+            ? const _ChannelIosGlassBackButton()
             : null,
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,

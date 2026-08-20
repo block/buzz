@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection, SemanticsAction;
 import 'package:flutter/services.dart';
@@ -5197,7 +5196,7 @@ void main() {
 
   group('App bar', () {
     testWidgets(
-      'uses a Cupertino back button with clear channel icon spacing',
+      'uses a native iOS glass back button with clear channel icon spacing',
       (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -5234,9 +5233,18 @@ void main() {
         await tester.tap(find.text('Open channel'));
         await tester.pumpAndSettle();
 
-        expect(find.byType(CupertinoNavigationBarBackButton), findsOneWidget);
+        final nativeViewFinder = find.descendant(
+          of: find.byKey(const ValueKey('channel-ios-glass-back')),
+          matching: find.byType(UiKitView),
+        );
+        final nativeView = tester.widget<UiKitView>(nativeViewFinder);
+        expect(nativeView.viewType, 'buzz/channel_back_glass');
+        expect(
+          (nativeView.creationParams as Map<String, Object>)['brightness'],
+          'light',
+        );
         final backButtonRect = tester.getRect(
-          find.byKey(const ValueKey('channel-cupertino-back')),
+          find.byKey(const ValueKey('channel-ios-glass-back')),
         );
         final channelIconRect = tester.getRect(
           find.byKey(const ValueKey('channel-header-avatar')),

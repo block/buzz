@@ -4,17 +4,59 @@ const _dmHeaderAvatarSize = 32.0;
 const _channelHeaderAvatarSize = 40.0;
 const _dmPresenceDotRatio = 8 / 14;
 
-Widget _channelCupertinoBackButton(BuildContext context) {
-  return SizedBox(
-    width: 52,
-    height: 48,
-    child: CupertinoNavigationBarBackButton(
-      key: const ValueKey('channel-cupertino-back'),
-      color: context.colors.primary,
-      previousPageTitle: '',
-      onPressed: () => Navigator.of(context).maybePop(),
-    ),
-  );
+class _ChannelIosGlassBackButton extends HookWidget {
+  const _ChannelIosGlassBackButton();
+
+  static const _viewType = 'buzz/channel_back_glass';
+
+  @override
+  Widget build(BuildContext context) {
+    final nativeChannel = useState<MethodChannel?>(null);
+    final brightness = context.theme.brightness.name;
+    final primaryColor = context.colors.primary.toARGB32();
+
+    useEffect(() {
+      final channel = nativeChannel.value;
+      if (channel == null) return null;
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'pressed' && context.mounted) {
+          await Navigator.of(context).maybePop();
+        }
+      });
+      return () => channel.setMethodCallHandler(null);
+    }, [nativeChannel.value]);
+
+    useEffect(() {
+      final channel = nativeChannel.value;
+      if (channel != null) {
+        unawaited(
+          channel.invokeMethod<void>('setAppearance', <String, Object>{
+            'brightness': brightness,
+            'foregroundColor': primaryColor,
+          }),
+        );
+      }
+      return null;
+    }, [nativeChannel.value, brightness, primaryColor]);
+
+    return SizedBox(
+      key: const ValueKey('channel-ios-glass-back'),
+      width: 52,
+      height: 48,
+      child: UiKitView(
+        viewType: _viewType,
+        hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+        creationParams: <String, Object>{
+          'brightness': brightness,
+          'foregroundColor': primaryColor,
+        },
+        creationParamsCodec: const StandardMessageCodec(),
+        onPlatformViewCreated: (viewId) {
+          nativeChannel.value = MethodChannel('$_viewType/$viewId');
+        },
+      ),
+    );
+  }
 }
 
 bool _showsMembersAction(Channel channel) {

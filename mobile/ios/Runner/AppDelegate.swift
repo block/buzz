@@ -99,6 +99,15 @@ import UserNotifications
       )
     }
 
+    if let channelBackGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzChannelBackGlassButton"
+    ) {
+      channelBackGlassRegistrar.register(
+        ChannelBackGlassButtonFactory(messenger: messenger),
+        withId: "buzz/channel_back_glass"
+      )
+    }
+
     if let stickyDateGlassRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzStickyDateGlassHeader"
     ) {
