@@ -6146,9 +6146,25 @@ function buildLastMessages(
   return map;
 }
 
+/**
+ * Mirrors the real backend split: `get_channels` (member-only) drops
+ * non-member open channels, while `get_open_channel_directory` keeps the
+ * discovery superset. Filtering on `is_member` lets specs assert the poll no
+ * longer leaks the whole relay's open channels into the member list.
+ */
+function scopeChannelsForMembership<T extends { is_member: boolean }>(
+  channels: T[],
+  scope: "member-only" | "open-directory",
+): T[] {
+  return scope === "open-directory"
+    ? channels
+    : channels.filter((channel) => channel.is_member);
+}
+
 async function handleGetChannels(
   payload: unknown,
   config: E2eConfig | undefined,
+  scope: "member-only" | "open-directory" = "member-only",
 ) {
   const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
   if (channelsReadDelayMs > 0) {
@@ -6169,7 +6185,10 @@ async function handleGetChannels(
     // The hash is constant ("mock-hash") and full lists remain the default:
     // mock channel data mutates during tests while the hash does not. Focused
     // snapshot specs can opt into the not-modified branch explicitly.
-    const channels = listMockChannels(config);
+    const channels = scopeChannelsForMembership(
+      listMockChannels(config),
+      scope,
+    );
     const hash = "mock-hash";
     const knownHash = (payload as { knownHash?: unknown } | null)?.knownHash;
     const forcedNotModified =
@@ -6276,10 +6295,12 @@ async function handleGetChannels(
     })
     .filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id));
 
+  const scopedChannels = scopeChannelsForMembership(channels, scope);
+
   return {
     hash: "mock-hash",
-    channels,
-    last_messages: buildLastMessages(channels),
+    channels: scopedChannels,
+    last_messages: buildLastMessages(scopedChannels),
   };
 }
 
@@ -12601,6 +12622,16 @@ export function maybeInstallE2eTauriMocks() {
           });
         }
         return channels;
+      }
+      case "get_open_channel_directory": {
+        // The real command returns a bare Channel[] (the discovery superset),
+        // not the hash-wrapped payload `get_channels` uses.
+        const directory = await handleGetChannels(
+          payload,
+          activeConfig,
+          "open-directory",
+        );
+        return directory.channels ?? [];
       }
       case "get_feed":
         return handleGetFeed(

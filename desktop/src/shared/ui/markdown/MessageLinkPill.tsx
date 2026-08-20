@@ -1,11 +1,15 @@
 import * as React from "react";
 
+import {
+  isChannelReferenceOpenable,
+  useChannelReference,
+} from "@/features/channels/openChannelDirectory";
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
+import { getMessageLinkLabel } from "@/features/messages/lib/messageLinkLabel";
 import { cn } from "@/shared/lib/cn";
 
 import { BuzzLinkChip } from "./BuzzLinkChip";
 import type { MessageLinkPillProps } from "./types";
-import { getMessageLinkLabel } from "@/features/messages/lib/messageLinkLabel";
 
 const graphemeSegmenter =
   typeof Intl.Segmenter === "function"
@@ -38,18 +42,30 @@ function segmentLinkLabel(label: string): Array<{
   return segments;
 }
 
-export function MessageLinkPill({
-  channels,
+function ResolvedMessageLinkPill(props: MessageLinkPillProps) {
+  const channel = useChannelReference(props.link.channelId);
+  const openable = isChannelReferenceOpenable(channel);
+  return (
+    <MessageLinkPillContents
+      {...props}
+      channelLabel={openable ? channel.name : undefined}
+      openable={openable}
+    />
+  );
+}
+
+function MessageLinkPillContents({
   href,
   interactive,
   link,
   onOpenMessageLink,
   threadExcerpt,
   variant = "default",
-}: MessageLinkPillProps) {
+  channelLabel: resolvedChannelLabel,
+  openable = true,
+}: MessageLinkPillProps & { channelLabel?: string; openable?: boolean }) {
   const [isHovered, setIsHovered] = React.useState(false);
-  const channel = channels.find((c) => c.id === link.channelId);
-  const channelLabel = channel?.name ?? link.channelId.slice(0, 8);
+  const channelLabel = resolvedChannelLabel ?? link.channelId.slice(0, 8);
   const shortId = link.messageId.slice(0, 8);
   const isSentFromThread = variant === "sent-from-thread";
   const permalink = href ?? buildMessageLink(link);
@@ -65,11 +81,15 @@ export function MessageLinkPill({
         data-message-link=""
         href={permalink}
         icon="message"
-        aria-label={`Open message ${shortId} in channel ${channelLabel}`}
+        aria-label={
+          openable
+            ? `Open message ${shortId} in channel ${channelLabel}`
+            : `Message ${shortId} in channel ${channelLabel}`
+        }
         title={label}
-        interactive={interactive}
+        interactive={openable && interactive}
         onOpenLink={() => {
-          onOpenMessageLink(link);
+          if (openable) onOpenMessageLink(link);
         }}
       >
         {channelLabel} · {shortId}
@@ -77,7 +97,7 @@ export function MessageLinkPill({
     );
   }
 
-  if (!interactive) {
+  if (!interactive || !openable) {
     return (
       <span className="inline-block max-w-80 truncate" data-message-link="">
         {label}
@@ -98,9 +118,7 @@ export function MessageLinkPill({
       )}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      onClick={() => {
-        onOpenMessageLink(link);
-      }}
+      onClick={() => onOpenMessageLink(link)}
     >
       {segmentLinkLabel(label).map((segment) =>
         segment.isEmoji ? (
@@ -122,4 +140,18 @@ export function MessageLinkPill({
       )}
     </button>
   );
+}
+
+export function MessageLinkPill(props: MessageLinkPillProps) {
+  const knownChannel = props.channels?.find(
+    (channel) => channel.id === props.link.channelId,
+  );
+
+  if (knownChannel || !props.resolveChannelReference) {
+    return (
+      <MessageLinkPillContents {...props} channelLabel={knownChannel?.name} />
+    );
+  }
+
+  return <ResolvedMessageLinkPill {...props} />;
 }
