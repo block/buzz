@@ -6,6 +6,10 @@ import {
   useRemindersQuery,
 } from "@/features/reminders/hooks";
 import { dueSince } from "@/features/reminders/lib/reminderFilters";
+import {
+  hasNavigableTarget,
+  resolveReminderDestination,
+} from "@/features/reminders/lib/reminderNavigation";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
 import {
   requestDockBounce,
@@ -105,14 +109,43 @@ export function useReminderNotifications(
           )
         : `${due.length} reminders are due`;
 
-    void sendDesktopNotification({
-      title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
-      body,
-    }).then((didSend) => {
+    // A single due reminder carries its message target, so make the
+    // notification click-through to that message — the same landing as clicking
+    // the row in the inbox. Coalesced multi-reminder toasts have no single
+    // destination, so they omit the target and fall back to opening Home.
+    const singleTarget =
+      due.length === 1 && hasNavigableTarget(due[0].content.target)
+        ? due[0].content.target
+        : undefined;
+
+    void (async () => {
+      const destination = singleTarget
+        ? await resolveReminderDestination(singleTarget)
+        : null;
+
+      const didSend = await sendDesktopNotification({
+        title: formatNotificationTitle({
+          prefix: "Reminder due",
+          channelLabel,
+        }),
+        body,
+        target: destination
+          ? {
+              channelId: destination.channelId,
+              channelName: channelLabel,
+              content: singleTarget?.preview,
+              eventId: destination.messageId,
+              kind: null,
+              pubkey: singleTarget?.authorPubkey,
+              threadRootId: destination.threadRootId,
+            }
+          : undefined,
+      });
+
       if (!didSend) return;
       playNotificationSound(resolveSlotSound(current, "needs_action"));
       void requestDockBounce();
-    });
+    })();
   });
 
   React.useEffect(() => {
