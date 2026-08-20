@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { after, afterEach, before, test } from "node:test";
+import { registerHooks } from "node:module";
+import { after, before, test } from "node:test";
 
 import { JSDOM } from "jsdom";
 
@@ -8,6 +9,29 @@ import { projectDetailSelectionItem } from "../lib/projectDetailSelectionItem.ts
 import { reviewDiffWorkspaceBranch } from "../lib/projectReviewDisplay.ts";
 import { pullRequestsPanelKind } from "./PullRequestsPanelSurface.tsx";
 import { buildProjectDetailCrumbs } from "./useProjectDetailCrumbs.ts";
+
+// The real composer mounts TipTap and never releases jsdom handles. Stub it so
+// the production panel can prove selectedPullRequest wiring without hanging
+// the node:test process.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "@/features/forum/ui/ForumComposer") {
+      return { shortCircuit: true, url: "buzz-test-stub:ForumComposer" };
+    }
+    return nextResolve(specifier, context);
+  },
+  load(url, context, nextLoad) {
+    if (url === "buzz-test-stub:ForumComposer") {
+      return {
+        format: "module",
+        shortCircuit: true,
+        source:
+          "globalThis.__FORUM_COMPOSER_STUBBED__ = true;\nexport function ForumComposer() { return null; }\n",
+      };
+    }
+    return nextLoad(url, context);
+  },
+});
 
 const OWNER = "a".repeat(64);
 const REVIEW_A_ID = "b".repeat(64);
@@ -36,7 +60,7 @@ const reviewA = {
   author: OWNER,
   createdAt: 1_700_000_000,
   repoAddress: repository.repoAddress,
-  channelId: "forged-origin-channel",
+  channelId: null,
   originAgentName: null,
   labels: [],
   recipients: [],
@@ -58,6 +82,19 @@ const reviewA = {
 };
 
 const noop = () => {};
+
+function assertRetainedReviewDetail(screen) {
+  const detail = screen.getByTestId("project-pull-request-detail");
+  const title = detail.querySelector("h3");
+  assert.ok(title, "real PullRequestsPanel detail should render an h3 title");
+  assert.match(title.textContent, /Ship the retained review/);
+  assert.match(
+    detail.textContent,
+    /Keep this description visible while the list refetches/,
+  );
+  assert.equal(screen.queryByTestId("project-pull-requests-empty"), null);
+  assert.equal(screen.queryByText("No reviews yet."), null);
+}
 
 function productionConsumers({ activeRepoPullRequest, selectedPullRequest }) {
   const crumbs = buildProjectDetailCrumbs({
@@ -119,78 +156,198 @@ const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
 });
 
-before(() => {
-  Object.assign(globalThis, {
-    document: dom.window.document,
-    HTMLElement: dom.window.HTMLElement,
-    IS_REACT_ACT_ENVIRONMENT: true,
-    window: dom.window,
-  });
-  dom.window.matchMedia = () => ({
-    matches: false,
-    addEventListener() {},
-    removeEventListener() {},
-  });
-});
+class NoopObserver {
+  disconnect() {}
+  observe() {}
+  unobserve() {}
+}
 
-afterEach(async () => {
-  const { cleanup } = await import("@testing-library/react");
-  cleanup();
+Object.assign(globalThis, {
+  HTMLElement: dom.window.HTMLElement,
+  IS_REACT_ACT_ENVIRONMENT: true,
+  IntersectionObserver: NoopObserver,
+  MutationObserver: dom.window.MutationObserver,
+  ResizeObserver: NoopObserver,
+  document: dom.window.document,
+  localStorage: dom.window.localStorage,
+  self: dom.window,
+  window: dom.window,
 });
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: dom.window.navigator,
+  writable: true,
+});
+Object.defineProperty(dom.window.navigator, "mediaDevices", {
+  configurable: true,
+  value: {
+    addEventListener: () => {},
+    enumerateDevices: async () => [],
+    removeEventListener: () => {},
+  },
+});
+dom.window.matchMedia = () => ({
+  matches: false,
+  addEventListener() {},
+  removeEventListener() {},
+});
+dom.window.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+dom.window.cancelAnimationFrame = (id) => clearTimeout(id);
+globalThis.requestAnimationFrame = dom.window.requestAnimationFrame;
+globalThis.cancelAnimationFrame = dom.window.cancelAnimationFrame;
+const tauriInternals = {
+  invoke: async (cmd) => {
+    if (cmd === "get_identity") return { pubkey: OWNER };
+    if (cmd === "search_messages") return { found: 0, hits: [] };
+    if (cmd === "get_open_channel_directory") return [];
+    if (cmd === "get_channel_details") return null;
+    if (cmd === "list_channels") return [];
+    if (cmd === "get_users_batch") return { missing: [], profiles: {} };
+    if (cmd.startsWith("plugin:event|")) return 0;
+    throw new Error(`unmocked Tauri command: ${cmd}`);
+  },
+  transformCallback: () => 1,
+};
+globalThis.__TAURI_INTERNALS__ = tauriInternals;
+dom.window.__TAURI_INTERNALS__ = tauriInternals;
+globalThis.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+dom.window.__TAURI_EVENT_PLUGIN_INTERNALS__ =
+  globalThis.__TAURI_EVENT_PLUGIN_INTERNALS__;
 
 after(() => dom.window.close());
 
+let React;
+let act;
+let createRoot;
 let hookModule;
 let panelModule;
-let surfaceModule;
+let QueryClient;
+let QueryClientProvider;
+let CommunitiesProvider;
+let TooltipProvider;
+let createMemoryHistory;
+let createRootRoute;
+let createRoute;
+let createRouter;
+let RouterProvider;
+let channelsQueryKey;
 before(async () => {
+  ({ default: React, act } = await import("react"));
+  ({ createRoot } = await import("react-dom/client"));
   hookModule = await import("./useRetainedProjectGitViews.ts");
   panelModule = await import("./ProjectPullRequestsPanel.tsx");
-  surfaceModule = await import("./PullRequestsPanelSurface.tsx");
+  ({ QueryClient, QueryClientProvider } = await import(
+    "@tanstack/react-query"
+  ));
+  ({ CommunitiesProvider } = await import(
+    "@/features/communities/useCommunities.tsx"
+  ));
+  ({ TooltipProvider } = await import("@/shared/ui/tooltip"));
+  ({
+    createMemoryHistory,
+    createRootRoute,
+    createRoute,
+    createRouter,
+    RouterProvider,
+  } = await import("@tanstack/react-router"));
+  ({ channelsQueryKey } = await import("@/features/channels/hooks.ts"));
 });
 
 async function renderSelection(initialProps) {
-  const { renderHook } = await import("@testing-library/react");
-  return renderHook(
-    (props) => hookModule.useRetainedPullRequestSelection(props),
-    { initialProps },
-  );
+  let props = initialProps;
+  const result = { current: null };
+  function Probe() {
+    result.current = hookModule.useRetainedPullRequestSelection(props);
+    return null;
+  }
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(React.createElement(Probe));
+  });
+  return {
+    result,
+    async rerender(nextProps) {
+      props = nextProps;
+      await act(async () => {
+        root.render(React.createElement(Probe));
+      });
+    },
+    async unmount() {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
 }
 
-async function renderReviewsPanel({
-  isLoading,
-  pullRequests,
-  selectedPullRequest,
-}) {
-  const { createElement } = await import("react");
-  const { render } = await import("@testing-library/react");
+async function renderReviewsPanel(initialProps) {
+  let setPanelProps = noop;
   const { PullRequestsPanel } = panelModule;
-  const { PullRequestsPanelSurface } = surfaceModule;
-  const tree = !selectedPullRequest
-    ? createElement(PullRequestsPanel, {
-        error: null,
-        isLoading,
-        onSelectedPullRequestIdChange: noop,
-        project: repository,
-        pullRequests,
-        selectedPullRequest,
-      })
-    : createElement(PullRequestsPanelSurface, {
-        detail: createElement(
-          "div",
-          { "data-testid": "project-pull-request-detail" },
-          createElement("h3", null, selectedPullRequest.title),
-          createElement("p", null, selectedPullRequest.content),
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  client.setQueryData(["identity"], { pubkey: OWNER });
+  client.setQueryData(channelsQueryKey, []);
+  function Panel() {
+    const [props, setProps] = React.useState(initialProps);
+    setPanelProps = setProps;
+    return React.createElement(PullRequestsPanel, {
+      error: null,
+      isLoading: props.isLoading,
+      onSelectedPullRequestIdChange: noop,
+      project: repository,
+      pullRequests: props.pullRequests,
+      selectedPullRequest: props.selectedPullRequest,
+    });
+  }
+  const rootRoute = createRootRoute({ component: Panel });
+  const channelRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/channels/$channelId",
+    component: () => null,
+  });
+  const router = createRouter({
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+    routeTree: rootRoute.addChildren([channelRoute]),
+  });
+  await router.load();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const tree = () =>
+    React.createElement(
+      QueryClientProvider,
+      { client },
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(
+          CommunitiesProvider,
+          null,
+          React.createElement(RouterProvider, { router }),
         ),
-        error: null,
-        isLoading,
-        list: createElement("div", {
-          "data-testid": "project-pull-requests-list",
-        }),
-        pullRequests,
-        selectedPullRequest,
+      ),
+    );
+  await act(async () => {
+    root.render(tree());
+  });
+  return {
+    async rerender(nextProps) {
+      await act(async () => {
+        setPanelProps(nextProps);
       });
-  return render(tree);
+    },
+    async unmount() {
+      await act(async () => {
+        root.unmount();
+      });
+      client.clear();
+      container.remove();
+    },
+  };
 }
 
 test("selected review chrome and diff query stay aligned across fetch phases", async () => {
@@ -202,7 +359,11 @@ test("selected review chrome and diff query stay aligned across fetch phases", a
     repository,
     selectedPullRequestId: REVIEW_A_ID,
   };
-  const { rerender, result } = await renderSelection(populated);
+  const {
+    rerender,
+    result,
+    unmount: unmountSelection,
+  } = await renderSelection(populated);
 
   const populatedConsumers = panelConsumers({
     isLoading: false,
@@ -219,82 +380,89 @@ test("selected review chrome and diff query stay aligned across fetch phases", a
     diffWorkspaceBranch: "main",
     kind: "detail",
   });
-  let panel = await renderReviewsPanel({
+  const panel = await renderReviewsPanel({
     isLoading: false,
     pullRequests: populated.pullRequests,
     selectedPullRequest: result.current.selectedPullRequest,
   });
-  assert.match(
-    screen.getByRole("heading", { level: 3 }).textContent,
-    /Ship the retained review/,
-  );
-  assert.match(
-    screen.getByTestId("project-pull-request-detail").textContent,
-    /Keep this description visible while the list refetches/,
-  );
-  assert.equal(screen.queryByTestId("project-pull-requests-empty"), null);
+  try {
+    assert.equal(globalThis.__FORUM_COMPOSER_STUBBED__, true);
+    assertRetainedReviewDetail(screen);
 
-  rerender({
-    ...populated,
-    isFetching: true,
-    pullRequests: [],
-  });
-  const fetchingConsumers = panelConsumers({
-    isLoading: false,
-    pullRequests: [],
-    selectedPullRequest: result.current.selectedPullRequest,
-  });
-  assert.equal(result.current.selectedPullRequest, reviewA);
-  assert.equal(
-    result.current.selectedPullRequest,
-    result.current.activeRepoPullRequest,
-  );
-  assert.deepEqual(fetchingConsumers, populatedConsumers);
-  panel.unmount();
-  panel = await renderReviewsPanel({
-    isLoading: false,
-    pullRequests: [],
-    selectedPullRequest: result.current.selectedPullRequest,
-  });
-  assert.match(
-    screen.getByRole("heading", { level: 3 }).textContent,
-    /Ship the retained review/,
-  );
-  assert.match(
-    screen.getByTestId("project-pull-request-detail").textContent,
-    /Keep this description visible while the list refetches/,
-  );
-  assert.equal(screen.queryByText("No reviews yet."), null);
+    await rerender({
+      ...populated,
+      isFetching: true,
+      pullRequests: [],
+    });
+    const fetchingConsumers = panelConsumers({
+      isLoading: false,
+      pullRequests: [],
+      selectedPullRequest: result.current.selectedPullRequest,
+    });
+    assert.equal(result.current.selectedPullRequest, reviewA);
+    assert.equal(
+      result.current.selectedPullRequest,
+      result.current.activeRepoPullRequest,
+    );
+    assert.deepEqual(fetchingConsumers, populatedConsumers);
+    await panel.rerender({
+      isLoading: false,
+      pullRequests: [],
+      selectedPullRequest: result.current.selectedPullRequest,
+    });
+    assertRetainedReviewDetail(screen);
+    // Production wiring mutation: drop selectedPullRequest while the hook still
+    // retains review A. The pane must go empty — this is the gap the prior
+    // surface-only render could not catch.
+    await panel.rerender({
+      isLoading: false,
+      pullRequests: [],
+      selectedPullRequest: null,
+    });
+    assert.equal(
+      screen.getByTestId("project-pull-requests-empty").textContent,
+      "No reviews yet.",
+    );
+    assert.equal(screen.queryByTestId("project-pull-request-detail"), null);
+    await panel.rerender({
+      isLoading: false,
+      pullRequests: [],
+      selectedPullRequest: result.current.selectedPullRequest,
+    });
+    assertRetainedReviewDetail(screen);
 
-  rerender({
-    ...populated,
-    isFetching: false,
-    pullRequests: [],
-  });
-  const completedConsumers = panelConsumers({
-    isLoading: false,
-    pullRequests: [],
-    selectedPullRequest: result.current.selectedPullRequest,
-  });
-  assert.equal(result.current.selectedPullRequest, null);
-  assert.equal(result.current.activeRepoPullRequest, null);
-  assert.deepEqual(completedConsumers, {
-    agentReviewId: null,
-    crumbTitle: null,
-    contextId: null,
-    diffQueryId: null,
-    diffWorkspaceBranch: "feature-a",
-    kind: "empty",
-  });
-  panel.unmount();
-  await renderReviewsPanel({
-    isLoading: false,
-    pullRequests: [],
-    selectedPullRequest: result.current.selectedPullRequest,
-  });
-  assert.equal(
-    screen.getByTestId("project-pull-requests-empty").textContent,
-    "No reviews yet.",
-  );
-  assert.equal(screen.queryByTestId("project-pull-request-detail"), null);
+    await rerender({
+      ...populated,
+      isFetching: false,
+      pullRequests: [],
+    });
+    const completedConsumers = panelConsumers({
+      isLoading: false,
+      pullRequests: [],
+      selectedPullRequest: result.current.selectedPullRequest,
+    });
+    assert.equal(result.current.selectedPullRequest, null);
+    assert.equal(result.current.activeRepoPullRequest, null);
+    assert.deepEqual(completedConsumers, {
+      agentReviewId: null,
+      crumbTitle: null,
+      contextId: null,
+      diffQueryId: null,
+      diffWorkspaceBranch: "feature-a",
+      kind: "empty",
+    });
+    await panel.rerender({
+      isLoading: false,
+      pullRequests: [],
+      selectedPullRequest: result.current.selectedPullRequest,
+    });
+    assert.equal(
+      screen.getByTestId("project-pull-requests-empty").textContent,
+      "No reviews yet.",
+    );
+    assert.equal(screen.queryByTestId("project-pull-request-detail"), null);
+  } finally {
+    await panel.unmount();
+    await unmountSelection();
+  }
 });
