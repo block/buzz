@@ -5237,6 +5237,17 @@ void main() {
       );
       expect(
         tester
+            .widget<Icon>(
+              find.descendant(
+                of: find.byKey(const ValueKey('channel-header-avatar')),
+                matching: find.byIcon(LucideIcons.hash),
+              ),
+            )
+            .color,
+        AppTheme.light().colorScheme.primary,
+      );
+      expect(
+        tester
             .widget<Text>(
               find.byKey(const ValueKey('channel-header-member-count')),
             )

@@ -72,7 +72,7 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                 child: Icon(
                   channelIcon(channel),
                   size: 20,
-                  color: context.colors.onSurfaceVariant,
+                  color: context.colors.primary,
                 ),
               ),
               const SizedBox(width: Grid.xxs),
