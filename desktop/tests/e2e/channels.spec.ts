@@ -3012,15 +3012,16 @@ test("channel settings opens and creates channel workflows over the channel", as
     "Welcome responder",
   );
 
-  // Opening a workflow closes the settings sheet and portals the shared editor
-  // over the channel; the channel route stays put behind it.
+  // Opening a workflow keeps the settings Workflows view mounted beneath the
+  // shared editor; the channel route stays put behind both layers.
   const channelUrl = new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`);
   await sheet.getByTestId("channel-workflow-mock-wf-1").click();
   await expect(
     page.getByRole("dialog", { name: "Edit workflow" }),
   ).toBeVisible();
   await expect(page).toHaveURL(channelUrl);
-  await expect(sheet).toHaveCount(0);
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toBeVisible();
 
   const overlayEditor = page.getByRole("dialog", { name: "Edit workflow" });
@@ -3059,10 +3060,12 @@ test("channel settings opens and creates channel workflows over the channel", as
   );
   await expect(page).toHaveURL(channelUrl);
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-
-  await page.getByTestId("channel-management-trigger").click();
   await expect(sheet).toBeVisible();
-  await page.getByTestId("channel-workflows-ingress").click();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
   await page.getByTestId("channel-workflows-new").click();
 
   await expect(
@@ -3079,6 +3082,9 @@ test("channel settings opens and creates channel workflows over the channel", as
   ).toHaveCount(0);
   await expect(page).toHaveURL(channelUrl);
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-new")).toBeVisible();
 });
 
 async function seedHomeInboxMention(

@@ -254,29 +254,30 @@ export function ChannelManagementSheet({
     onOpenChange(next);
   }
 
-  // Workflows open as a modal over the channel the settings sheet belongs to.
-  // The navigation fallbacks only apply where no overlay host is mounted; the
+  // Workflows open as a modal above the channel settings Workflows view. Keep
+  // that view mounted behind the editor so every completed close path (clean,
+  // dirty-discard, or create cancel) returns to the exact surface that opened
+  // it. The navigation fallbacks still close the sheet before changing routes;
   // canonical /workflows deep links stay unchanged either way.
   function handleOpenWorkflow(workflow: Workflow) {
-    handlePanelOpenChange(false);
-
     if (openWorkflowOverlay) {
       openWorkflowOverlay(workflow.id, workflow);
       return;
     }
 
+    handlePanelOpenChange(false);
     void goWorkflow(workflow.id);
   }
 
   function handleCreateWorkflow() {
     if (!channelId) return;
-    handlePanelOpenChange(false);
 
     if (openNewWorkflowOverlay) {
       openNewWorkflowOverlay(channelId);
       return;
     }
 
+    handlePanelOpenChange(false);
     void goNewWorkflowForChannel(channelId);
   }
 
