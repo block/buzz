@@ -17,6 +17,8 @@ import {
   resolvePersonaRuntime,
 } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { sortChannelsMembersFirst } from "@/features/channels/lib/channelPickerOrdering";
+import { ChannelPickerField } from "@/features/channels/ui/ChannelPickerField";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
   AgentPersona,
@@ -62,8 +64,10 @@ export function AddTeamToChannelDialog({
 
   const channels = React.useMemo(
     () =>
-      (channelsQuery.data ?? []).filter(
-        (channel) => channel.channelType !== "dm" && !channel.archivedAt,
+      sortChannelsMembersFirst(
+        (channelsQuery.data ?? []).filter(
+          (channel) => channel.channelType !== "dm" && !channel.archivedAt,
+        ),
       ),
     [channelsQuery.data],
   );
@@ -104,15 +108,6 @@ export function AddTeamToChannelDialog({
     }
     onOpenChange(next);
   }
-
-  React.useEffect(() => {
-    if (!open) {
-      return;
-    }
-    if (!channelId && channels.length > 0) {
-      setChannelId(channels[0].id);
-    }
-  }, [channelId, channels, open]);
 
   const selectedChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
@@ -205,22 +200,13 @@ export function AddTeamToChannelDialog({
               <label className="text-sm font-medium" htmlFor="team-channel-id">
                 Channel
               </label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={channels.length === 0 || deployMutation.isPending}
-                id="team-channel-id"
-                onChange={(event) => setChannelId(event.target.value)}
+              <ChannelPickerField
+                channels={channels}
+                disabled={deployMutation.isPending}
+                inputId="team-channel-id"
+                onChange={setChannelId}
                 value={channelId}
-              >
-                {channels.length === 0 ? (
-                  <option value="">No channels available</option>
-                ) : null}
-                {channels.map((channel) => (
-                  <option key={channel.id} value={channel.id}>
-                    {channel.name} · {channel.visibility}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
 
             <div className="space-y-1.5">

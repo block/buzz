@@ -8,6 +8,8 @@ import {
   useChannelMembersQuery,
   useChannelsQuery,
 } from "@/features/channels/hooks";
+import { sortChannelsMembersFirst } from "@/features/channels/lib/channelPickerOrdering";
+import { ChannelPickerField } from "@/features/channels/ui/ChannelPickerField";
 import type { Channel, ChannelRole, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -42,8 +44,10 @@ export function AddAgentToChannelDialog({
   );
   const channels = React.useMemo(
     () =>
-      (channelsQuery.data ?? []).filter(
-        (channel) => channel.channelType !== "dm" && !channel.archivedAt,
+      sortChannelsMembersFirst(
+        (channelsQuery.data ?? []).filter(
+          (channel) => channel.channelType !== "dm" && !channel.archivedAt,
+        ),
       ),
     [channelsQuery.data],
   );
@@ -61,16 +65,6 @@ export function AddAgentToChannelDialog({
 
     onOpenChange(next);
   }
-
-  React.useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    if (!channelId && channels.length > 0) {
-      setChannelId(channels[0].id);
-    }
-  }, [channelId, channels, open]);
 
   const membersQuery = useChannelMembersQuery(
     channelId || null,
@@ -126,24 +120,13 @@ export function AddAgentToChannelDialog({
               <label className="text-sm font-medium" htmlFor="agent-channel-id">
                 Channel
               </label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={
-                  channels.length === 0 || attachAgentMutation.isPending
-                }
-                id="agent-channel-id"
-                onChange={(event) => setChannelId(event.target.value)}
+              <ChannelPickerField
+                channels={channels}
+                disabled={attachAgentMutation.isPending}
+                inputId="agent-channel-id"
+                onChange={setChannelId}
                 value={channelId}
-              >
-                {channels.length === 0 ? (
-                  <option value="">No channels available</option>
-                ) : null}
-                {channels.map((channel) => (
-                  <option key={channel.id} value={channel.id}>
-                    {channel.name} · {channel.visibility}
-                  </option>
-                ))}
-              </select>
+              />
               <p className="text-xs text-muted-foreground">
                 Only channels accessible to the current desktop user are shown
                 here.
