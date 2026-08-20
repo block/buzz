@@ -75,3 +75,61 @@ test("primary respond-to copy does not expose implementation jargon", () => {
     assert.doesNotMatch(primaryFieldSource, new RegExp(jargon));
   }
 });
+
+test("allowlist search fetches a larger page so exact human matches are not crowded out", () => {
+  assert.match(respondToFieldSource, /ALLOWLIST_SEARCH_LIMIT = 50/);
+  assert.match(
+    respondToFieldSource,
+    /useUserSearchQuery\(deferredQuery, \{[\s\S]*limit: ALLOWLIST_SEARCH_LIMIT/,
+  );
+});
+
+test("allowlist search includes agents and re-ranks like persona share recipients", () => {
+  assert.doesNotMatch(respondToFieldSource, /!user\.isAgent/);
+  assert.match(respondToFieldSource, /rankUserCandidatesBySearch\(/);
+});
+
+test("allowlist search labels agents so they are distinguishable from humans", () => {
+  assert.match(
+    respondToFieldSource,
+    /user\.isAgent \? `Agent · \$\{detail\}` : detail/,
+  );
+});
+
+test("allowlist search ranks exact human matches ahead of similarly named agents", () => {
+  const searchResultsBlock = respondToFieldSource.slice(
+    respondToFieldSource.indexOf("const searchResults = React.useMemo"),
+    respondToFieldSource.indexOf("const pasteParsed = React.useMemo"),
+  );
+
+  assert.doesNotMatch(searchResultsBlock, /!user\.isAgent/);
+  assert.match(searchResultsBlock, /rankUserCandidatesBySearch\(/);
+  assert.match(
+    searchResultsBlock,
+    /getLabel: formatSearchUserName,\s*\n\s*limit: ALLOWLIST_SEARCH_LIMIT/,
+  );
+});
+
+test("allowlist chips show display names instead of truncated pubkeys", () => {
+  assert.match(respondToFieldSource, /resolveAllowlistChipLabel\(/);
+  assert.match(
+    respondToFieldSource,
+    /data-testid=\{`agent-respond-to-chip-label-\$\{pubkey\}`\}/,
+  );
+  assert.match(respondToFieldSource, /aria-label=\{`Remove \$\{chipLabel\}`\}/);
+  const chipBlock = respondToFieldSource.slice(
+    respondToFieldSource.indexOf("agent-respond-to-chip-label"),
+    respondToFieldSource.indexOf('{deferredQuery.length > 0 ? ('),
+  );
+  assert.doesNotMatch(chipBlock, /<PubKey pubkey=\{pubkey\} \/>/);
+});
+
+test("allowlist chips resolve profiles for edit-loaded pubkeys", () => {
+  assert.match(respondToFieldSource, /useUsersBatchQuery\(allowlist/);
+  assert.match(respondToFieldSource, /allowlistProfiles=\{allowlistProfilesQuery\.data\?\.profiles\}/);
+});
+
+test("search selection remembers display metadata for allowlist chips", () => {
+  assert.match(respondToFieldSource, /hintFromSearchResult\(user\)/);
+  assert.match(respondToFieldSource, /setAllowlistHints\(/);
+});
