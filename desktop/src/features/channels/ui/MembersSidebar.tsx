@@ -14,6 +14,7 @@ import {
   getSharedChannelIds,
   isAgentIdentityInAllowedList,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
+import { isOtherSetupAgent } from "@/features/agents/lib/otherSetupAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
 import { formatMemberName } from "@/features/channels/lib/memberUtils";
@@ -70,7 +71,6 @@ const MEMBER_ADD_RESULT_LIMIT = 50;
 const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
-
 function formatAddCandidateName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
@@ -459,8 +459,7 @@ export function MembersSidebar({
     onUntimeout,
   } = useMembersSidebarModeration(open);
 
-  const isArchived =
-    channel?.archivedAt !== null && channel?.archivedAt !== undefined;
+  const isArchived = channel?.archivedAt != null;
   const managedAgentByPubkey = React.useMemo(
     () =>
       new Map(
@@ -611,6 +610,15 @@ export function MembersSidebar({
     const managedAgent = memberIsBot
       ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
       : undefined;
+    const showOtherSetupMarker =
+      memberIsBot &&
+      isOtherSetupAgent({
+        currentPubkey,
+        managedAgents: managedAgentsQuery.data ?? [],
+        profileOwnerPubkey: memberProfile?.ownerPubkey,
+        pubkey: member.pubkey,
+        relayAgents: relayAgentsQuery.data ?? [],
+      });
     const managedAgentRuntime =
       memberIsBot && relayUrl
         ? findManagedAgentRuntime(
@@ -675,6 +683,7 @@ export function MembersSidebar({
             memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
           }
           profileAvatarUrl={memberProfile?.avatarUrl ?? null}
+          showOtherSetupMarker={showOtherSetupMarker}
           viewerIsOwner={viewerIsOwner}
         />
       </div>

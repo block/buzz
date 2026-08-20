@@ -18,6 +18,7 @@ import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import {
@@ -73,6 +74,7 @@ type MembersSidebarMemberCardProps = {
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
+  showOtherSetupMarker?: boolean;
   viewerIsOwner: boolean;
 };
 
@@ -141,6 +143,7 @@ export function MembersSidebarMemberCard({
   onViewActivity,
   presenceStatus,
   profileAvatarUrl,
+  showOtherSetupMarker = false,
   viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
   const roleLabel = formatRoleLabel(member, memberIsBot);
@@ -185,6 +188,11 @@ export function MembersSidebarMemberCard({
               <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
                 <Bot aria-hidden="true" className="h-4 w-4" />
                 {roleLabel}
+                {showOtherSetupMarker ? (
+                  <OtherSetupAgentMarker
+                    testId={`sidebar-member-agent-provenance-${member.pubkey}`}
+                  />
+                ) : null}
               </span>
             </div>
             <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
