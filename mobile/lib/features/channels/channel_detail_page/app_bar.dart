@@ -8,7 +8,7 @@ class _ChannelIosGlassBackButton extends HookWidget {
   const _ChannelIosGlassBackButton();
 
   static const _viewType = 'buzz/channel_back_glass';
-  static const _buttonCenterX = 33.0;
+  static const _buttonCenterX = 35.0;
 
   @override
   Widget build(BuildContext context) {
@@ -42,7 +42,7 @@ class _ChannelIosGlassBackButton extends HookWidget {
 
     return SizedBox(
       key: const ValueKey('channel-ios-glass-back'),
-      width: 53,
+      width: 55,
       height: 48,
       child: UiKitView(
         viewType: _viewType,
