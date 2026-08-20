@@ -503,14 +503,16 @@ test("markdown message links resolve private destinations without a directory sc
     assert.deepEqual(ipc.detailCalls, [channelId], path);
     assert.equal(ipc.directoryCalls, 0, path);
     assert.equal(
-      mounted.container.querySelector("[data-message-link] button"),
-      null,
-      `${path} private destination must be inert`,
-    );
-    assert.equal(
-      mounted.container.querySelector("[data-message-link] [data-buzz-link]"),
+      mounted.container.querySelector("button[data-message-link]"),
       null,
       `${path} private destination must not render a clickable pill`,
+    );
+    assert.notEqual(
+      mounted.container.querySelector(
+        "span[data-message-link][data-buzz-link]",
+      ),
+      null,
+      `${path} private destination must render an inert message-link pill`,
     );
     await mounted.unmount();
     ipc.reset();
