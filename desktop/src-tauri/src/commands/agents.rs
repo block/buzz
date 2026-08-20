@@ -6,14 +6,14 @@ use super::managed_agent_definition::validate_create_definition;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, ensure_persona_is_active,
-        find_managed_agent_mut, load_managed_agents, load_personas, load_teams,
-        managed_agent_avatar_url, normalize_agent_args, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, BackendKind, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        build_managed_agent_summary, ensure_persona_is_active, find_managed_agent_mut,
+        load_managed_agents, load_personas, load_teams, managed_agent_avatar_url,
+        normalize_agent_args, resolve_provider_binary, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
+        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
+        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -344,12 +344,8 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-            &app,
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app),
-        );
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
@@ -432,12 +428,8 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-            &app,
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app),
-        );
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
@@ -507,12 +499,8 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-            &app,
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app),
-        );
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
@@ -927,12 +915,8 @@ pub async fn start_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-            &app,
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app),
-        );
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
@@ -1070,12 +1054,8 @@ pub async fn stop_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-            &app,
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app),
-        );
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
@@ -1129,12 +1109,8 @@ pub async fn delete_managed_agent(
                 .lock()
                 .map_err(|error| error.to_string())?;
 
-            let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-                &app,
-                &mut records,
-                &mut runtimes,
-                &current_instance_id(&app),
-            );
+            let (sync_changed, exited_pubkeys) =
+                sync_managed_agent_processes(&app, &mut records, &mut runtimes);
             if sync_changed {
                 save_managed_agents(&app, &records)?;
             }

@@ -167,12 +167,8 @@ pub fn list_managed_agent_runtimes(
             Ok(None) => None,
         })
         .collect();
-    let (records_changed, _) = super::sync_managed_agent_processes(
-        &app,
-        &mut records,
-        &mut runtimes,
-        &current_instance_id(&app),
-    );
+    let (records_changed, _) =
+        super::sync_managed_agent_processes(&app, &mut records, &mut runtimes);
     let mut statuses = Vec::new();
     for key in exited_keys {
         state.clear_agent_session_cache(&key);

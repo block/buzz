@@ -1076,11 +1076,9 @@ export async function startPairing(): Promise<string> {
 export async function confirmPairingSas(): Promise<void> {
   await invokeTauri("confirm_pairing_sas");
 }
-
 export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
-
 export async function applyCommunity(
   communityId: string,
   relayUrl: string,

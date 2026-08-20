@@ -236,7 +236,6 @@ pub fn sync_managed_agent_processes(
     app: &AppHandle,
     records: &mut [ManagedAgentRecord],
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
-    _instance_id: &str,
 ) -> (bool, Vec<String>) {
     let mut changed = false;
     let mut exited = Vec::new();
@@ -366,12 +365,8 @@ pub async fn supervise_managed_agent_processes(app: AppHandle) {
                     .managed_agent_processes
                     .lock()
                     .map_err(|error| error.to_string())?;
-                let (changed, exited_pubkeys) = sync_managed_agent_processes(
-                    &sync_app,
-                    &mut records,
-                    &mut runtimes,
-                    &super::current_instance_id(&sync_app),
-                );
+                let (changed, exited_pubkeys) =
+                    sync_managed_agent_processes(&sync_app, &mut records, &mut runtimes);
                 if changed {
                     super::super::save_managed_agents(&sync_app, &records)?;
                 }

@@ -12,11 +12,10 @@ use crate::{
                 RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        current_instance_id, is_reserved_env_key, is_safe_to_reveal, is_well_formed_env_key,
-        known_acp_runtime, load_managed_agents, load_personas, resolve_effective_agent_env,
-        save_managed_agents, sync_managed_agent_processes, AgentDefinition, BackendKind,
-        GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey,
-        MAX_ENV_VALUE_BYTES,
+        is_reserved_env_key, is_safe_to_reveal, is_well_formed_env_key, known_acp_runtime,
+        load_managed_agents, load_personas, resolve_effective_agent_env, save_managed_agents,
+        sync_managed_agent_processes, AgentDefinition, BackendKind, GlobalAgentConfig,
+        KnownAcpRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, MAX_ENV_VALUE_BYTES,
     },
 };
 
@@ -269,12 +268,8 @@ pub async fn get_agent_config_surface(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-            &app,
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app),
-        );
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&app, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app, &records)?;
         }
