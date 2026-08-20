@@ -29,6 +29,12 @@ test("manual waits retain simultaneous unique entries and ignore malformed or du
         reason: "Ignored",
       },
       { key: "bad", actor: { kind: "person", name: "" }, reason: "Invalid" },
+      {
+        key: "bad-since",
+        actor: { kind: "person", name: "Logan" },
+        reason: "Invalid timestamp",
+        since: "not-a-date",
+      },
     ]).map((wait) => wait.key),
     ["log", "review"],
   );

@@ -55,6 +55,11 @@ export function isWorkstreamWait(
   )
     return false;
   if (typeof actor.name !== "string" || !actor.name.trim()) return false;
+  if (
+    wait.since !== undefined &&
+    (typeof wait.since !== "string" || !Number.isFinite(Date.parse(wait.since)))
+  )
+    return false;
   return (
     actor.pubkey === undefined ||
     (typeof actor.pubkey === "string" && !!actor.pubkey.trim())

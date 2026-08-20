@@ -131,6 +131,7 @@ export function WorkstreamBoardScreen() {
                 <WorkstreamCard
                   activeWorking={activeTurnsByChannelId.get(channel.id)}
                   channel={channel}
+                  currentOwnerPubkey={identityQuery.data?.pubkey}
                   key={channel.id}
                   onSelect={(channelId) => void goChannel(channelId)}
                   onWaitsChange={(waits, createdAt) =>

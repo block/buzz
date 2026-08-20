@@ -1,9 +1,6 @@
 import * as React from "react";
 
-import type {
-  TimelineThreadSummary,
-  TimelineThreadSummaryParticipant,
-} from "@/features/messages/lib/threadPanel";
+import type { TimelineThreadSummary } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow";
 import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
@@ -16,43 +13,11 @@ import {
   THREAD_REPLY_ROW_MARGIN_INLINE_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import { cn } from "@/shared/lib/cn";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { AvatarStack } from "@/shared/ui/AvatarStack";
 
 const THREAD_SUMMARY_CONTENT_OFFSET_REM =
   THREAD_REPLY_BODY_OFFSET_REM - THREAD_REPLY_ROW_MARGIN_INLINE_REM;
 const THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM = 0.25;
-
-function ParticipantAvatar({
-  participant,
-  index,
-  participantCount,
-}: {
-  participant: TimelineThreadSummaryParticipant;
-  index: number;
-  participantCount: number;
-}) {
-  return (
-    <div
-      className={index > 0 ? "-ml-1" : ""}
-      data-testid="message-thread-summary-participant"
-      style={{
-        zIndex: index + 1,
-        ...(index < participantCount - 1 && {
-          mask: "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
-          WebkitMask:
-            "radial-gradient(circle 14px at calc(100% + 6px) 50%, transparent 99%, #fff 100%)",
-        }),
-      }}
-    >
-      <UserAvatar
-        avatarUrl={participant.avatarUrl}
-        className="h-6 w-6 text-2xs"
-        displayName={participant.author}
-        size="sm"
-      />
-    </div>
-  );
-}
 
 export function MessageThreadSummaryRow({
   collapseDepthGuideActions,
@@ -231,14 +196,14 @@ export function MessageThreadSummaryRow({
           }}
         />
         <div className="relative z-10 flex shrink-0 items-center">
-          {summary.participants.map((participant, index) => (
-            <ParticipantAvatar
-              index={index}
-              key={participant.id}
-              participant={participant}
-              participantCount={summary.participants.length}
-            />
-          ))}
+          <AvatarStack
+            items={summary.participants.map((participant) => ({
+              id: participant.id,
+              avatarUrl: participant.avatarUrl,
+              displayName: participant.author,
+            }))}
+            testId="message-thread-summary-participant"
+          />
         </div>
         <div className="relative z-10 min-w-0">
           <div>

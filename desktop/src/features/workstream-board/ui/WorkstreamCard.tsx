@@ -18,7 +18,9 @@ import {
 import { buildWorkstreamCardViewModel } from "@/features/workstream-board/lib/workstreamCardViewModel";
 import { WorkstreamPullRequests } from "@/features/workstream-board/ui/WorkstreamPullRequests";
 import { WorkstreamWaits } from "@/features/workstream-board/ui/WorkstreamWaits";
-import { WorkstreamWorkingIndicator } from "@/features/workstream-board/ui/WorkstreamWorkingIndicator";
+import { WorkstreamAgentStatusPills } from "@/features/workstream-board/ui/WorkstreamAgentStatusPills";
+import { classifyWorkstreamAgents } from "@/features/workstream-board/lib/workstreamAgentStatuses";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -26,6 +28,7 @@ type WorkstreamCardProps = {
   activeWorking?: ActiveChannelTurnSummary;
   channel: Channel;
   profiles?: UserProfileLookup;
+  currentOwnerPubkey?: string;
   onWaitsChange?: (
     waits: readonly WorkstreamWait[],
     createdAt: string | null | undefined,
@@ -36,6 +39,7 @@ type WorkstreamCardProps = {
 export function WorkstreamCard({
   activeWorking,
   channel,
+  currentOwnerPubkey,
   onSelect,
   onWaitsChange,
   profiles,
@@ -65,11 +69,30 @@ export function WorkstreamCard({
   React.useEffect(() => {
     onWaitsChange?.(waits, detailsQuery.data?.createdAt);
   }, [detailsQuery.data?.createdAt, onWaitsChange, waits]);
+  const agentStatuses = React.useMemo(
+    () =>
+      viewModel.status === "ready"
+        ? classifyWorkstreamAgents(
+            viewModel.card.assignees,
+            activeWorking,
+            waits,
+          )
+        : { working: [], waiting: [] },
+    [activeWorking, viewModel, waits],
+  );
+  const waitingOnPrincipal = waits.some(
+    (wait) =>
+      wait.actor.pubkey &&
+      currentOwnerPubkey &&
+      normalizePubkey(wait.actor.pubkey) ===
+        normalizePubkey(currentOwnerPubkey),
+  );
 
   return (
     <div
       className={cn(
         "group relative min-h-48 w-full overflow-hidden rounded-2xl border border-border/70 bg-muted/50 p-5 text-left text-foreground shadow-xs transition-all hover:-translate-y-0.5 hover:border-border hover:bg-muted/65 hover:shadow-md",
+        waitingOnPrincipal && "border-t-4 border-t-amber-400/70",
       )}
       data-testid={`workstream-card-${channel.id}`}
     >
@@ -80,11 +103,20 @@ export function WorkstreamCard({
       >
         <span className="sr-only">Open #{channel.name}</span>
       </button>
+      {waitingOnPrincipal ? (
+        <span className="pointer-events-none absolute right-4 top-0 z-20 rounded-b-md border border-t-0 border-amber-400/60 bg-muted px-2 py-1 text-3xs font-bold uppercase tracking-wider text-foreground">
+          Priority
+        </span>
+      ) : null}
       <div className="pointer-events-none relative z-10 flex h-full min-h-40 flex-col">
-        <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+        <button
+          className="pointer-events-auto flex max-w-[calc(100%-4rem)] items-center gap-1.5 text-xs font-semibold text-muted-foreground hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={() => onSelect(channel.id)}
+          type="button"
+        >
           <Hash className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate">{channel.name}</span>
-        </div>
+        </button>
         {viewModel.status === "ready" ? (
           <>
             <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-foreground">
@@ -97,25 +129,21 @@ export function WorkstreamCard({
                   {viewModel.card.orchestrator.name}
                 </span>
               </p>
-              {viewModel.card.assignees.length > 0 ? (
-                <div className="flex flex-wrap gap-1">
-                  {viewModel.card.assignees.map((assignee) => (
-                    <span
-                      className="rounded-full border border-border/65 bg-background/80 px-2 py-0.5 text-2xs text-muted-foreground"
-                      key={assignee.pubkey}
-                    >
-                      {assignee.name}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
+              <WorkstreamAgentStatusPills
+                profiles={profiles}
+                statuses={agentStatuses}
+              />
               {references.length > 0 ? (
                 <WorkstreamPullRequests
                   references={references}
                   states={pullRequestStates}
                 />
               ) : null}
-              <WorkstreamWaits waits={waits} />
+              <WorkstreamWaits
+                profiles={profiles}
+                references={references}
+                waits={waits}
+              />
             </div>
           </>
         ) : viewModel.status === "loading" ? (
@@ -135,12 +163,6 @@ export function WorkstreamCard({
             ) : null}
           </div>
         )}
-        {activeWorking ? (
-          <WorkstreamWorkingIndicator
-            activeWorking={activeWorking}
-            profiles={profiles}
-          />
-        ) : null}
       </div>
     </div>
   );
