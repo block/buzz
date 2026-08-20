@@ -148,6 +148,66 @@ test("failed replacement preserves the previous subscription and retries", async
   reconciler.dispose();
 });
 
+test("default browser timers retry safely after an open failure and cancel pending work", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const timers = [];
+  const cleared = [];
+  const opened = [];
+  let shouldFail = true;
+  const setTimerWithGlobalReceiver = function (callback, delayMs) {
+    assert.equal(this, globalThis);
+    const timer = { callback, delayMs };
+    timers.push(timer);
+    return timer;
+  };
+  const clearTimerWithGlobalReceiver = function (timer) {
+    assert.equal(this, globalThis);
+    cleared.push(timer);
+  };
+
+  const reconciler = new PresenceSubscriptionReconciler({
+    open: async (authors) => {
+      opened.push(authors);
+      if (shouldFail) throw new Error("rate-limited: retry later");
+      return async () => {};
+    },
+    retryDelay: () => 25,
+  });
+
+  try {
+    globalThis.setTimeout = setTimerWithGlobalReceiver;
+    reconciler.setAuthors([A]);
+    await Promise.resolve();
+    await Promise.resolve();
+    globalThis.setTimeout = originalSetTimeout;
+
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].delayMs, 25);
+
+    shouldFail = false;
+    timers[0].callback();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(opened, [[A], [A]]);
+
+    shouldFail = true;
+    globalThis.setTimeout = setTimerWithGlobalReceiver;
+    reconciler.setAuthors([B]);
+    await Promise.resolve();
+    await Promise.resolve();
+    globalThis.setTimeout = originalSetTimeout;
+
+    globalThis.clearTimeout = clearTimerWithGlobalReceiver;
+    reconciler.dispose();
+    globalThis.clearTimeout = originalClearTimeout;
+    assert.deepEqual(cleared, [timers[1]]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
 test("rapid A to B to C keeps A until C is confirmed", async () => {
   const openingB = deferred();
   const actions = [];
