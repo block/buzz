@@ -417,12 +417,13 @@ pub async fn upload_blob(
         }
     }
     let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
+    let document_upload = is_document_upload(&headers);
 
     serving_write.verify().await.map_err(serving_lease_lost)?;
 
     let mut descriptor = serving_write
         .protect(async {
-            Ok(if should_stream_as_video(&sniff) {
+            Ok(if !document_upload && should_stream_as_video(&sniff) {
                 // Video path: stream body directly to disk — never fully buffered in RAM.
                 let content_length = headers
                     .get("content-length")
@@ -439,10 +440,11 @@ pub async fn upload_blob(
                 )
                 .await?
             } else {
-                // Non-video path: buffer the body (bounded by the larger image/document
-                // cap), then decide image-vs-document by sniffed MIME. Images go through
-                // thumbnailing; allowlisted documents are served as downloads.
-                let max = if is_document_upload(&headers) {
+                // Buffered path: a declared document signal takes precedence over
+                // sniffed media bytes so MIME/extension/content disagreement is rejected.
+                // Ordinary images still go through thumbnailing when no document signal
+                // is present; validated documents are served as downloads.
+                let max = if document_upload {
                     buzz_media::validation::max_document_bytes_for_upload(
                         state.config.media.max_file_bytes,
                     ) as u64
@@ -463,7 +465,22 @@ pub async fn upload_blob(
                     Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
                 );
 
-                if is_image {
+                if document_upload {
+                    let (declared_mime, extension) = document_upload_hints(&headers);
+                    buzz_media::process_file_upload(
+                        &state.media_storage,
+                        &state.config.media,
+                        &auth.tenant,
+                        &auth.auth_event,
+                        buzz_media::DocumentUploadHints {
+                            declared_mime,
+                            extension,
+                        },
+                        bytes,
+                        attribution,
+                    )
+                    .await?
+                } else if is_image {
                     buzz_media::process_upload(
                         &state.media_storage,
                         &state.config.media,

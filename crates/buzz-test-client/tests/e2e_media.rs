@@ -277,6 +277,27 @@ async fn test_calendar_upload_round_trip_and_policy_rejections() {
         reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
 
+    let disguised_image = tiny_jpeg();
+    let disguised_image_hash = hex::encode(Sha256::digest(&disguised_image));
+    let rejected_image = client
+        .put(format!("{}/upload", relay_http_url()))
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_auth(&keys, &disguised_image_hash)),
+        )
+        .header("Content-Type", "text/calendar")
+        .header("X-Buzz-File-Extension", "ics")
+        .header("X-SHA-256", disguised_image_hash)
+        .body(disguised_image)
+        .send()
+        .await
+        .expect("image disguised as calendar request failed");
+    assert_eq!(
+        rejected_image.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "image bytes with calendar MIME and extension hints must be rejected"
+    );
+
     let channel_id = uuid::Uuid::new_v4().to_string();
     let create = EventBuilder::new(Kind::from(9007), "")
         .tags(vec![
