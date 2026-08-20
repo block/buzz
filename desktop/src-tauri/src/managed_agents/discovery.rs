@@ -9,14 +9,18 @@ use crate::managed_agents::{
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
     HarnessSource,
 };
+mod args;
+mod hermes;
 mod presets;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
+pub use args::normalize_agent_args;
 pub(crate) use presets::{
     canonical_harness_command, command_for_runtime_id, preset_harness_definitions,
     preset_harness_ids,
 };
+use hermes::HERMES_RUNTIME;
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
@@ -211,6 +215,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    HERMES_RUNTIME,
 ];
 
 /// Skill discovery directories declared by known runtimes.
@@ -438,38 +443,6 @@ pub fn try_record_agent_command(
 
     // No runtime id set — legacy agent; use the safe default.
     Ok(default_agent_command())
-}
-
-fn default_agent_args(command: &str) -> Option<Vec<String>> {
-    match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
-        _ => None,
-    }
-}
-
-pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
-    let normalized = agent_args
-        .into_iter()
-        .map(|arg| arg.trim().to_string())
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>();
-
-    let Some(default_args) = default_agent_args(command) else {
-        return normalized;
-    };
-
-    if normalized.is_empty() {
-        return default_args;
-    }
-
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
-        return default_args;
-    }
-
-    normalized
 }
 
 fn profile_target_dirs(root: &Path) -> [PathBuf; 2] {
