@@ -27,6 +27,16 @@ Object.defineProperty(globalThis, "navigator", {
   configurable: true,
   value: dom.window.navigator,
 });
+// The discussion facepile renders UserProfilePopover, which mounts HuddleProvider;
+// its audio-device effects touch navigator.mediaDevices, absent in jsdom.
+Object.defineProperty(dom.window.navigator, "mediaDevices", {
+  configurable: true,
+  value: {
+    addEventListener: () => {},
+    enumerateDevices: async () => [],
+    removeEventListener: () => {},
+  },
+});
 dom.window.requestAnimationFrame = (callback) => setTimeout(callback, 0);
 globalThis.requestAnimationFrame = dom.window.requestAnimationFrame;
 
@@ -35,6 +45,10 @@ globalThis.__TAURI_INTERNALS__ = {
   transformCallback: () => 1,
 };
 dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
+// @tauri-apps/api reads unregisterListener off window during listener teardown.
+globalThis.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} };
+dom.window.__TAURI_EVENT_PLUGIN_INTERNALS__ =
+  globalThis.__TAURI_EVENT_PLUGIN_INTERNALS__;
 
 const ipc = {
   detailCalls: [],
@@ -55,6 +69,11 @@ const ipc = {
     }
     if (command === "search_messages") return this.search(args);
     if (command === "get_users_batch") return this.users(args);
+    // HuddleProvider (mounted transitively via the discussion facepile's
+    // profile popover) registers Tauri event listeners. Absorb them so the
+    // panel can render; its audio probes are all best-effort and swallow the
+    // unmocked-command throw below.
+    if (command.startsWith("plugin:event|")) return 0;
     throw new Error(`unmocked Tauri command: ${command}`);
   },
   reset() {
@@ -74,6 +93,7 @@ let createRoot;
 let QueryClient;
 let QueryClientProvider;
 let CommunitiesProvider;
+let HuddleProvider;
 let useChannelReference;
 let useSearchResults;
 let channelReferenceQueryKey;
@@ -228,6 +248,7 @@ before(async () => {
   ({ CommunitiesProvider } = await import(
     "@/features/communities/useCommunities.tsx"
   ));
+  ({ HuddleProvider } = await import("@/features/huddle"));
   ({
     channelReferenceQueryKey,
     openChannelDirectoryQueryKey,
@@ -410,7 +431,11 @@ async function mountWithRouter(client, Component) {
         React.createElement(
           CommunitiesProvider,
           null,
-          React.createElement(RouterProvider, { router }),
+          React.createElement(
+            HuddleProvider,
+            null,
+            React.createElement(RouterProvider, { router }),
+          ),
         ),
       ),
     );
