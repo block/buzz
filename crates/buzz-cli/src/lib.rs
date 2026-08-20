@@ -582,8 +582,9 @@ pub enum ChannelsCmd {
         /// Channel description
         #[arg(long)]
         description: Option<String>,
-        /// Make the channel ephemeral: lifetime in seconds. The relay archives
-        /// it once this many seconds pass without a new message.
+        /// Make the channel temporary/ephemeral: idle lifetime in seconds. If
+        /// omitted, the channel is permanent. The relay archives it once this
+        /// many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
         /// Apply a desktop-local channel template by name (case-insensitive):
