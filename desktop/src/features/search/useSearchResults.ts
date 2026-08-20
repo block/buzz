@@ -116,12 +116,25 @@ export function useSearchResults({
   const [debouncedQuery, setDebouncedQuery] = React.useState("");
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const parsedQuery = React.useMemo(
+    () => parseSearchOperators(debouncedQuery),
+    [debouncedQuery],
+  );
+  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
+  const hasSearchQuery =
+    debouncedQuery.trim().length >= minimumQueryLength ||
+    parsedQuery.since !== null ||
+    parsedQuery.until !== null ||
+    parsedQuery.from !== null ||
+    parsedQuery.in !== null;
+  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
 
-  // Global search surfaces non-member open channels, so while it is active it
-  // fetches the discovery superset on demand rather than depending on the
-  // member-only poll list. Scoped search (channelId set) needs no directory.
+  // Global search surfaces non-member open channels, but only after a query
+  // needs search-backed results. Opening Cmd-K with an empty query must keep
+  // its suggestions local and avoid the all-open discovery scan. Scoped search
+  // (channelId set) needs no directory.
   const openDirectoryQuery = useOpenChannelDirectoryQuery({
-    enabled: enabled && !scopeChannelId,
+    enabled: searchBackedQueriesEnabled && !scopeChannelId,
   });
   const channels = React.useMemo(
     () => mergeOpenChannelDirectory(memberChannels, openDirectoryQuery.data),
@@ -133,11 +146,6 @@ export function useSearchResults({
     [channels],
   );
 
-  const parsedQuery = React.useMemo(
-    () => parseSearchOperators(debouncedQuery),
-    [debouncedQuery],
-  );
-
   const channelResolution = React.useMemo<OperatorResolveResult<string>>(
     () =>
       scopeChannelId
@@ -147,16 +155,7 @@ export function useSearchResults({
   );
 
   const ftsQuery = parsedQuery.text;
-  const minimumQueryLength = getMinimumSearchQueryLength(scopeChannelId);
 
-  const hasSearchQuery =
-    debouncedQuery.trim().length >= minimumQueryLength ||
-    parsedQuery.since !== null ||
-    parsedQuery.until !== null ||
-    parsedQuery.from !== null ||
-    parsedQuery.in !== null;
-
-  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
   const needsAuthorResolution = Boolean(parsedQuery.from);
   const entitySearchEnabled = searchBackedQueriesEnabled && !scopeChannelId;
 

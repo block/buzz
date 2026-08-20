@@ -1,9 +1,13 @@
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 
 import { getChannelDetails, getOpenChannelDirectory } from "@/shared/api/tauri";
 import type { Channel, ChannelDetail } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import {
+  useStableArrayShallow,
+  useStableMap,
+} from "@/shared/hooks/useStableReference";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   canFetchChannelsForIdentity,
@@ -162,6 +166,104 @@ function channelFromFetchedDetail(detail: ChannelDetail): Channel {
 }
 
 /**
+ * Shared bounded detail query for one unresolved channel id. Both single- and
+ * multi-reference consumers use this exact key, fetch, and miss-cache policy,
+ * so concurrent surfaces dedupe in React Query rather than creating parallel
+ * reference caches.
+ */
+function channelReferenceQueryOptions({
+  channelId,
+  enabled,
+}: {
+  channelId: string;
+  enabled: boolean;
+}) {
+  return {
+    enabled,
+    queryKey: channelReferenceQueryKey(channelId),
+    queryFn: async (): Promise<Channel | null> => {
+      try {
+        return channelFromFetchedDetail(await getChannelDetails(channelId));
+      } catch (error) {
+        if (String(error).includes("channel not found")) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    retry: false,
+    staleTime: CHANNEL_REFERENCE_STALE_TIME_MS,
+  };
+}
+
+function uniqueChannelIds(
+  channelIds: readonly (string | null | undefined)[],
+): string[] {
+  return [
+    ...new Set(
+      channelIds.filter((channelId): channelId is string => Boolean(channelId)),
+    ),
+  ];
+}
+
+/**
+ * Resolves a finite set of channel ids without ever initiating directory
+ * discovery. Known member/warm-directory entries win immediately; only the
+ * remaining ids issue bounded `get_channel_details` requests. Per-id query
+ * keys intentionally match `useChannelReference`, which shares in-flight
+ * work and five-minute misses across every consumer.
+ */
+export function useChannelReferences(
+  channelIds: readonly (string | null | undefined)[],
+  options?: { enabled?: boolean },
+): { channelsById: ReadonlyMap<string, Channel>; isReady: boolean } {
+  const ids = useStableArrayShallow(
+    React.useMemo(() => uniqueChannelIds(channelIds), [channelIds]),
+  );
+  const { memberChannels, warmDirectory, isReady } = useChannelSources(options);
+  const knownById = React.useMemo(() => {
+    const channelsById = new Map<string, Channel>();
+    for (const channel of warmDirectory ?? []) {
+      channelsById.set(channel.id, channel);
+    }
+    for (const channel of memberChannels) {
+      channelsById.set(channel.id, channel);
+    }
+    return channelsById;
+  }, [memberChannels, warmDirectory]);
+
+  const { activeCommunity } = useCommunities();
+  const relayUrl = activeCommunity?.relayUrl ?? null;
+  const identityQuery = useIdentityQuery();
+  const ownerPubkey = identityQuery.data?.pubkey ?? null;
+  const canFetch =
+    (options?.enabled ?? true) &&
+    isReady &&
+    relayUrl !== null &&
+    canFetchChannelsForIdentity(ownerPubkey, identityQuery.isError);
+  const fetchQueries = useQueries({
+    queries: ids.map((channelId) =>
+      channelReferenceQueryOptions({
+        channelId,
+        enabled: canFetch && !knownById.has(channelId),
+      }),
+    ),
+  });
+  const channelsById = React.useMemo(() => {
+    const resolved = new Map(knownById);
+    for (let index = 0; index < ids.length; index += 1) {
+      const channel = fetchQueries[index]?.data;
+      if (channel) {
+        resolved.set(ids[index], channel);
+      }
+    }
+    return resolved;
+  }, [fetchQueries, ids, knownById]);
+
+  return { channelsById: useStableMap(channelsById), isReady };
+}
+
+/**
  * Resolves a single channel id to its metadata (name + visibility) for a
  * reference surface — a permalink chip, project origin, repo-access channel.
  * Resolution order: the member list, then a warm open directory, then a
@@ -174,39 +276,7 @@ function channelFromFetchedDetail(detail: ChannelDetail): Channel {
 export function useChannelReference(
   channelId: string | null | undefined,
 ): Channel | undefined {
-  const { memberChannels, warmDirectory, isReady } = useChannelSources();
-  const known = channelId
-    ? (memberChannels.find((channel) => channel.id === channelId) ??
-      warmDirectory?.find((channel) => channel.id === channelId))
-    : undefined;
-
-  const { activeCommunity } = useCommunities();
-  const relayUrl = activeCommunity?.relayUrl ?? null;
-  const identityQuery = useIdentityQuery();
-  const ownerPubkey = identityQuery.data?.pubkey ?? null;
-
-  const fetchQuery = useQuery({
-    enabled:
-      Boolean(channelId) &&
-      isReady &&
-      known === undefined &&
-      relayUrl !== null &&
-      canFetchChannelsForIdentity(ownerPubkey, identityQuery.isError),
-    queryKey: channelReferenceQueryKey(channelId ?? "none"),
-    queryFn: async (): Promise<Channel | null> => {
-      if (!channelId) return null;
-      try {
-        return channelFromFetchedDetail(await getChannelDetails(channelId));
-      } catch (error) {
-        if (String(error).includes("channel not found")) {
-          return null;
-        }
-        throw error;
-      }
-    },
-    retry: false,
-    staleTime: CHANNEL_REFERENCE_STALE_TIME_MS,
-  });
-
-  return known ?? fetchQuery.data ?? undefined;
+  const ids = React.useMemo(() => (channelId ? [channelId] : []), [channelId]);
+  const { channelsById } = useChannelReferences(ids);
+  return channelId ? channelsById.get(channelId) : undefined;
 }

@@ -20,6 +20,7 @@ Object.assign(globalThis, {
   MutationObserver: dom.window.MutationObserver,
   document: dom.window.document,
   localStorage: dom.window.localStorage,
+  self: dom.window,
   window: dom.window,
 });
 Object.defineProperty(globalThis, "navigator", {
@@ -41,6 +42,8 @@ const ipc = {
   detail: async () => {
     throw new Error("unconfigured detail response");
   },
+  search: async () => ({ found: 0, hits: [] }),
+  users: async () => ({ missing: [], profiles: {} }),
   async invoke(command, args) {
     if (command === "get_channel_details") {
       this.detailCalls.push(args.channelId);
@@ -50,6 +53,8 @@ const ipc = {
       this.directoryCalls += 1;
       return [];
     }
+    if (command === "search_messages") return this.search(args);
+    if (command === "get_users_batch") return this.users(args);
     throw new Error(`unmocked Tauri command: ${command}`);
   },
   reset() {
@@ -58,6 +63,8 @@ const ipc = {
     this.detail = async () => {
       throw new Error("unconfigured detail response");
     };
+    this.search = async () => ({ found: 0, hits: [] });
+    this.users = async () => ({ missing: [], profiles: {} });
   },
 };
 
@@ -68,10 +75,21 @@ let QueryClient;
 let QueryClientProvider;
 let CommunitiesProvider;
 let useChannelReference;
+let useSearchResults;
 let channelReferenceQueryKey;
 let channelsQueryKey;
 let openChannelDirectoryQueryKey;
 let isChannelReferenceOpenable;
+let useChannelReferences;
+let useOpenAgentActivity;
+let useReminderSources;
+let DiscussionChannelsPanel;
+let relayAgentsQueryKey;
+let createMemoryHistory;
+let createRootRoute;
+let createRoute;
+let createRouter;
+let RouterProvider;
 
 const COMMUNITY = {
   addedAt: "2026-08-19T00:00:00.000Z",
@@ -211,8 +229,29 @@ before(async () => {
     channelReferenceQueryKey,
     openChannelDirectoryQueryKey,
     useChannelReference,
+    useChannelReferences,
   } = await import("./openChannelDirectory.ts"));
   ({ channelsQueryKey } = await import("./hooks.ts"));
+  ({ relayAgentsQueryKey } = await import("@/features/agents/hooks.ts"));
+  ({ useOpenAgentActivity } = await import(
+    "@/features/agents/useOpenAgentActivity.ts"
+  ));
+  ({ useReminderSources } = await import(
+    "@/features/reminders/ui/RemindersPanel.tsx"
+  ));
+  ({ DiscussionChannelsPanel } = await import(
+    "@/features/projects/ui/DiscussionChannels.tsx"
+  ));
+  ({
+    createMemoryHistory,
+    createRootRoute,
+    createRoute,
+    createRouter,
+    RouterProvider,
+  } = await import("@tanstack/react-router"));
+  ({ useSearchResults } = await import(
+    "@/features/search/useSearchResults.ts"
+  ));
   ({ isChannelReferenceOpenable } = await import("./openChannelDirectory.ts"));
 });
 
@@ -225,6 +264,42 @@ beforeEach(() => {
 
 afterEach(() => ipc.reset());
 after(() => dom.window.close());
+
+test("opening global search with an empty query does not scan the open directory", async () => {
+  const client = createClient();
+  let search;
+  function Probe() {
+    search = useSearchResults({ channels: [], enabled: true });
+    return null;
+  }
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      React.createElement(
+        QueryClientProvider,
+        { client },
+        React.createElement(
+          CommunitiesProvider,
+          null,
+          React.createElement(Probe),
+        ),
+      ),
+    );
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(search.query, "");
+  assert.equal(ipc.directoryCalls, 0);
+
+  await act(async () => root.unmount());
+  client.clear();
+  container.remove();
+});
 
 test("an unknown id fetches one detail without scanning the open directory", async () => {
   const client = createClient();
@@ -298,4 +373,168 @@ test("a not-found detail result is cached as a five-minute miss", async () => {
   assert.deepEqual(ipc.detailCalls, ["missing-channel"]);
   assert.equal(ipc.directoryCalls, 0);
   await second.unmount();
+});
+
+async function mountWithRouter(client, Component) {
+  const rootRoute = createRootRoute({
+    component: () => React.createElement(Component),
+  });
+  const channelRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/channels/$channelId",
+    component: () => null,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([channelRoute]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await router.load();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      React.createElement(
+        QueryClientProvider,
+        { client },
+        React.createElement(
+          CommunitiesProvider,
+          null,
+          React.createElement(RouterProvider, { router }),
+        ),
+      ),
+    );
+  });
+  return {
+    container,
+    async settle() {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    },
+    async unmount() {
+      await act(async () => root.unmount());
+      client.clear();
+      container.remove();
+    },
+  };
+}
+
+test("multi-id references dedupe cold ids and share the single-id query cache", async () => {
+  const client = createClient();
+  ipc.detail = async (channelId) =>
+    rawDetail(rawChannel({ id: channelId, name: `#${channelId}` }));
+  let references;
+  function Probe() {
+    references = useChannelReferences(["cold", "cold", "other"]);
+    return null;
+  }
+  const mounted = await mountWithRouter(client, Probe);
+  await mounted.settle();
+
+  assert.deepEqual(ipc.detailCalls.sort(), ["cold", "other"]);
+  assert.equal(references.channelsById.get("cold")?.name, "#cold");
+  assert.equal(ipc.directoryCalls, 0);
+  await mounted.unmount();
+});
+
+test("agent activity opens a cold readable channel without a directory scan", async () => {
+  const client = createClient();
+  const agentPubkey = "b".repeat(64);
+  client.setQueryData(relayAgentsQueryKey, [
+    {
+      pubkey: agentPubkey,
+      ownerPubkey: VIEWER,
+      name: "Agent",
+      agentType: "agent",
+      channels: [],
+      channelIds: ["cold-agent-channel"],
+      capabilities: [],
+      status: "online",
+      respondTo: null,
+      respondToAllowlist: [],
+    },
+  ]);
+  ipc.detail = async (channelId) =>
+    rawDetail(rawChannel({ id: channelId, name: "cold-agent" }));
+  let activity;
+  function Probe() {
+    activity = useOpenAgentActivity();
+    return null;
+  }
+  const mounted = await mountWithRouter(client, Probe);
+  await mounted.settle();
+
+  assert.equal(activity.canOpenAgentActivity(agentPubkey), true);
+  assert.equal(activity.openAgentActivity(agentPubkey), true);
+  assert.deepEqual(ipc.detailCalls, ["cold-agent-channel"]);
+  assert.equal(ipc.directoryCalls, 0);
+  await mounted.unmount();
+});
+
+test("reminder sources label a cold readable channel without a directory scan", async () => {
+  const client = createClient();
+  const reminder = {
+    id: "reminder",
+    eventId: "event",
+    createdAt: 1,
+    content: {
+      status: "pending",
+      target: {
+        eventId: "message",
+        channelId: "cold-reminder-channel",
+        preview: "Reminder source",
+        authorPubkey: "c".repeat(64),
+      },
+    },
+  };
+  ipc.detail = async (channelId) =>
+    rawDetail(rawChannel({ id: channelId, name: "cold-reminder" }));
+  let sources;
+  function Probe() {
+    sources = useReminderSources([reminder]);
+    return null;
+  }
+  const mounted = await mountWithRouter(client, Probe);
+  await mounted.settle();
+
+  assert.equal(sources.get("reminder")?.channelLabel, "cold-reminder");
+  assert.deepEqual(ipc.detailCalls, ["cold-reminder-channel"]);
+  assert.equal(ipc.directoryCalls, 0);
+  await mounted.unmount();
+});
+
+test("discussion rows label a cold readable channel without a directory scan", async () => {
+  const client = createClient();
+  ipc.search = async () => ({
+    found: 1,
+    hits: [
+      {
+        event_id: "event",
+        content: "discussion",
+        kind: 9,
+        pubkey: "d".repeat(64),
+        channel_id: "abc12345-cold-discussion-channel",
+        channel_name: null,
+        created_at: 1,
+        score: 1,
+      },
+    ],
+  });
+  ipc.detail = async (channelId) =>
+    rawDetail(rawChannel({ id: channelId, name: "cold-discussion" }));
+  const mounted = await mountWithRouter(client, () =>
+    React.createElement(DiscussionChannelsPanel, {
+      query: "discussion query",
+      repositoryName: "repo",
+    }),
+  );
+  await mounted.settle();
+  await mounted.settle();
+
+  assert.match(mounted.container.textContent, /#cold-discussion/);
+  assert.doesNotMatch(mounted.container.textContent, /#abc12345/);
+  assert.deepEqual(ipc.detailCalls, ["abc12345-cold-discussion-channel"]);
+  assert.equal(ipc.directoryCalls, 0);
+  await mounted.unmount();
 });
