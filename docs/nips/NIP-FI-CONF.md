@@ -141,9 +141,8 @@ documents before any mutant is scored:
    contributes its pair to each.
 
 If a later core names an allowlisted symbol, only check 2's disjointness fails
-and the allowlist entry is deleted. `dependency_unreadable` MUST NOT be
-promoted without also leaving the set check 1 quantifies over: it is the one
-core condition whose public class differs.
+and the allowlist entry is deleted; check 1 then validates the promoted
+symbol's class.
 
 **Anonymity comparison.** Every `authorization_denied` row is in the
 private-state anonymity set. Between two private conditions on one
