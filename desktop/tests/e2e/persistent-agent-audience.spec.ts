@@ -318,6 +318,53 @@ test("the mention button opens settings and can undo an address", async ({
       ),
     )
     .toEqual([]);
+
+  await input.fill("@Mor");
+  await input.press("Tab");
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
+          );
+          return stored[scope] ?? [];
+        },
+        { scope: CHANNEL_SCOPE },
+      ),
+    )
+    .toEqual([]);
+
+  await input.type("later");
+  await input.press("Enter");
+  await expect(input).toHaveText("");
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita later"))
+    .toContain(AGENT_A);
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(1);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
+          );
+          return stored[scope] ?? [];
+        },
+        { scope: CHANNEL_SCOPE },
+      ),
+    )
+    .toEqual([AGENT_A]);
 });
 
 test("reselecting an always-mentioned agent pulses its composer avatar", async ({

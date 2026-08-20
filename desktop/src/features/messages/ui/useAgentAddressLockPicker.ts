@@ -185,11 +185,8 @@ export function useAgentAddressLockPicker({
     (suggestion: MentionSuggestion) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (suggestion.isAgent && pubkey && audienceScope) {
-        const { text, cursor } = richText.getPlainTextAndCursor();
-        const activeInlineMention = detectPrefixQuery("@", text, cursor, [
-          suggestion.displayName.toLowerCase(),
-        ]);
-        if (activeInlineMention) {
+        const { cursor } = richText.getPlainTextAndCursor();
+        if (mentions.isInlineMentionSelection()) {
           applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
           return;
         }
@@ -212,6 +209,7 @@ export function useAgentAddressLockPicker({
       audienceScope,
       consumeAddressSuggestion,
       lockedAgentPubkeys,
+      mentions.isInlineMentionSelection,
       mentions.insertMention,
       onPulseAddressLock,
       richText.getPlainTextAndCursor,

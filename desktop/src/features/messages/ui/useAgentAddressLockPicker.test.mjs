@@ -155,6 +155,7 @@ test("selecting an already addressed agent from the explicit picker pulses its b
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    isInlineMentionSelection: () => false,
     insertMention: () => {
       throw new Error("an already addressed agent must not be inserted");
     },
@@ -203,6 +204,7 @@ test("selecting an agent from a typed query leaves the inline mention for send",
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    isInlineMentionSelection: () => true,
     insertMention: () => ({
       replaceFromOffset: 5,
       replaceToOffset: 6,
@@ -215,7 +217,9 @@ test("selecting an agent from a typed query leaves the inline mention for send",
     addPubkey: (pubkey) => addedPubkeys.push(pubkey),
   };
   const richText = {
-    getPlainTextAndCursor: () => ({ text: "ping @", cursor: 6 }),
+    // Selection intent comes from the mention picker, even if focus movement
+    // makes the editor text/cursor insufficient to re-detect the typed query.
+    getPlainTextAndCursor: () => ({ text: "ping ", cursor: 5 }),
   };
   const { result } = renderHook(() =>
     useAgentAddressLockPicker({
@@ -260,6 +264,7 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
+    isInlineMentionSelection: () => false,
     insertMention: () => {
       throw new Error("explicit picker selections must become addressing");
     },

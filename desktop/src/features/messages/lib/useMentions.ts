@@ -72,6 +72,9 @@ export function useMentions(
 ) {
   const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
   const [mentionStartIndex, setMentionStartIndex] = React.useState(0);
+  const mentionPickerOriginRef = React.useRef<"inline" | "explicit" | null>(
+    null,
+  );
   const [selectedMentionNames, setSelectedMentionNames] = React.useState<
     string[]
   >([]);
@@ -661,6 +664,7 @@ export function useMentions(
       }
       trimMapToSize(mentions, 200);
       trimMapToSize(personaMentions, 200);
+      mentionPickerOriginRef.current = null;
       setMentionQuery(null);
       setSelected(0);
 
@@ -755,6 +759,10 @@ export function useMentions(
       managedAgentPubkeys.has(normalizePubkey(pubkey)),
     [managedAgentPubkeys],
   );
+  const isInlineMentionSelection = React.useCallback(
+    () => mentionPickerOriginRef.current === "inline",
+    [],
+  );
   const autocompleteGenerationRef = React.useRef(0);
   const updateMentionQuery = React.useCallback(
     (value: string, cursorPosition: number) => {
@@ -762,6 +770,18 @@ export function useMentions(
       const generation = ++autocompleteGenerationRef.current;
       latestValueRef.current = value;
       latestCursorRef.current = cursorPosition;
+
+      const activeInlineMention = detectPrefixQuery(
+        "@",
+        value,
+        cursorPosition,
+        searchableNamesLowerRef.current,
+      );
+      if (activeInlineMention) {
+        mentionPickerOriginRef.current = "inline";
+      } else if (mentionPickerOriginRef.current === "inline") {
+        mentionPickerOriginRef.current = null;
+      }
 
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
@@ -778,6 +798,7 @@ export function useMentions(
           searchableNamesLowerRef.current,
         );
         if (mention) {
+          mentionPickerOriginRef.current = "inline";
           setMentionQuery(mention.query);
           setMentionStartIndex(mention.startIndex);
           setSelected(0);
@@ -797,6 +818,7 @@ export function useMentions(
         debounceTimerRef.current = null;
       }
       flushedMentionStartIndexRef.current = null;
+      mentionPickerOriginRef.current = "explicit";
       if (preference === "preserve") {
         setMentionStartIndex(cursorPosition);
         return;
@@ -859,6 +881,7 @@ export function useMentions(
       debounceTimerRef.current = null;
     }
     flushedMentionStartIndexRef.current = null;
+    mentionPickerOriginRef.current = null;
     mentionSelection.clearAgentSelectionPreference();
     setMentionQuery(null);
     setSelected(0);
@@ -931,6 +954,7 @@ export function useMentions(
           });
           if (flushed?.type === "match") {
             flushedMentionStartIndexRef.current = flushed.startIndex;
+            mentionPickerOriginRef.current = "inline";
             setMentionQuery(null); // reset so dropdown closes
             return { handled: true, suggestion: flushed.suggestion };
           }
@@ -981,6 +1005,7 @@ export function useMentions(
     agentKnownNames: agentHighlightNames,
     isAgentPubkey,
     isManagedAgentPubkey,
+    isInlineMentionSelection,
     isMentionOpen,
     knownNames: highlightNames,
     memberPubkeys,
