@@ -558,6 +558,24 @@ impl DeletionStore {
         .unwrap_or(false)
     }
 
+    /// Resolve an active deletion-preview target without creating a request.
+    pub async fn preview_target(&self, community_host: &str) -> Result<(CommunityId, String)> {
+        let row: Option<(Uuid, String)> = sqlx::query_as(
+            "SELECT id, host FROM communities \
+             WHERE lower(host) = lower($1) AND deletion_state = 'active' \
+               AND deleted_at IS NULL",
+        )
+        .bind(community_host)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|(id, host)| (CommunityId::from_uuid(id), host))
+            .ok_or_else(|| {
+                DbError::DeletionSafety(format!(
+                    "community {community_host:?} is missing, fenced, or tombstoned"
+                ))
+            })
+    }
+
     /// Persist a request. Only active non-tombstone communities may be submitted.
     pub async fn submit(
         &self,
@@ -3191,6 +3209,36 @@ mod postgres_tests {
             .await
             .expect("freeze inventory");
         (request, inventory)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn preview_target_reads_active_community_without_creating_request() {
+        let (db, store) = store().await;
+        let host = format!("preview-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create preview community");
+
+        let (preview_id, canonical_host) = store
+            .preview_target(&host.to_uppercase())
+            .await
+            .expect("resolve preview target");
+
+        assert_eq!(preview_id, community.id);
+        assert_eq!(canonical_host, host);
+        let requests: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM community_deletion_requests WHERE community_id = $1",
+        )
+        .bind(community.id.as_uuid())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count preview requests");
+        assert_eq!(
+            requests, 0,
+            "preview must not create durable deletion state"
+        );
     }
 
     #[tokio::test]
