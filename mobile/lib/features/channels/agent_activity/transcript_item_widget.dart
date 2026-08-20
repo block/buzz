@@ -5,6 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../../shared/text/truncate.dart';
 import '../../../shared/theme/theme.dart';
 import 'observer_models.dart';
 
@@ -245,9 +246,7 @@ class _MetadataItemWidget extends HookWidget {
                   if (section.body.isNotEmpty) ...[
                     const SizedBox(height: Grid.quarter),
                     Text(
-                      section.body.length > 500
-                          ? '${section.body.substring(0, 500)}\u2026'
-                          : section.body,
+                      truncateWithEllipsis(section.body, 500, '\u2026'),
                       style: context.textTheme.bodySmall?.copyWith(
                         color: context.colors.onSurfaceVariant,
                       ),
@@ -401,9 +400,11 @@ class _ToolItemWidget extends HookWidget {
               if (resultExpanded.value) ...[
                 const SizedBox(height: Grid.quarter),
                 _CodeBlock(
-                  text: item.result.length > 2000
-                      ? '${item.result.substring(0, 2000)}\n\n\u2026 (truncated)'
-                      : item.result,
+                  text: truncateWithEllipsis(
+                    item.result,
+                    2000,
+                    '\n\n\u2026 (truncated)',
+                  ),
                   isError: item.isError,
                 ),
               ],
