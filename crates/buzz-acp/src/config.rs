@@ -35,6 +35,30 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+fn validate_timeout_fallback_marker(raw: Option<String>) -> Result<Option<String>, ConfigError> {
+    let Some(marker) = raw.map(|value| value.trim().to_string()) else {
+        return Ok(None);
+    };
+    if marker.is_empty() {
+        return Ok(None);
+    }
+    let valid = marker.len() <= 100
+        && marker
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && marker
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_uppercase);
+    if !valid {
+        return Err(ConfigError::ConfigFile(
+            "timeout_fallback_marker must be 1-100 ASCII characters, start with A-Z, and contain only A-Z, 0-9, or _"
+                .into(),
+        ));
+    }
+    Ok(Some(marker))
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -264,6 +288,10 @@ pub struct CliArgs {
     /// Absolute wall-clock cap per turn (safety valve).
     #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
     pub max_turn_duration: u64,
+
+    /// Exact terminal marker published instead of requeueing a timed-out batch.
+    #[arg(long, env = "BUZZ_ACP_TIMEOUT_FALLBACK_MARKER")]
+    pub timeout_fallback_marker: Option<String>,
 
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
     #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
@@ -502,6 +530,7 @@ pub struct Config {
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
+    pub timeout_fallback_marker: Option<String>,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
@@ -1003,6 +1032,9 @@ impl Config {
             )));
         }
 
+        let timeout_fallback_marker =
+            validate_timeout_fallback_marker(args.timeout_fallback_marker)?;
+
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
             if raw.is_empty() {
@@ -1071,6 +1103,7 @@ impl Config {
             mcp_command: args.mcp_command,
             idle_timeout_secs,
             max_turn_duration_secs,
+            timeout_fallback_marker,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
@@ -1135,7 +1168,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s timeout_fallback={} agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1143,6 +1176,7 @@ impl Config {
             self.mcp_command,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
+            self.timeout_fallback_marker.is_some(),
             self.agents,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
@@ -1451,6 +1485,7 @@ mod tests {
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
+            timeout_fallback_marker: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -2412,6 +2447,21 @@ channels = "ALL"
     #[test]
     fn idle_timeout_zero_from_deprecated_clamped_to_one() {
         assert_eq!(resolve_idle_timeout(None, Some(0)), 1);
+    }
+
+    #[test]
+    fn timeout_fallback_marker_is_strict_and_content_free() {
+        assert_eq!(
+            validate_timeout_fallback_marker(Some(" PROSPECT_RESEARCH_INCOMPLETE ".into()))
+                .unwrap(),
+            Some("PROSPECT_RESEARCH_INCOMPLETE".into())
+        );
+        assert!(validate_timeout_fallback_marker(Some("lowercase marker".into())).is_err());
+        assert!(validate_timeout_fallback_marker(Some("BAD\nMARKER".into())).is_err());
+        assert_eq!(
+            validate_timeout_fallback_marker(Some("  ".into())).unwrap(),
+            None
+        );
     }
 
     #[test]

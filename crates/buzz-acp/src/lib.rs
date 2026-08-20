@@ -3412,6 +3412,13 @@ fn handle_prompt_result(
     // branch below records what actually happened; only the hard-timeout
     // match arm in the death_message construction reads it.
     let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+    let terminal_timeout_marker = match &result.outcome {
+        PromptOutcome::Timeout(TimeoutKind::Idle)
+        | PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
+            config.timeout_fallback_marker.as_deref()
+        }
+        _ => None,
+    };
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -3442,6 +3449,27 @@ fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
+            } else if let Some(marker) = terminal_timeout_marker {
+                // Some workflow agents have a machine-readable terminal state.
+                // Their logical batch must end at the first ACP timeout; a fresh
+                // session retry would reset the per-turn clock and defeat the
+                // workflow's absolute deadline.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    marker,
+                    "publishing configured terminal timeout marker without requeue"
+                );
+                let content = format!(
+                    "{marker}\n\nThe deterministic agent runtime stopped this batch after its bounded timeout. No result package was produced, and no further tool call is permitted for this batch."
+                );
+                spawn_failure_notice(rest_client, &batch, content);
+                if matches!(
+                    result.outcome,
+                    PromptOutcome::Timeout(TimeoutKind::Hard { .. })
+                ) {
+                    hard_timeout_fate_suffix = Some(" — terminal fallback published");
+                }
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -6178,6 +6206,7 @@ mod build_mcp_servers_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            timeout_fallback_marker: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -6401,6 +6430,7 @@ mod error_outcome_emission_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            timeout_fallback_marker: None,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -6741,7 +6771,7 @@ mod error_outcome_emission_tests {
         };
 
         // Returns (pending_channels, queued_event_count_for_channel).
-        let run = |outcome: PromptOutcome, batch: FlushBatch| async move {
+        let run = |outcome: PromptOutcome, batch: FlushBatch, terminal_fallback: bool| async move {
             let channel_id = batch.channel_id;
             let agent = dummy_agent(0).await;
             let mut pool = AgentPool::from_slots(vec![None]);
@@ -6758,7 +6788,10 @@ mod error_outcome_emission_tests {
                 },
             );
             let mut queue = EventQueue::new(config::DedupMode::Queue);
-            let config = test_config();
+            let mut config = test_config();
+            if terminal_fallback {
+                config.timeout_fallback_marker = Some("PROSPECT_RESEARCH_INCOMPLETE".into());
+            }
             let mut heartbeat_in_flight = false;
             let removed_channels = HashSet::new();
             let mut crash_history = vec![SlotCircuit {
@@ -6801,6 +6834,7 @@ mod error_outcome_emission_tests {
                 recently_active: false,
             }),
             hard_batch,
+            false,
         )
         .await;
         assert_eq!(
@@ -6815,7 +6849,7 @@ mod error_outcome_emission_tests {
         // Idle timeout: batch IS requeued (first attempt, not yet dead-lettered).
         let idle_batch = make_batch();
         let (idle_channels, idle_events) =
-            run(PromptOutcome::Timeout(TimeoutKind::Idle), idle_batch).await;
+            run(PromptOutcome::Timeout(TimeoutKind::Idle), idle_batch, false).await;
         assert_eq!(
             idle_channels, 1,
             "idle timeout must requeue the batch for retry"
@@ -6824,6 +6858,30 @@ mod error_outcome_emission_tests {
             idle_events, 1,
             "idle timeout must preserve the event for retry"
         );
+
+        // A workflow-specific terminal marker turns timeout into a final,
+        // machine-readable response instead of resetting the clock by retrying.
+        let bounded_batch = make_batch();
+        let (bounded_channels, bounded_events) = run(
+            PromptOutcome::Timeout(TimeoutKind::Idle),
+            bounded_batch,
+            true,
+        )
+        .await;
+        assert_eq!(bounded_channels, 0);
+        assert_eq!(bounded_events, 0);
+
+        let bounded_hard_batch = make_batch();
+        let (bounded_hard_channels, bounded_hard_events) = run(
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: true,
+            }),
+            bounded_hard_batch,
+            true,
+        )
+        .await;
+        assert_eq!(bounded_hard_channels, 0);
+        assert_eq!(bounded_hard_events, 0);
     }
 
     #[tokio::test]
