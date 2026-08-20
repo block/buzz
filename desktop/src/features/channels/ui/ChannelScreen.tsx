@@ -50,6 +50,8 @@ import {
   selectTimelineLoadingState,
 } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
+import { useImportIdentityBindings } from "@/features/messages/useImportIdentityBindings";
+import { useMessageProfilePubkeys } from "@/features/channels/useMessageProfilePubkeys";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -308,22 +310,18 @@ export function ChannelScreen({
       mergeChannelKnownAgentPubkeys(channelMembers, managedAgents, relayAgents),
     [channelMembers, managedAgents, relayAgents],
   );
-  const messageProfilePubkeys = React.useMemo(
-    () => [
-      ...new Set([
-        ...messageEventProfilePubkeys,
-        ...activeDmParticipantPubkeys,
-        ...knownAgentPubkeys,
-        ...typingEntries.map((entry) => entry.pubkey),
-      ]),
-    ],
-    [
-      activeDmParticipantPubkeys,
-      knownAgentPubkeys,
-      messageEventProfilePubkeys,
-      typingEntries,
-    ],
-  );
+  // Owner-signed import identity bindings + the bound people's pubkeys, so
+  // imported history renders under their avatar even where they never natively
+  // authored an event in this channel.
+  const { bindings: importIdentityBindings, boundPubkeys: boundImportPubkeys } =
+    useImportIdentityBindings();
+  const messageProfilePubkeys = useMessageProfilePubkeys({
+    messageEventProfilePubkeys,
+    activeDmParticipantPubkeys,
+    knownAgentPubkeys,
+    typingEntries,
+    boundImportPubkeys,
+  });
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
   });
@@ -397,6 +395,7 @@ export function ChannelScreen({
         respondToLookup,
         relaySelfPubkey,
         messageOwnerProfiles,
+        importIdentityBindings,
       ),
     [
       activeChannel,
@@ -409,6 +408,7 @@ export function ChannelScreen({
       relaySelfPubkey,
       respondToLookup,
       resolvedMessages,
+      importIdentityBindings,
     ],
   );
   const threadPanelData = useIndependentThreadPanel({

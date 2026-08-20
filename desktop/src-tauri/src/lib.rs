@@ -57,10 +57,11 @@ pub use commands::print_agent_access_owner_only_probe_if_requested;
 use commands::*;
 use deep_link::{
     acknowledge_pending_community_deep_link, acknowledge_pending_entity_deep_link,
-    acknowledge_pending_navigation_deep_link, clear_pending_navigation_deep_links,
-    handle_deep_link_url, take_pending_community_deep_link, take_pending_entity_deep_link,
+    acknowledge_pending_import_claim_deep_link, acknowledge_pending_navigation_deep_link,
+    clear_pending_navigation_deep_links, handle_deep_link_url, take_pending_community_deep_link,
+    take_pending_entity_deep_link, take_pending_import_claim_deep_link,
     take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingEntityDeepLinks,
-    PendingNavigationDeepLinks,
+    PendingImportClaimDeepLinks, PendingNavigationDeepLinks,
 };
 use huddle::{
     add_agent_to_huddle,
@@ -225,6 +226,7 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(PendingImportClaimDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
         .manage(BuilderlabSession::default())
@@ -533,6 +535,8 @@ pub fn run() {
             terminal_runtime::terminal_focus,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
+            take_pending_import_claim_deep_link,
+            acknowledge_pending_import_claim_deep_link,
             take_pending_navigation_deep_link,
             acknowledge_pending_navigation_deep_link,
             clear_pending_navigation_deep_links,
