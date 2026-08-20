@@ -443,6 +443,8 @@ one deployed domain does not activate it.
 Before NIP-FI enforcement or discovery is enabled, reviewers verify that one
 immutable claim tuple passes every applicable oracle, other than a validly
 deferred `FI-CONF-INTEROP-EXIT`, at one reviewed revision;
+that, if the canonical fixture has been published before the review, the claim
+tuple's exit fixture digest is not `pending-canonical-fixture`;
 that the protected-ingress inventory has no uncovered or competing authority;
 that every listed oracle, other than a validly deferred `FI-CONF-INTEROP-EXIT`
 under **Mutation adequacy**, has a killed, attributed, reachable mutant and every
