@@ -1,40 +1,14 @@
 import type { EnvVarsValue } from "./EnvVarsEditor";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 
 /**
- * Pure env-var update helpers shared by the persona / create-agent /
- * edit-agent dialogs. Every function returns the SAME reference when nothing
- * changes, so `setEnvVars(fn(current))` skips a no-op re-render.
+ * Provider selection changes which values a consumer reads. It must not delete
+ * values from the shared env map: global credentials and endpoints may still
+ * belong to another explicitly configured agent or to card minting.
  */
-
-/** Remove `envKey` when present. */
-export function envVarsWithoutKey(
+export function envVarsPreservingProviderState(
   current: EnvVarsValue,
-  envKey: string,
+  _previousProvider: string,
+  _nextProvider: string,
 ): EnvVarsValue {
-  if (!(envKey in current)) {
-    return current;
-  }
-
-  const next = { ...current };
-  delete next[envKey];
-  return next;
-}
-
-/**
- * Clear the previous provider's managed API key when switching providers.
- * No-op when the previous provider has no managed key or the next provider
- * uses the same one.
- */
-export function envVarsClearingManagedApiKey(
-  current: EnvVarsValue,
-  previousProvider: string,
-  nextProvider: string,
-): EnvVarsValue {
-  const previousEnvVar = getProviderApiKeyEnvVar(previousProvider);
-  const nextEnvVar = getProviderApiKeyEnvVar(nextProvider);
-  if (previousEnvVar && previousEnvVar !== nextEnvVar) {
-    return envVarsWithoutKey(current, previousEnvVar);
-  }
   return current;
 }

@@ -33,6 +33,50 @@ fn local_in_app() -> AgentDefinition {
     }
 }
 
+#[test]
+fn inbound_legacy_openai_provider_keeps_local_custom_origin_compatible() {
+    let mut local = local_in_app();
+    local.env_vars = BTreeMap::from([
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            "compat-key".to_string(),
+        ),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "https://gateway.example/v1".to_string(),
+        ),
+    ]);
+    let mut personas = vec![local];
+    let mut inbound = inbound_for(UUID, "Remote");
+    inbound.provider = Some("openai".to_string());
+
+    apply_inbound_persona(&mut personas, inbound);
+
+    assert_eq!(personas[0].provider.as_deref(), Some("openai"));
+}
+
+#[test]
+fn inbound_explicit_official_key_preserves_openai_provider() {
+    let mut local = local_in_app();
+    local.env_vars = BTreeMap::from([
+        ("OPENAI_API_KEY".to_string(), "official-key".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            "compat-key".to_string(),
+        ),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "https://gateway.example/v1".to_string(),
+        ),
+    ]);
+    let mut personas = vec![local];
+    let inbound = inbound_for(UUID, "Remote");
+
+    apply_inbound_persona(&mut personas, inbound);
+
+    assert_eq!(personas[0].provider.as_deref(), Some("openai"));
+}
+
 /// An inbound persona as `persona_from_event` would produce it: id = d-tag,
 /// slug = Some(d-tag), empty env_vars, source_team None.
 fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {

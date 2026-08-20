@@ -19,7 +19,7 @@ impl Harness {
     async fn spawn(extra: &[(&str, &str)]) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "openai")
+        cmd.env("BUZZ_AGENT_PROVIDER", "openai-compat")
             .env("OPENAI_COMPAT_API_KEY", "test")
             .env("OPENAI_COMPAT_MODEL", "fake-model")
             .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
@@ -472,7 +472,7 @@ async fn test_oversized_line_kills_agent() {
     let url = spawn_fake_llm(vec![]).await;
     let bin = env!("CARGO_BIN_EXE_buzz-agent");
     let mut cmd = tokio::process::Command::new(bin);
-    cmd.env("BUZZ_AGENT_PROVIDER", "openai")
+    cmd.env("BUZZ_AGENT_PROVIDER", "openai-compat")
         .env("OPENAI_COMPAT_API_KEY", "test")
         .env("OPENAI_COMPAT_MODEL", "fake-model")
         .env("OPENAI_COMPAT_BASE_URL", &url)
@@ -634,7 +634,7 @@ async fn test_thought_chunk_emitted_before_message_chunk_responses_api() {
     )])
     .await;
     let mut h = Harness::spawn(&[
-        ("BUZZ_AGENT_PROVIDER", "openai"),
+        ("BUZZ_AGENT_PROVIDER", "openai-compat"),
         ("OPENAI_COMPAT_API_KEY", "test"),
         ("OPENAI_COMPAT_MODEL", "fake-model"),
         ("OPENAI_COMPAT_API", "responses"),
@@ -940,7 +940,7 @@ async fn test_acp_v2_chunks_carry_message_id() {
     ])
     .await;
     let mut h = Harness::spawn(&[
-        ("BUZZ_AGENT_PROVIDER", "openai"),
+        ("BUZZ_AGENT_PROVIDER", "openai-compat"),
         ("OPENAI_COMPAT_API_KEY", "test"),
         ("OPENAI_COMPAT_MODEL", "fake-model"),
         ("OPENAI_COMPAT_API", "responses"),

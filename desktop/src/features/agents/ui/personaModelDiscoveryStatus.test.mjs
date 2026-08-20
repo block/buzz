@@ -14,15 +14,15 @@ test("model discovery status names missing Anthropic credentials", () => {
   assert.match(status?.message ?? "", /Anthropic models/);
 });
 
-test("model discovery status names missing OpenAI-compatible credentials", () => {
+test("model discovery status names missing official OpenAI credentials", () => {
   const status = formatModelDiscoveryErrorStatus(
-    new Error("config: OPENAI_COMPAT_API_KEY required"),
-    "openai-compat",
+    new Error("config: OPENAI_API_KEY required"),
+    "openai",
   );
 
   assert.equal(status?.tone, "warning");
   assert.match(status?.message ?? "", /OpenAI runtime API key/);
-  assert.match(status?.message ?? "", /OPENAI_COMPAT_API_KEY/);
+  assert.match(status?.message ?? "", /OPENAI_API_KEY/);
   assert.match(status?.message ?? "", /OpenAI models/);
 });
 

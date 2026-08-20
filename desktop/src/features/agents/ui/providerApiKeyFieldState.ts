@@ -93,7 +93,10 @@ export function getProviderApiKeyFieldState({
     advancedRequiredEnvKeys,
     inheritedLabel,
     isInherited: source !== null,
-    isRequired: source === null && value.length === 0,
+    isRequired:
+      requiredEnvKeys.includes(secretEnvVar) &&
+      source === null &&
+      value.length === 0,
     secretEnvVar,
     value,
   };

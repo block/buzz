@@ -52,10 +52,10 @@ export function getGlobalAgentCredentialState({
   const advancedCredentialMissing = advancedRequiredEnvKeys.some(
     (key) => (envVars[key] ?? "").trim().length === 0,
   );
+  const apiKeyRequired =
+    apiKeyEnvVar !== null && requiredEnvKeys.includes(apiKeyEnvVar);
   const apiKeyMissing =
-    apiKeyEnvVar !== null &&
-    !apiKeyInherited &&
-    apiKeyValue.trim().length === 0;
+    apiKeyRequired && !apiKeyInherited && apiKeyValue.trim().length === 0;
 
   return {
     advancedCredentialMissing,
@@ -64,6 +64,7 @@ export function getGlobalAgentCredentialState({
     apiKeyEnvVar,
     apiKeyFileSatisfied,
     apiKeyInherited,
+    apiKeyRequired,
     apiKeyValue,
     credentialsValid: !advancedCredentialMissing && !apiKeyMissing,
   };

@@ -11,7 +11,7 @@ import {
 
 /**
  * Top-level API key pseudo-field for providers that require a secret
- * credential (anthropic → ANTHROPIC_API_KEY, openai → OPENAI_COMPAT_API_KEY).
+ * credential (anthropic → ANTHROPIC_API_KEY, openai → OPENAI_API_KEY).
  *
  * This is a pure view over `envVars[secretEnvVar]` — writes go through
  * `onValueChange`, which the parent routes to `setEnvVars`. No second copy

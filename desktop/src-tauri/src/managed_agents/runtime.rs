@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 
 use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
-
+use super::openai_env::effective_runtime_provider;
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
@@ -24,7 +24,7 @@ pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondT
 mod metadata;
 pub(crate) use metadata::{
     apply_agent_display_env, resolve_session_title, runtime_metadata_env_vars,
-    DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
+    scrub_ambient_openai_env, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -204,7 +204,7 @@ pub fn build_managed_agent_summary(
         personas,
         global_config,
     );
-    let (effective_model, effective_provider, effective_prompt, model_source) = match effective_cfg
+    let (effective_model, configured_provider, effective_prompt, model_source) = match effective_cfg
     {
         crate::managed_agents::effective_config::EffectiveConfigResult::Resolved(cfg) => {
             let source = cfg.model.source.clone();
@@ -293,6 +293,8 @@ pub fn build_managed_agent_summary(
             env: Default::default(),
         }
     });
+    let effective_provider =
+        effective_runtime_provider(&descriptor.command, configured_provider, &descriptor.env);
     let effective_mcp_command = known_acp_runtime(&descriptor.command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("")
@@ -582,7 +584,6 @@ pub fn spawn_agent_child(
             config_file_path: runtime_meta.and_then(|r| r.config_file_path),
             effective_command: descriptor.command.clone(),
         };
-        // Compute the optional payload before touching the command.
         let setup_payload_json =
             if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
                 let reqs: Vec<serde_json::Value> = requirements
@@ -595,6 +596,9 @@ pub fn spawn_agent_child(
                         Requirement::EnvKey { key } => serde_json::json!({
                             "surface": "env_key",
                             "key": key,
+                        }),
+                        Requirement::ConfigInvalid { message } => serde_json::json!({
+                            "surface": "config_invalid", "message": message,
                         }),
                         Requirement::CliLogin {
                             probe_args,
@@ -709,7 +713,9 @@ pub fn spawn_agent_child(
     let mesh_model_id = effective_cfg.relay_mesh_model_id();
     let effective_prompt = effective_cfg.system_prompt.value;
     let effective_model = effective_cfg.model.value;
-    let effective_provider = effective_cfg.provider.value;
+    let configured_provider = effective_cfg.provider.value;
+    let effective_provider =
+        effective_runtime_provider(&descriptor.command, configured_provider, &descriptor.env);
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
@@ -804,17 +810,14 @@ pub fn spawn_agent_child(
         );
     }
 
-    // User env (descriptor.env): fully-layered floor→runtime→definition→global→persona→agent,
-    // reserved-key filtered. Written last so user-explicit values win over Buzz-set env.
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
 
-    // B5: carry persisted effort; harness resolves thought_level configId at first session.
-    // Written AFTER descriptor.env so the canonical persisted value wins over any
-    // user-supplied BUZZ_ACP_EFFORT_LEVEL entry, mirroring the A1 model-authority pattern
+    if runtime_meta.is_some_and(|runtime| runtime.id == "buzz-agent") {
+        scrub_ambient_openai_env(&mut command, effective_provider.as_deref(), &descriptor.env);
+    }
     // (ANTHROPIC_MODEL is applied post-loop for the same reason). When effort_level is
-    // None there is no canonical value to assert, so env passthrough stands — user env
     // legitimately seeds startup effort in that case.
     apply_effort_env(&mut command, record.effort_level.as_deref());
 
@@ -902,8 +905,6 @@ pub fn spawn_agent_child(
     } else {
         None
     };
-
-    // Receipt persistence belongs to the caller's atomic register transition.
 
     // Windows: assign the harness to a Job Object so its whole tree dies with
     // the handle. The Unix process-group equivalent is set above.
@@ -994,6 +995,5 @@ pub fn start_managed_agent_process(
 
 #[cfg(test)]
 mod test_fixtures;
-
 #[cfg(test)]
 mod tests;

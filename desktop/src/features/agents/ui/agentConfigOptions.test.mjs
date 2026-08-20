@@ -264,8 +264,7 @@ test("getProviderApiKeyLabel_openai_returns_openai_runtime_label", () => {
 });
 
 test("getProviderApiKeyLabel_openai_compat_returns_distinct_label", () => {
-  // openai and openai-compat must have distinct labels — both use
-  // OPENAI_COMPAT_API_KEY but carry different semantic identities.
+  // openai and openai-compat have distinct labels and credential identities.
   assert.equal(
     getProviderApiKeyLabel("openai-compat"),
     "OpenAI-compatible Runtime API Key",

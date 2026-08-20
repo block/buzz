@@ -95,6 +95,8 @@ pub(crate) enum RequirementPayload {
     NormalizedField { field: String },
     /// An env-backed credential that is absent.
     EnvKey { key: String },
+    /// Invalid or conflicting configuration with actionable remediation copy.
+    ConfigInvalid { message: String },
     /// A CLI authentication step that must be completed interactively.
     CliLogin {
         probe_args: Vec<String>,
@@ -127,6 +129,7 @@ impl RequirementPayload {
             RequirementPayload::EnvKey { key } => {
                 format!("set `{}` in Edit Agent → Environment variables", key)
             }
+            RequirementPayload::ConfigInvalid { message } => message.clone(),
             RequirementPayload::CliLogin {
                 setup_copy,
                 availability,
@@ -723,6 +726,25 @@ mod tests {
             "nudge body should mention the missing env key"
         );
         assert!(body.contains("Fizz"), "nudge body should name the agent");
+    }
+
+    #[test]
+    fn nudge_body_explains_conflicting_openai_origin() {
+        let payload = SetupPayload {
+            agent_name: "OpenAI Agent".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![RequirementPayload::ConfigInvalid {
+                message:
+                    "remove `OPENAI_COMPAT_BASE_URL` or switch the provider to `openai-compat`"
+                        .to_string(),
+            }],
+        };
+
+        let body = payload.nudge_body();
+
+        assert!(body.contains("remove `OPENAI_COMPAT_BASE_URL`"));
+        assert!(body.contains("switch the provider to `openai-compat`"));
+        assert!(body.contains(r#""surface":"config_invalid""#));
     }
 
     #[test]

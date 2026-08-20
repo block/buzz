@@ -25,6 +25,67 @@ pub(super) fn env_or_process_value(env: &BTreeMap<String, String>, key: &str) ->
     })
 }
 
+/// Read a trimmed mapped value even when it is blank, falling back to the
+/// process only when the map has no override. Optional credentials use this so
+/// an explicit blank means "send no authentication" rather than inheriting an
+/// unrelated process secret.
+pub(super) fn env_or_process_override(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env.get(key)
+        .map(|value| value.trim().to_string())
+        .or_else(|| {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+        })
+}
+
+pub(super) fn validate_openai_compat_base_url(value: &str) -> Result<(), String> {
+    const INVALID_URL: &str =
+        "OPENAI_COMPAT_BASE_URL must be an HTTP(S) URL without credentials, query, or fragment";
+    let parsed = url::Url::parse(value.trim()).map_err(|_| INVALID_URL.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(INVALID_URL.to_string());
+    }
+    Ok(())
+}
+
+pub(super) fn openai_compatible_models_url_for_discovery(
+    provider: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let is_compat =
+        provider.is_some_and(|value| value.trim().eq_ignore_ascii_case("openai-compat"));
+    let configured_base_url = if is_compat {
+        env_or_process_override(env, "OPENAI_COMPAT_BASE_URL")
+    } else {
+        env_value(env, "OPENAI_COMPAT_BASE_URL")
+    }
+    .filter(|value| !value.is_empty());
+    if !is_compat {
+        if configured_base_url
+            .as_deref()
+            .is_some_and(|value| value.trim_end_matches('/') != "https://api.openai.com/v1")
+        {
+            return Err(
+                "OPENAI_COMPAT_BASE_URL is only supported by provider=openai-compat".into(),
+            );
+        }
+        return Ok("https://api.openai.com/v1/models".to_string());
+    }
+
+    let base_url = configured_base_url.ok_or_else(|| {
+        "OPENAI_COMPAT_BASE_URL required for OpenAI-compatible model discovery".to_string()
+    })?;
+    validate_openai_compat_base_url(&base_url)?;
+    Ok(format!("{}/models", base_url.trim().trim_end_matches('/')))
+}
+
 /// Clone `env` with `key` set to the value a request actually used, so error
 /// redaction masks the inherited process value and not just the mapped one.
 pub(super) fn redaction_env_with_value(
@@ -49,7 +110,7 @@ pub(super) fn redaction_env_with_value(
 /// turn the subprocess catalog into `config: ANTHROPIC_API_KEY required`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DiscoveryProvider {
-    value: Option<String>,
+    pub(super) value: Option<String>,
     inferred: bool,
 }
 
@@ -68,7 +129,7 @@ impl DiscoveryProvider {
         env: &BTreeMap<String, String>,
         key: &str,
     ) -> Result<Option<String>, String> {
-        match env_or_process_value(env, key) {
+        match env_or_process_override(env, key).filter(|value| !value.is_empty()) {
             Some(value) => Ok(Some(value)),
             None if self.inferred => Ok(None),
             None => Err(format!("config: {key} required")),
@@ -110,5 +171,25 @@ pub(super) fn effective_discovery_provider(
     DiscoveryProvider {
         value: provider_env_var.and_then(|key| env_or_process_value(env, key)),
         inferred: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_openai_compat_base_url;
+
+    #[test]
+    fn rejects_ambiguous_openai_compat_url_components() {
+        for value in [
+            "http://user:secret@localhost/v1",
+            "http://localhost/v1?tenant=x",
+            "http://localhost/v1#fragment",
+        ] {
+            let error = validate_openai_compat_base_url(value).unwrap_err();
+            assert!(
+                error.contains("without credentials, query, or fragment"),
+                "value={value} error={error}"
+            );
+        }
     }
 }

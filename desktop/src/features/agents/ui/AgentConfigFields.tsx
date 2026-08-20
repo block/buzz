@@ -37,7 +37,6 @@ import {
   CARD_MINT_KEY_ANNOTATIONS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
-  getProviderApiKeyEnvVar,
   getProviderApiKeyLabel,
   runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/agentConfigOptions";
@@ -47,6 +46,11 @@ import {
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
 import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
+import {
+  OPENAI_COMPAT_BASE_URL,
+  OpenAiCompatibleBaseUrlField,
+  openAiCompatibleBaseUrlError,
+} from "@/features/agents/ui/OpenAiCompatibleBaseUrlField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import {
@@ -63,6 +67,7 @@ import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup"
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { CardMintKeyCue } from "./CardMintKeyCue";
 import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
+import { envVarsPreservingProviderState } from "./providerEnvVarUpdates";
 
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
@@ -90,23 +95,22 @@ type AgentConfigDisclosure =
 // onboarding's values won every call and are now the only behavior:
 // - auto-select a valid model when the provider changes
 // - keep the model select usable during discovery
-// - preserve credential env vars across provider switches (the abandoned
-//   provider's key stays in env_vars — visible/deletable under Advanced)
+// - clear a managed provider credential when its identity changes; unrelated
+//   env vars remain visible/deletable under Advanced.
+// - clear provider-owned endpoint metadata when leaving openai-compat.
 // - require a provider before model/effort are editable (no saveable
 //   invalid state — design principle #4)
 const autoSelectModelOnProviderChange = true;
 const disableModelSelectDuringDiscovery = false;
-const preserveCredentialEnvVarsOnProviderChange = true;
+const clearManagedCredentialOnProviderChange = true;
 const requireProviderForModelAndEffort = true;
-
 /** The canonical behavior contract, exported for the contract test. */
 export const CANONICAL_CONFIG_BEHAVIORS = {
   autoSelectModelOnProviderChange,
   disableModelSelectDuringDiscovery,
-  preserveCredentialEnvVarsOnProviderChange,
+  clearManagedCredentialOnProviderChange,
   requireProviderForModelAndEffort,
 } as const;
-
 /** Disclosure preset → the eight visibility decisions it owns. Exported for the contract test. */
 export function resolveDisclosure(disclosure: AgentConfigDisclosure) {
   const full = disclosure !== "onboarding-essential";
@@ -121,7 +125,6 @@ export function resolveDisclosure(disclosure: AgentConfigDisclosure) {
     showUnavailableEffortOptions: full,
   } as const;
 }
-
 export function shouldRevealDependentConfigFields({
   disclosure,
   providerFieldVisible,
@@ -137,7 +140,6 @@ export function shouldRevealDependentConfigFields({
     providerValue.trim().length > 0
   );
 }
-
 /** Whether the status line under the Model field renders. Discovery warnings bypass onboarding-essential so first-run failures are never invisible. */
 export function shouldShowModelStatusMessage(
   showDescriptions: boolean,
@@ -145,7 +147,6 @@ export function shouldShowModelStatusMessage(
 ): boolean {
   return showDescriptions || status !== null;
 }
-
 /**
  * Renders the Model control given discovery state. Optional-model harnesses omit it while
  * discovery is loading or after confirmed successful empty; failures keep it for the #2246 UI.
@@ -174,7 +175,6 @@ export function shouldRenderModelControl({
   // Omit only on confirmed successful empty — not on failure/unavailable.
   return !modelDiscoverySuccessfulEmpty;
 }
-
 export type AgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
@@ -210,7 +210,6 @@ export type AgentConfigFieldsProps = {
   useCustomSelect?: boolean;
   useChevronSelectIcon?: boolean;
 };
-
 export function AgentConfigFields({
   bakedEnv,
   selectedRuntime,
@@ -240,7 +239,6 @@ export function AgentConfigFields({
     showRequiredIndicators,
     showUnavailableEffortOptions,
   } = resolveDisclosure(disclosure);
-
   const fieldModel = React.useMemo(
     () =>
       deriveAgentConfigFieldModel({
@@ -255,7 +253,6 @@ export function AgentConfigFields({
     effortField?.currentPersistence.kind === "envVar"
       ? effortField.currentPersistence.key
       : null;
-
   const numericDescriptors = fieldModel.fields.filter(
     (d): d is NumericDescriptor =>
       (d.kind === "maxOutputTokens" ||
@@ -307,7 +304,6 @@ export function AgentConfigFields({
       ]),
     [bakedEnv, allStructuredKeys],
   );
-
   const providerValue = providerFieldVisible ? (config.provider ?? "") : "";
   const providerForDiscovery =
     providerFieldVisible && !isCustomProvider
@@ -343,6 +339,7 @@ export function AgentConfigFields({
     apiKeyEnvVar,
     apiKeyFileSatisfied,
     apiKeyInherited,
+    apiKeyRequired,
     apiKeyValue,
     credentialsValid,
   } = getGlobalAgentCredentialState({
@@ -352,12 +349,23 @@ export function AgentConfigFields({
     runtimeFileConfig,
     runtimeId: credentialRuntimeId,
   });
+  const compatibleBaseUrl = config.env_vars[OPENAI_COMPAT_BASE_URL] ?? "";
+  const compatibleBaseUrlInherited =
+    effectiveProvider === "openai-compat" &&
+    compatibleBaseUrl.trim().length === 0 &&
+    credentialsValid;
+  const compatibleBaseUrlValid =
+    effectiveProvider !== "openai-compat" ||
+    compatibleBaseUrlInherited ||
+    openAiCompatibleBaseUrlError(compatibleBaseUrl) === null;
   const configIsValid =
-    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
+    selectedRuntimeId.length > 0 &&
+    modelIsValid &&
+    credentialsValid &&
+    compatibleBaseUrlValid;
   React.useEffect(() => {
     onValidityChange?.(configIsValid);
   }, [configIsValid, onValidityChange]);
-
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
@@ -383,7 +391,6 @@ export function AgentConfigFields({
     modelIsOptional,
     showCustomModelOption,
   });
-
   // Mount-time healing policy: onboarding page 4 edits the root config during
   // first-run (no higher layers to inherit from), so acting on open is safe
   // and intentional there — it heals stale state and picks a valid model.
@@ -401,7 +408,6 @@ export function AgentConfigFields({
   const mayMutateDependentFieldsRef = React.useRef(false);
   mayMutateDependentFieldsRef.current =
     healOnMount || userEditedProviderRef.current;
-
   const autoSelectedModelScopeRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (!autoSelectModelOnProviderChange) return;
@@ -415,12 +421,10 @@ export function AgentConfigFields({
     if (modelDiscoveryLoading || discoveredModelOptions === null) return;
     const selectionScope = `${selectedRuntimeId}:${trimmedProvider}`;
     if (autoSelectedModelScopeRef.current === selectionScope) return;
-
     const firstModel = discoveredModelOptions.find(
       (option) => option.id.trim().length > 0,
     );
     if (!firstModel) return;
-
     autoSelectedModelScopeRef.current = selectionScope;
     onCustomModelEditingChange(false);
     onConfigChange({ ...config, model: firstModel.id });
@@ -434,11 +438,9 @@ export function AgentConfigFields({
     providerForDiscovery,
     selectedRuntimeId,
   ]);
-
   const currentEffortForAutoClear = effortPersistenceKey
     ? (config.env_vars[effortPersistenceKey] ?? "")
     : "";
-
   // When the selected harness changes outside this component (Back → setup
   // page → choose a different harness → Next), the saved model can belong to
   // the old harness. In onboarding, heal that stale value as soon as the new
@@ -452,7 +454,6 @@ export function AgentConfigFields({
     const currentModel = (config.model ?? "").trim();
     if (currentModel.length === 0) return;
     if (modelDiscoveryLoading) return;
-
     const catalogMiss =
       discoveredModelOptions !== null &&
       !discoveredModelOptions.some(
@@ -461,7 +462,6 @@ export function AgentConfigFields({
     const omittedAfterSuccessfulEmpty =
       modelIsOptional && !modelControlVisible && modelDiscoverySuccessfulEmpty;
     if (!catalogMiss && !omittedAfterSuccessfulEmpty) return;
-
     const nextEnvVars = { ...config.env_vars };
     if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
     onCustomModelEditingChange(false);
@@ -478,7 +478,6 @@ export function AgentConfigFields({
     healOnMount,
     effortPersistenceKey,
   ]);
-
   // Orphan-model clearing follows the mount-time healing policy above: the
   // backend resolves provider and model independently across layers
   // (agent → definition → global), so a saved global model WITHOUT a global
@@ -496,7 +495,6 @@ export function AgentConfigFields({
     ) {
       return;
     }
-
     const nextEnvVars = { ...config.env_vars };
     if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
     onCustomModelEditingChange(false);
@@ -522,34 +520,26 @@ export function AgentConfigFields({
       onConfigChange({ ...config, env_vars: nextEnvVars });
     },
   });
-
   function handleProviderChange(value: string) {
     userEditedProviderRef.current = true;
-    const previousApiKey = getProviderApiKeyEnvVar(effectiveProvider);
     if (value === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-      const nextEnvVars = { ...config.env_vars };
-      if (!preserveCredentialEnvVarsOnProviderChange && previousApiKey) {
-        delete nextEnvVars[previousApiKey];
-      }
+      const nextEnvVars = envVarsPreservingProviderState(
+        config.env_vars,
+        effectiveProvider,
+        "",
+      );
       onIsCustomProviderChange(true);
       onConfigChange({ ...config, env_vars: nextEnvVars, provider: null });
       return;
     }
     const nextProvider =
       value === AUTO_PROVIDER_DROPDOWN_VALUE || value === "" ? null : value;
-    const nextApiKey = getProviderApiKeyEnvVar(
+    const nextEnvVars = envVarsPreservingProviderState(
+      config.env_vars,
+      effectiveProvider,
       nextProvider ?? bakedProvider ?? "",
     );
-    const nextEnvVars = { ...config.env_vars };
-    if (
-      !preserveCredentialEnvVarsOnProviderChange &&
-      previousApiKey &&
-      previousApiKey !== nextApiKey
-    ) {
-      delete nextEnvVars[previousApiKey];
-    }
     const providerChanged = nextProvider !== (config.provider ?? null);
-
     onIsCustomProviderChange(false);
     onConfigChange({
       ...config,
@@ -563,28 +553,23 @@ export function AgentConfigFields({
             : config.model,
     });
   }
-
   function handleCustomProviderInput(value: string) {
     onConfigChange({ ...config, provider: value || null });
   }
-
   function handleModelChange(value: string) {
     onConfigChange({
       ...config,
       model: config.provider === "relay-mesh" ? value || "auto" : value || null,
     });
   }
-
   function handleEnvVarsChange(next: Record<string, string>) {
     onConfigChange({ ...config, env_vars: next });
   }
-
   const handleNumericEnvVarChange = (key: string, value: string) => {
     const next = { ...config.env_vars, [key]: value };
     if (value === "") delete next[key];
     onConfigChange({ ...config, env_vars: next });
   };
-
   // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
   // migration rewrites v1→v2. Hide the legacy v1 option so it is not offered
   // for new selections; OSS builds show it.
@@ -609,7 +594,6 @@ export function AgentConfigFields({
   const providerSelectValue = isCustomProvider
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : providerValue || AUTO_PROVIDER_DROPDOWN_VALUE;
-
   const providerZeroLabel = React.useMemo(() => {
     if (!bakedProvider) return null;
     return getBakedProviderInheritLabel(bakedProvider, providerOptions);
@@ -623,7 +607,6 @@ export function AgentConfigFields({
     }
     return "Select a provider";
   }, [bakedProvider, providerOptions]);
-
   const implicitEffortProvider =
     selectedRuntimeId === "claude"
       ? "anthropic"
@@ -639,7 +622,6 @@ export function AgentConfigFields({
     ? (config.env_vars[effortPersistenceKey] ?? "")
     : "";
   const effortFieldVisible = showEffortField && effortField !== undefined;
-
   const progressiveDefaults = disclosure === "progressive-defaults";
   const fieldClassName = unstyled
     ? progressiveDefaults
@@ -708,7 +690,6 @@ export function AgentConfigFields({
       ))}
     </select>
   );
-
   const providerContent = providerFieldVisible ? (
     <div className={fieldClassName}>
       <label
@@ -740,13 +721,15 @@ export function AgentConfigFields({
       ) : null}
     </div>
   ) : null;
-
   const advancedEditorBlock = (
     <>
       <EnvVarsEditor
         fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
         hiddenKeys={[
           ...(apiKeyEnvVar ? [apiKeyEnvVar] : []),
+          ...(effectiveProvider === "openai-compat"
+            ? [OPENAI_COMPAT_BASE_URL]
+            : []),
           ...allStructuredKeys,
         ]}
         inheritedRows={bakedGenericRows}
@@ -767,9 +750,23 @@ export function AgentConfigFields({
       ) : null}
     </>
   );
-
   const dependentContent = (
     <>
+      {providerFieldVisible && effectiveProvider === "openai-compat" ? (
+        <div className={blockClassName}>
+          <OpenAiCompatibleBaseUrlField
+            disabled={false}
+            inherited={compatibleBaseUrlInherited}
+            onValueChange={(next) =>
+              handleEnvVarsChange({
+                ...config.env_vars,
+                [OPENAI_COMPAT_BASE_URL]: next,
+              })
+            }
+            value={compatibleBaseUrl}
+          />
+        </div>
+      ) : null}
       {providerFieldVisible && apiKeyEnvVar ? (
         <div className={blockClassName}>
           <PersonaProviderApiKeyField
@@ -781,7 +778,9 @@ export function AgentConfigFields({
                 : "Provided by this build"
             }
             isInherited={apiKeyInherited}
-            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
+            isRequired={
+              apiKeyRequired && !apiKeyInherited && apiKeyValue.length === 0
+            }
             label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
             onValueChange={(value) =>
               onConfigChange({
@@ -793,7 +792,6 @@ export function AgentConfigFields({
           />
         </div>
       ) : null}
-
       {/* Model field — omitted only after confirmed successful empty discovery */}
       {modelControlVisible ? (
         <div className={showDescriptions ? fieldClassName : undefined}>
@@ -846,7 +844,6 @@ export function AgentConfigFields({
           />
         </div>
       ) : null}
-
       {/* Thinking / Effort */}
       {effortFieldVisible ? (
         <div className={blockClassName}>
@@ -892,7 +889,6 @@ export function AgentConfigFields({
           />
         </div>
       ) : null}
-
       {showAdvancedFields ? (
         <div className={cn(blockClassName, "space-y-3")}>
           <CardMintKeyCue envVars={config.env_vars} />
@@ -945,7 +941,6 @@ export function AgentConfigFields({
       ) : null}
     </>
   );
-
   const content = (
     <>
       {providerContent}
@@ -977,7 +972,6 @@ export function AgentConfigFields({
       )}
     </>
   );
-
   if (unstyled) {
     return (
       <div
@@ -988,7 +982,6 @@ export function AgentConfigFields({
       </div>
     );
   }
-
   return (
     <SettingsOptionGroup data-testid="global-agent-config-fields">
       {content}

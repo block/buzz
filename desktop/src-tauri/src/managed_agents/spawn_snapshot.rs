@@ -291,12 +291,18 @@ pub(crate) fn prospective_spawn_config_snapshot(
     // definition) resolves as if all three were absent: `spawn_agent_child`
     // refuses to spawn an orphan regardless, and `eligible_restart_diff`
     // suppresses the badge for one.
-    let (prompt, model, provider) = match resolve_effective_config(record, personas, global) {
-        EffectiveConfigResult::Resolved(cfg) => {
-            (cfg.system_prompt.value, cfg.model.value, cfg.provider.value)
-        }
-        EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
-    };
+    let (prompt, model, configured_provider) =
+        match resolve_effective_config(record, personas, global) {
+            EffectiveConfigResult::Resolved(cfg) => {
+                (cfg.system_prompt.value, cfg.model.value, cfg.provider.value)
+            }
+            EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
+        };
+    let provider = crate::managed_agents::openai_env::effective_runtime_provider(
+        &descriptor.command,
+        configured_provider,
+        &descriptor.env,
+    );
 
     SpawnConfigSnapshot::from_inputs(SpawnConfigInputs {
         record,

@@ -43,11 +43,17 @@ ANTHROPIC_API_KEY=sk-ant-... \
 ANTHROPIC_MODEL=claude-sonnet-4-5 \
   ./target/release/buzz-agent
 
-# Or any OpenAI-compatible endpoint
+# Or OpenAI
 BUZZ_AGENT_PROVIDER=openai \
-OPENAI_COMPAT_API_KEY=sk-... \
+OPENAI_API_KEY=sk-... \
 OPENAI_COMPAT_MODEL=gpt-5 \
-OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
+  ./target/release/buzz-agent
+
+# Or an OpenAI-compatible endpoint (the key is optional)
+BUZZ_AGENT_PROVIDER=openai-compat \
+OPENAI_COMPAT_API_KEY=local-secret \
+OPENAI_COMPAT_MODEL=llama3 \
+OPENAI_COMPAT_BASE_URL=http://localhost:11434/v1 \
   ./target/release/buzz-agent
 
 # Or OpenRouter
@@ -135,14 +141,15 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openai-compat`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
 | `ANTHROPIC_API_VERSION` | `2023-06-01` | |
-| `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
-| `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
+| `OPENAI_API_KEY` | — | Required when provider=openai. Never used by provider=openai-compat. |
+| `OPENAI_COMPAT_API_KEY` | — | Optional when provider=openai-compat. Never used by provider=openai. |
+| `OPENAI_COMPAT_MODEL` | — | Required when provider=openai or provider=openai-compat. |
+| `OPENAI_COMPAT_BASE_URL` | — | Required for provider=openai-compat. Custom values are rejected by provider=openai, which is pinned to `https://api.openai.com/v1`. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
@@ -235,17 +242,17 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 |---|---|---|---|
 | Anthropic | `anthropic` | `POST {base}/v1/messages` | claude-sonnet-4-5, claude-opus-4 |
 | OpenAI | `openai` | `POST {base}/responses` | gpt-5, gpt-5-mini, o4-mini, gpt-4o |
-| vLLM | `openai` | `POST {base}/chat/completions` | any tool-calling model |
-| llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
-| Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
-| Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
+| vLLM | `openai-compat` | `POST {base}/chat/completions` | any tool-calling model |
+| llama.cpp | `openai-compat` | `POST {base}/chat/completions` | any tool-calling GGUF |
+| Ollama | `openai-compat` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
+| Block Gateway | `openai-compat` | `POST {base}/chat/completions` | gpt-5, claude |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, or `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_API_KEY`, or `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
 
-`provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
+`provider=openai` and `provider=openai-compat` share the same OpenAI transport implementation, which speaks the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format). They do not share credentials or origins: official OpenAI reads only `OPENAI_API_KEY` and is pinned to `https://api.openai.com/v1`; compatible endpoints read only the optional `OPENAI_COMPAT_API_KEY` and require an explicit `OPENAI_COMPAT_BASE_URL`. Selecting `provider=openai` with a custom compatible URL fails closed with an instruction to select `openai-compat`.
 
 By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
 

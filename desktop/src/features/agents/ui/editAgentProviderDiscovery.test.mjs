@@ -1298,9 +1298,9 @@ test("requiredCredentialEnvKeys: buzz-agent + anthropic → ANTHROPIC_API_KEY", 
   assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
 });
 
-test("requiredCredentialEnvKeys: buzz-agent + openai → OPENAI_COMPAT_API_KEY", () => {
+test("requiredCredentialEnvKeys: buzz-agent + openai → OPENAI_API_KEY", () => {
   const keys = requiredCredentialEnvKeys("buzz-agent", "openai");
-  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+  assert.deepEqual(keys, ["OPENAI_API_KEY"]);
 });
 
 test("requiredCredentialEnvKeys: buzz-agent + databricks → DATABRICKS_HOST only (no token)", () => {
@@ -1323,9 +1323,9 @@ test("requiredCredentialEnvKeys: goose + anthropic → ANTHROPIC_API_KEY", () =>
   assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
 });
 
-test("requiredCredentialEnvKeys: goose + openai → OPENAI_COMPAT_API_KEY", () => {
+test("requiredCredentialEnvKeys: goose + openai → OPENAI_API_KEY", () => {
   const keys = requiredCredentialEnvKeys("goose", "openai");
-  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+  assert.deepEqual(keys, ["OPENAI_API_KEY"]);
 });
 
 test("requiredCredentialEnvKeys: buzz-agent + no provider → empty (provider not yet selected)", () => {

@@ -23,6 +23,7 @@ import type { AcpAvailabilityStatus } from "@/shared/api/types";
 export type ConfigNudgeRequirement =
   | { surface: "normalized_field"; field: string }
   | { surface: "env_key"; key: string }
+  | { surface: "config_invalid"; message: string }
   | {
       surface: "cli_login";
       probe_args: string[];
@@ -145,6 +146,8 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
       return typeof r.field === "string";
     case "env_key":
       return typeof r.key === "string";
+    case "config_invalid":
+      return typeof r.message === "string";
     case "cli_login":
       return (
         Array.isArray(r.probe_args) &&

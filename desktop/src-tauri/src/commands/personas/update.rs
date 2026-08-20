@@ -119,6 +119,15 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             persona.runtime = runtime;
             persona.model = model;
             persona.provider = provider;
+            if persona
+                .env_vars
+                .get(crate::managed_agents::openai_env::MIGRATED_OPENAI_PROVIDER_ENV)
+                != persona.provider.as_ref()
+            {
+                persona
+                    .env_vars
+                    .remove(crate::managed_agents::openai_env::MIGRATED_OPENAI_PROVIDER_ENV);
+            }
             persona.name_pool = input
                 .name_pool
                 .into_iter()

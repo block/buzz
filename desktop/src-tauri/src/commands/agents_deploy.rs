@@ -192,11 +192,21 @@ pub(crate) fn build_deploy_payload(
     )
     .require_resolved()?;
 
-    ensure_remote_provider_supported(effective.provider.value.as_deref())?;
-
     let descriptor =
         crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
             .map_err(|error| crate::managed_agents::user_facing_harness_error(&error))?;
+    let mut effective_provider = effective.provider.value;
+    if crate::managed_agents::known_acp_runtime(&descriptor.command)
+        .is_some_and(|runtime| runtime.id == "buzz-agent")
+    {
+        let mut env = descriptor.env.clone();
+        effective_provider = crate::managed_agents::openai_env::canonicalize_openai_provider_env(
+            &mut env,
+            effective_provider.as_deref(),
+        );
+    }
+    ensure_remote_provider_supported(effective_provider.as_deref())?;
+
     let owner_pubkey = super::workspace_owner_hex(state)?;
     let launch = build_launch_block(
         record,
@@ -218,7 +228,7 @@ pub(crate) fn build_deploy_payload(
         ),
         DeployProjections {
             effective_model: effective.model.value,
-            effective_provider: effective.provider.value,
+            effective_provider,
             effective_prompt: effective.system_prompt.value,
             effective_parallelism,
             owner_only_access: crate::managed_agents::owner_only_access_build(),

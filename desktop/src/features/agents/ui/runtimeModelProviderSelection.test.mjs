@@ -17,7 +17,7 @@ const base = {
 
 // --- selectionOnRuntimeChange ---
 
-test("runtime change to a provider-locked runtime, full reset (Persona/Edit): clears provider, custom flags, and managed API key", () => {
+test("runtime change to a provider-locked runtime, full reset (Persona/Edit): clears provider and custom flags but preserves env", () => {
   const next = selectionOnRuntimeChange(
     {
       ...base,
@@ -37,7 +37,7 @@ test("runtime change to a provider-locked runtime, full reset (Persona/Edit): cl
   assert.equal(next.provider, "");
   assert.equal(next.isCustomProviderEditing, false);
   assert.equal(next.isCustomModelEditing, false);
-  assert.deepEqual(next.envVars, { KEEP: "x" });
+  assert.deepEqual(next.envVars, { ANTHROPIC_API_KEY: "sk-1", KEEP: "x" });
 });
 
 test("runtime change to a provider-locked runtime, provider-only reset (Create): keeps env vars and custom-model flag", () => {
@@ -79,7 +79,7 @@ test("runtime change between provider-selection runtimes keeps provider state", 
 
 // --- selectionOnProviderDropdownChange ---
 
-test("provider switch clears the previous managed API key and sets the provider", () => {
+test("provider switch preserves shared env and sets the provider", () => {
   const next = selectionOnProviderDropdownChange(
     {
       ...base,
@@ -94,10 +94,51 @@ test("provider switch clears the previous managed API key and sets the provider"
   );
   assert.equal(next.provider, "openai");
   assert.equal(next.isCustomProviderEditing, false);
-  assert.deepEqual(next.envVars, { KEEP: "x" });
+  assert.deepEqual(next.envVars, { ANTHROPIC_API_KEY: "sk-1", KEEP: "x" });
 });
 
-test("custom-provider entry clears the managed key and enters custom editing", () => {
+test("provider switch between OpenAI origins preserves both credential identities", () => {
+  const official = selectionOnProviderDropdownChange(
+    {
+      ...base,
+      provider: "openai-compat",
+      envVars: {
+        OPENAI_COMPAT_API_KEY: "compat-key",
+        OPENAI_COMPAT_BASE_URL: "https://gateway.example/v1",
+        KEEP: "x",
+      },
+    },
+    {
+      runtime: "buzz-agent",
+      nextValue: "openai",
+      clearModelWhenApiKeyMissing: false,
+    },
+  );
+  assert.deepEqual(official.envVars, {
+    OPENAI_COMPAT_API_KEY: "compat-key",
+    OPENAI_COMPAT_BASE_URL: "https://gateway.example/v1",
+    KEEP: "x",
+  });
+
+  const compatible = selectionOnProviderDropdownChange(
+    {
+      ...base,
+      provider: "openai",
+      envVars: { OPENAI_API_KEY: "official-key", KEEP: "x" },
+    },
+    {
+      runtime: "buzz-agent",
+      nextValue: "openai-compat",
+      clearModelWhenApiKeyMissing: false,
+    },
+  );
+  assert.deepEqual(compatible.envVars, {
+    OPENAI_API_KEY: "official-key",
+    KEEP: "x",
+  });
+});
+
+test("custom-provider entry preserves env and enters custom editing", () => {
   const next = selectionOnProviderDropdownChange(
     {
       ...base,
@@ -112,7 +153,7 @@ test("custom-provider entry clears the managed key and enters custom editing", (
   );
   assert.equal(next.isCustomProviderEditing, true);
   assert.equal(next.provider, "");
-  assert.deepEqual(next.envVars, {});
+  assert.deepEqual(next.envVars, { ANTHROPIC_API_KEY: "sk-1" });
 });
 
 test("auto-provider selection maps to empty provider", () => {
@@ -125,7 +166,7 @@ test("auto-provider selection maps to empty provider", () => {
     },
   );
   assert.equal(next.provider, "");
-  assert.deepEqual(next.envVars, {});
+  assert.deepEqual(next.envVars, { ANTHROPIC_API_KEY: "sk-1" });
 });
 
 test("Persona mode clears the model when the new provider's API key is missing", () => {

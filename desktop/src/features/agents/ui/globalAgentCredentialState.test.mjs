@@ -49,7 +49,7 @@ test("global defaults accept a provider key set in runtime config", () => {
     runtimeFileConfig: {
       provider: "openai",
       model: "gpt-5.5",
-      satisfiedEnvKeys: ["OPENAI_COMPAT_API_KEY"],
+      satisfiedEnvKeys: ["OPENAI_API_KEY"],
     },
     runtimeId: "goose",
   });
@@ -57,4 +57,31 @@ test("global defaults accept a provider key set in runtime config", () => {
   assert.equal(state.apiKeyFileSatisfied, true);
   assert.equal(state.apiKeyInherited, true);
   assert.equal(state.credentialsValid, true);
+});
+
+test("OpenAI-compatible defaults require the base URL but not an API key", () => {
+  const missingUrl = getGlobalAgentCredentialState({
+    bakedEnvKeys: [],
+    envVars: {},
+    provider: "openai-compat",
+    runtimeFileConfig: null,
+    runtimeId: "buzz-agent",
+  });
+
+  assert.equal(missingUrl.apiKeyRequired, false);
+  assert.equal(missingUrl.credentialsValid, false);
+  assert.deepEqual(missingUrl.advancedRequiredEnvKeys, [
+    "OPENAI_COMPAT_BASE_URL",
+  ]);
+
+  const configured = getGlobalAgentCredentialState({
+    bakedEnvKeys: [],
+    envVars: { OPENAI_COMPAT_BASE_URL: "http://localhost:11434/v1" },
+    provider: "openai-compat",
+    runtimeFileConfig: null,
+    runtimeId: "buzz-agent",
+  });
+
+  assert.equal(configured.apiKeyRequired, false);
+  assert.equal(configured.credentialsValid, true);
 });

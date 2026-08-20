@@ -42,7 +42,10 @@ pub fn apply_relay_mesh_env(
         return;
     }
     let model = relay_mesh_wire_model(model.unwrap_or(RELAY_MESH_AUTO_MODEL_ID)).to_string();
-    env.insert("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string());
+    env.insert(
+        "BUZZ_AGENT_PROVIDER".to_string(),
+        "openai-compat".to_string(),
+    );
     env.insert("BUZZ_AGENT_MODEL".to_string(), model.clone());
     env.insert(
         "OPENAI_COMPAT_BASE_URL".to_string(),
@@ -161,6 +164,10 @@ mod tests {
         assert_eq!(
             env.get("OPENAI_COMPAT_MODEL").map(String::as_str),
             Some(RELAY_MESH_VIRTUAL_MODEL_ID)
+        );
+        assert_eq!(
+            env.get("BUZZ_AGENT_PROVIDER").map(String::as_str),
+            Some("openai-compat")
         );
     }
 

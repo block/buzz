@@ -279,7 +279,7 @@ async fn agent_chat_in_isolated_home(
         // The transport subset of apply_relay_mesh_env(): provider, base URL,
         // model, key, and chat API. Not BUZZ_AGENT_REQUIRE_REPLY, which needs
         // Buzz's publish tools to mean anything.
-        .env("BUZZ_AGENT_PROVIDER", "openai")
+        .env("BUZZ_AGENT_PROVIDER", "openai-compat")
         .env("BUZZ_AGENT_MODEL", model)
         .env("OPENAI_COMPAT_BASE_URL", base)
         .env("OPENAI_COMPAT_MODEL", model)

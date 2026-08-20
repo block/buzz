@@ -6,13 +6,14 @@ use tauri::{AppHandle, State};
 
 use super::agent_model_process::run_agent_models_command;
 use super::managed_agent_definition::apply_model_provider_prompt_update;
-// The map-only lookup is reached solely from the base-URL helpers that exist for
-// their unit tests; discovery itself always goes through the process-env variant.
-#[cfg(test)]
-use super::agent_models_env::env_value;
+// The map-only lookup is reached solely from an Anthropic base-URL helper used
+// by unit tests; discovery itself always goes through the process-env variant.
 use super::agent_models_env::{
-    effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
+    effective_discovery_provider, env_or_process_value, openai_compatible_models_url_for_discovery,
+    redaction_env_with_value, DiscoveryProvider,
 };
+#[cfg(test)]
+use super::agent_models_env::{env_or_process_override, env_value};
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
@@ -95,11 +96,18 @@ pub async fn get_agent_models(
         command: _,
     } = discovery;
 
-    let merged_env = discovery_env_with_baked_floor(merged_env);
+    let mut merged_env = discovery_env_with_baked_floor(merged_env);
     // Resolve against the baked/process env when the record saved no provider,
     // so a build-provided provider still gets live discovery.
-    let effective_provider =
+    let mut effective_provider =
         effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
+    if known_acp_runtime(&discovery.command).is_some_and(|runtime| runtime.id == "buzz-agent") {
+        effective_provider.value =
+            crate::managed_agents::openai_env::canonicalize_openai_provider_env(
+                &mut merged_env,
+                effective_provider.as_deref(),
+            );
+    }
     if let Some(models) = discover_openrouter_models(
         &state.http_client,
         &effective_provider,
@@ -230,14 +238,21 @@ pub async fn discover_agent_models(
         &input.definition_env,
         &input.env_vars,
     );
-    let merged_env = discovery_env_with_baked_floor(merged_env);
+    let mut merged_env = discovery_env_with_baked_floor(merged_env);
     // Recover a build-provided provider when the form has none, so the create
     // dialog discovers live models instead of falling through to the subprocess.
-    let effective_provider = effective_discovery_provider(
+    let mut effective_provider = effective_discovery_provider(
         input.provider.as_deref(),
         runtime_meta.and_then(|meta| meta.provider_env_var),
         &merged_env,
     );
+    if runtime_meta.is_some_and(|runtime| runtime.id == "buzz-agent") {
+        effective_provider.value =
+            crate::managed_agents::openai_env::canonicalize_openai_provider_env(
+                &mut merged_env,
+                effective_provider.as_deref(),
+            );
+    }
 
     // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
     // client endpoint is started only after a live target is selected.
@@ -353,19 +368,6 @@ fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
             .as_deref(),
         Some("openai" | "openai-compat")
     )
-}
-
-#[cfg(test)]
-fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
-    let base_url = env_value(env, "OPENAI_COMPAT_BASE_URL")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    format!("{}/models", base_url.trim_end_matches('/'))
-}
-
-fn openai_compatible_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
-    let base_url = env_or_process_value(env, "OPENAI_COMPAT_BASE_URL")
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-    format!("{}/models", base_url.trim_end_matches('/'))
 }
 
 fn is_agent_text_model_id(id: &str) -> bool {
@@ -496,23 +498,39 @@ async fn discover_openai_compatible_models(
         return Ok(None);
     }
 
+    let is_compat = provider
+        .as_deref()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("openai-compat"));
+    let api_key_env_var = if is_compat || relay_mesh {
+        "OPENAI_COMPAT_API_KEY"
+    } else {
+        "OPENAI_API_KEY"
+    };
     let api_key = if relay_mesh {
         crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
+    } else if is_compat {
+        env.get(api_key_env_var)
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
     } else {
-        match provider.required_env(env, "OPENAI_COMPAT_API_KEY")? {
+        match provider.required_env(env, api_key_env_var)? {
             Some(api_key) => api_key,
             None => return Ok(None),
         }
     };
-    let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
+    let redaction_env = redaction_env_with_value(env, api_key_env_var, &api_key);
     let url = if relay_mesh {
         format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
     } else {
-        openai_compatible_models_url_for_discovery(env)
+        openai_compatible_models_url_for_discovery(provider.as_deref(), env)?
     };
-    let response = client
-        .get(&url)
-        .bearer_auth(&api_key)
+    let request = client.get(&url);
+    let request = if api_key.is_empty() {
+        request
+    } else {
+        request.bearer_auth(&api_key)
+    };
+    let response = request
         .send()
         .await
         .map_err(|error| format!("OpenAI model discovery request failed: {error}"))?;
@@ -673,7 +691,6 @@ async fn discover_anthropic_models(
     if models.is_empty() {
         return Err("Anthropic model discovery returned no models".to_string());
     }
-
     Ok(Some(AgentModelsResponse {
         agent_name: provider
             .as_deref()
@@ -687,7 +704,6 @@ async fn discover_anthropic_models(
         supports_switching: true,
     }))
 }
-
 #[path = "agent_models_databricks.rs"]
 mod databricks;
 #[cfg(test)]
@@ -703,7 +719,6 @@ pub use update::update_managed_agent;
 pub(super) use update::{flush_managed_agent_policy, managed_agent_access_policy_changed};
 
 // ── Model normalization ───────────────────────────────────────────────────────
-
 /// Normalize raw `buzz-acp models --json` output into a typed DTO for the frontend.
 ///
 /// Merges models from both ACP paths (stable configOptions + unstable SessionModelState),
@@ -720,10 +735,8 @@ pub(super) fn normalize_agent_models(
         .as_str()
         .unwrap_or("unknown")
         .to_string();
-
     let mut models: Vec<AgentModelInfo> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();
-
     // 1. Stable configOptions (preferred). Only entries with category "model"
     //    are model options — the CLI pre-filters, but we're defensive here.
     if let Some(config_options) = raw["stable"]["configOptions"].as_array() {
@@ -749,7 +762,6 @@ pub(super) fn normalize_agent_models(
             }
         }
     }
-
     // 2. Unstable availableModels (fallback — skip duplicates from stable).
     let mut agent_default_model: Option<String> = None;
     if let Some(unstable) = raw.get("unstable") {
@@ -771,9 +783,7 @@ pub(super) fn normalize_agent_models(
             }
         }
     }
-
     let supports_switching = !models.is_empty();
-
     AgentModelsResponse {
         agent_name,
         agent_version,
@@ -783,7 +793,6 @@ pub(super) fn normalize_agent_models(
         supports_switching,
     }
 }
-
 #[cfg(test)]
 #[path = "agent_models_tests.rs"]
 mod tests;

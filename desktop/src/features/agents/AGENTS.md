@@ -105,7 +105,16 @@ with a TypeScript lookup table or an id comparison in a component.
    `onboarding-agent-defaults.spec.ts`.
 9. **The defaults modal is progressively disclosed.** An unset global config
    starts on the Buzz Agent-first deployment fallback and carries that visible
-   harness into the next saved edit. The `progressive-defaults` disclosure
+   harness into the next saved edit. Provider credentials have distinct
+   identities: official OpenAI uses `OPENAI_API_KEY`, while arbitrary
+   OpenAI-compatible origins use `OPENAI_COMPAT_API_KEY`. Provider changes preserve the shared env map; provider-specific consumers
+   select only their own credential and routing values. Official OpenAI pins its
+   origin and ignores compatible routing state, so changing the default never
+   destroys credentials or endpoints still used by explicitly configured agents
+   or card minting. Persisted pre-split credentials are migrated once at
+   boot: official `api.openai.com` records move to `OPENAI_API_KEY`, while
+   custom origins remain `openai-compat` and retain `OPENAI_COMPAT_API_KEY`.
+   The `progressive-defaults` disclosure
    preset therefore begins at Provider for Buzz Agent, then reveals Model,
    Effort, and Advanced only after a provider is configured. Harnesses whose
    runtime metadata has no provider field skip that gate. Reveals animate their

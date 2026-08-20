@@ -43,7 +43,7 @@ pub struct Llm {
     /// for the lifetime of the process.
     auto_upgraded: AtomicBool,
     /// Bearer-token source for OpenAI-family requests. Static for OpenAI
-    /// (the `OPENAI_COMPAT_API_KEY` env var) and Databricks-with-token
+    /// (the provider-specific OpenAI API key env var) and Databricks-with-token
     /// (the `DATABRICKS_TOKEN` env var); a refreshable PKCE engine for
     /// Databricks otherwise. Anthropic doesn't use this — it always
     /// reads `cfg.api_key` directly because the API expects `x-api-key`.
@@ -114,9 +114,9 @@ impl Llm {
                     .await
                     .and_then(parse_openai_with_reasoning_details)
             }
-            Provider::OpenAi | Provider::Databricks => {
+            Provider::OpenAi | Provider::OpenAiCompat | Provider::Databricks => {
                 let provider_str = match cfg.provider {
-                    Provider::OpenAi => "openai",
+                    Provider::OpenAi | Provider::OpenAiCompat => "openai",
                     Provider::Databricks => "databricks",
                     _ => unreachable!(),
                 };
@@ -269,7 +269,7 @@ impl Llm {
                     let v = self.post_openrouter(cfg, &body).await?;
                     Ok(parse_openai(v)?.text)
                 }
-                Provider::OpenAi | Provider::Databricks => {
+                Provider::OpenAi | Provider::OpenAiCompat | Provider::Databricks => {
                     let r = self
                         .openai_request(cfg, effective_model, |use_responses, request_model| {
                             if use_responses {
@@ -494,14 +494,19 @@ impl Llm {
         // statuses map to `LlmAuth` in `post`: a 403 is indistinguishable from
         // an expired-token 403 here, so we refresh once and let it propagate.
         let mut bearer = self.auth.bearer().await.map_err(PostError::from)?;
+        let use_bearer = cfg.provider != Provider::OpenAiCompat || !bearer.is_empty();
         let mut refreshed = false;
         loop {
-            match post(&self.http, &url, body_ref, cfg.llm_timeout, |r| {
-                r.bearer_auth(&bearer)
+            match post(&self.http, &url, body_ref, cfg.llm_timeout, |request| {
+                if use_bearer {
+                    request.bearer_auth(&bearer)
+                } else {
+                    request
+                }
             })
             .await
             {
-                Err(PostError::Agent(AgentError::LlmAuth(_))) if !refreshed => {
+                Err(PostError::Agent(AgentError::LlmAuth(_))) if use_bearer && !refreshed => {
                     refreshed = true;
                     bearer = self
                         .auth
@@ -2069,14 +2074,15 @@ pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
 /// - `Provider::Anthropic`: a static source seeded from `cfg.api_key`. It's
 ///   never read for Anthropic requests (those go through `post_anthropic` with
 ///   `x-api-key`), but Llm holds one to keep the field non-`Option`.
-/// - `Provider::OpenAi`: a static source over `OPENAI_COMPAT_API_KEY`.
+/// - `Provider::OpenAi`: a static source over `OPENAI_API_KEY`.
+/// - `Provider::OpenAiCompat`: a static source over `OPENAI_COMPAT_API_KEY`.
 /// - `Provider::Databricks`: if `DATABRICKS_TOKEN` is set, a static source.
 ///   Otherwise a `PkceOAuthTokenSource` pointed at the workspace's OIDC
 ///   discovery URL. First request without a cached token triggers a browser
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenAiCompat | Provider::OpenRouter => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
@@ -2102,9 +2108,11 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
 pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
     match provider {
         Provider::OpenRouter => max_output_tokens.saturating_mul(2),
-        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
-            max_output_tokens
-        }
+        Provider::Anthropic
+        | Provider::OpenAi
+        | Provider::OpenAiCompat
+        | Provider::Databricks
+        | Provider::DatabricksV2 => max_output_tokens,
     }
 }
 
@@ -5779,6 +5787,49 @@ mod tests {
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
             auth,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_openai_compat_omits_authorization_when_key_is_empty() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let captured = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            let body = "{\"ok\":true}";
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(), body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&bytes).to_ascii_lowercase()
+        });
+
+        let llm = llm_with(Arc::new(StaticTokenSource::new("")));
+        let mut config = cfg(Provider::OpenAiCompat);
+        config.base_url = base;
+        llm.post_openai(&config, "/v1/x", &json!({}), "model")
+            .await
+            .unwrap();
+
+        let headers = captured.await.unwrap();
+        assert!(!headers.contains("authorization:"), "{headers}");
     }
 
     /// A single 401 forces exactly one refresh, the retry with the fresh

@@ -29,6 +29,8 @@ function requirementKey(
   switch (req.surface) {
     case "env_key":
       return `env_key:${req.key}:${index}`;
+    case "config_invalid":
+      return `config_invalid:${req.message}:${index}`;
     case "normalized_field":
       return `normalized_field:${req.field}:${index}`;
     case "cli_login":
@@ -328,6 +330,21 @@ function RequirementRow({
               Edit Agent →
             </button>
           )}
+        </div>
+      );
+    case "config_invalid":
+      return (
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            {requirement.message}
+          </span>
+          <button
+            className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
+            onClick={(e) => onOpenEditAgent(e, undefined)}
+            type="button"
+          >
+            Edit Agent →
+          </button>
         </div>
       );
     case "normalized_field":

@@ -20,6 +20,7 @@ pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod managed_node_paths;
 mod nest;
+pub(crate) mod openai_env;
 pub(crate) mod parallelism;
 mod persona_avatars;
 pub(crate) mod persona_events;

@@ -18,6 +18,11 @@ import { PersonaModelField } from "./PersonaModelField";
 import { runtimeAvailabilityWarning } from "./runtimeAvailabilityWarning";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
+  OPENAI_COMPAT_BASE_URL,
+  OpenAiCompatibleBaseUrlField,
+  openAiCompatibleBaseUrlError,
+} from "./OpenAiCompatibleBaseUrlField";
+import {
   canSubmitPersonaDialog,
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
@@ -260,7 +265,6 @@ export function AgentDefinitionDialog({
       isRuntimeAutoSeededRef.current = true;
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
-
   // Keep an inherited Create runtime synced with defaults saved in-place.
   React.useEffect(() => {
     if (
@@ -275,7 +279,6 @@ export function AgentDefinitionDialog({
     ) {
       return;
     }
-
     if (runtime !== defaultRuntime.id) setRuntime(defaultRuntime.id);
     isRuntimeAutoSeededRef.current = true;
     hasSeededForOpenRef.current = true;
@@ -287,7 +290,6 @@ export function AgentDefinitionDialog({
     runtime,
     runtimesLoading,
   ]);
-
   // Keep setup guidance reachable when no available runtime can be inherited.
   React.useEffect(() => {
     if (
@@ -300,7 +302,6 @@ export function AgentDefinitionDialog({
       setAiConfigurationMode("custom");
     }
   }, [defaultRuntime, isCreateMode, open, runtime, runtimesLoading]);
-
   function handleOpenChange(next: boolean) {
     // The catalog may veto embedded close requests; preserve the draft until unmount.
     if (!next && !embedded) {
@@ -324,15 +325,12 @@ export function AgentDefinitionDialog({
       // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
       // [initialValues, open] effect resets both when the dialog re-opens.
     }
-
     onOpenChange(next);
   }
-
   async function handleSubmit() {
     // D1: the same localModeSatisfied gate as canSubmit prevents form-submit
     // (Enter) from bypassing a missing credential.
     if (!initialValues || !localModeSatisfied || !canSubmit) return;
-
     const {
       runtime: runtimeForSubmit,
       model: modelForSubmit,
@@ -370,7 +368,6 @@ export function AgentDefinitionDialog({
         "id" in initialValues,
       ),
     };
-
     if ("id" in initialValues) {
       await onSubmit(
         {
@@ -383,15 +380,12 @@ export function AgentDefinitionDialog({
       );
       return;
     }
-
     await onSubmit(baseInput, { publishCatalogUpdates: false });
   }
-
   function handleSubmitForm(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void handleSubmit();
   }
-
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
@@ -494,6 +488,14 @@ export function AgentDefinitionDialog({
     selectedRuntime?.availability === "available";
   // Gate model/provider validity through missingNormalizedFields — single
   // source of truth with the readiness gate so display and Save can't drift.
+  const compatibleBaseUrl = envVars[OPENAI_COMPAT_BASE_URL] ?? "";
+  const compatibleBaseUrlInherited =
+    compatibleBaseUrl.trim().length === 0 &&
+    localModeGate.missingEnvKeys.every((key) => key !== OPENAI_COMPAT_BASE_URL);
+  const compatibleBaseUrlValid =
+    effectiveProvider !== "openai-compat" ||
+    compatibleBaseUrlInherited ||
+    openAiCompatibleBaseUrlError(compatibleBaseUrl) === null;
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
@@ -505,9 +507,9 @@ export function AgentDefinitionDialog({
     // D1: localModeSatisfied covers both missingNormalizedFields AND
     // missingEnvKeys — credential env keys now block submit, not just display.
     localModeSatisfied &&
+    compatibleBaseUrlValid &&
     customAiPairSatisfied &&
     !isAvatarUploadPending;
-
   // Merge global env as the base layer so credential keys satisfied via global
   // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
   const envVarsForDiscovery = React.useMemo(
@@ -623,7 +625,6 @@ export function AgentDefinitionDialog({
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
-
   React.useEffect(() => {
     if (
       !open ||
@@ -637,7 +638,6 @@ export function AgentDefinitionDialog({
     ) {
       return;
     }
-
     setModel("");
     setIsCustomModelEditing(false);
   }, [
@@ -648,7 +648,6 @@ export function AgentDefinitionDialog({
     effectiveProvider,
     runtime,
   ]);
-
   const selection: RuntimeModelProviderSelection = {
     provider,
     model,
@@ -656,7 +655,6 @@ export function AgentDefinitionDialog({
     isCustomModelEditing,
     envVars,
   };
-
   function applySelection(next: RuntimeModelProviderSelection) {
     setProvider(next.provider);
     setModel(next.model);
@@ -664,7 +662,6 @@ export function AgentDefinitionDialog({
     setIsCustomModelEditing(next.isCustomModelEditing);
     setEnvVars(next.envVars);
   }
-
   function handleRuntimeDropdownChange(nextValue: string) {
     const action = runtimeDropdownAction(nextValue);
     if (action.kind === "add-custom-harness") {
@@ -687,7 +684,6 @@ export function AgentDefinitionDialog({
       }),
     );
   }
-
   // Routed through the normal change handler so a harness registered inline
   // resets model/provider exactly as a hand-picked one would. Scoped to `open`
   // so a pending id can't outlive the dialog that started the registration.
@@ -696,7 +692,6 @@ export function AgentDefinitionDialog({
     handleRuntimeDropdownChange,
     open,
   );
-
   function handleProviderDropdownChange(nextValue: string) {
     setHasUserChanges(true);
     const nextProvider =
@@ -714,7 +709,6 @@ export function AgentDefinitionDialog({
       model: nextProvider === "relay-mesh" ? "auto" : nextSelection.model,
     });
   }
-
   function handleModelDropdownChange(nextValue: string) {
     setHasUserChanges(true);
     applySelection(
@@ -725,7 +719,6 @@ export function AgentDefinitionDialog({
       }),
     );
   }
-
   const footer = (
     <AgentDefinitionDialogFooter
       canSubmit={canSubmit}
@@ -757,7 +750,6 @@ export function AgentDefinitionDialog({
           setAvatarUrl(nextAvatarUrl);
         }}
       />
-
       <div className="space-y-5">
         <div className="space-y-1.5">
           <label
@@ -786,7 +778,6 @@ export function AgentDefinitionDialog({
             />
           </div>
         </div>
-
         <div className="space-y-1.5">
           <label
             className="text-sm font-medium text-foreground"
@@ -808,7 +799,6 @@ export function AgentDefinitionDialog({
             />
           </div>
         </div>
-
         {modelFieldVisible ? (
           <AgentAiConfigurationModeField
             mode={aiConfigurationMode}
@@ -816,7 +806,6 @@ export function AgentDefinitionDialog({
             onModeChange={handleAiConfigurationModeChange}
           />
         ) : null}
-
         <div
           className="space-y-5"
           data-testid={`agent-${aiConfigurationMode}-configuration-section`}
@@ -831,7 +820,6 @@ export function AgentDefinitionDialog({
               warning={runtimeWarning}
             />
           ) : null}
-
           {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
             <div className="space-y-1.5">
               <RequiredFieldLabel
@@ -875,7 +863,21 @@ export function AgentDefinitionDialog({
               ) : null}
             </div>
           ) : null}
-
+          {llmProviderFieldVisible &&
+          aiConfigurationMode === "custom" &&
+          effectiveProvider === "openai-compat" ? (
+            <OpenAiCompatibleBaseUrlField
+              disabled={isPending}
+              inherited={compatibleBaseUrlInherited}
+              onValueChange={(next) =>
+                setEnvVars((prev) => ({
+                  ...prev,
+                  [OPENAI_COMPAT_BASE_URL]: next,
+                }))
+              }
+              value={compatibleBaseUrl}
+            />
+          ) : null}
           {llmProviderFieldVisible &&
           aiConfigurationMode === "custom" &&
           topLevelSecretEnvVar ? (
@@ -895,7 +897,6 @@ export function AgentDefinitionDialog({
               value={apiKeyValue}
             />
           ) : null}
-
           <AnimatePresence initial={false}>
             {modelFieldVisible && aiConfigurationMode === "custom" ? (
               <PersonaModelField
@@ -915,7 +916,6 @@ export function AgentDefinitionDialog({
               />
             ) : null}
           </AnimatePresence>
-
           {aiConfigurationMode === "defaults" ? (
             <AgentCreateAiDefaultsSummary
               canChooseProvider={runtimeCanChooseLlmProvider}
@@ -929,19 +929,16 @@ export function AgentDefinitionDialog({
             />
           ) : null}
         </div>
-
         <AgentDefaultsDialog
           onOpenChange={setAiDefaultsOpen}
           open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
           returnFocusRef={aiDefaultsTriggerRef}
         />
-
         <AddCustomHarnessDialog
           onOpenChange={setIsAddHarnessOpen}
           onSaved={selectSavedHarness}
           open={isAddHarnessOpen}
         />
-
         <div className="space-y-3">
           <button
             aria-expanded={showAdvancedFields}
@@ -985,9 +982,12 @@ export function AgentDefinitionDialog({
                   disabled={isPending}
                   envVars={envVars}
                   fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
-                  hiddenEnvKeys={
-                    topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                  }
+                  hiddenEnvKeys={[
+                    ...(topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []),
+                    ...(effectiveProvider === "openai-compat"
+                      ? [OPENAI_COMPAT_BASE_URL]
+                      : []),
+                  ]}
                   inheritedEnvVars={inheritedEnvVarsForAdvanced}
                   model={model}
                   modelTuningRuntimeId={runtime}
@@ -1007,14 +1007,12 @@ export function AgentDefinitionDialog({
             ) : null}
           </AnimatePresence>
         </div>
-
         {error ? (
           <p className="text-sm text-destructive">{error.message}</p>
         ) : null}
       </div>
     </form>
   );
-
   return (
     <AgentDefinitionDialogShell
       description={description}

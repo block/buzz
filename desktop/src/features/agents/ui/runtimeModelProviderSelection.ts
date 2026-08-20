@@ -8,10 +8,7 @@ import {
   shouldClearKnownModelForSelectionScope,
 } from "./agentConfigOptions";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
-import {
-  envVarsClearingManagedApiKey,
-  envVarsWithoutKey,
-} from "./providerEnvVarUpdates";
+import { envVarsPreservingProviderState } from "./providerEnvVarUpdates";
 
 /**
  * Pure transition functions for the runtime -> LLM provider -> model dropdown
@@ -62,7 +59,7 @@ export function selectionOnRuntimeChange(
 
   if (!params.nextRuntimeCanChooseProvider) {
     if (params.lockedRuntimeReset === "full") {
-      next.envVars = envVarsClearingManagedApiKey(
+      next.envVars = envVarsPreservingProviderState(
         next.envVars,
         current.provider,
         "",
@@ -92,10 +89,11 @@ export function selectionOnProviderDropdownChange(
   const next = { ...current };
 
   if (params.nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-    const previousEnvVar = getProviderApiKeyEnvVar(current.provider);
-    if (previousEnvVar) {
-      next.envVars = envVarsWithoutKey(next.envVars, previousEnvVar);
-    }
+    next.envVars = envVarsPreservingProviderState(
+      next.envVars,
+      current.provider,
+      "",
+    );
     next.isCustomProviderEditing = true;
     next.provider = "";
     return next;
@@ -103,7 +101,7 @@ export function selectionOnProviderDropdownChange(
 
   const nextProvider =
     params.nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : params.nextValue;
-  next.envVars = envVarsClearingManagedApiKey(
+  next.envVars = envVarsPreservingProviderState(
     next.envVars,
     current.provider,
     nextProvider,

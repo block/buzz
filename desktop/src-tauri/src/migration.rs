@@ -189,6 +189,7 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
+    openai_credentials::migrate_openai_credentials(app);
 }
 
 /// Copy one-time app state from the legacy app identifier directory to
@@ -1366,6 +1367,7 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
     rename_provider_to_runtime_in_personas(&path);
 }
 mod materialize;
+mod openai_credentials;
 pub use materialize::materialize_agent_runtimes;
 mod fold;
 pub use fold::fold_personas_into_agent_store;
@@ -1380,16 +1382,14 @@ mod team_suffix;
 pub use team_suffix::strip_baked_team_instructions;
 
 #[cfg(test)]
+#[path = "migration_avatar_tests.rs"]
+mod avatar_tests;
+#[cfg(test)]
 #[path = "migration_test_support.rs"]
 mod test_support;
-
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "migration_avatar_tests.rs"]
-mod avatar_tests;
 
 #[cfg(test)]
 #[path = "migration_command_tests.rs"]

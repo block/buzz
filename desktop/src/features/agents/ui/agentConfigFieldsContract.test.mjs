@@ -32,8 +32,8 @@ test("canonical behaviors: onboarding's values are the only behavior", () => {
     autoSelectModelOnProviderChange: true,
     // Model select stays usable while discovery loads (no flash-disable).
     disableModelSelectDuringDiscovery: false,
-    // Switching provider keeps the old provider's typed API key in env_vars.
-    preserveCredentialEnvVarsOnProviderChange: true,
+    // Changing provider clears a managed credential whose identity no longer applies.
+    clearManagedCredentialOnProviderChange: true,
     // Model/effort are locked until a provider exists (no saveable invalid state).
     requireProviderForModelAndEffort: true,
   });

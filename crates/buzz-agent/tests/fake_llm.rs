@@ -175,7 +175,7 @@ impl Harness {
     async fn spawn(base_url: &str) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "openai")
+        cmd.env("BUZZ_AGENT_PROVIDER", "openai-compat")
             .env("OPENAI_COMPAT_API_KEY", "test")
             .env("OPENAI_COMPAT_MODEL", "fake-model")
             .env("OPENAI_COMPAT_BASE_URL", base_url)
@@ -572,7 +572,7 @@ async fn rejects_oversized_line() {
     let url = spawn_fake_llm(vec![]).await;
     let bin = env!("CARGO_BIN_EXE_buzz-agent");
     let mut cmd = tokio::process::Command::new(bin);
-    cmd.env("BUZZ_AGENT_PROVIDER", "openai")
+    cmd.env("BUZZ_AGENT_PROVIDER", "openai-compat")
         .env("OPENAI_COMPAT_API_KEY", "test")
         .env("OPENAI_COMPAT_MODEL", "fake-model")
         .env("OPENAI_COMPAT_BASE_URL", &url)

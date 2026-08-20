@@ -129,7 +129,7 @@ async fn openai_auto_upgrades_chat_to_responses_on_databricks_signal() {
 
     let bin = env!("CARGO_BIN_EXE_buzz-agent");
     let mut cmd = Command::new(bin);
-    cmd.env("BUZZ_AGENT_PROVIDER", "openai")
+    cmd.env("BUZZ_AGENT_PROVIDER", "openai-compat")
         .env("OPENAI_COMPAT_API_KEY", "test")
         .env("OPENAI_COMPAT_MODEL", "gpt-5.5")
         .env("OPENAI_COMPAT_BASE_URL", &base_url)

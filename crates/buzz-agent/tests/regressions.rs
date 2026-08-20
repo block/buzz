@@ -108,7 +108,7 @@ impl Harness {
     async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "openai")
+        cmd.env("BUZZ_AGENT_PROVIDER", "openai-compat")
             .env("OPENAI_COMPAT_API_KEY", "test")
             .env("OPENAI_COMPAT_MODEL", "fake-model")
             .env("OPENAI_COMPAT_BASE_URL", base_url)
@@ -2296,7 +2296,7 @@ async fn reply_guard_combines_with_stop_hook_objection() {
 fn reply_guard_rejects_unparseable_toggle() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_buzz-agent"))
         .env("BUZZ_AGENT_PROVIDER", "openai")
-        .env("OPENAI_COMPAT_API_KEY", "test")
+        .env("OPENAI_API_KEY", "test")
         .env("OPENAI_COMPAT_MODEL", "fake-model")
         .env("BUZZ_AGENT_REQUIRE_REPLY", "true")
         .stdin(Stdio::null())
@@ -2318,7 +2318,7 @@ fn reply_guard_rejects_unparseable_toggle() {
 fn max_token_recoveries_rejects_unparseable_value() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_buzz-agent"))
         .env("BUZZ_AGENT_PROVIDER", "openai")
-        .env("OPENAI_COMPAT_API_KEY", "test")
+        .env("OPENAI_API_KEY", "test")
         .env("OPENAI_COMPAT_MODEL", "fake-model")
         .env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", "unbounded")
         .stdin(Stdio::null())

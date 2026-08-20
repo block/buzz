@@ -34,6 +34,33 @@ fn snapshot(
     snapshot_with_policy(record, personas, teams, workspace_relay, global, false)
 }
 
+#[test]
+fn legacy_custom_buzz_agent_snapshot_uses_runtime_provider_identity() {
+    let mut rec = record();
+    rec.runtime = Some("buzz-agent".into());
+    rec.provider = Some("openai".into());
+    rec.env_vars.insert(
+        crate::managed_agents::openai_env::MIGRATED_OPENAI_PROVIDER_ENV.into(),
+        "openai-compat".into(),
+    );
+    rec.env_vars
+        .insert("OPENAI_COMPAT_API_KEY".into(), "shared-key".into());
+    rec.env_vars.insert(
+        "OPENAI_COMPAT_BASE_URL".into(),
+        "https://gateway.example/v1".into(),
+    );
+    let global = GlobalAgentConfig {
+        env_vars: BTreeMap::from([("OPENAI_API_KEY".into(), "shared-key".into())]),
+        ..Default::default()
+    };
+
+    let value = snapshot(&rec, &[], &[], "wss://ws.example", &global);
+    assert_eq!(
+        value.get("provider").and_then(serde_json::Value::as_str),
+        Some("openai-compat")
+    );
+}
+
 /// `snapshot` with the fixed no-persona/no-team/default-global shape the effort
 /// tests share, so their call sites read as `snap(&record)` instead of wrapping.
 fn snap(record: &ManagedAgentRecord) -> serde_json::Value {

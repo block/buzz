@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "agent_models_tests/openai_credentials.rs"]
+mod openai_credentials;
+
 #[test]
 fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
     use crate::managed_agents::RespondTo;
@@ -142,10 +145,18 @@ fn openai_compat_model_normalization_preserves_provider_specific_ids() {
 }
 
 #[test]
-fn openai_models_url_uses_openai_default_base_url() {
+fn openai_compat_models_url_requires_custom_base_url() {
+    let err = openai_compatible_models_url_for_discovery(Some("openai-compat"), &BTreeMap::new())
+        .unwrap_err();
+    assert!(err.contains("OPENAI_COMPAT_BASE_URL required"), "{err}");
+
+    let env = BTreeMap::from([(
+        "OPENAI_COMPAT_BASE_URL".to_string(),
+        "http://localhost:11434/v1/".to_string(),
+    )]);
     assert_eq!(
-        openai_compatible_models_url(&BTreeMap::new()),
-        "https://api.openai.com/v1/models"
+        openai_compatible_models_url_for_discovery(Some("openai-compat"), &env).unwrap(),
+        "http://localhost:11434/v1/models"
     );
 }
 
@@ -310,7 +321,7 @@ fn effective_discovery_provider_recovers_baked_provider_when_record_has_none() {
 fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
     let env = BTreeMap::new();
     assert_eq!(
-        effective_discovery_provider(None, Some("BUZZ_AGENT_PROVIDER"), &env).as_deref(),
+        effective_discovery_provider(None, Some("BUZZ_TEST_UNSET_PROVIDER"), &env).as_deref(),
         None
     );
     // A runtime that takes no provider env var has nothing to recover from.

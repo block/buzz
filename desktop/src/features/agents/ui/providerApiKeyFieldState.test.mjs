@@ -66,17 +66,17 @@ test("providerApiKeyFieldState_explicitLocalEmptyShadowsGlobalAndBuild", () => {
   assert.equal(state.inheritedLabel, "");
 });
 
-test("providerApiKeyFieldState_openaiUsesCompatCredentialKey", () => {
+test("providerApiKeyFieldState_openaiUsesOfficialCredentialKey", () => {
   const state = getProviderApiKeyFieldState({
     bakedEnvKeys: [],
     effectiveEnvVars: {},
     envVars: {},
     globalEnvVars: {},
     provider: "openai",
-    requiredEnvKeys: ["OPENAI_COMPAT_API_KEY"],
+    requiredEnvKeys: ["OPENAI_API_KEY"],
   });
 
-  assert.equal(state.secretEnvVar, "OPENAI_COMPAT_API_KEY");
+  assert.equal(state.secretEnvVar, "OPENAI_API_KEY");
   assert.equal(state.isRequired, true);
 });
 
@@ -93,4 +93,19 @@ test("providerApiKeyFieldState_explicitLocalEmptyShadowsRuntimeConfig", () => {
 
   assert.equal(state.isRequired, true);
   assert.equal(state.isInherited, false);
+});
+
+test("providerApiKeyFieldState_openaiCompatKeyIsOptional", () => {
+  const state = getProviderApiKeyFieldState({
+    bakedEnvKeys: [],
+    effectiveEnvVars: {},
+    envVars: {},
+    globalEnvVars: {},
+    provider: "openai-compat",
+    requiredEnvKeys: ["OPENAI_COMPAT_BASE_URL"],
+  });
+
+  assert.equal(state.secretEnvVar, "OPENAI_COMPAT_API_KEY");
+  assert.equal(state.isRequired, false);
+  assert.deepEqual(state.advancedRequiredEnvKeys, ["OPENAI_COMPAT_BASE_URL"]);
 });

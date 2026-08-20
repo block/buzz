@@ -33,6 +33,15 @@ pub(super) fn apply_model_provider_prompt_update(
         }
         if let Some(provider_update) = provider {
             record.provider = provider_update;
+            if record
+                .env_vars
+                .get(crate::managed_agents::openai_env::MIGRATED_OPENAI_PROVIDER_ENV)
+                != record.provider.as_ref()
+            {
+                record
+                    .env_vars
+                    .remove(crate::managed_agents::openai_env::MIGRATED_OPENAI_PROVIDER_ENV);
+            }
         }
         if let Some(prompt_update) = system_prompt {
             record.system_prompt = prompt_update;

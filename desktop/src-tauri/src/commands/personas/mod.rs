@@ -49,6 +49,12 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
             .lock()
             .map_err(|error| error.to_string())?;
         let mut personas = load_personas(&app)?;
+        for persona in &mut personas {
+            crate::managed_agents::openai_env::project_buzz_agent_definition(persona);
+            persona
+                .env_vars
+                .remove(crate::managed_agents::openai_env::MIGRATED_OPENAI_PROVIDER_ENV);
+        }
         pending::project_active_persona_sharing(&app, &state, &mut personas);
         Ok(personas)
     })

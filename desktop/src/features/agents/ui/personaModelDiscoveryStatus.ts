@@ -108,10 +108,10 @@ export function formatModelDiscoveryErrorStatus(
     };
   }
 
-  if (message.includes("OPENAI_COMPAT_API_KEY required")) {
+  if (message.includes("OPENAI_API_KEY required")) {
     return {
       message:
-        "Enter an OpenAI runtime API key (OPENAI_COMPAT_API_KEY) to load OpenAI models.",
+        "Enter an OpenAI runtime API key (OPENAI_API_KEY) to load OpenAI models.",
       tone: "warning",
     };
   }
