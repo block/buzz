@@ -519,6 +519,48 @@ test("markdown message links resolve private destinations without a directory sc
   }
 });
 
+test("authored-label channel and message links respect the private-destination gate", async () => {
+  // buzz://channel/<uuid> and buzz://channel/<uuid>/<event-id> with an authored
+  // label both go through ChannelDeepLinkAnchor. The authored-label branch must
+  // route through the same bounded detail lookup + openable gate as the pill
+  // paths — a private channel must render inert regardless of the display text.
+  const channelId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const messageId = "b".repeat(64);
+  const channelLink = `buzz://channel/${channelId}`;
+  const messageLinkUrl = `buzz://channel/${channelId}/${messageId}`;
+  const renderPaths = [
+    ["channel variant", `[private channel](${channelLink})`],
+    ["message variant", `[private message](${messageLinkUrl})`],
+  ];
+
+  for (const [path, content] of renderPaths) {
+    const client = createClient();
+    ipc.detail = async (id) =>
+      rawDetail(rawChannel({ id, name: "private", visibility: "private" }));
+    const mounted = await mountMarkdownReference(
+      client,
+      content,
+      `private-authored-label-${path}`,
+    );
+    await mounted.settle();
+
+    assert.deepEqual(ipc.detailCalls, [channelId], `${path}: bounded detail`);
+    assert.equal(ipc.directoryCalls, 0, `${path}: no directory scan`);
+    assert.equal(
+      mounted.container.querySelector("button"),
+      null,
+      `${path} private destination must not render a clickable element`,
+    );
+    assert.notEqual(
+      mounted.container.querySelector("span[data-buzz-link]"),
+      null,
+      `${path} private destination must render an inert node`,
+    );
+    await mounted.unmount();
+    ipc.reset();
+  }
+});
+
 test("multi-id references dedupe cold ids and share the single-id query cache", async () => {
   const client = createClient();
   ipc.detail = async (channelId) =>

@@ -68,6 +68,58 @@ function ResolvedChannelPermalinkChip(props: ChannelPermalinkChipProps) {
   );
 }
 
+type AuthoredDeepLinkProps = {
+  channelId: string;
+  children: React.ReactNode;
+  href: string;
+  interactive: boolean;
+  messageLink: {
+    channelId: string;
+    messageId: string;
+    threadRootId: null;
+  } | null;
+  onOpenChannel: (channelId: string) => void;
+  onOpenMessageLink: (link: {
+    channelId: string;
+    messageId: string;
+    threadRootId: null;
+  }) => void;
+};
+
+function ResolvedAuthoredDeepLink({
+  channelId,
+  children,
+  href,
+  interactive,
+  messageLink,
+  onOpenChannel,
+  onOpenMessageLink,
+}: AuthoredDeepLinkProps) {
+  const channel = useChannelReference(channelId);
+  const openable = isChannelReferenceOpenable(channel);
+  const label = getReactNodeText(children);
+  if (!openable) {
+    return (
+      <span className="font-medium text-current" data-buzz-link={href}>
+        {children}
+      </span>
+    );
+  }
+  return (
+    <BuzzInlineLink
+      href={href}
+      title={href}
+      aria-label={`${messageLink ? "Open message" : "Open channel"}: ${label}`}
+      interactive={interactive}
+      onOpenLink={() =>
+        messageLink ? onOpenMessageLink(messageLink) : onOpenChannel(channelId)
+      }
+    >
+      {children}
+    </BuzzInlineLink>
+  );
+}
+
 /**
  * A permalink labels from its synchronous member list first. Only production
  * markdown requests the bounded detail lookup for an unknown id; static
@@ -115,16 +167,39 @@ export function ChannelDeepLinkAnchor({
       : onOpenChannel(parsed.value.channelId);
   const authoredLabel = getReactNodeText(children);
   if (authoredLabel !== href) {
+    const { channelId } = parsed.value;
+    const knownChannel = channels?.find((c) => c.id === channelId);
+    if (knownChannel) {
+      return (
+        <BuzzInlineLink
+          href={href}
+          title={href}
+          aria-label={`${messageLink ? "Open message" : "Open channel"}: ${authoredLabel}`}
+          interactive={interactive}
+          onOpenLink={openLink}
+        >
+          {children}
+        </BuzzInlineLink>
+      );
+    }
+    if (!resolveChannelReferences) {
+      return (
+        <span className="font-medium text-current" data-buzz-link={href}>
+          {children}
+        </span>
+      );
+    }
     return (
-      <BuzzInlineLink
+      <ResolvedAuthoredDeepLink
+        channelId={channelId}
         href={href}
-        title={href}
-        aria-label={`${messageLink ? "Open message" : "Open channel"}: ${authoredLabel}`}
         interactive={interactive}
-        onOpenLink={openLink}
+        messageLink={messageLink}
+        onOpenChannel={onOpenChannel}
+        onOpenMessageLink={onOpenMessageLink}
       >
         {children}
-      </BuzzInlineLink>
+      </ResolvedAuthoredDeepLink>
     );
   }
   if (messageLink) {
