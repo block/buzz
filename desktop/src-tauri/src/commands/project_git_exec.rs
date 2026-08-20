@@ -4,9 +4,13 @@
 //! the identity nsec is handed to `git-credential-nostr` via environment
 //! variables so nothing key-related ever touches disk or global git config.
 
-use crate::{app_state::AppState, managed_agents::resolve_command};
+use crate::{
+    app_state::AppState,
+    managed_agents::{login_shell_path, resolve_command},
+};
 use nostr::{Keys, ToBech32};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use url::Url;
@@ -16,6 +20,132 @@ use url::Url;
 /// `spawn_blocking` threads indefinitely.
 const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(300);
+const MIN_GIT_VERSION: (u64, u64) = (2, 46);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitVersion {
+    major: u64,
+    minor: u64,
+    display: String,
+}
+
+fn parse_git_version(output: &str) -> Option<GitVersion> {
+    let display = output.trim().strip_prefix("git version ")?.to_string();
+    let numeric = display.split_whitespace().next()?;
+    let mut parts = numeric.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some(GitVersion {
+        major,
+        minor,
+        display,
+    })
+}
+
+fn probe_git_version(path: &Path) -> Result<GitVersion, String> {
+    let mut command = Command::new(path);
+    command
+        .arg("--version")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .stdin(Stdio::null());
+    crate::util::configure_no_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!("{}: exited with {}", path.display(), output.status));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_git_version(&stdout).ok_or_else(|| {
+        format!(
+            "{}: unrecognized version output `{}`",
+            path.display(),
+            stdout.trim()
+        )
+    })
+}
+
+fn select_compatible_git(
+    candidates: Vec<PathBuf>,
+    mut probe: impl FnMut(&Path) -> Result<GitVersion, String>,
+) -> Result<PathBuf, String> {
+    if candidates.is_empty() {
+        return Err("git was not found on PATH".to_string());
+    }
+
+    let mut found = Vec::new();
+    for path in candidates {
+        match probe(&path) {
+            Ok(version) if (version.major, version.minor) >= MIN_GIT_VERSION => {
+                return Ok(path);
+            }
+            Ok(version) => found.push(format!("{} at {}", version.display, path.display())),
+            Err(error) => found.push(error),
+        }
+    }
+
+    Err(format!(
+        "Buzz Git authentication requires Git {}.{} or newer. Found: {}. Install a compatible Git and restart Buzz.",
+        MIN_GIT_VERSION.0,
+        MIN_GIT_VERSION.1,
+        found.join(", ")
+    ))
+}
+
+fn git_candidate_paths() -> Vec<PathBuf> {
+    let executable = if cfg!(windows) { "git.exe" } else { "git" };
+    let mut candidates = Vec::new();
+    let mut push_candidate = |candidate: PathBuf| {
+        if candidate.is_file() && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    };
+
+    if let Some(path) = resolve_command("git") {
+        push_candidate(path);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            push_candidate(directory.join(executable));
+        }
+    }
+    if let Some(path) = login_shell_path() {
+        for directory in std::env::split_paths(&path) {
+            push_candidate(directory.join(executable));
+        }
+    }
+
+    #[cfg(not(windows))]
+    for path in [
+        "/opt/homebrew/bin/git",
+        "/opt/local/bin/git",
+        "/usr/local/bin/git",
+        "/usr/bin/git",
+    ] {
+        push_candidate(PathBuf::from(path));
+    }
+    #[cfg(windows)]
+    for root in [
+        std::env::var_os("ProgramFiles"),
+        std::env::var_os("ProgramFiles(x86)"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_candidate(PathBuf::from(root).join("Git").join("cmd").join(executable));
+    }
+
+    candidates
+}
+
+fn resolve_compatible_git() -> Result<PathBuf, String> {
+    use std::sync::OnceLock;
+    static COMPATIBLE_GIT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    COMPATIBLE_GIT
+        .get_or_init(|| select_compatible_git(git_candidate_paths(), probe_git_version))
+        .clone()
+}
 
 fn git_subcommand<'a>(args: &'a [&str]) -> Option<&'a str> {
     let mut index = 0;
@@ -220,7 +350,7 @@ pub(crate) fn build_git_clone_auth_config(
 }
 
 pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfig, String> {
-    let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
+    let git_path = resolve_compatible_git()?;
     let credential_helper = resolve_command("git-credential-nostr");
     let nsec = keys
         .secret_key()
@@ -394,9 +524,69 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 mod tests {
     use super::{
         clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        git_subcommand, parse_git_version, select_compatible_git, validate_clone_url,
+        validate_clone_url_against_relay, validate_local_clone_url, GitVersion,
     };
+
+    #[test]
+    fn parses_platform_git_versions() {
+        assert_eq!(
+            parse_git_version("git version 2.39.5 (Apple Git-154)\n"),
+            Some(GitVersion {
+                major: 2,
+                minor: 39,
+                display: "2.39.5 (Apple Git-154)".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_git_version("git version 2.47.1.windows.1\n"),
+            Some(GitVersion {
+                major: 2,
+                minor: 47,
+                display: "2.47.1.windows.1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn compatible_git_selection_skips_an_older_first_candidate() {
+        let old = std::path::PathBuf::from("/usr/bin/git");
+        let current = std::path::PathBuf::from("/opt/local/bin/git");
+        let selected = select_compatible_git(vec![old.clone(), current.clone()], |path| {
+            if path == old {
+                Ok(GitVersion {
+                    major: 2,
+                    minor: 39,
+                    display: "2.39.5 (Apple Git-154)".to_string(),
+                })
+            } else {
+                Ok(GitVersion {
+                    major: 2,
+                    minor: 47,
+                    display: "2.47.0".to_string(),
+                })
+            }
+        })
+        .expect("compatible Git should be selected");
+
+        assert_eq!(selected, current);
+    }
+
+    #[test]
+    fn incompatible_git_error_names_the_version_and_path() {
+        let path = std::path::PathBuf::from("/usr/bin/git");
+        let error = select_compatible_git(vec![path], |_| {
+            Ok(GitVersion {
+                major: 2,
+                minor: 39,
+                display: "2.39.5 (Apple Git-154)".to_string(),
+            })
+        })
+        .expect_err("old Git must be rejected");
+
+        assert!(error.contains("requires Git 2.46 or newer"));
+        assert!(error.contains("2.39.5 (Apple Git-154) at /usr/bin/git"));
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {
