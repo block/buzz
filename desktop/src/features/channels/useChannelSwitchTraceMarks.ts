@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { markTimelineSettledThisSession } from "@/features/messages/lib/settledTimelineChannels";
 import {
   abandonChannelSwitchTrace,
   markChannelSwitchRouteCommit,
@@ -34,6 +35,7 @@ export function useChannelSwitchTraceMarks({
       return;
     }
     if (!isTimelineLoading) {
+      markTimelineSettledThisSession(activeChannelId);
       settleChannelSwitchTrace(activeChannelId);
     }
   }, [activeChannelId, activeChannelType, isTimelineLoading]);
