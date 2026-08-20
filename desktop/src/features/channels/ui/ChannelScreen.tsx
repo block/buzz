@@ -66,6 +66,7 @@ import { useHuddleReadMarker } from "@/features/channels/ui/useHuddleReadMarker"
 import { useHuddleThreadIsolation } from "@/features/channels/ui/useHuddleThreadIsolation";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
+import { useChannelSwitchTraceMarks } from "@/features/channels/useChannelSwitchTraceMarks";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import { channelContentTopPaddingMeasurement } from "@/shared/layout/chromeLayout";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
@@ -616,6 +617,11 @@ export function ChannelScreen({
       timelineLoadingNow,
     );
   settledChannelIdRef.current = settledChannelId;
+  useChannelSwitchTraceMarks({
+    activeChannelId,
+    activeChannelType: activeChannel?.channelType ?? null,
+    isTimelineLoading,
+  });
   const { welcomeKickoffStage, welcomeKickoffSettingUp } =
     useWelcomeKickoffStagePresence(
       activeChannel,

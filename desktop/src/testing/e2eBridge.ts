@@ -11981,6 +11981,9 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
+      case "append_switch_perf_log":
+        // Perf-trace JSONL sink — a real file makes no sense in mock runs.
+        return "/mock/switch-perf.jsonl";
       case "get_os_idle_seconds":
         // e2e runs headless with no OS idle API; the presence hook falls back
         // to in-app activity tracking.

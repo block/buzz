@@ -38,6 +38,7 @@ import {
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
 import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
+import { traceChannelWindowFetch } from "@/shared/lib/channelSwitchPerf";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -271,7 +272,14 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       if (!channel) throw new Error("No channel selected.");
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const fetchStartedAt = performance.now();
       const events = await getChannelWindowEvents(channel.id);
+      traceChannelWindowFetch(
+        channel.id,
+        events.length,
+        performance.now() - fetchStartedAt,
+        fetchStartedAt,
+      );
       return reconcileFetchedChannelWindow(
         queryClient,
         channel.id,
