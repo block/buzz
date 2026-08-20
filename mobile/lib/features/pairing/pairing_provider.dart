@@ -927,7 +927,8 @@ class PairingNotifier extends Notifier<PairingState> {
     if (!kDebugMode && uri.scheme != 'https') {
       throw const FormatException('Relay URL must use HTTPS');
     }
-    if (uri.scheme != 'http' && uri.scheme != 'https') {
+    if (uri.scheme != 'http' && uri.scheme != 'https' &&
+        uri.scheme != 'ws' && uri.scheme != 'wss') {
       throw FormatException('Invalid URL scheme: ${uri.scheme}');
     }
 
