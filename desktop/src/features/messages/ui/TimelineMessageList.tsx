@@ -26,6 +26,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
+import { AgentProgressRow } from "./AgentProgressRow";
 import { DayDivider } from "./DayDivider";
 import { MessageRowItem, SystemRow } from "./TimelineMessageRow";
 import { TimelineRowShell } from "./TimelineRowShell";
@@ -240,6 +241,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               ownerProfiles={ownerProfiles}
             />
           );
+        case "agent-progress-group":
+          return (
+            <AgentProgressRow entries={item.entries} profiles={profiles} />
+          );
         case "message":
           return (
             <MessageRowItem
@@ -366,7 +371,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 });
 
 function timelineItemMessageIds(item: TimelineNonDayItem): string[] {
-  if (item.kind === "system-group") {
+  if (item.kind === "system-group" || item.kind === "agent-progress-group") {
     return item.entries.map((entry) => entry.message.id);
   }
   return item.kind === "message" || item.kind === "system"

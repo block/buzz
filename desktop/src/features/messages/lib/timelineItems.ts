@@ -17,6 +17,7 @@ import {
   isWithinGroupingWindow,
   startsNewMessageGroup,
 } from "@/features/messages/lib/messageGrouping";
+import { isAgentProgressBody } from "@/features/messages/lib/agentProgressMessages";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
 /**
@@ -31,6 +32,11 @@ export type TimelineItem =
   | { kind: "system"; key: string; entry: MainTimelineEntry }
   | {
       kind: "system-group";
+      key: string;
+      entries: MainTimelineEntry[];
+    }
+  | {
+      kind: "agent-progress-group";
       key: string;
       entries: MainTimelineEntry[];
     }
@@ -226,6 +232,35 @@ export function buildTimelineItems(
     }
 
     const kind = message.kind === KIND_SYSTEM_MESSAGE ? "system" : "message";
+    if (
+      kind === "message" &&
+      isAgentProgressBody(message.body) &&
+      !message.pending
+    ) {
+      previousGroupEntry = null;
+      previousMessageItemIndex = null;
+      const grouped = [entry];
+      while (i + grouped.length < entries.length) {
+        const next = entries[i + grouped.length];
+        if (
+          membershipBarrierIndexes.has(i + grouped.length) ||
+          next.message.kind === KIND_SYSTEM_MESSAGE ||
+          next.message.pending ||
+          next.message.pubkey !== message.pubkey ||
+          !isAgentProgressBody(next.message.body)
+        ) {
+          break;
+        }
+        grouped.push(next);
+      }
+      items.push({
+        kind: "agent-progress-group",
+        key: entryRenderKey(grouped[0]),
+        entries: grouped,
+      });
+      i += grouped.length - 1;
+      continue;
+    }
     if (kind === "system") {
       previousGroupEntry = null;
       previousMessageItemIndex = null;
