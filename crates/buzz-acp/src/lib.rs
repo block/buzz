@@ -215,6 +215,95 @@ async fn is_owner_or_sibling(
     is_sibling
 }
 
+/// Tag name marking an event as produced by the relay's workflow engine.
+/// Written by `buzz-relay`'s `RelayActionSink::send_message`
+/// (`crates/buzz-relay/src/workflow_sink.rs`) as `["buzz:workflow","true"]`.
+const WORKFLOW_MARKER_TAG: &str = "buzz:workflow";
+
+/// Resolve the author the inbound gate should judge, honouring workflow
+/// attribution when — and only when — the opt-in pin is configured and the
+/// event proves it came from that relay's own signing key.
+///
+/// Returns `Some(attributed_author_hex)` when all of the following hold:
+///
+/// 1. `relay_pubkey_pin` is set (the `--honor-workflow-attribution` /
+///    `BUZZ_ACP_HONOR_WORKFLOW_ATTRIBUTION` opt-in; unset ⇒ always `None`).
+/// 2. `event.pubkey` equals the pin exactly.
+/// 3. The event's id hash and Schnorr signature verify
+///    ([`buzz_core::verify_event`]) — so the pubkey field is *proven*, not
+///    merely claimed. This is the trust anchor.
+/// 4. The event carries the `buzz:workflow` marker tag.
+/// 5. A first `p` tag exists carrying a well-formed 64-hex pubkey.
+///
+/// Otherwise `None`, and the caller falls back to `event.pubkey` — today's
+/// behaviour, byte for byte.
+///
+/// # Why the signature check is non-negotiable
+///
+/// Attribution tags are ordinary event tags: **any** channel member can write
+/// `["buzz:workflow","true"]` and `["p", <owner>]` into an event they sign
+/// themselves. If the gate trusted tags alone, any member could impersonate the
+/// owner and drive an `owner-only` agent. The relay's signature over the whole
+/// event (tags included) is the only thing that makes the attribution
+/// trustworthy, because only the relay's workflow engine can produce it.
+///
+/// Note the resolved author is *not* thereby trusted — it is fed back into the
+/// unchanged `--respond-to` policy, so `owner-only` still admits only the owner
+/// or a verified sibling. This widens *who can be spoken for*, never *who is
+/// allowed*.
+fn resolve_workflow_attributed_author(
+    event: &nostr::Event,
+    relay_pubkey_pin: Option<&str>,
+) -> Option<String> {
+    // (1) Opt-in gate — unset means the whole feature does not exist.
+    let pin = relay_pubkey_pin?;
+
+    // (2) The event must claim to be from the pinned relay key.
+    let author = event.pubkey.to_hex();
+    if author != pin {
+        return None;
+    }
+
+    // (4) Marker check before signature verification: `verify_event` is
+    // CPU-bound Schnorr work, and the marker is a cheap tag scan. Ordering is
+    // security-neutral (both must pass) but keeps the common case cheap.
+    let has_marker = event.tags.iter().any(|t| {
+        let parts = t.as_slice();
+        parts.len() >= 2 && parts[0] == WORKFLOW_MARKER_TAG && parts[1] == "true"
+    });
+    if !has_marker {
+        return None;
+    }
+
+    // (3) THE trust anchor: prove the relay actually signed these exact tags.
+    // Without this, a forged event carrying the relay's pubkey in its `pubkey`
+    // field would be accepted on the strength of a field anyone can type.
+    if let Err(err) = buzz_core::verify_event(event) {
+        tracing::warn!(
+            event_id = %event.id.to_hex(),
+            %err,
+            "event claims the pinned relay pubkey but fails signature verification — \
+             refusing workflow attribution"
+        );
+        return None;
+    }
+
+    // (5) First `p` tag is the attribution tag — `workflow_sink.rs` writes the
+    // workflow owner first, then appends one `p` per resolved @mention.
+    let attributed = event.tags.iter().find_map(|t| {
+        let parts = t.as_slice();
+        if parts.len() >= 2 && parts[0] == "p" {
+            let candidate = parts[1].trim().to_ascii_lowercase();
+            if candidate.len() == 64 && candidate.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(candidate);
+            }
+        }
+        None
+    })?;
+
+    Some(attributed)
+}
+
 /// Inbound author gate decision: does this author's event fire a turn?
 ///
 /// Coarse security policy applied before subscription rules. Both `OwnerOnly`
@@ -2852,7 +2941,22 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
+                                // Workflow attribution (opt-in, off by default):
+                                // when the event is *cryptographically proven* to
+                                // come from the pinned relay key AND carries the
+                                // `buzz:workflow` marker, judge the `p` attribution
+                                // tag instead of the relay's own pubkey. The
+                                // resolved author still faces the unchanged
+                                // respond_to policy below. Feature unset ⇒
+                                // `attributed` is None and this is a no-op.
+                                let attributed = resolve_workflow_attributed_author(
+                                    &buzz_event.event,
+                                    config.honor_workflow_attribution.as_deref(),
+                                );
+                                let author = match &attributed {
+                                    Some(a) => a.clone(),
+                                    None => buzz_event.event.pubkey.to_hex(),
+                                };
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -2870,12 +2974,21 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %author,
+                                        signer = %buzz_event.event.pubkey.to_hex(),
+                                        workflow_attributed = attributed.is_some(),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
+                                }
+                                if attributed.is_some() {
+                                    tracing::info!(
+                                        channel_id = %buzz_event.channel_id,
+                                        attributed_author = %&author[..8.min(author.len())],
+                                        "workflow-attributed event admitted"
+                                    );
                                 }
                             }
 
@@ -5694,6 +5807,249 @@ mod author_gate_tests {
     }
 }
 
+/// Opt-in workflow-attribution extension to the inbound author gate.
+///
+/// These tests exercise the gate exactly as the event loop composes it:
+/// resolve the effective author with [`resolve_workflow_attributed_author`],
+/// then feed that author to [`author_allowed`] under `owner-only`. The
+/// load-bearing case is `spoofed_*`: a non-relay signer writing the same
+/// marker and attribution tags must be rejected, because tags are writable by
+/// any channel member and only the relay's signature is trustworthy.
+#[cfg(test)]
+mod workflow_attribution_gate_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn dummy_rest_client() -> relay::RestClient {
+        relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:0".into(),
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        }
+    }
+
+    /// Build a kind:9 event shaped like `workflow_sink.rs` emits: `p`
+    /// attribution tag, `h` channel tag, `buzz:workflow` marker, plus one `p`
+    /// per mentioned member. `signer` decides whose signature covers it.
+    fn workflow_style_event(
+        signer: &Keys,
+        attributed_to: &str,
+        marker: bool,
+        mention: Option<&str>,
+    ) -> nostr::Event {
+        let mut tags = vec![
+            Tag::parse(["p", attributed_to]).expect("p tag"),
+            Tag::parse(["h", &uuid::Uuid::new_v4().to_string()]).expect("h tag"),
+        ];
+        if marker {
+            tags.push(Tag::parse(["buzz:workflow", "true"]).expect("workflow tag"));
+        }
+        if let Some(m) = mention {
+            tags.push(Tag::parse(["p", m]).expect("mention p tag"));
+        }
+        EventBuilder::new(
+            Kind::Custom(KIND_STREAM_MESSAGE as u16),
+            "@builderbot pulse",
+        )
+        .tags(tags)
+        .sign_with_keys(signer)
+        .expect("sign")
+    }
+
+    /// The composed gate decision, mirroring the event-loop call site.
+    async fn gate_admits(event: &nostr::Event, pin: Option<&str>, owner: &str) -> bool {
+        let attributed = resolve_workflow_attributed_author(event, pin);
+        let author = attributed.clone().unwrap_or_else(|| event.pubkey.to_hex());
+        let cache = OwnerCache::new(Some(owner.to_string()));
+        // Non-owner authors would otherwise trigger a sibling profile lookup
+        // over HTTP; pin them as known non-siblings so the decision is local.
+        if author != owner {
+            cache.cache_sibling(author.clone(), false);
+        }
+        author_allowed(
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            &author,
+            false,
+            &cache,
+            &dummy_rest_client(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn relay_signed_marked_owner_attributed_is_admitted() {
+        let relay_keys = Keys::generate();
+        let pin = relay_keys.public_key().to_hex();
+        let owner = "cd".repeat(32);
+        let agent = "ef".repeat(32);
+        let event = workflow_style_event(&relay_keys, &owner, true, Some(&agent));
+
+        assert_eq!(
+            resolve_workflow_attributed_author(&event, Some(&pin)),
+            Some(owner.clone()),
+            "the first p tag is the attribution tag and must resolve to the owner"
+        );
+        assert!(
+            gate_admits(&event, Some(&pin), &owner).await,
+            "a relay-signed, workflow-marked event attributed to the owner must be admitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_signed_marked_non_owner_attributed_is_dropped() {
+        let relay_keys = Keys::generate();
+        let pin = relay_keys.public_key().to_hex();
+        let owner = "cd".repeat(32);
+        let other = "ab".repeat(32);
+        let event = workflow_style_event(&relay_keys, &other, true, None);
+
+        assert_eq!(
+            resolve_workflow_attributed_author(&event, Some(&pin)),
+            Some(other),
+            "attribution resolves, but resolution is not authorisation"
+        );
+        assert!(
+            !gate_admits(&event, Some(&pin), &owner).await,
+            "owner-only must still reject a workflow attributed to a non-owner"
+        );
+    }
+
+    /// THE load-bearing test. Any channel member can write
+    /// `["buzz:workflow","true"]` and `["p", <owner>]` into an event they sign
+    /// themselves. Without the signature check that is full impersonation of
+    /// the owner against an `owner-only` agent.
+    #[tokio::test]
+    async fn spoofed_marked_and_attributed_event_from_non_relay_signer_is_dropped() {
+        let relay_keys = Keys::generate();
+        let pin = relay_keys.public_key().to_hex();
+        let attacker = Keys::generate();
+        let owner = "cd".repeat(32);
+        let event = workflow_style_event(&attacker, &owner, true, None);
+
+        assert_eq!(
+            resolve_workflow_attributed_author(&event, Some(&pin)),
+            None,
+            "attribution tags from a non-relay signer must never be honoured"
+        );
+        assert!(
+            !gate_admits(&event, Some(&pin), &owner).await,
+            "a spoofed workflow event must be dropped by the owner-only gate"
+        );
+    }
+
+    /// Second half of the spoof surface: an event whose `pubkey` field *claims*
+    /// the pinned relay key but whose signature does not verify against it.
+    /// The pubkey field alone is not proof — only `verify_event` is.
+    #[tokio::test]
+    async fn forged_pubkey_field_without_valid_signature_is_dropped() {
+        let relay_keys = Keys::generate();
+        let pin = relay_keys.public_key().to_hex();
+        let attacker = Keys::generate();
+        let owner = "cd".repeat(32);
+
+        let honest = workflow_style_event(&attacker, &owner, true, None);
+        // Swap in the relay's pubkey, leaving the attacker's signature intact.
+        let mut forged = honest.clone();
+        forged.pubkey = relay_keys.public_key();
+
+        assert_eq!(forged.pubkey.to_hex(), pin, "forgery targets the pin");
+        assert!(
+            buzz_core::verify_event(&forged).is_err(),
+            "the tampered event must fail verification"
+        );
+        assert_eq!(
+            resolve_workflow_attributed_author(&forged, Some(&pin)),
+            None,
+            "a claimed-but-unproven relay pubkey must not unlock attribution"
+        );
+        assert!(
+            !gate_admits(&forged, Some(&pin), &owner).await,
+            "a forged relay-pubkey event must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_signed_but_unmarked_event_is_dropped() {
+        let relay_keys = Keys::generate();
+        let pin = relay_keys.public_key().to_hex();
+        let owner = "cd".repeat(32);
+        // Same shape, no `buzz:workflow` marker — an ordinary relay-signed post.
+        let event = workflow_style_event(&relay_keys, &owner, false, None);
+
+        assert_eq!(
+            resolve_workflow_attributed_author(&event, Some(&pin)),
+            None,
+            "without the workflow marker the p tag is just a mention, not attribution"
+        );
+        assert!(
+            !gate_admits(&event, Some(&pin), &owner).await,
+            "an unmarked relay-signed event must be gated on the relay pubkey as before"
+        );
+    }
+
+    /// Flag unset ⇒ today's behaviour exactly: every one of the above events is
+    /// judged on `event.pubkey`, and none of those signers is the owner.
+    #[tokio::test]
+    async fn flag_unset_drops_every_case() {
+        let relay_keys = Keys::generate();
+        let attacker = Keys::generate();
+        let owner = "cd".repeat(32);
+
+        let cases = [
+            ("relay-signed marked owner-attributed", &relay_keys, true),
+            ("relay-signed unmarked", &relay_keys, false),
+            ("spoofed marked", &attacker, true),
+        ];
+        for (label, signer, marker) in cases {
+            let event = workflow_style_event(signer, &owner, marker, None);
+            assert_eq!(
+                resolve_workflow_attributed_author(&event, None),
+                None,
+                "with the flag unset, {label} must not resolve attribution"
+            );
+            assert!(
+                !gate_admits(&event, None, &owner).await,
+                "with the flag unset, {label} must be dropped as it is today"
+            );
+        }
+    }
+
+    /// A different relay's key (or any other pinned-mismatch) does not unlock
+    /// attribution, even with a perfectly valid signature and marker.
+    #[tokio::test]
+    async fn valid_signature_from_a_different_key_than_the_pin_is_dropped() {
+        let pinned_relay = Keys::generate();
+        let other_relay = Keys::generate();
+        let pin = pinned_relay.public_key().to_hex();
+        let owner = "cd".repeat(32);
+        let event = workflow_style_event(&other_relay, &owner, true, None);
+
+        assert_eq!(
+            resolve_workflow_attributed_author(&event, Some(&pin)),
+            None,
+            "only the pinned key may speak for others"
+        );
+        assert!(!gate_admits(&event, Some(&pin), &owner).await);
+    }
+
+    /// A malformed attribution tag must not resolve to a truncated/garbage
+    /// author that could accidentally collide with a policy decision.
+    #[tokio::test]
+    async fn malformed_attribution_tag_does_not_resolve() {
+        let relay_keys = Keys::generate();
+        let pin = relay_keys.public_key().to_hex();
+        let event = workflow_style_event(&relay_keys, "not-a-pubkey", true, None);
+
+        assert_eq!(
+            resolve_workflow_attributed_author(&event, Some(&pin)),
+            None,
+            "a non-64-hex p tag must be ignored rather than partially trusted"
+        );
+    }
+}
+
 #[cfg(test)]
 mod observer_snapshot_race_tests {
     use super::*;
@@ -6778,6 +7134,7 @@ mod build_mcp_servers_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
+            honor_workflow_attribution: None,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
@@ -7002,6 +7359,7 @@ mod error_outcome_emission_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
+            honor_workflow_attribution: None,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,

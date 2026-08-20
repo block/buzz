@@ -480,6 +480,25 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
+    /// Opt-in: honour workflow attribution in the inbound author gate.
+    ///
+    /// Value is the **relay's own signing pubkey** (64 hex chars) — the NIP-11
+    /// `self` field of the relay this harness connects to. Unset (the default)
+    /// disables the feature entirely.
+    ///
+    /// When set, an inbound event that is (a) signed by exactly this pubkey and
+    /// (b) tagged `["buzz:workflow","true"]` has its gate author resolved from
+    /// the first `p` attribution tag instead of `event.pubkey`. That resolved
+    /// author is then subjected to the *unchanged* `--respond-to` policy, so
+    /// `owner-only` still admits only the owner (or a verified sibling).
+    ///
+    /// Security: the pin is the trust anchor. Attribution tags are writable by
+    /// any member, so they are consulted **only** after the event's signature
+    /// verifies against this exact pubkey. Never set this to anything but the
+    /// relay's own key.
+    #[arg(long, env = "BUZZ_ACP_HONOR_WORKFLOW_ATTRIBUTION")]
+    pub honor_workflow_attribution: Option<String>,
+
     /// Team-owned instructions layered after `[System]` and before agent memory.
     #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
     pub team_instructions: Option<String>,
@@ -571,6 +590,10 @@ pub struct Config {
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
+    /// Pinned relay signing pubkey (lowercase hex) enabling workflow-attribution
+    /// author resolution in the inbound gate. `None` = feature off (default).
+    /// See [`Args::honor_workflow_attribution`] for the security contract.
+    pub honor_workflow_attribution: Option<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
@@ -1048,6 +1071,27 @@ impl Config {
             HashSet::new()
         };
 
+        // Workflow-attribution pin: must be a well-formed 64-char hex pubkey.
+        // A malformed value is a startup error rather than a silent no-op —
+        // silently disabling a security-relevant gate extension because of a
+        // typo is exactly the failure mode operators would not notice.
+        let honor_workflow_attribution = match args.honor_workflow_attribution {
+            Some(raw) => {
+                let trimmed = raw.trim().to_ascii_lowercase();
+                if trimmed.is_empty() {
+                    None
+                } else if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(ConfigError::ConfigFile(format!(
+                        "invalid BUZZ_ACP_HONOR_WORKFLOW_ATTRIBUTION: '{raw}' \
+                         (must be the relay's own pubkey — exactly 64 hex characters)"
+                    )));
+                } else {
+                    Some(trimmed)
+                }
+            }
+            None => None,
+        };
+
         // Validate respond_to against the allowed set.
         let allowed_respond_to = if let Some(raw) = args.allowed_respond_to {
             // Validate each entry is a known RespondTo mode.
@@ -1134,6 +1178,7 @@ impl Config {
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
+            honor_workflow_attribution,
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
@@ -1163,8 +1208,14 @@ impl Config {
             modes.sort();
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
+        // Surfaced at startup so an operator can tell at a glance whether the
+        // gate extension is armed and against which relay key.
+        let workflow_attribution_detail = match &self.honor_workflow_attribution {
+            Some(pk) => format!(" honor_workflow_attribution={}…", &pk[..8.min(pk.len())]),
+            None => String::new(),
+        };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1187,6 +1238,7 @@ impl Config {
             self.permission_mode,
             respond_to_detail,
             allowed_respond_to_detail,
+            workflow_attribution_detail,
         )
     }
 }
@@ -1507,6 +1559,7 @@ mod tests {
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
+            honor_workflow_attribution: None,
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
