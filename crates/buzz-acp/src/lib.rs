@@ -3134,7 +3134,7 @@ async fn tokio_main() -> Result<()> {
                 if let PromptSource::Channel(ch) = &result.source {
                     typing_channels.remove(ch);
                 }
-                if handle_prompt_result(
+                match handle_prompt_result(
                     &mut pool,
                     &mut queue,
                     &config,
@@ -3146,9 +3146,31 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
-                ) == LoopAction::Exit
-                {
-                    break;
+                ) {
+                    LoopAction::Exit => break,
+                    LoopAction::PresenceOffline => {
+                        // Stop renewing online presence and advertise offline so
+                        // the sidebar stops treating this agent as reachable
+                        // after Claude/Codex credentials expire (#3831).
+                        presence_heartbeat = None;
+                        if let Some(h) = presence_task.take() {
+                            h.abort();
+                        }
+                        if config.presence_enabled {
+                            let pp = presence_publisher.clone();
+                            let pk = presence_keys.clone();
+                            presence_task = Some(tokio::spawn(async move {
+                                if let Err(e) = publish_presence(&pp, &pk, "offline").await {
+                                    tracing::warn!(
+                                        "failed to set presence offline after auth expiry: {e}"
+                                    );
+                                } else {
+                                    tracing::info!("presence set to offline after auth expiry");
+                                }
+                            }));
+                        }
+                    }
+                    LoopAction::Continue => {}
                 }
                 if drain_ready_join_results(
                     &mut pool,
@@ -3520,10 +3542,13 @@ async fn tokio_main() -> Result<()> {
     Ok(())
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum LoopAction {
     Continue,
     Exit,
+    /// Auth is permanently broken for this process — stop advertising online
+    /// presence so operators/sidebar stop treating the agent as reachable.
+    PresenceOffline,
 }
 
 fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
@@ -3817,15 +3842,23 @@ fn dispatch_pending(
 ///   Specific to the auth-expiry flow; does not appear in unrelated errors.
 /// - `"API Error: 401"` — present in Claude/Codex HTTP-401 responses; 401 is
 ///   the standard auth-failure status and does not arise from network blips.
+/// - `"Authentication required"` — ACP `-32000` surface when the CLI reports
+///   `loggedIn: false` with no remaining credentials (headless expiry).
+/// - `"OAuth session expired and could not be refreshed"` — macOS managed-agent
+///   surface for the same expiry, worded differently from the CLI variants
+///   above; observed as `-32000` alongside "Failed to authenticate:".
 ///
 /// False positives (misclassifying a transient error as non-retryable) silently
 /// drop a user message, which is worse than a false negative (extra retries on
-/// an auth error). Both patterns are therefore chosen for high precision.
+/// an auth error). These patterns are therefore chosen for high precision.
 fn is_auth_error(error: &acp::AcpError) -> bool {
     let acp::AcpError::AgentError { message, .. } = error else {
         return false;
     };
-    message.contains("Re-authenticate") || message.contains("API Error: 401")
+    message.contains("Re-authenticate")
+        || message.contains("API Error: 401")
+        || message.contains("Authentication required")
+        || message.contains("OAuth session expired and could not be refreshed")
 }
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
@@ -3981,7 +4014,7 @@ fn handle_prompt_result(
                 );
                 let content = "⚠️ I couldn't process the last request: authentication failed. \
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
-                    and then re-send."
+                    and restart this agent. I'll stay offline until then."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
@@ -4030,6 +4063,7 @@ fn handle_prompt_result(
         PromptOutcome::Cancelled => "cancelled",
         PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
     };
+    let auth_expired = matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e));
     let agent_index = result.agent.index;
     // Capture the spawn-time configured model and our PID before the agent is
     // moved into match arms below. `desired_model` reflects the config/persona
@@ -4236,6 +4270,13 @@ fn handle_prompt_result(
                 pool.return_agent(result.agent);
             }
         }
+    }
+    if auth_expired {
+        tracing::error!(
+            agent = agent_index,
+            "agent authentication expired — taking presence offline until restart"
+        );
+        return LoopAction::PresenceOffline;
     }
     LoopAction::Continue
 }
@@ -8251,6 +8292,31 @@ mod error_outcome_emission_tests {
     }
 
     #[test]
+    fn is_auth_error_matches_authentication_required_message() {
+        let e = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Authentication required".to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "headless 'Authentication required' must be classified as auth error"
+        );
+    }
+
+    #[test]
+    fn is_auth_error_matches_oauth_session_expired_message() {
+        let e = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Failed to authenticate: OAuth session expired and could not be refreshed"
+                .to_string(),
+        };
+        assert!(
+            is_auth_error(&e),
+            "macOS managed-agent 'OAuth session expired' variant must be classified as auth error"
+        );
+    }
+
+    #[test]
     fn is_auth_error_rejects_other_agent_error_message() {
         let e = acp::AcpError::AgentError {
             code: -32601,
@@ -8362,6 +8428,83 @@ mod error_outcome_emission_tests {
             queue.queued_event_count(&channel_id),
             0,
             "auth error must dead-letter immediately — no events should be pending"
+        );
+    }
+
+    /// Auth expiry must also signal PresenceOffline so the event loop can stop
+    /// advertising the agent as online (#3831).
+    #[tokio::test]
+    async fn auth_error_returns_presence_offline_loop_action() {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let auth_error = acp::AcpError::AgentError {
+            code: -32000,
+            message: "Authentication required".to_string(),
+        };
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Error(auth_error),
+            batch: Some(batch),
+        };
+        let action = handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+        assert_eq!(
+            action,
+            LoopAction::PresenceOffline,
+            "auth expiry must take presence offline so the agent stops looking online"
         );
     }
 
