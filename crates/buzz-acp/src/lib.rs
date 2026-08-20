@@ -194,24 +194,38 @@ async fn is_owner_or_sibling(
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
+    is_owner_or_sibling_checked(author, owner_cache, rest_client)
+        .await
+        .unwrap_or(false)
+}
+
+/// Return `None` when sibling status cannot be resolved. Callers that use a
+/// negative result to broaden delivery must keep that distinct from failure.
+async fn is_owner_or_sibling_checked(
+    author: &str,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> Option<bool> {
     let my_owner = match owner_cache.get() {
         Some(o) => o,
-        None => return false, // no owner configured — fail closed
+        None => return None,
     };
 
     // Direct owner check.
     if author == my_owner {
-        return true;
+        return Some(true);
     }
 
     // Check sibling cache.
     if let Some(cached) = owner_cache.is_known_sibling(author) {
-        return cached;
+        return Some(cached);
     }
 
     // Query the author's kind:0 profile to check for NIP-OA auth tag.
     let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
+    if let Some(is_sibling) = is_sibling {
+        owner_cache.cache_sibling(author.to_string(), is_sibling);
+    }
     is_sibling
 }
 
@@ -257,6 +271,48 @@ async fn author_allowed(
     }
 }
 
+/// Apply owner-broadcast routing after the author gate.
+///
+/// Direct owner messages wake every agent unless the owner adds explicit
+/// recipient tags, in which case only tagged agents wake. Messages from any
+/// other allowed author still require an explicit mention of this agent.
+async fn owner_broadcast_allows(
+    event: &nostr::Event,
+    agent_pubkey: &str,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> bool {
+    let Some(owner) = owner_cache.get() else {
+        return false;
+    };
+    let mentioned_pubkeys = event.tags.iter().filter_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().map(String::as_str) == Some("p"))
+            .then(|| parts.get(1).map(String::as_str))
+            .flatten()
+    });
+
+    if event.pubkey.to_hex() != owner {
+        return mentioned_pubkeys.into_iter().any(|pk| pk == agent_pubkey);
+    }
+
+    let mentioned_pubkeys: Vec<_> = mentioned_pubkeys.collect();
+    if mentioned_pubkeys.contains(&agent_pubkey) {
+        return true;
+    }
+
+    for pubkey in mentioned_pubkeys {
+        if pubkey == owner {
+            continue;
+        }
+        match is_owner_or_sibling_checked(pubkey, owner_cache, rest_client).await {
+            Some(true) | None => return false,
+            Some(false) => {}
+        }
+    }
+    true
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -292,12 +348,12 @@ async fn check_sibling_via_profile(
     author: &str,
     expected_owner: &str,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> Option<bool> {
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
         .author(match nostr::PublicKey::from_hex(author) {
             Ok(pk) => pk,
-            Err(_) => return false,
+            Err(_) => return Some(false),
         })
         .limit(1);
 
@@ -305,28 +361,28 @@ async fn check_sibling_via_profile(
         .await
     {
         Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
+        _ => return None,
     };
 
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
-        None => return false,
+        None => return None,
     };
     let event = match events.first() {
         Some(e) => e,
-        None => return false,
+        None => return Some(false),
     };
     let tags = match event.get("tags").and_then(|t| t.as_array()) {
         Some(t) => t,
-        None => return false,
+        None => return None,
     };
 
     // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
     // Don't trust the relay — verify ourselves.
     let agent_pk = match nostr::PublicKey::from_hex(author) {
         Ok(pk) => pk,
-        Err(_) => return false,
+        Err(_) => return Some(false),
     };
 
     for tag in tags {
@@ -350,7 +406,7 @@ async fn check_sibling_via_profile(
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
                 tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
+                return Some(true);
             }
             Err(e) => {
                 tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
@@ -358,7 +414,7 @@ async fn check_sibling_via_profile(
         }
     }
 
-    false
+    Some(false)
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -2113,6 +2169,21 @@ async fn tokio_main() -> Result<()> {
                 prompt_tag: Some("all".into()),
             }]
         }
+        SubscribeMode::OwnerBroadcast => {
+            vec![SubscriptionRule {
+                name: "owner-broadcast".into(),
+                channels: filter::ChannelScope::All("all".into()),
+                kinds: config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(config::default_owner_broadcast_kinds),
+                require_mention: false,
+                filter: None,
+                compiled_filter: None,
+                consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                prompt_tag: Some("owner-broadcast".into()),
+            }]
+        }
         SubscribeMode::Config => {
             // load_rules() already warns if the config file has zero rules.
             config::load_rules(&config.config_path)?
@@ -2877,6 +2948,22 @@ async fn tokio_main() -> Result<()> {
                                     );
                                     continue;
                                 }
+                            }
+
+                            if config.subscribe_mode == SubscribeMode::OwnerBroadcast
+                                && !owner_broadcast_allows(
+                                    &buzz_event.event,
+                                    &pubkey_hex,
+                                    &owner_cache,
+                                    &ctx.rest_client,
+                                )
+                                .await
+                            {
+                                tracing::debug!(
+                                    channel_id = %buzz_event.channel_id,
+                                    "owner-broadcast routing — event targets another agent"
+                                );
+                                continue;
                             }
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
@@ -5323,6 +5410,16 @@ mod owner_cache_tests {
 mod author_gate_tests {
     use super::*;
 
+    fn event_with_mentions(author: &nostr::Keys, mentions: &[&str]) -> nostr::Event {
+        let tags = mentions
+            .iter()
+            .map(|pubkey| nostr::Tag::parse(["p", *pubkey]).unwrap());
+        nostr::EventBuilder::new(nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16), "hello")
+            .tags(tags)
+            .sign_with_keys(author)
+            .unwrap()
+    }
+
     /// A `RestClient` for tests. The author-gate decisions exercised here all
     /// resolve from the owner pubkey or sibling cache before any HTTP call, so
     /// this client is never actually used to make a request.
@@ -5347,6 +5444,102 @@ mod author_gate_tests {
         cache.cache_sibling(STRANGER.into(), false);
         cache.cache_sibling(EXTERNAL.into(), false);
         cache
+    }
+
+    #[tokio::test]
+    async fn owner_broadcast_is_broad_until_owner_targets_an_agent() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let other_agent = nostr::Keys::generate();
+        let human = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let agent_hex = agent.public_key().to_hex();
+        let other_agent_hex = other_agent.public_key().to_hex();
+        let human_hex = human.public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner_hex));
+        cache.cache_sibling(other_agent_hex.clone(), true);
+        cache.cache_sibling(human_hex.clone(), false);
+        let rest = dummy_rest_client();
+
+        assert!(
+            owner_broadcast_allows(&event_with_mentions(&owner, &[]), &agent_hex, &cache, &rest,)
+                .await
+        );
+        assert!(
+            owner_broadcast_allows(
+                &event_with_mentions(&owner, &[&agent_hex]),
+                &agent_hex,
+                &cache,
+                &rest,
+            )
+            .await
+        );
+        assert!(
+            owner_broadcast_allows(
+                &event_with_mentions(&owner, &[&agent_hex, &other_agent_hex]),
+                &other_agent_hex,
+                &cache,
+                &rest,
+            )
+            .await
+        );
+        assert!(
+            owner_broadcast_allows(
+                &event_with_mentions(&owner, &[&other_agent_hex, &agent_hex]),
+                &other_agent_hex,
+                &cache,
+                &rest,
+            )
+            .await
+        );
+        assert!(
+            !owner_broadcast_allows(
+                &event_with_mentions(&owner, &[&other_agent_hex]),
+                &agent_hex,
+                &cache,
+                &rest,
+            )
+            .await
+        );
+        assert!(
+            owner_broadcast_allows(
+                &event_with_mentions(&owner, &[&human_hex]),
+                &agent_hex,
+                &cache,
+                &rest,
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_broadcast_requires_mentions_from_non_owner_authors() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let sibling = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let agent_hex = agent.public_key().to_hex();
+        let cache = OwnerCache::new(Some(owner_hex));
+        let rest = dummy_rest_client();
+
+        assert!(
+            !owner_broadcast_allows(
+                &event_with_mentions(&sibling, &[]),
+                &agent_hex,
+                &cache,
+                &rest,
+            )
+            .await
+        );
+        assert!(
+            owner_broadcast_allows(
+                &event_with_mentions(&sibling, &[&agent_hex]),
+                &agent_hex,
+                &cache,
+                &rest,
+            )
+            .await
+        );
     }
 
     #[tokio::test]
