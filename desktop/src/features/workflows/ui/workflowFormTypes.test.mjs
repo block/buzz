@@ -240,6 +240,51 @@ test("switching from Message Posted clears reply_in_thread before save", () => {
   }
 });
 
+test("an ineligible trigger cannot resurrect reply_in_thread through an action change", () => {
+  // Full repro: Message Posted → Send Message → enable Reply → switch action to
+  // Delay → switch trigger to an ineligible one → switch action back to Send
+  // Message. The action picker changes only `action` (a plain spread, mirrored
+  // here), so `withTriggerType` must clear the hidden flag on every step, not
+  // just the ones whose current action is send_message.
+  for (const triggerType of ["schedule", "webhook"]) {
+    const enabled = sendMessageState({ replyInThread: true });
+    const asDelay = {
+      ...enabled,
+      steps: [{ ...enabled.steps[0], action: "delay", duration: "5m" }],
+    };
+    const switched = withTriggerType(asDelay, triggerType);
+    const backToSend = {
+      ...switched,
+      steps: [{ ...switched.steps[0], action: "send_message" }],
+    };
+
+    assert.equal(backToSend.steps[0].replyInThread, false, triggerType);
+    assert.doesNotMatch(formStateToYaml(backToSend), /reply_in_thread/);
+  }
+});
+
+test("invalid reply_in_thread values are refused rather than normalized", () => {
+  const original = (yaml) => {
+    const result = yamlToFormState(yaml);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /YAML editor/);
+    return result;
+  };
+
+  // Non-boolean would be silently deleted on serialization.
+  const nonBoolean = `name: Coerced\ntrigger: { on: message_posted }\nsteps: [{ id: s1, action: send_message, text: hi, reply_in_thread: "yes" }]\n`;
+  assert.match(original(nonBoolean).error, /reply_in_thread must be a boolean/);
+
+  // true under an ineligible trigger would round-trip a backend-invalid definition.
+  for (const trigger of ["schedule, cron: '0 9 * * *'", "webhook"]) {
+    const yaml = `name: Ineligible\ntrigger: { on: ${trigger} }\nsteps: [{ id: s1, action: send_message, text: hi, reply_in_thread: true }]\n`;
+    assert.match(
+      original(yaml).error,
+      /reply_in_thread is not supported for (schedule|webhook) triggers/,
+    );
+  }
+});
+
 test("reply_in_thread eligibility follows trigger capability", () => {
   assert.equal(isThreadReplyEligibleTrigger("message_posted"), true);
   assert.equal(isThreadReplyEligibleTrigger("schedule"), false);

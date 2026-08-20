@@ -207,12 +207,13 @@ export function withTriggerType(
   return {
     ...state,
     trigger: { on: triggerType },
+    // Clear threaded-reply state on every step, not just send_message ones:
+    // a hidden `replyInThread` on a step whose action was changed away from
+    // send_message would otherwise resurrect when the action is switched back.
     steps: isThreadReplyEligibleTrigger(triggerType)
       ? state.steps
       : state.steps.map((step) =>
-          step.action === "send_message" && step.replyInThread
-            ? { ...step, replyInThread: false }
-            : step,
+          step.replyInThread ? { ...step, replyInThread: false } : step,
         ),
   };
 }
@@ -592,6 +593,21 @@ export function yamlToFormState(
             ok: false,
             error:
               "Webhook header names cannot be empty or have surrounding whitespace in Form mode",
+          };
+        }
+      }
+
+      if (step.reply_in_thread !== undefined) {
+        if (typeof step.reply_in_thread !== "boolean") {
+          return {
+            ok: false,
+            error: `Step ${number} reply_in_thread must be a boolean — use the YAML editor`,
+          };
+        }
+        if (step.reply_in_thread && !isThreadReplyEligibleTrigger(triggerOn)) {
+          return {
+            ok: false,
+            error: `reply_in_thread is not supported for ${triggerOn} triggers — use the YAML editor`,
           };
         }
       }
