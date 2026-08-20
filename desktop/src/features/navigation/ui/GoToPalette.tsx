@@ -53,9 +53,9 @@ export function GoToPalette({ state }: GoToPaletteProps) {
           Jump to a section of the app. Type to filter, press a number to jump
           by position, or use the shortcut shown on each row.
         </DialogDescription>
-        <div className="flex items-center border-b border-border/60 px-4 py-3">
+        <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
           <input
-            className="w-full bg-transparent text-base text-foreground placeholder:text-muted-foreground/60 focus:outline-hidden"
+            className="min-w-0 flex-1 bg-transparent text-base text-foreground placeholder:text-muted-foreground/60 focus:outline-hidden"
             data-testid="go-to-input"
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder="Go to&hellip;"
@@ -63,6 +63,9 @@ export function GoToPalette({ state }: GoToPaletteProps) {
             type="text"
             value={query}
           />
+          <kbd className="shrink-0 rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
+            ESC
+          </kbd>
         </div>
         {results.length === 0 ? (
           <p className="px-4 py-5 text-sm text-muted-foreground">
