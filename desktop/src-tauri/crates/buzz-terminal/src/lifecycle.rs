@@ -44,9 +44,13 @@
 //! session is the documented way to survive one's terminal, and honouring it
 //! is correct behaviour, not a gap.
 
+#[cfg(unix)]
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
+#[cfg(unix)]
 use portable_pty::Child;
 
 /// How long the group gets to honour `SIGTERM` before `SIGKILL`.
@@ -62,6 +66,7 @@ pub const TERM_GRACE: Duration = Duration::from_millis(250);
 /// Polling rather than blocking in `wait()`: a blocking wait cannot be given a
 /// deadline without a second thread, and the whole point of the grace period
 /// is that it expires.
+#[cfg(unix)]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// How a session ended.
