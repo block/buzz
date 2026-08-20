@@ -1,4 +1,4 @@
-import { MessageCircle, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -35,6 +35,7 @@ import {
 } from "@/features/projects/lib/projectRepoHost";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import { ProjectsChannelsList } from "@/features/projects/ui/ProjectsChannelsList";
+import { ProjectsOverviewChatToggle } from "@/features/projects/ui/ProjectsOverviewChatToggle";
 import {
   ProjectsOverviewContextSheet,
   ProjectsOverviewNarrowContextToggle,
@@ -832,12 +833,9 @@ export function ProjectsView() {
                           onFilterChange={handleFilterChange}
                         />
                       </div>
-                      <Button
-                        aria-label={`Chat with an agent about ${projectsSectionTitle(filter)}`}
-                        aria-pressed={selectionAgentContext !== null}
-                        className="-mr-2 ml-auto h-7 w-7 shrink-0 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-                        data-testid="projects-overview-chat-toggle"
-                        onClick={() =>
+                      <ProjectsOverviewChatToggle
+                        active={selectionAgentContext !== null}
+                        onToggle={() =>
                           setSelectionAgentContext((context) =>
                             context
                               ? null
@@ -846,20 +844,8 @@ export function ProjectsView() {
                                 ),
                           )
                         }
-                        size="icon"
-                        title={`Chat with an agent about ${projectsSectionTitle(filter)}`}
-                        type="button"
-                        variant="ghost"
-                      >
-                        <MessageCircle
-                          className={cn(
-                            "h-4 w-4 transition-opacity duration-200 ease-linear",
-                            selectionAgentContext
-                              ? "opacity-100"
-                              : "opacity-60",
-                          )}
-                        />
-                      </Button>
+                        sectionTitle={projectsSectionTitle(filter)}
+                      />
                     </div>
                     <div
                       className={
