@@ -1214,6 +1214,25 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append an explicit send instruction for an unthreaded DM turn.
+///
+/// The harness only *prompts* the agent — the agent publishes its own reply by
+/// running `buzz messages send`. Threaded turns get that instruction from
+/// [`append_reply_instruction`] / [`append_new_thread_reply_instruction`], but
+/// an unthreaded DM has no reply anchor and previously carried no send
+/// instruction at all, so weakly-instructed agents read the context and ended
+/// the turn silently. No `--reply-to` here: the turn is not threaded.
+fn append_dm_send_instruction(s: &mut String, channel_id: Uuid) {
+    s.push_str(&format!(
+        "\nIMPORTANT: This is a direct message from a human, and it is not \
+         threaded. You MUST publish your reply yourself — it is not sent for \
+         you. Send it with `buzz messages send --channel {channel_id} \
+         --content \"<your reply>\"`. Do NOT pass `--reply-to` for this turn. \
+         Do NOT use @mentions in a DM — the recipient is the only other party, \
+         and an `@` triggers a mention preflight that can abort the send."
+    ));
+}
+
 /// Decide whether a turn is human-facing for reply-anchor purposes.
 ///
 /// A turn is human-facing when the triggering sender is a human, OR a human
@@ -1365,6 +1384,10 @@ fn format_context_hints(
             if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
+        } else {
+            // Unthreaded DM: no reply anchor exists, so nothing above tells the
+            // agent to publish anything. Say it explicitly.
+            append_dm_send_instruction(&mut s, channel_id);
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
@@ -3305,6 +3328,146 @@ mod tests {
         assert!(prompt.contains("Scope: dm"));
     }
 
+    /// An unthreaded DM must carry an explicit send directive — the harness
+    /// only prompts; the agent publishes its own reply.
+    #[test]
+    fn test_format_prompt_unthreaded_dm_has_send_directive() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hey");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("Scope: dm"), "got:\n{prompt}");
+        assert!(
+            prompt.contains(&format!("buzz messages send --channel {ch}")),
+            "unthreaded DM must name the send command with the channel uuid, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Do NOT pass `--reply-to` for this turn."),
+            "unthreaded DM must not ask for --reply-to, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Do NOT use @mentions in a DM"),
+            "unthreaded DM must carry the no-mention guidance, got:\n{prompt}"
+        );
+    }
+
+    /// Threaded DMs keep the pre-existing `--reply-to` instruction and must NOT
+    /// pick up the unthreaded send directive.
+    #[test]
+    fn test_format_prompt_threaded_dm_keeps_reply_to_instruction() {
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "sounds good",
+            vec![vec![
+                "e".into(),
+                "dmroot123".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("Scope: dm"), "got:\n{prompt}");
+        assert!(prompt.contains("Thread root: dmroot123"), "got:\n{prompt}");
+        assert!(
+            prompt.contains(&format!("use `--reply-to {event_id}`")),
+            "threaded DM must keep its reply anchor, got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Do NOT use @mentions in a DM"),
+            "threaded DM must not gain the unthreaded send directive, got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Do NOT pass `--reply-to` for this turn."),
+            "threaded DM must not gain the unthreaded send directive, got:\n{prompt}"
+        );
+    }
+
+    /// Channel-scope prompts are unaffected by the DM send directive.
+    #[test]
+    fn test_format_prompt_channel_scope_has_no_dm_send_directive() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello everyone");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "engineering".into(),
+            channel_type: "stream".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(prompt.contains("Scope: channel"), "got:\n{prompt}");
+        assert!(
+            !prompt.contains("This is a direct message from a human"),
+            "channel prompt must not gain the DM directive, got:\n{prompt}"
+        );
+        assert!(
+            !prompt.contains("Do NOT use @mentions in a DM"),
+            "channel prompt must not gain the DM directive, got:\n{prompt}"
+        );
+    }
+
     #[test]
     fn test_format_prompt_thread_scope() {
         let ch = Uuid::new_v4();
@@ -4355,8 +4518,12 @@ mod tests {
         );
     }
 
+    /// An unthreaded DM must not be given a `--reply-to` anchor. It still gets
+    /// the explicit send directive (see
+    /// `test_format_prompt_unthreaded_dm_has_send_directive`), which names
+    /// `--reply-to` only to tell the agent NOT to pass it.
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_reply_anchor_absent_for_dm_non_reply() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
         let batch = FlushBatch {
@@ -4384,8 +4551,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            !prompt.contains("use `--reply-to"),
+            "DM non-reply should NOT be given a reply anchor, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("Do NOT pass `--reply-to` for this turn."),
+            "DM non-reply should be told explicitly not to thread, got:\n{prompt}"
         );
     }
 

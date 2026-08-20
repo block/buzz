@@ -446,6 +446,10 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
+            // No DM mention exemption in setup mode: the explicit
+            // `event_mentions_agent` gate above already required a mention, so
+            // exempting here would change nothing but blur the contract.
+            false,
         )
         .await
         .is_some();

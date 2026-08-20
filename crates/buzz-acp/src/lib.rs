@@ -286,6 +286,70 @@ pub(crate) async fn is_dm_channel(
     }
 }
 
+/// Strip the `#p` subscription filter from DM channels in mentions mode.
+///
+/// Mentions mode subscribes with `require_mention: true`, which the relay
+/// renders as a `#p` tag filter (see `relay::build_channel_filter`). A plain DM
+/// carries no `p` tag, so without this the event never comes off the wire and
+/// the local `require_mention` exemption in [`filter::match_event`] could never
+/// see it. Both gates must be exempted for the feature to work end to end.
+///
+/// Applies to [`SubscribeMode::Mentions`] only. `All` mode already has
+/// `require_mention: false`, and `Config` mode rules keep their operator-declared
+/// `require_mention` semantics in every channel, DM or not.
+///
+/// # Unknown channel types are treated as NOT-DM (deliberate divergence)
+///
+/// This helper only exempts channels whose type `channel_info` definitively
+/// reports as `"dm"`. A channel missing from the map keeps its narrower `#p`
+/// subscription. That is the **opposite** of [`is_dm_channel`], which fails
+/// *closed to DM* (treats unresolved channels as DMs).
+///
+/// The divergence is intentional and the two directions mean different things:
+/// - [`is_dm_channel`] guards the **author gate**, where "unknown ⇒ DM" is the
+///   restrictive answer (only owner/siblings get through).
+/// - Here, "unknown ⇒ DM" would be the **permissive** answer — it would widen a
+///   subscription to every message in a channel that may well be a public
+///   stream. Startup discovery metadata is definitive for the channels it
+///   covers, so an absent entry means "not a channel we discovered as a DM" and
+///   the narrow subscription stands.
+///
+/// The dynamic (post-startup membership) subscribe path does the reverse and
+/// accepts `is_dm_channel`'s fail-closed-to-DM answer, because agent-initiated
+/// DMs have no startup metadata at all and would otherwise never be exempted.
+/// Widening there is safe: the author gate still runs on every event.
+///
+/// Returns the number of channels whose filter was changed.
+pub(crate) fn apply_dm_mention_exemption(
+    filters: &mut HashMap<Uuid, config::ChannelFilter>,
+    channel_info: &HashMap<Uuid, relay::ChannelInfo>,
+    mode: &SubscribeMode,
+) -> usize {
+    if *mode != SubscribeMode::Mentions {
+        return 0;
+    }
+
+    let mut exempted = 0;
+    for (channel_id, filter) in filters.iter_mut() {
+        if !filter.require_mention {
+            continue;
+        }
+        let is_dm = channel_info
+            .get(channel_id)
+            .is_some_and(|info| info.channel_type == "dm");
+        if !is_dm {
+            continue;
+        }
+        filter.require_mention = false;
+        exempted += 1;
+        tracing::debug!(
+            channel_id = %channel_id,
+            "dm mention exemption: subscribing to DM channel without #p filter"
+        );
+    }
+    exempted
+}
+
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
 async fn check_sibling_via_profile(
@@ -2119,7 +2183,21 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    // Mentions mode only: DM channels must not carry a `#p` subscription filter
+    // or plain DM text never reaches the local exemption. See the helper's doc
+    // comment for why unknown channel types stay narrow here.
+    let dm_exempted = apply_dm_mention_exemption(
+        &mut channel_filters,
+        &channel_info_map,
+        &config.subscribe_mode,
+    );
+    if dm_exempted > 0 {
+        tracing::info!(
+            channels = dm_exempted,
+            "dm mention exemption applied to DM channel subscription(s)"
+        );
+    }
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2675,7 +2753,26 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    } else if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        // Same intent as apply_dm_mention_exemption()
+                                        // on the startup path, but deliberately
+                                        // NOT shared with it: this path has one
+                                        // filter and no startup metadata, so it
+                                        // must await the async is_dm_channel()
+                                        // resolver and accepts its fail-closed-
+                                        // to-DM answer. Agent-initiated DMs
+                                        // arrive on exactly this path and would
+                                        // never be exempted otherwise.
+                                        if config.subscribe_mode == SubscribeMode::Mentions
+                                            && filter.require_mention
+                                            && is_dm_channel(ch, &ctx.channel_info).await
+                                        {
+                                            filter.require_mention = false;
+                                            tracing::debug!(
+                                                channel_id = %ch,
+                                                "dm mention exemption: subscribing to DM channel without #p filter"
+                                            );
+                                        }
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -2851,13 +2948,15 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            // DM hardening: resolve channel type (fail-closed to
+                            // DM) so allowlist/anyone modes cannot be exercised
+                            // by non-owner authors inside DMs. Hoisted out of the
+                            // author-gate block because the mentions-mode DM
+                            // exemption below needs the same answer.
+                            let is_dm =
+                                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -2879,7 +2978,13 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            // Mentions mode only: a DM is already addressed to the
+                            // agent, so the require_mention gate must not apply
+                            // there. Config-mode rules keep their declared
+                            // require_mention semantics in every channel.
+                            let dm_mention_exempt =
+                                config.subscribe_mode == SubscribeMode::Mentions && is_dm;
+                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, dm_mention_exempt).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
@@ -4070,10 +4175,13 @@ fn handle_prompt_result(
 
     match result.outcome {
         // Successful prompt — return agent to pool.
-        PromptOutcome::Ok(_) => {
+        PromptOutcome::Ok(ref stop_reason) => {
+            // Surface the StopReason — `outcome_label` collapses every Ok to
+            // "ok", hiding refusals and turn-limit stops.
             tracing::debug!(
                 agent = agent_index,
                 outcome = outcome_label,
+                stop_reason = ?stop_reason,
                 "agent_returned"
             );
             pool.return_agent(result.agent);
@@ -5691,6 +5799,199 @@ mod author_gate_tests {
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
         );
+    }
+}
+
+#[cfg(test)]
+mod dm_mention_exemption_tests {
+    //! Startup wire-filter side of the DM mention exemption.
+    //!
+    //! `apply_dm_mention_exemption` decides which channels get subscribed
+    //! WITHOUT a `#p` filter. The local `require_mention` exemption in
+    //! `filter::match_event` is useless if the event never comes off the wire,
+    //! so these tests pin the subscription half.
+
+    use super::*;
+
+    fn dm_info() -> relay::ChannelInfo {
+        relay::ChannelInfo {
+            name: "dm-with-owner".into(),
+            channel_type: "dm".into(),
+        }
+    }
+
+    fn stream_info() -> relay::ChannelInfo {
+        relay::ChannelInfo {
+            name: "engineering".into(),
+            channel_type: "stream".into(),
+        }
+    }
+
+    /// A channel filter as mentions mode resolves it: narrow, `#p`-gated.
+    fn mentions_filter() -> config::ChannelFilter {
+        config::ChannelFilter {
+            kinds: None,
+            require_mention: true,
+        }
+    }
+
+    #[test]
+    fn test_dm_channel_in_mentions_mode_drops_mention_filter() {
+        let dm = Uuid::new_v4();
+        let mut filters = HashMap::from([(dm, mentions_filter())]);
+        let info = HashMap::from([(dm, dm_info())]);
+
+        let exempted =
+            apply_dm_mention_exemption(&mut filters, &info, &config::SubscribeMode::Mentions);
+
+        assert_eq!(exempted, 1, "the one DM channel must be counted as changed");
+        assert!(
+            !filters[&dm].require_mention,
+            "a DM channel must subscribe without the #p filter"
+        );
+    }
+
+    #[test]
+    fn test_stream_channel_keeps_mention_filter() {
+        let stream = Uuid::new_v4();
+        let mut filters = HashMap::from([(stream, mentions_filter())]);
+        let info = HashMap::from([(stream, stream_info())]);
+
+        let exempted =
+            apply_dm_mention_exemption(&mut filters, &info, &config::SubscribeMode::Mentions);
+
+        assert_eq!(exempted, 0, "a stream channel must not be exempted");
+        assert!(
+            filters[&stream].require_mention,
+            "a stream channel keeps its #p subscription in mentions mode"
+        );
+    }
+
+    #[test]
+    fn test_unknown_channel_type_keeps_mention_filter() {
+        // Deliberate divergence from is_dm_channel(), which fails CLOSED to DM.
+        // Here "unknown ⇒ DM" would be the permissive answer — it would widen a
+        // subscription to every message in a possibly-public channel — so an
+        // absent entry keeps the narrow filter.
+        let absent = Uuid::new_v4();
+        let declared_unknown = Uuid::new_v4();
+        let mut filters = HashMap::from([
+            (absent, mentions_filter()),
+            (declared_unknown, mentions_filter()),
+        ]);
+        let info = HashMap::from([(
+            declared_unknown,
+            relay::ChannelInfo {
+                name: "mystery".into(),
+                channel_type: "unknown".into(),
+            },
+        )]);
+
+        let exempted =
+            apply_dm_mention_exemption(&mut filters, &info, &config::SubscribeMode::Mentions);
+
+        assert_eq!(
+            exempted, 0,
+            "unresolved channel types must not be exempted here"
+        );
+        assert!(
+            filters[&absent].require_mention,
+            "a channel missing from discovery metadata keeps the narrow #p filter"
+        );
+        assert!(
+            filters[&declared_unknown].require_mention,
+            "an explicitly 'unknown' channel type keeps the narrow #p filter"
+        );
+    }
+
+    #[test]
+    fn test_non_mentions_modes_leave_filters_untouched() {
+        // Config mode: an operator who declared require_mention gets exactly
+        // that, in every channel, DM included. All mode never sets it true.
+        let dm = Uuid::new_v4();
+        let info = HashMap::from([(dm, dm_info())]);
+
+        for mode in [config::SubscribeMode::Config, config::SubscribeMode::All] {
+            let mut filters = HashMap::from([(dm, mentions_filter())]);
+            let exempted = apply_dm_mention_exemption(&mut filters, &info, &mode);
+
+            assert_eq!(exempted, 0, "{mode:?} mode must exempt nothing");
+            assert!(
+                filters[&dm].require_mention,
+                "{mode:?} mode must leave a DM channel's filter untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn test_already_open_dm_filter_is_not_counted() {
+        // require_mention already false — nothing changed, so nothing counted.
+        let dm = Uuid::new_v4();
+        let mut filters = HashMap::from([(
+            dm,
+            config::ChannelFilter {
+                kinds: None,
+                require_mention: false,
+            },
+        )]);
+        let info = HashMap::from([(dm, dm_info())]);
+
+        let exempted =
+            apply_dm_mention_exemption(&mut filters, &info, &config::SubscribeMode::Mentions);
+
+        assert_eq!(exempted, 0, "an already-open filter is not a change");
+        assert!(!filters[&dm].require_mention);
+    }
+
+    #[test]
+    fn test_mixed_channel_set_exempts_only_dms() {
+        // The realistic startup shape: DMs, streams, and an undiscovered
+        // channel resolved in one pass.
+        let dm_a = Uuid::new_v4();
+        let dm_b = Uuid::new_v4();
+        let stream = Uuid::new_v4();
+        let absent = Uuid::new_v4();
+
+        let mut filters = HashMap::from([
+            (dm_a, mentions_filter()),
+            (dm_b, mentions_filter()),
+            (stream, mentions_filter()),
+            (absent, mentions_filter()),
+        ]);
+        let info = HashMap::from([
+            (dm_a, dm_info()),
+            (dm_b, dm_info()),
+            (stream, stream_info()),
+        ]);
+
+        let exempted =
+            apply_dm_mention_exemption(&mut filters, &info, &config::SubscribeMode::Mentions);
+
+        assert_eq!(exempted, 2, "both DM channels must be counted");
+        assert!(!filters[&dm_a].require_mention);
+        assert!(!filters[&dm_b].require_mention);
+        assert!(filters[&stream].require_mention);
+        assert!(filters[&absent].require_mention);
+    }
+
+    #[test]
+    fn test_exemption_preserves_kinds() {
+        // The exemption touches require_mention only — the kinds filter is
+        // resolved elsewhere and must survive untouched.
+        let dm = Uuid::new_v4();
+        let mut filters = HashMap::from([(
+            dm,
+            config::ChannelFilter {
+                kinds: Some(vec![9, 45001]),
+                require_mention: true,
+            },
+        )]);
+        let info = HashMap::from([(dm, dm_info())]);
+
+        apply_dm_mention_exemption(&mut filters, &info, &config::SubscribeMode::Mentions);
+
+        assert_eq!(filters[&dm].kinds, Some(vec![9, 45001]));
+        assert!(!filters[&dm].require_mention);
     }
 }
 
