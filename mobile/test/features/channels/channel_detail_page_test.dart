@@ -5246,12 +5246,12 @@ void main() {
         );
         expect(
           (nativeView.creationParams as Map<String, Object>)['buttonCenterX'],
-          37.0,
+          38.0,
         );
         final backButtonRect = tester.getRect(
           find.byKey(const ValueKey('channel-ios-glass-back')),
         );
-        expect(backButtonRect.width, 57);
+        expect(backButtonRect.width, 58);
         final channelIconRect = tester.getRect(
           find.byKey(const ValueKey('channel-header-avatar')),
         );
