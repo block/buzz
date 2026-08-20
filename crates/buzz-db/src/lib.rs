@@ -3828,6 +3828,7 @@ impl Db {
         name: &str,
         definition_json: &str,
         definition_hash: &[u8],
+        definition_event_id: &[u8],
     ) -> Result<()> {
         workflow::upsert_workflow(
             &self.pool,
@@ -3838,6 +3839,7 @@ impl Db {
             name,
             definition_json,
             definition_hash,
+            definition_event_id,
         )
         .await
     }

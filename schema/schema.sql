@@ -368,6 +368,9 @@ CREATE TABLE workflows (
     channel_id      UUID,
     definition      JSONB NOT NULL,
     definition_hash BYTEA NOT NULL,
+    -- Exact owner-signed kind:30620 revision that materialized this row.
+    -- Nullable only for pre-0032 rows; workflow doorbells fail closed until re-saved.
+    definition_event_id BYTEA,
     status          workflow_status NOT NULL DEFAULT 'active',
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

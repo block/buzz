@@ -8,9 +8,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_DEF};
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_db::event::EventQuery;
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, DoorbellContext};
+use buzz_workflow::executor::WorkflowCause;
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
@@ -170,16 +172,22 @@ impl RelayActionSink {
 }
 
 impl ActionSink for RelayActionSink {
+    #[allow(clippy::too_many_arguments)]
     fn send_message(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
+        step_id: &str,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        doorbell: &DoorbellContext,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let step_id = step_id.to_owned();
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
+        let doorbell = doorbell.clone();
 
         Box::pin(async move {
             // 0. Upgrade weak reference — fails only during shutdown.
@@ -240,6 +248,58 @@ impl ActionSink for RelayActionSink {
             })?;
             let author_pubkey_bytes = author_pubkey.to_bytes().to_vec();
             let author_pubkey_hex = author_pubkey.to_hex();
+            // The kind:30620 event is the owner's signed authority artifact.
+            // Resolve the current live event by its NIP-33 coordinate and bind
+            // the output to its exact event ID. ACP fetches and verifies this
+            // event independently before treating the message as owner-authored.
+            let mut definition_query = EventQuery::for_community(tenant.community());
+            definition_query.channel_id = Some(channel_uuid);
+            definition_query.kinds = Some(vec![KIND_WORKFLOW_DEF as i32]);
+            definition_query.pubkey = Some(author_pubkey_bytes.clone());
+            definition_query.d_tag = Some(workflow_id.to_string());
+            definition_query.limit = Some(1);
+            let definition = state
+                .db
+                .query_events(&definition_query)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "owner-signed workflow definition {workflow_id} is unavailable"
+                    ))
+                })?;
+            let definition_event_id = definition.event.id.to_hex();
+            if !definition_event_id.eq_ignore_ascii_case(&doorbell.definition_event_id) {
+                return Err(ActionSinkError::Database(
+                    "workflow definition changed while the run was executing".into(),
+                ));
+            }
+            // Mention routing comes only from the owner-signed template, never
+            // from values rendered out of a trigger event or webhook payload.
+            // This preserves explicit workflow targets without allowing source
+            // text such as `{{trigger.text}}` to wake a different agent.
+            let (signed_workflow, _) =
+                buzz_workflow::WorkflowEngine::parse_yaml(&definition.event.content).map_err(
+                    |e| ActionSinkError::InvalidInput(format!("invalid workflow definition: {e}")),
+                )?;
+            let routing_text = signed_workflow
+                .steps
+                .iter()
+                .find(|step| step.id == step_id)
+                .and_then(|step| match &step.action {
+                    buzz_workflow::schema::ActionDef::SendMessage { text, .. } => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    ActionSinkError::InvalidInput(format!(
+                        "workflow step {step_id} is not a send_message action"
+                    ))
+                })?;
+
             let is_member = state
                 .is_member_cached(tenant.community(), channel_uuid, &author_pubkey_bytes)
                 .await
@@ -252,24 +312,38 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - `workflow-owner` identifies the claimed principal, but ACP
+            //      grants authority only from the referenced owner-signed definition
+            //    - `workflow-definition` binds the exact kind:30620 event and step
+            //    - the owner is always p-tagged; extra wake targets are resolved
+            //      only from the owner-signed template, never rendered cause data
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
-            //    - one `p` tag per `@Name` that resolves to a channel member,
-            //      so mentioned agents are woken (wake is `p`-tag gated)
+            let cause_tag = match &doorbell.cause {
+                WorkflowCause::Event(id) => ["workflow-cause", "event", id.as_str()],
+                WorkflowCause::Schedule(slot) => ["workflow-cause", "schedule", slot.as_str()],
+                WorkflowCause::Command(id) => ["workflow-cause", "command", id.as_str()],
+                WorkflowCause::Webhook => ["workflow-cause", "webhook", ""],
+            };
             let mut tags = vec![
+                Tag::parse(["workflow-owner", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow-owner tag: {e}")))?,
+                Tag::parse(["workflow-definition", &definition_event_id, &step_id]).map_err(
+                    |e| ActionSinkError::EventBuild(format!("workflow-definition tag: {e}")),
+                )?,
+                Tag::parse(cause_tag)
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow-cause tag: {e}")))?,
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
                     .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
-                Tag::parse(["buzz:workflow", "true"])
+                Tag::parse(["buzz:workflow", "doorbell-v1"])
                     .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
             ];
 
-            // Resolve `@Name` mentions to channel-member pubkeys and append a
-            // `p` tag for each (skipping the author, already tagged above). A
-            // resolution failure must not drop the message, so log and proceed
-            // with the base tags.
+            // Resolve only owner-signed `@Name` mentions to member pubkeys.
+            // Dynamic trigger/webhook values are deliberately excluded from
+            // routing, even though ACP may render them into the local prompt.
             let members = state
                 .db
                 .get_members(tenant.community(), channel_uuid)
@@ -288,7 +362,7 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            for mentioned in resolve_mention_pubkeys(&text, &named_members) {
+            for mentioned in resolve_mention_pubkeys(&routing_text, &named_members) {
                 if mentioned == author_pubkey_hex {
                     continue;
                 }
@@ -299,7 +373,12 @@ impl ActionSink for RelayActionSink {
             }
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
-            let event = EventBuilder::new(kind, &text)
+            let event_content = match doorbell.cause {
+                WorkflowCause::Webhook => serde_json::to_string(&doorbell.webhook_fields)
+                    .map_err(|e| ActionSinkError::EventBuild(format!("webhook payload: {e}")))?,
+                _ => String::new(),
+            };
+            let event = EventBuilder::new(kind, event_content)
                 .tags(tags)
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
@@ -560,9 +639,9 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests {
-    //! Regression test for `e3661764` / `7899c1a8`: a workflow `send_message`
-    //! that mentions a channel member by name (`@Name`) must emit a `p` tag for
-    //! that member so ACP agent wake (`event_mentions_agent`, p-tag gated) fires.
+    //! Doorbell routing regression: a workflow's owner-signed `@Name` may add
+    //! a wake target, but dynamic trigger/webhook values cannot become routing
+    //! authority because mention extraction reads the signed template only.
     //!
     //! Postgres-gated like the other DB-backed relay tests. Run with:
     //!   `cargo test -p buzz-relay --lib workflow_sink -- --ignored`
@@ -611,13 +690,12 @@ mod integration_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn workflow_send_message_p_tags_mentioned_member() {
+    async fn workflow_doorbell_routes_from_signed_template() {
         let state = test_state().await;
 
         let author = nostr::Keys::generate();
         let author_hex = author.public_key().to_hex();
         let agent = nostr::Keys::generate();
-        let agent_hex = agent.public_key().to_hex();
         let agent_bytes = agent.public_key().to_bytes().to_vec();
 
         let host = format!("wf-ptag-{}.example", uuid::Uuid::new_v4().simple());
@@ -669,13 +747,37 @@ mod integration_tests {
             .await
             .expect("add agent member");
 
+        let workflow_id = Uuid::new_v4();
+        let definition = EventBuilder::new(
+            Kind::Custom(KIND_WORKFLOW_DEF as u16),
+            "name: ptag\ntrigger:\n  on: webhook\nsteps:\n  - id: notify\n    action: send_message\n    text: '{{trigger.text}}'\n",
+        )
+        .tags([
+            Tag::parse(["d", &workflow_id.to_string()]).expect("d tag"),
+            Tag::parse(["h", &channel.id.to_string()]).expect("h tag"),
+        ])
+        .sign_with_keys(&author)
+        .expect("sign definition");
+        state
+            .db
+            .insert_event(community, &definition, Some(channel.id))
+            .await
+            .expect("persist definition");
+
         let sink = RelayActionSink::new(&state);
         let event_id_hex = sink
             .send_message(
                 community,
+                workflow_id,
+                "notify",
                 &channel.id.to_string(),
                 "heads up @Robby — please take a look",
                 &author_hex,
+                &DoorbellContext {
+                    definition_event_id: definition.id.to_hex(),
+                    cause: WorkflowCause::Webhook,
+                    webhook_fields: std::collections::HashMap::new(),
+                },
             )
             .await
             .expect("send_message");
@@ -699,13 +801,55 @@ mod integration_tests {
             .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
             .collect();
 
-        assert!(
-            p_tag_targets.contains(&author_hex.as_str()),
-            "author should still be attributed via p tag; got {p_tag_targets:?}"
+        assert_eq!(
+            p_tag_targets,
+            vec![author_hex.as_str()],
+            "rendered @Robby from trigger data must not become a second wake target"
         );
-        assert!(
-            p_tag_targets.contains(&agent_hex.as_str()),
-            "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+
+        let workflow_owner_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("workflow-owner"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(
+            workflow_owner_targets,
+            vec![author_hex.as_str()],
+            "workflow output must carry exactly one dedicated owner authority tag"
+        );
+
+        let definition_targets: Vec<&[String]> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("workflow-definition"))
+            .map(|t| t.as_slice())
+            .collect();
+        assert_eq!(definition_targets.len(), 1);
+        assert_eq!(
+            definition_targets[0],
+            [
+                "workflow-definition",
+                definition.id.to_hex().as_str(),
+                "notify"
+            ]
+        );
+        assert_eq!(stored.event.content, "{}", "relay prose must be discarded");
+        let causes: Vec<&[String]> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("workflow-cause"))
+            .map(|tag| tag.as_slice())
+            .collect();
+        assert_eq!(causes.len(), 1);
+        assert_eq!(causes[0], ["workflow-cause", "webhook", ""]);
+        assert_eq!(
+            stored.event.pubkey,
+            state.relay_keypair.public_key(),
+            "workflow output must be signed by the relay identity"
         );
     }
 }

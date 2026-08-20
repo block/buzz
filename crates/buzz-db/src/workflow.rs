@@ -177,6 +177,8 @@ pub struct WorkflowRecord {
     pub definition: serde_json::Value,
     /// SHA-256 hash of the canonical definition JSON.
     pub definition_hash: Vec<u8>,
+    /// Exact owner-signed kind:30620 event that materialized this revision.
+    pub definition_event_id: Option<Vec<u8>>,
     /// Current lifecycle status of the workflow definition.
     pub status: WorkflowStatus,
     /// Whether the workflow will fire on matching events.
@@ -322,16 +324,18 @@ pub async fn upsert_workflow(
     name: &str,
     definition_json: &str,
     definition_hash: &[u8],
+    definition_event_id: &[u8],
 ) -> Result<()> {
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
-            (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+            (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id, status, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, 'active', TRUE)
         ON CONFLICT (community_id, id) DO UPDATE
         SET name = EXCLUDED.name,
             definition = EXCLUDED.definition,
             definition_hash = EXCLUDED.definition_hash,
+            definition_event_id = EXCLUDED.definition_event_id,
             updated_at = NOW()
         WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
           AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
@@ -345,6 +349,7 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
+    .bind(definition_event_id)
     .fetch_optional(pool)
     .await?;
 
@@ -370,7 +375,7 @@ pub async fn get_workflow(
 ) -> Result<WorkflowRecord> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND id = $2
@@ -401,7 +406,7 @@ pub async fn list_channel_workflows(
 
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND channel_id = $2
@@ -432,7 +437,7 @@ pub async fn list_enabled_channel_workflows(
 ) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1
@@ -460,7 +465,7 @@ pub async fn list_enabled_channel_workflows(
 pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
+        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash, w.definition_event_id,
                w.status::text AS status, w.enabled, w.created_at, w.updated_at
         FROM workflows w
         JOIN communities c ON c.id = w.community_id
@@ -1183,6 +1188,7 @@ fn row_to_workflow_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRecord> 
         channel_id,
         definition: row.try_get("definition")?,
         definition_hash: row.try_get("definition_hash")?,
+        definition_event_id: row.try_get("definition_event_id")?,
         status,
         enabled,
         created_at: row.try_get("created_at")?,
@@ -1247,7 +1253,7 @@ pub async fn find_by_owner_and_name(
 ) -> Result<Option<WorkflowRecord>> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND owner_pubkey = $2 AND name = $3
@@ -1381,6 +1387,7 @@ mod tests {
             owner_pubkey: vec![0xab; 32],
             channel_id: Some(channel_id),
             definition: def.clone(),
+            definition_event_id: None,
             definition_hash: vec![0x01, 0x02, 0x03, 0x04],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1411,6 +1418,7 @@ mod tests {
             owner_pubkey: vec![0x00; 32],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1433,6 +1441,7 @@ mod tests {
             owner_pubkey: vec![0x01; 32],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![0xAA],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1462,6 +1471,7 @@ mod tests {
                 owner_pubkey: vec![],
                 channel_id: None,
                 definition: serde_json::json!({}),
+                definition_event_id: None,
                 definition_hash: vec![],
                 status: status.clone(),
                 enabled: true,
@@ -1482,6 +1492,7 @@ mod tests {
             owner_pubkey: vec![],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![],
             status: WorkflowStatus::Active,
             enabled: false,

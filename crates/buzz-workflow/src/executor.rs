@@ -18,6 +18,7 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::action_sink::DoorbellContext;
 use crate::error::WorkflowError;
 use crate::schema::{ActionDef, Step, WorkflowDef};
 use crate::WorkflowEngine;
@@ -39,6 +40,26 @@ pub struct TriggerContext {
     pub message_id: String,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
+    /// Exact owner-signed kind:30620 definition revision executed by this run.
+    #[serde(default)]
+    pub definition_event_id: String,
+    /// Semantic cause carried to workflow-generated agent doorbells.
+    #[serde(default)]
+    pub cause: Option<WorkflowCause>,
+}
+
+/// Provenance for the event that caused a workflow run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum WorkflowCause {
+    /// Signed message, reaction, or diff event.
+    Event(String),
+    /// Deterministic UTC schedule slot.
+    Schedule(String),
+    /// Owner-signed kind:46020 manual-run command.
+    Command(String),
+    /// Unsigned external webhook payload.
+    Webhook,
 }
 
 impl TriggerContext {
@@ -584,9 +605,31 @@ pub async fn dispatch_action(
                         "SendMessage → {channel_id}: {text}"
                     );
 
+                    let doorbell = DoorbellContext {
+                        definition_event_id: trigger_ctx.definition_event_id.clone(),
+                        cause: trigger_ctx.cause.clone().ok_or_else(|| {
+                            WorkflowError::InvalidDefinition(
+                                "SendMessage: workflow cause provenance is unavailable".into(),
+                            )
+                        })?,
+                        webhook_fields: trigger_ctx.webhook_fields.clone(),
+                    };
+                    if doorbell.definition_event_id.is_empty() {
+                        return Err(WorkflowError::InvalidDefinition(
+                            "SendMessage: workflow definition provenance is unavailable".into(),
+                        ));
+                    }
                     let event_id = engine
                         .action_sink()?
-                        .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
+                        .send_message(
+                            community_id,
+                            workflow.id,
+                            step_id,
+                            &channel_id,
+                            text,
+                            &owner_pubkey_hex,
+                            &doorbell,
+                        )
                         .await
                         .map_err(WorkflowError::from)?;
 
@@ -1267,6 +1310,8 @@ mod tests {
             emoji: "fire".to_owned(),
             message_id: "event-id-hex".to_owned(),
             webhook_fields: HashMap::new(),
+            definition_event_id: String::new(),
+            cause: None,
         }
     }
 

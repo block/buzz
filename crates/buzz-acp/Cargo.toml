@@ -19,6 +19,7 @@ path = "src/main.rs"
 # Internal
 buzz-core = { workspace = true }
 buzz-sdk = { workspace = true }
+buzz-workflow = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
 
 # Nostr

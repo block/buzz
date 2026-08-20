@@ -1947,11 +1947,16 @@ pub async fn workflow_webhook(
         };
 
     // Build trigger context from webhook body fields.
+    let Some(definition_event_id) = workflow.definition_event_id.as_deref() else {
+        return Err(not_found("workflow not found"));
+    };
     let mut trigger_ctx = buzz_workflow::executor::TriggerContext {
         channel_id: workflow
             .channel_id
             .map(|ch| ch.to_string())
             .unwrap_or_default(),
+        definition_event_id: hex::encode(definition_event_id),
+        cause: Some(buzz_workflow::executor::WorkflowCause::Webhook),
         ..Default::default()
     };
     if let Some(Value::Object(ref map)) = body_json {
