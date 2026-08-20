@@ -21,7 +21,7 @@ import {
 import type { Channel, Workflow } from "@/shared/api/types";
 import {
   deleteWorkflow,
-  getChannelsWorkflows,
+  getChannelWorkflows,
   triggerWorkflow,
   updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
@@ -111,20 +111,17 @@ export function WorkflowsView({
   const allWorkflowsQuery = useQuery({
     queryKey: allWorkflowsQueryKey(channelIdKey),
     queryFn: async () => {
-      // Single batched relay query for all member channels, then group by the
-      // channel_id each workflow carries — replaces the per-channel fanout.
-      const channelNameById = new Map(
-        memberChannels.map((channel) => [channel.id, channel.name]),
+      const channelWorkflows = await Promise.all(
+        memberChannels.map(async (channel) => ({
+          channel,
+          workflows: await getChannelWorkflows(channel.id),
+        })),
       );
-      const workflows = await getChannelsWorkflows(channelIds);
       const results: WorkflowWithChannel[] = [];
-      for (const workflow of workflows) {
-        results.push({
-          workflow,
-          channelName: workflow.channelId
-            ? (channelNameById.get(workflow.channelId) ?? "")
-            : "",
-        });
+      for (const { channel, workflows } of channelWorkflows) {
+        for (const workflow of workflows) {
+          results.push({ workflow, channelName: channel.name });
+        }
       }
       return results;
     },
