@@ -1,109 +1,190 @@
+import * as React from "react";
+
 import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import type {
-  Project,
-  ProjectActivitySummary,
-} from "@/features/projects/hooks";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProjectsContributionGraph } from "./ProjectsContributionGraph";
 
-type ProjectsOverviewRailProps = {
-  profiles?: UserProfileLookup;
-  projects: Project[];
-  summaries?: Record<string, ProjectActivitySummary>;
-};
+/** Matches Tailwind `-space-x-1.5` so stacked rows stay zoom-safe. */
+const STACK_OVERLAP_REM = 0.375;
 
-function overviewPeople(
-  projects: Project[],
-  summaries: Record<string, ProjectActivitySummary> | undefined,
-) {
-  return [
-    ...new Set(
-      projects.flatMap((project) =>
-        [
-          project.owner,
-          ...project.repositories.flatMap((repository) => [
-            repository.owner,
-            ...repository.contributors,
-          ]),
-          ...(summaries?.[project.id]?.participantPubkeys ?? []),
-        ].map(normalizePubkey),
-      ),
-    ),
-  ];
-}
-
-function overviewActivityByDay(
-  projects: Project[],
-  summaries: Record<string, ProjectActivitySummary> | undefined,
-) {
-  const merged: Record<string, number> = {};
-  for (const project of projects) {
-    const byDay = summaries?.[project.id]?.activityByDay;
-    if (!byDay) continue;
-    for (const [day, count] of Object.entries(byDay)) {
-      merged[day] = (merged[day] ?? 0) + count;
-    }
+/** How many overlapping avatars fit in a wrapping stack before the +N chip. */
+export function visibleStackedAvatarCount({
+  avatarSize,
+  containerWidth,
+  maxRows = 2,
+  overlap,
+  total,
+}: {
+  avatarSize: number;
+  containerWidth: number;
+  maxRows?: number;
+  overlap: number;
+  total: number;
+}): { columns: number; remaining: number; visible: number } {
+  if (total <= 0) return { columns: 1, remaining: 0, visible: 0 };
+  if (containerWidth <= 0 || avatarSize <= 0) {
+    return { columns: total, remaining: 0, visible: total };
   }
-  return merged;
+  const stride = Math.max(1, avatarSize - overlap);
+  const columns = Math.max(
+    1,
+    1 + Math.floor(Math.max(0, containerWidth - avatarSize) / stride),
+  );
+  const slots = columns * maxRows;
+  if (total <= slots) return { columns, remaining: 0, visible: total };
+  const visible = Math.max(1, slots - 1);
+  return { columns, remaining: total - visible, visible };
 }
 
-/** Workspace people and contribution activity for the overview side rail. */
-export function ProjectsOverviewRail({
+function OverviewPerson({
+  index,
   profiles,
-  projects,
-  summaries,
-}: ProjectsOverviewRailProps) {
-  const people = overviewPeople(projects, summaries);
-  const activityByDay = overviewActivityByDay(projects, summaries);
-
-  // Plain stacked cards — the overview panel's rail column owns placement
-  // and spacing, so the sections can never drift apart or collide.
+  pubkey,
+  stackSize,
+}: {
+  index: number;
+  profiles?: UserProfileLookup;
+  pubkey: string;
+  stackSize: number;
+}) {
+  const profile = profiles?.[normalizePubkey(pubkey)];
+  const label = resolveUserLabel({ profiles, pubkey });
   return (
-    <>
-      <div className="rounded-lg border border-border/60 p-4">
-        <OverviewRailSection title="People" titleClassName="text-base">
-          {people.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {people.slice(0, 18).map((pubkey) => {
-                const profile = profiles?.[normalizePubkey(pubkey)];
-                const label = resolveUserLabel({ profiles, pubkey });
-                return (
-                  <Tooltip key={pubkey}>
-                    <TooltipTrigger asChild>
-                      <span className="inline-flex">
-                        <UserAvatar
-                          accent={profile?.isAgent === true}
-                          avatarUrl={profile?.avatarUrl ?? null}
-                          displayName={label}
-                          size="sm"
-                        />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>{label}</TooltipContent>
-                  </Tooltip>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No people yet.</p>
-          )}
-        </OverviewRailSection>
-      </div>
-
-      <div className="min-w-0 rounded-lg border border-border/60 p-4">
-        <OverviewRailSection
-          title="Contribution Activity"
-          titleClassName="text-base"
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className="relative inline-flex rounded-full ring-2 ring-background"
+          data-overview-person=""
+          style={{ zIndex: stackSize - index }}
         >
-          <ProjectsContributionGraph activityByDay={activityByDay} compact />
-        </OverviewRailSection>
-      </div>
-    </>
+          <UserAvatar
+            accent={profile?.isAgent === true}
+            avatarUrl={profile?.avatarUrl ?? null}
+            displayName={label}
+            size="sm"
+          />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
+}
+
+export function ProjectsOverviewPeople({
+  className,
+  people,
+  profiles,
+}: {
+  className?: string;
+  people: string[];
+  profiles?: UserProfileLookup;
+}) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [layout, setLayout] = React.useState({
+    columns: Math.min(people.length, 48) || 1,
+    visible: Math.min(people.length, 48),
+  });
+
+  React.useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container || people.length === 0) return;
+
+    function measure() {
+      const node = containerRef.current;
+      if (!node) return;
+      const probe = node.querySelector(
+        "[data-overview-person]",
+      ) as HTMLElement | null;
+      const avatarSize = probe?.offsetWidth ?? 24;
+      const rootSize = Number.parseFloat(
+        getComputedStyle(document.documentElement).fontSize,
+      );
+      const next = visibleStackedAvatarCount({
+        avatarSize,
+        containerWidth: node.clientWidth,
+        overlap: STACK_OVERLAP_REM * rootSize,
+        total: people.length,
+      });
+      setLayout((current) =>
+        current.columns === next.columns && current.visible === next.visible
+          ? current
+          : { columns: next.columns, visible: next.visible },
+      );
+    }
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [people.length]);
+
+  if (people.length === 0) return null;
+
+  const visible = people.slice(0, layout.visible);
+  const remaining = people.length - visible.length;
+  const remainingLabels = people
+    .slice(visible.length)
+    .map((pubkey) => resolveUserLabel({ profiles, pubkey }));
+  const rows: string[][] = [];
+  for (let index = 0; index < visible.length; index += layout.columns) {
+    rows.push(visible.slice(index, index + layout.columns));
+  }
+
+  return (
+    <div
+      className={cn("flex flex-col gap-1", className)}
+      data-testid="projects-overview-people"
+      ref={containerRef}
+    >
+      {rows.map((row, rowIndex) => {
+        const isLastRow = rowIndex === rows.length - 1;
+        const showOverflow = isLastRow && remaining > 0;
+        const stackSize = row.length + (showOverflow ? 1 : 0);
+        return (
+          <div className="flex -space-x-1.5" key={row[0] ?? rowIndex}>
+            {row.map((pubkey, index) => (
+              <OverviewPerson
+                index={index}
+                key={pubkey}
+                profiles={profiles}
+                pubkey={pubkey}
+                stackSize={stackSize}
+              />
+            ))}
+            {showOverflow ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span
+                    className="relative z-0 inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-muted px-1 text-3xs font-semibold tabular-nums text-muted-foreground ring-2 ring-background"
+                    data-testid="projects-overview-people-overflow"
+                  >
+                    +{remaining}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {remainingLabels.length === 1
+                    ? remainingLabels[0]
+                    : `${remaining} more`}
+                </TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function ProjectsOverviewActivityGraph({
+  activityByDay,
+}: {
+  activityByDay: Record<string, number>;
+}) {
+  return <ProjectsContributionGraph activityByDay={activityByDay} compact />;
 }

@@ -3,10 +3,10 @@ import { Glasses } from "lucide-react";
 import { cn } from "@/shared/lib/cn";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
-const PROJECT_TAB_TRIGGER_CLASS =
+export const PROJECT_TAB_TRIGGER_CLASS =
   "h-7 shrink-0 rounded-full bg-muted/30 px-3 text-xs font-medium leading-5 tracking-tight text-muted-foreground shadow-none transition-colors hover:bg-muted/55 hover:text-foreground data-[state=active]:bg-muted data-[state=active]:text-foreground data-[state=active]:shadow-none";
 
-const PROJECT_TAB_SELECTED_CLASS = "bg-muted text-foreground";
+export const PROJECT_TAB_SELECTED_CLASS = "bg-muted text-foreground";
 const PROJECT_OVERVIEW_TAB_CLASS =
   "h-7 w-7 shrink-0 rounded-full bg-muted/30 p-1.5 text-muted-foreground shadow-none transition-colors hover:bg-muted/55 hover:text-foreground data-[state=active]:bg-muted data-[state=active]:text-foreground data-[state=active]:shadow-none";
 

@@ -12114,6 +12114,8 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_project_local_repositories":
         return [];
+      case "open_project_repository_folder":
+        return null;
       case "push_project_local_repository": {
         const input = payload as { branchName?: string | null };
         const status = window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__;
@@ -12143,7 +12145,8 @@ export function maybeInstallE2eTauriMocks() {
           message: "Pulled main from remote.",
         };
       case "clone_project_repository": {
-        const path = "/tmp/buzz/REPOS/mock-project";
+        // Clones land in reposDir/<repo-name>, matching the terminal mocks.
+        const path = "/tmp/buzz/REPOS/buzz";
         const commit = "0123456789abcdef0123456789abcdef01234567";
         window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ = {
           local_path: path,
