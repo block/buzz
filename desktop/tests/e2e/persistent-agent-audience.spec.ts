@@ -195,7 +195,9 @@ test("always addresses multiple agents without closing the mention picker", asyn
     .toEqual([AGENT_A, AGENT_B]);
 });
 
-test("Tab auto-addresses the highlighted agent", async ({ page }) => {
+test("Tab keeps a manually selected agent as an inline mention", async ({
+  page,
+}) => {
   await installAudienceFixtures(page);
   await openGeneral(page);
 
@@ -206,26 +208,24 @@ test("Tab auto-addresses the highlighted agent", async ({ page }) => {
 
   await input.press("Tab");
 
-  await expect(input).toHaveText("");
+  await expect(input).toHaveText("@Morgarita ");
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(
-        ({ scope }) => {
-          const stored = JSON.parse(
-            localStorage.getItem(
-              "buzz:persistent-agent-audiences:v3:e2e-default-community",
-            ) ?? "{}",
-          );
-          return stored[scope] ?? [];
-        },
-        { scope: CHANNEL_SCOPE },
-      ),
-    )
-    .toEqual([AGENT_A]);
+  ).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      ({ scope }) => {
+        const stored = JSON.parse(
+          localStorage.getItem(
+            "buzz:persistent-agent-audiences:v3:e2e-default-community",
+          ) ?? "{}",
+        );
+        return stored[scope] ?? [];
+      },
+      { scope: CHANNEL_SCOPE },
+    ),
+  ).toEqual([]);
 });
 
 test("primary+Shift+Enter opens the picker, then pins the highlighted agent", async ({
@@ -415,7 +415,7 @@ test("a failed always-mentioned send shakes the composer avatar", async ({
   await expect(avatar).toHaveAttribute("data-shake-version", "1");
 });
 
-test("selecting an agent auto-pins it for this and later messages", async ({
+test("a manually mentioned agent becomes selected after the message sends", async ({
   page,
 }) => {
   await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
@@ -424,16 +424,14 @@ test("selecting an agent auto-pins it for this and later messages", async ({
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
   await input.fill("@Mor");
-  await composer
-    .getByTestId("mention-autocomplete")
-    .getByText("Morgarita", { exact: true })
-    .click();
-  await expect(input).toHaveText("");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await input.press("Tab");
+  await expect(input).toHaveText("@Morgarita ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
 
-  await input.fill("hello");
+  await input.type("hello");
   await input.press("Enter");
 
   await expect(input).toHaveText("", { timeout: 500 });
@@ -445,9 +443,15 @@ test("selecting an agent auto-pins it for this and later messages", async ({
   await expect(input).toBeFocused();
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 2_500 });
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "hello"))
+    .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita hello"))
+    .toContain(AGENT_A);
+
+  await input.fill("follow up");
+  await input.press("Enter");
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "follow up"))
     .toContain(AGENT_A);
 });
 

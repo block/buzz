@@ -292,6 +292,16 @@ function MessageComposerImpl({
   const persistentAudience = usePersistentAgentAudience(audienceScope);
   const addressPulse = useAddressMentionPulse();
   const addressPrototype = useComposerAddressPrototype();
+  const addInlineAgentMentionsToAudience = React.useCallback(
+    (pubkeys: readonly string[]) => {
+      if (!audienceScope) return;
+      for (const pubkey of pubkeys) {
+        persistentAudience.addPubkey(pubkey);
+        addressPulse.pulseOne(pubkey);
+      }
+    },
+    [addressPulse.pulseOne, audienceScope, persistentAudience.addPubkey],
+  );
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -303,6 +313,7 @@ function MessageComposerImpl({
     mentions,
     onAddressedAgentsSendStarted: addressPulse.pulseMany,
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
+    onInlineAgentMentionsSent: addInlineAgentMentionsToAudience,
     onPrepareSendChannel,
     onSendRef,
     richText,

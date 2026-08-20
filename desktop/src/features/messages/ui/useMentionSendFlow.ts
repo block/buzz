@@ -61,6 +61,7 @@ type UseMentionSendFlowOptions = {
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onAddressedAgentsSendStarted?: (pubkeys: readonly string[]) => void;
   onAddressedAgentsSendFailed?: (pubkeys: readonly string[]) => void;
+  onInlineAgentMentionsSent?: (pubkeys: readonly string[]) => void;
   onSendRef: React.MutableRefObject<
     (
       content: string,
@@ -97,6 +98,7 @@ export function useMentionSendFlow({
   onPrepareSendChannel,
   onAddressedAgentsSendStarted,
   onAddressedAgentsSendFailed,
+  onInlineAgentMentionsSent,
   onSendRef,
   richText,
   setContent,
@@ -588,6 +590,14 @@ export function useMentionSendFlow({
             draft.preparedLinkPreviews != null,
           );
           if (signal?.aborted || isSendCancelled()) return;
+          const sentMentionPubkeys = new Set(
+            revalidatedMentionPubkeys.map(normalizePubkey),
+          );
+          onInlineAgentMentionsSent?.(
+            draft.inlineAgentMentionPubkeys.filter((pubkey) =>
+              sentMentionPubkeys.has(normalizePubkey(pubkey)),
+            ),
+          );
           if (draft.sentDraftKey) {
             drafts.markDraftSent(
               draft.sentDraftKey,
@@ -654,6 +664,7 @@ export function useMentionSendFlow({
       mentions.revalidateMentionPubkeys,
       onAddressedAgentsSendStarted,
       onAddressedAgentsSendFailed,
+      onInlineAgentMentionsSent,
       onPrepareSendChannel,
       onSendRef,
       richText.setContent,
@@ -780,8 +791,14 @@ export function useMentionSendFlow({
           } catch {}
         }
 
+        const savedMentionRefs = mentions.getDraftMentionRefs(trimmed);
         const pendingDraft: PendingNonMemberMentionSend = {
           addressedAgentPubkeys: uniqueNormalizedPubkeys(addressedAgentPubkeys),
+          inlineAgentMentionPubkeys: uniqueNormalizedPubkeys(
+            savedMentionRefs
+              .filter((ref) => ref.isAgent)
+              .map((ref) => ref.pubkey),
+          ),
           capturedChannelId: effectiveChannelId,
           capturedThreadContext,
           trimmed,
@@ -800,7 +817,7 @@ export function useMentionSendFlow({
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
           sentDraftKey,
           recoveryDraftKey,
-          savedMentionRefs: mentions.getDraftMentionRefs(trimmed),
+          savedMentionRefs,
         };
 
         if (promptNonMemberPubkeys.length > 0) {

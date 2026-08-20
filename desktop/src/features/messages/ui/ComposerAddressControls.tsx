@@ -89,6 +89,34 @@ function RemainingAgentCount({ count }: { count: number }) {
 
 const VISIBLE_AGENT_LIMIT = 3;
 
+function useNewlyAddedAgentPubkeys(
+  agents: readonly ComposerAddressAgent[],
+): ReadonlySet<string> {
+  const previousPubkeysRef = React.useRef<ReadonlySet<string> | null>(null);
+  const currentPubkeys = new Set(agents.map((agent) => agent.pubkey));
+  const newlyAddedPubkeys = new Set<string>();
+
+  if (previousPubkeysRef.current) {
+    for (const pubkey of currentPubkeys) {
+      if (!previousPubkeysRef.current.has(pubkey)) {
+        newlyAddedPubkeys.add(pubkey);
+      }
+    }
+  }
+
+  React.useEffect(() => {
+    previousPubkeysRef.current = new Set(agents.map((agent) => agent.pubkey));
+  }, [agents]);
+
+  return newlyAddedPubkeys;
+}
+
+const addressEntryTransition = {
+  type: "spring",
+  stiffness: 500,
+  damping: 30,
+} as const;
+
 type AddressAgentsProps = {
   agents: readonly ComposerAddressAgent[];
   pulseVersionByPubkey?: Readonly<Record<string, number>>;
@@ -112,6 +140,7 @@ export function ComposerMentionButton({
   const visibleAgents = showAgents ? agents.slice(0, VISIBLE_AGENT_LIMIT) : [];
   const hiddenCount = showAgents ? agents.length - visibleAgents.length : 0;
   const hasAgents = visibleAgents.length > 0;
+  const newlyAddedAgentPubkeys = useNewlyAddedAgentPubkeys(visibleAgents);
 
   return (
     <Tooltip disableHoverableContent>
@@ -119,8 +148,10 @@ export function ComposerMentionButton({
         <button
           aria-label={hasAgents ? "Manage mentioned agents" : "Mention someone"}
           className={cn(
-            "flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
-            hasAgents && "bg-accent/70 px-1.5",
+            "flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+            hasAgents
+              ? "bg-primary/15 pl-2 pr-1 text-primary hover:bg-primary/25 hover:text-primary/90"
+              : "text-foreground hover:bg-accent hover:text-accent-foreground",
           )}
           data-testid="message-insert-mention"
           disabled={disabled}
@@ -134,15 +165,19 @@ export function ComposerMentionButton({
               className="flex items-center gap-1"
               data-testid="composer-address-locks"
             >
-              <AnimatePresence initial={false} mode="popLayout">
+              <AnimatePresence mode="popLayout">
                 {visibleAgents.map((agent) => (
                   <motion.span
-                    animate={{ opacity: 1, scale: 1, x: 0 }}
-                    exit={{ opacity: 0, scale: 0.8, x: -4 }}
-                    initial={{ opacity: 0, scale: 0.8, x: -4 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    initial={
+                      newlyAddedAgentPubkeys.has(agent.pubkey)
+                        ? { opacity: 0, scale: 0.8 }
+                        : false
+                    }
                     key={agent.pubkey}
                     layout
-                    transition={{ type: "spring", stiffness: 550, damping: 34 }}
+                    transition={addressEntryTransition}
                   >
                     <AddressedAgentAvatar
                       agent={agent}
@@ -181,6 +216,7 @@ export function ComposerSendButton({
   const visibleAgents = showAgents ? agents.slice(0, VISIBLE_AGENT_LIMIT) : [];
   const hiddenCount = showAgents ? agents.length - visibleAgents.length : 0;
   const hasAgents = visibleAgents.length > 0;
+  const newlyAddedAgentPubkeys = useNewlyAddedAgentPubkeys(visibleAgents);
 
   if (!hasAgents) {
     return (
@@ -210,21 +246,25 @@ export function ComposerSendButton({
         className="flex items-center gap-1"
         data-testid="composer-address-locks"
       >
-        <AnimatePresence initial={false} mode="popLayout">
+        <AnimatePresence mode="popLayout">
           {visibleAgents.map((agent) => (
             <Tooltip disableHoverableContent key={agent.pubkey}>
               <TooltipTrigger asChild>
                 <motion.button
                   aria-label={`Stop always mentioning ${agent.displayName}`}
-                  animate={{ opacity: 1, scale: 1, x: 0 }}
+                  animate={{ opacity: 1, scale: 1 }}
                   className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-primary-foreground"
                   data-testid={`composer-address-lock-remove-${agent.pubkey}`}
                   disabled={isSending}
-                  exit={{ opacity: 0, scale: 0.8, x: -4 }}
-                  initial={{ opacity: 0, scale: 0.8, x: -4 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  initial={
+                    newlyAddedAgentPubkeys.has(agent.pubkey)
+                      ? { opacity: 0, scale: 0.8 }
+                      : false
+                  }
                   layout
                   onClick={() => onRemove(agent.pubkey)}
-                  transition={{ type: "spring", stiffness: 550, damping: 34 }}
+                  transition={addressEntryTransition}
                   type="button"
                 >
                   <AddressedAgentAvatar

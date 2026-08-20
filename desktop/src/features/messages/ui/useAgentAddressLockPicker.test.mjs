@@ -143,7 +143,7 @@ test("toggling an addressed agent keeps autocomplete open and removes the lock",
   );
 });
 
-test("selecting an already addressed agent removes the query and pulses its badge", async () => {
+test("selecting an already addressed agent from the explicit picker pulses its badge", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
@@ -165,7 +165,7 @@ test("selecting an already addressed agent removes the query and pulses its badg
     addPubkey: (pubkey) => addedPubkeys.push(pubkey),
   };
   const richText = {
-    getPlainTextAndCursor: () => ({ text: "ping @", cursor: 6 }),
+    getPlainTextAndCursor: () => ({ text: "ping ", cursor: 5 }),
   };
   const { result } = renderHook(() =>
     useAgentAddressLockPicker({
@@ -186,14 +186,12 @@ test("selecting an already addressed agent removes the query and pulses its badg
     });
   });
 
-  assert.deepEqual(appliedEdits, [
-    { replaceFromOffset: 5, replaceToOffset: 6, insertText: "" },
-  ]);
+  assert.deepEqual(appliedEdits, []);
   assert.deepEqual(addedPubkeys, []);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
 });
 
-test("selecting an agent auto-addresses it instead of leaving an inline mention", async () => {
+test("selecting an agent from a typed query leaves the inline mention for send", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
@@ -205,9 +203,11 @@ test("selecting an agent auto-addresses it instead of leaving an inline mention"
     cancelMentionAutocomplete: () => {},
     getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
-    insertMention: () => {
-      throw new Error("agent selections must become persistent addressing");
-    },
+    insertMention: () => ({
+      replaceFromOffset: 5,
+      replaceToOffset: 6,
+      insertText: "@Agent Ada ",
+    }),
     mentionStartIndex: 5,
   };
   const audience = {
@@ -237,8 +237,61 @@ test("selecting an agent auto-addresses it instead of leaving an inline mention"
   });
 
   assert.deepEqual(appliedEdits, [
-    { replaceFromOffset: 5, replaceToOffset: 6, insertText: "" },
+    {
+      replaceFromOffset: 5,
+      replaceToOffset: 6,
+      insertText: "@Agent Ada ",
+    },
   ]);
+  assert.deepEqual(addedPubkeys, []);
+  assert.deepEqual(pulsedPubkeys, []);
+  assert.equal(result.current.announcement, "");
+});
+
+test("selecting an agent from the explicit picker auto-addresses it", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const appliedEdits = [];
+  const addedPubkeys = [];
+  const pulsedPubkeys = [];
+  const mentions = {
+    cancelMentionAutocomplete: () => {},
+    getDraftMentionRefs: () => [],
+    getMentionDisplayName: () => "Agent Ada",
+    insertMention: () => {
+      throw new Error("explicit picker selections must become addressing");
+    },
+    mentionStartIndex: 5,
+  };
+  const audience = {
+    pubkeys: [],
+    addPubkey: (pubkey) => addedPubkeys.push(pubkey),
+  };
+  const richText = {
+    getPlainTextAndCursor: () => ({ text: "ping ", cursor: 5 }),
+  };
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => appliedEdits.push(edit),
+      audience,
+      audienceScope: "channel-scope",
+      mentions,
+      onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
+      richText,
+    }),
+  );
+
+  act(() => {
+    result.current.selectMentionSuggestion({
+      pubkey: "agent-pubkey",
+      displayName: "Agent Ada",
+      isAgent: true,
+    });
+  });
+
+  assert.deepEqual(appliedEdits, []);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
   assert.equal(result.current.announcement, "Always addressing Agent Ada");

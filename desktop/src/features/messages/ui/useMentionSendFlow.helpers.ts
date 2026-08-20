@@ -13,6 +13,7 @@ export { MENTION_REFERENCE_TAG };
 
 export type PendingNonMemberMentionSend = {
   addressedAgentPubkeys: string[];
+  inlineAgentMentionPubkeys: string[];
   capturedChannelId: string | null;
   capturedThreadContext: {
     parentEventId: string | null;

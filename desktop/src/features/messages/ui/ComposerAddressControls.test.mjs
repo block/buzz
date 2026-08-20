@@ -69,12 +69,39 @@ test("mention-button prototype expands the mention control with addressed agents
   assert.ok(view.getByTestId("composer-address-locks"));
   const avatar = view.getByTestId("composer-address-lock-agent-pubkey");
   assert.ok(avatar);
+  assert.match(
+    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    /(?:^|\s)pl-2(?:\s|$)/,
+  );
+  assert.match(
+    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    /(?:^|\s)pr-1(?:\s|$)/,
+  );
+  assert.match(
+    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    /(?:^|\s)bg-primary\/15(?:\s|$)/,
+  );
+  assert.match(
+    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    /(?:^|\s)text-primary(?:\s|$)/,
+  );
+  assert.doesNotMatch(
+    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    /(?:^|\s)bg-accent\/70(?:\s|$)/,
+  );
   assert.doesNotMatch(
     avatar.querySelector("span")?.className ?? "",
     /(?:^|\s)ring(?:-|\s)/,
   );
   for (const addedAgent of [secondAgent, thirdAgent]) {
-    assert.ok(view.getByTestId(`composer-address-lock-${addedAgent.pubkey}`));
+    const addedAvatar = view.getByTestId(
+      `composer-address-lock-${addedAgent.pubkey}`,
+    );
+    assert.equal(addedAvatar.parentElement?.style.opacity, "0");
+    assert.match(
+      addedAvatar.parentElement?.style.transform ?? "",
+      /scale\(0.8\)/,
+    );
   }
   assert.equal(
     view.queryByRole("button", { name: "Stop always mentioning Agent Ada" }),
@@ -109,7 +136,14 @@ test("send-button prototype exposes each addressed avatar as a remove control", 
 
   assert.ok(view.getByTestId("composer-address-send"));
   for (const addedAgent of [secondAgent, thirdAgent]) {
-    assert.ok(view.getByTestId(`composer-address-lock-${addedAgent.pubkey}`));
+    const addedAvatar = view.getByTestId(
+      `composer-address-lock-${addedAgent.pubkey}`,
+    );
+    assert.equal(addedAvatar.parentElement?.style.opacity, "0");
+    assert.match(
+      addedAvatar.parentElement?.style.transform ?? "",
+      /scale\(0.8\)/,
+    );
   }
   const remove = view.getByRole("button", {
     name: "Stop always mentioning Agent Ada",
