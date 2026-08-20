@@ -1206,6 +1206,12 @@ pub enum ReposCmd {
         #[arg(long)]
         channel: String,
     },
+    /// Delete one of your repository announcements (NIP-09 a-tag)
+    Rm {
+        /// Repository identifier (d-tag)
+        #[arg(long)]
+        id: String,
+    },
     /// Manage branch and tag protection rules on one of your repositories.
     #[command(subcommand)]
     Protect(ReposProtectCmd),
