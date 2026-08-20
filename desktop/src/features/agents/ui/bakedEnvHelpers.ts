@@ -58,6 +58,28 @@ export function getBakedModelInheritLabel(bakedModelId: string): string {
   return `Inherit build default (${bakedModelId})`;
 }
 
+/** Resolve baked provider/model values only from this runtime's catalog keys. */
+export function getRuntimeBakedDefaults(
+  bakedEnv: readonly BakedEnvEntry[],
+  runtime:
+    | { id: string; modelEnvVar: string | null; providerEnvVar: string | null }
+    | undefined,
+  globalEnv: Readonly<Record<string, string>>,
+): { model: string | null; provider: string | null } {
+  const provider = runtime?.providerEnvVar
+    ? resolveInheritedDefault(null, bakedEnv, runtime.providerEnvVar).value
+    : "";
+  const directModel = runtime?.modelEnvVar
+    ? resolveInheritedDefault(null, bakedEnv, runtime.modelEnvVar).value
+    : "";
+  const model =
+    directModel ||
+    (runtime?.id === "buzz-agent"
+      ? getGlobalModelFallback(bakedEnv, provider, globalEnv)
+      : null);
+  return { model: model || null, provider: provider || null };
+}
+
 function providerModelEnvKey(provider: string): string | null {
   switch (provider.trim().toLowerCase()) {
     case "databricks":
