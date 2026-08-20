@@ -5,9 +5,11 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex,
     },
 };
+
+use super::{PlaybackCoordinator, SynthesisFlightGuard};
 
 use crate::huddle::pocket::{load_voice_style, VoiceStyle, DEFAULT_VOICE, VOICE_FILE_EXT};
 
@@ -32,51 +34,29 @@ pub(super) type CancelSignals<'a> = (&'a AtomicBool, &'a AtomicBool);
 
 #[derive(Clone)]
 pub(super) struct PlaybackProbe {
-    player: Arc<Mutex<Option<Arc<rodio::Player>>>>,
-    pub(super) player_ops: Arc<Mutex<()>>,
-    synthesis_in_flight: Arc<AtomicBool>,
-}
-
-pub(super) struct SynthesisFlightGuard {
-    playback_probe: PlaybackProbe,
-}
-
-impl Drop for SynthesisFlightGuard {
-    fn drop(&mut self) {
-        self.playback_probe.set_synthesis_in_flight(false);
-    }
+    playback: Arc<Mutex<Option<Arc<PlaybackCoordinator>>>>,
 }
 
 impl PlaybackProbe {
     pub(super) fn new() -> Self {
         Self {
-            player: Arc::new(Mutex::new(None)),
-            player_ops: Arc::new(Mutex::new(())),
-            synthesis_in_flight: Arc::new(AtomicBool::new(false)),
+            playback: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub(super) fn install(&self, player: Arc<rodio::Player>) {
-        self.player
+    pub(super) fn install(&self, playback: Arc<PlaybackCoordinator>) {
+        self.playback
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .replace(player);
+            .replace(playback);
     }
 
-    pub(super) fn set_synthesis_in_flight(&self, in_flight: bool) {
-        let _ops = lock_player_ops(&self.player_ops);
-        self.synthesis_in_flight.store(in_flight, Ordering::Release);
+    pub(super) fn begin_synthesis(&self) -> Option<SynthesisFlightGuard> {
+        self.playback().map(|playback| playback.begin_synthesis())
     }
 
-    pub(super) fn begin_synthesis(&self) -> SynthesisFlightGuard {
-        self.set_synthesis_in_flight(true);
-        SynthesisFlightGuard {
-            playback_probe: self.clone(),
-        }
-    }
-
-    fn player(&self) -> Option<Arc<rodio::Player>> {
-        self.player
+    pub(super) fn playback(&self) -> Option<Arc<PlaybackCoordinator>> {
+        self.playback
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
@@ -199,19 +179,18 @@ pub(super) fn request_active_speaker_cancel(
     playback_probe: &PlaybackProbe,
     expected_speaker_pubkey: &str,
 ) -> bool {
-    let Some(player) = playback_probe.player() else {
+    let Some(playback) = playback_probe.playback() else {
         return false;
     };
-    let _ops = lock_player_ops(&playback_probe.player_ops);
-    let playback_live =
-        !player.empty() || playback_probe.synthesis_in_flight.load(Ordering::Acquire);
-    request_active_speaker_cancel_while_locked(
-        generations,
-        active_speaker,
-        cancellation,
-        playback_live,
-        expected_speaker_pubkey,
-    )
+    playback.with_playback_live(|playback_live| {
+        request_active_speaker_cancel_while_locked(
+            generations,
+            active_speaker,
+            cancellation,
+            playback_live,
+            expected_speaker_pubkey,
+        )
+    })
 }
 
 fn request_active_speaker_cancel_while_locked(
@@ -475,10 +454,8 @@ fn log_cancelled_route(route_id: u64, reason: &str) {
 /// Check for cancel or shutdown. Returns `true` if the caller should break/continue.
 /// On cancel: drains the text queue and clears the cancel flag.
 ///
-/// `player` pairs the Player with the `player_ops` mutex shared with the
-/// barge-in monitor thread; the cancel/shutdown clear runs under that lock so
-/// it is serialized with the monitor's stale-branch re-check (see the monitor
-/// block in `tts_worker`).
+/// `playback` is the coordinator shared with the barge-in monitor; replacing
+/// playback is serialized with append and with the monitor's stale observation.
 pub(super) fn handle_cancel_or_shutdown(
     cancel_signals: CancelSignals<'_>,
     shutdown: &AtomicBool,
@@ -486,7 +463,7 @@ pub(super) fn handle_cancel_or_shutdown(
     text_state: CancelTextState<'_>,
     voice_change_ack: &VoiceChangeAck,
     active_route_id: Option<u64>,
-    player: Option<(&rodio::Player, &Mutex<()>)>,
+    playback: Option<&PlaybackCoordinator>,
 ) -> bool {
     let (cancel, voice_cancel) = cancel_signals;
     let (text_rx, deferred_text, current_text) = text_state;
@@ -495,11 +472,7 @@ pub(super) fn handle_cancel_or_shutdown(
             "buzz-desktop: tts stage=cancellation reason=shutdown route_id={}",
             active_route_id.unwrap_or(0)
         );
-        if let Some((p, ops)) = player {
-            let _ops = lock_player_ops(ops);
-            p.clear();
-        }
-        tts_active.store(false, Ordering::Release);
+        release_playback(playback, tts_active);
         return true;
     }
     if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
@@ -525,33 +498,27 @@ pub(super) fn handle_cancel_or_shutdown(
             })
             .flatten();
         retain_cancelled_text(deferred_text, current_text, text_rx, preserve_generation);
-        if let Some((p, ops)) = player {
-            let _ops = lock_player_ops(ops);
-            // `Player::clear()` removes queued sources AND pauses the player
-            // (rodio 0.22 `clear()` ends with `self.pause()`). With one
-            // persistent Player for the worker's lifetime, the un-pause is
-            // mandatory: without `play()`, every append after a barge-in
-            // would queue silently forever.
-            p.clear();
-            p.play();
-            // Consume the flag under the lock: once released with
-            // `cancel == false`, the monitor's stale branch no-ops instead
-            // of clearing the fresh post-cancel utterance.
-        }
-        tts_active.store(false, Ordering::Release);
+        // Consume the flag at the coordinator serialization point: once
+        // released with `cancel == false`, a stale monitor observation cannot
+        // replace fresh post-cancel playback.
+        release_playback(playback, tts_active);
         return true;
     }
     false
 }
 
-/// Acquire the `player_ops` lock, recovering from poison.
-///
-/// The data under the mutex is `()` — it only serializes Player mutations —
-/// so a panicked holder leaves nothing inconsistent to observe and recovery
-/// is always safe. Without this, a worker panic would wedge the monitor (or
-/// vice versa) on `unwrap()`.
-pub(super) fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
-    ops.lock().unwrap_or_else(PoisonError::into_inner)
+/// Silence playback and release the mic gate as one transition. When a player
+/// is live the release is published inside the replacement, so an append that
+/// wins the coordinator handoff cannot have its own activity publication
+/// overwritten by this `false`. With nothing live there is no transition to
+/// join and the gate is released directly.
+fn release_playback(playback: Option<&PlaybackCoordinator>, tts_active: &AtomicBool) {
+    let released = playback.is_some_and(|playback| {
+        playback.cancel_if_live(|| true, || tts_active.store(false, Ordering::Release))
+    });
+    if !released {
+        tts_active.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -562,16 +529,16 @@ mod speaker_generation_tests {
         let channels = std::num::NonZero::new(1).expect("non-zero channels");
         let sample_rate = std::num::NonZero::new(24_000).expect("non-zero sample rate");
         let (mixer, _mixer_source) = rodio::mixer::mixer(channels, sample_rate);
-        let player = Arc::new(rodio::Player::connect_new(&mixer));
+        let playback = Arc::new(PlaybackCoordinator::new(&mixer));
         if playback_live {
-            player.append(rodio::buffer::SamplesBuffer::new(
-                channels,
-                sample_rate,
-                vec![0.0; 24_000],
-            ));
+            playback.append_if(
+                rodio::buffer::SamplesBuffer::new(channels, sample_rate, vec![0.0; 24_000]),
+                |_| true,
+                || {},
+            );
         }
         let probe = PlaybackProbe::new();
-        probe.install(player);
+        probe.install(playback);
         probe
     }
 
@@ -583,6 +550,43 @@ mod speaker_generation_tests {
             speaker_generation,
             voice_reference: Some("pocket:mary".to_string()),
             text: "Hello".to_string(),
+        }
+    }
+
+    /// A cancellation releases the mic gate whether or not there was audio to
+    /// silence. With a live player the release rides inside the replacement;
+    /// with nothing live there is no transition to join, and skipping the
+    /// release would strand the gate open with the worker already past the
+    /// utterance.
+    #[test]
+    fn cancellation_releases_the_mic_gate_with_or_without_live_playback() {
+        for playback_live in [false, true] {
+            let probe = playback_probe(playback_live);
+            let playback = probe.playback().expect("installed coordinator");
+            let cancel = AtomicBool::new(true);
+            let voice_cancel = AtomicBool::new(false);
+            let shutdown = AtomicBool::new(false);
+            let tts_active = AtomicBool::new(true);
+            let voice_change_ack = Arc::new(Mutex::new(None));
+            let (_text_tx, text_rx) = mpsc::channel();
+            let mut deferred_text = VecDeque::new();
+            let mut current_text = None;
+
+            assert!(handle_cancel_or_shutdown(
+                (&cancel, &voice_cancel),
+                &shutdown,
+                &tts_active,
+                (&text_rx, &mut deferred_text, &mut current_text),
+                &voice_change_ack,
+                None,
+                Some(&playback),
+            ));
+
+            assert!(
+                !tts_active.load(Ordering::Acquire),
+                "cancellation must release the mic gate (playback_live={playback_live})"
+            );
+            assert!(playback.empty(), "cancellation silences any queued audio");
         }
     }
 

@@ -57,7 +57,7 @@ test("top-level project lists align dates and overflow actions", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await expect(
-    page.getByRole("heading", { level: 1, name: "Projects" }),
+    page.getByRole("heading", { level: 2, name: "Projects", exact: true }),
   ).toBeVisible();
 
   async function trailingPositions(
@@ -103,18 +103,9 @@ test("top-level project lists align dates and overflow actions", async ({
   await expect(page.getByRole("menuitem", { name: "Local" })).toBeVisible();
   await page.keyboard.press("Escape");
   const projectRow = page.locator('[data-testid^="project-row-"]').first();
-  const projectPositions = await trailingPositions(projectRow, {
-    summaryTestId: "projects-row-summary",
-  });
-  // Project rows show the activity bar alone — counts stay in its tooltips.
-  await expect(
-    projectRow
-      .getByTestId("projects-row-summary")
-      .getByTestId("project-activity-bar"),
-  ).toBeVisible();
-  await expect(
-    projectRow.getByTestId("projects-row-summary"),
-  ).not.toContainText("commits");
+  const projectPositions = await trailingPositions(projectRow);
+  await expect(projectRow.getByTestId("projects-row-context")).toBeVisible();
+  await expect(projectRow.getByTestId("projects-row-people")).toBeVisible();
 
   await page.getByTestId("projects-section-repositories").click();
   await page.getByRole("button", { name: "Filter repositories" }).click();
@@ -126,17 +117,14 @@ test("top-level project lists align dates and overflow actions", async ({
   await expect(page.getByTestId("repository-row-relay-tools")).toBeVisible();
   const repositoryRow = page.getByTestId("repository-row-buzz");
   await expect(
-    repositoryRow.getByTestId("repositories-row-summary"),
-  ).toContainText("commits");
+    repositoryRow.getByTestId("repositories-row-project"),
+  ).toBeVisible();
   await expect(
-    repositoryRow.getByTestId("repositories-row-branch"),
-  ).toContainText("main");
-  // Subtitle is the repository location (owner/repo for Buzz-hosted repos).
-  await expect(repositoryRow.locator("p")).toHaveText(/\/buzz$/);
+    repositoryRow.getByTestId("repositories-row-description"),
+  ).toContainText(/Relay, desktop, and mobile|community platform/);
   const repositoryPositions = await trailingPositions(repositoryRow, {
     actionName: /More options for/,
     dateTestId: "repositories-row-date",
-    summaryTestId: "repositories-row-summary",
   });
   // No summaryX comparison: repository rows carry text stats next to the bar
   // while project rows show the bar alone, so the columns differ in width by
@@ -219,11 +207,11 @@ test("top-level project lists align dates and overflow actions", async ({
     .locator('[data-testid^="project-row-"]')
     .first();
   await expect(
-    responsiveRepositoryRow.getByTestId("projects-row-summary"),
-  ).toBeHidden();
+    responsiveRepositoryRow.getByTestId("projects-row-context"),
+  ).toBeVisible();
   await expect(
     responsiveRepositoryRow.getByTestId("projects-row-people"),
-  ).toBeHidden();
+  ).toBeVisible();
   await expect(
     responsiveRepositoryRow.getByTestId("projects-row-date"),
   ).toBeVisible();
@@ -470,7 +458,13 @@ test("multi-repository projects switch the active repository", async ({
     },
   );
   await projectRow.click();
-  await expect(page).toHaveURL(/\/projects\//);
+  await expect(page).not.toHaveURL(/\/projects\//);
+  await expect(projectRow).toHaveAttribute("aria-expanded", "false");
+  await expect(relayToolsRepository).toBeHidden();
+
+  await projectRow.click();
+  await expect(page).not.toHaveURL(/\/projects\//);
+  await expect(projectRow).toHaveAttribute("aria-expanded", "true");
   await expect(relayToolsRepository).toBeVisible();
   const projectSidebarMetrics = await sidebarScrollContent.evaluate(
     (element) => {
@@ -496,7 +490,7 @@ test("multi-repository projects switch the active repository", async ({
     return element.scrollTop;
   });
   await projectRow.click();
-  await expect(page).toHaveURL(/\/projects\//);
+  await expect(page).not.toHaveURL(/\/projects\//);
   await expect(projectRow).toHaveAttribute("aria-expanded", "true");
   await expect
     .poll(() =>
@@ -611,7 +605,7 @@ test("commit detail opens from the commits feed with a diff", async ({
   ).toBeVisible();
   await expect(
     firstCommitRow.getByTestId("project-commit-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   await waitForAnimations(page);
   await page.screenshot({
     fullPage: false,
@@ -624,12 +618,15 @@ test("commit detail opens from the commits feed with a diff", async ({
     .getByRole("button", { name: /Add Trello board workflow details/ })
     .click();
 
-  // Detail header: resolved author, subject, and hash.
-  await expect(page.getByText("Brain", { exact: true })).toBeVisible();
+  // Detail header: static descriptor, subject, and hash.
   await expect(
     page.getByRole("heading", { name: "Add Trello board workflow details" }),
   ).toBeVisible();
   const commitDetail = page.getByTestId("project-commit-detail");
+  const commitHeader = commitDetail.locator("header").first();
+  await expect(commitHeader).toContainText("Committed");
+  await expect(commitHeader).not.toContainText("Brain");
+  await expect(commitHeader.locator("img")).toHaveCount(0);
   await expect(commitDetail).toHaveCSS("max-width", "768px");
   await expect(
     commitDetail.getByRole("heading", {
@@ -686,7 +683,7 @@ test("commit detail opens from the commits feed with a diff", async ({
     .first()
     .getByRole("button", { name: /Add Trello board workflow details/ })
     .click();
-  await expect(page.getByText("Brain", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("project-commit-detail")).toBeVisible();
   await page
     .getByRole("navigation", { name: "Project breadcrumb" })
     .getByTestId("project-breadcrumb-repository")
@@ -799,7 +796,7 @@ test("pull request and issue feeds use compact work item rows", async ({
   ).toHaveText("0");
   await expect(
     prRows.first().getByTestId("project-pull-request-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   await expect(
     page.getByTestId("project-work-item-group-header").first(),
   ).toBeVisible();
@@ -855,7 +852,7 @@ test("pull request and issue feeds use compact work item rows", async ({
   ).toHaveText("0");
   await expect(
     issueRows.first().getByTestId("project-issue-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   const taskCategoryBoxes = await taskCategoryCells.evaluateAll((cells) =>
     cells.slice(0, 5).map((cell) => {
       const box = cell.getBoundingClientRect();

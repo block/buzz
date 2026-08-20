@@ -372,13 +372,22 @@ void main() {
       expect(offset(), 0);
 
       await tester.tap(find.byTooltip('Animals & Nature'));
-      await tester.pumpAndSettle();
+      await tester.pump();
 
       // Same scroll view, moved — not a swapped-in second grid.
       expect(grid, findsOneWidget);
       expect(offset(), greaterThan(0));
       // People has 200 emoji at 8 per row: 25 rows of 40px plus a 28px header.
       expect(offset(), closeTo(28 + 25 * 40, 0.5));
+      expect(
+        tester
+            .widget<CustomScrollView>(grid)
+            .controller!
+            .position
+            .isScrollingNotifier
+            .value,
+        isFalse,
+      );
     });
 
     testWidgets(

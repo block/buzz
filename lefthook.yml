@@ -81,9 +81,8 @@ pre-push:
       # serially so parallel pre-push hooks do not contend for Cargo's lock.
       glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
       run: just desktop-tauri-clippy && just desktop-tauri-test
-    mobile-check:
+    mobile-checks:
+      # Run analysis and tests serially so parallel pre-push hooks do not
+      # contend for shared Flutter state (.dart_tool, shader bundle).
       glob: ["mobile/**"]
-      run: just mobile-check
-    mobile-test:
-      glob: ["mobile/**"]
-      run: just mobile-test
+      run: just mobile-check && just mobile-test

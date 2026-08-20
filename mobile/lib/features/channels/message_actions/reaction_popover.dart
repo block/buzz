@@ -20,25 +20,69 @@ void _showMessageReactionPopover({
   required Rect anchorRect,
   required EdgeInsets spotlightPadding,
 }) {
-  unawaited(HapticFeedback.mediumImpact());
-  final reduceMotion = MediaQuery.disableAnimationsOf(context);
-  showGeneralDialog<void>(
-    context: context,
-    barrierDismissible: true,
-    barrierLabel: 'Dismiss reaction picker',
-    barrierColor: Colors.transparent,
-    transitionDuration: reduceMotion ? Duration.zero : _reactionPopoverDuration,
-    transitionBuilder: (context, animation, secondaryAnimation, child) => child,
-    pageBuilder: (dialogContext, animation, secondaryAnimation) =>
-        _MessageReactionPopover(
-          anchorRect: anchorRect,
-          spotlightPadding: spotlightPadding,
-          animation: animation,
-          message: message,
-          pageContext: context,
-          pageRef: ref,
-        ),
+  unawaited(
+    _presentMessageReactionPopover(
+      context: context,
+      ref: ref,
+      message: message,
+      anchorRect: anchorRect,
+      spotlightPadding: spotlightPadding,
+    ),
   );
+}
+
+Future<void> _presentMessageReactionPopover({
+  required BuildContext context,
+  required WidgetRef ref,
+  required TimelineMessage message,
+  required Rect anchorRect,
+  required EdgeInsets spotlightPadding,
+}) async {
+  if (_messageActionPresentationInFlight) return;
+  _messageActionPresentationInFlight = true;
+
+  try {
+    unawaited(HapticFeedback.mediumImpact());
+    final reduceMotion = MediaQuery.disableAnimationsOf(context);
+    final dialogRoute = RawDialogRoute<void>(
+      barrierDismissible: true,
+      barrierLabel: 'Dismiss reaction picker',
+      barrierColor: Colors.transparent,
+      transitionDuration: reduceMotion
+          ? Duration.zero
+          : _reactionPopoverDuration,
+      transitionBuilder: (context, animation, secondaryAnimation, child) =>
+          child,
+      pageBuilder: (dialogContext, animation, secondaryAnimation) =>
+          _MessageReactionPopover(
+            anchorRect: anchorRect,
+            spotlightPadding: spotlightPadding,
+            animation: animation,
+            message: message,
+            pageContext: context,
+            pageRef: ref,
+          ),
+    );
+    var routePushed = false;
+    messageActionBackdropActive.value = true;
+    try {
+      // Remove UIKit glass views from Flutter's platform-view overlay before the
+      // backdrop filter paints, otherwise they leave sharp rectangular holes.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!context.mounted) return;
+      final popResult = Navigator.of(
+        context,
+        rootNavigator: true,
+      ).push(dialogRoute);
+      routePushed = true;
+      await popResult;
+    } finally {
+      if (routePushed) await dialogRoute.completed;
+      messageActionBackdropActive.value = false;
+    }
+  } finally {
+    _messageActionPresentationInFlight = false;
+  }
 }
 
 class _MessageReactionPopover extends HookWidget {
@@ -103,31 +147,29 @@ class _MessageReactionPopover extends HookWidget {
         return Stack(
           children: [
             Positioned.fill(
-              child: AnimatedBuilder(
-                animation: animation,
-                builder: (context, child) {
-                  final blurProgress = const Interval(
-                    0,
-                    0.30,
-                    curve: Curves.easeOutCubic,
-                  ).transform(animation.value);
-                  final sigma = 20 * blurProgress;
-                  return ClipPath(
-                    key: const ValueKey('reaction-popover-background'),
-                    clipper: _OutsideAnchorClipper(
-                      anchorRect,
-                      spotlightPadding,
-                    ),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: sigma, sigmaY: sigma),
-                      child: ColoredBox(
+              child: ClipPath(
+                key: const ValueKey('reaction-popover-background'),
+                clipper: _OutsideAnchorClipper(anchorRect, spotlightPadding),
+                child: BackdropFilter(
+                  key: const ValueKey('reaction-popover-backdrop-filter'),
+                  filter: _messageActionBackdropFilter,
+                  child: AnimatedBuilder(
+                    animation: animation,
+                    builder: (context, child) {
+                      final opacity = const Interval(
+                        0,
+                        0.30,
+                        curve: Curves.easeOutCubic,
+                      ).transform(animation.value);
+                      return ColoredBox(
+                        key: const ValueKey('reaction-popover-background-tint'),
                         color: context.colors.inverseSurface.withValues(
-                          alpha: 0.10 * blurProgress,
+                          alpha: _messageActionBackdropTintOpacity * opacity,
                         ),
-                      ),
-                    ),
-                  );
-                },
+                      );
+                    },
+                  ),
+                ),
               ),
             ),
             Positioned.fill(
