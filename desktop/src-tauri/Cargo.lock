@@ -1040,6 +1040,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "buzz-runtime",
  "dirs",
  "getrandom 0.4.3",
  "hex",
@@ -1094,6 +1095,7 @@ dependencies = [
  "buzz-core",
  "buzz-media",
  "buzz-persona",
+ "buzz-runtime",
  "buzz-sdk",
  "buzz-terminal",
  "buzz-voice",
@@ -1106,6 +1108,7 @@ dependencies = [
  "earshot",
  "ed25519-dalek",
  "flate2",
+ "fs2",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -1212,6 +1215,26 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "buzz-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "libc",
+ "nostr 0.44.7",
+ "rand 0.10.2",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3042,6 +3065,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

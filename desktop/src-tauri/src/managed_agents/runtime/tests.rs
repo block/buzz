@@ -1,89 +1,5 @@
 use crate::managed_agents::known_acp_runtime;
 
-// ── desktop binary name tests ───────────────────────────────────────────
-
-#[test]
-fn appimage_binary_matches_truncated_linux_comm_name() {
-    assert!(super::is_desktop_binary("buzz-desktop.bi"));
-}
-
-// ── buffer_contains_identifier tests ────────────────────────────────────
-
-#[test]
-fn identifier_prefix_does_not_match_longer_id() {
-    // DMG identifier should NOT match inside a dev desktop's config JSON.
-    let buf = br#""identifier":"xyz.block.buzz.app.dev""#;
-    let id = b"xyz.block.buzz.app";
-    assert!(!super::buffer_contains_identifier(buf, id));
-}
-
-#[test]
-fn identifier_prefix_does_not_match_worktree_slug() {
-    // Main dev identifier should NOT match inside a worktree desktop's buffer.
-    let buf = br#""identifier":"xyz.block.buzz.app.dev.my-branch""#;
-    let id = b"xyz.block.buzz.app.dev";
-    assert!(!super::buffer_contains_identifier(buf, id));
-}
-
-#[test]
-fn identifier_exact_match_with_quote_boundary() {
-    // Exact match followed by closing quote — should match.
-    let buf = br#""identifier":"xyz.block.buzz.app.dev""#;
-    let id = b"xyz.block.buzz.app.dev";
-    assert!(super::buffer_contains_identifier(buf, id));
-}
-
-#[test]
-fn identifier_match_with_null_boundary() {
-    // In KERN_PROCARGS2, entries are null-delimited.
-    let mut buf = b"BUZZ_MANAGED_AGENT=xyz.block.buzz.app.dev".to_vec();
-    buf.push(0);
-    buf.extend_from_slice(b"OTHER_VAR=value");
-    let id = b"xyz.block.buzz.app.dev";
-    assert!(super::buffer_contains_identifier(&buf, id));
-}
-
-#[test]
-fn identifier_exact_match_at_end_of_buffer() {
-    // Exact match with end-of-buffer as the boundary — Thufir's case 1.
-    let buf = b"xyz.block.buzz.app.dev";
-    let id = b"xyz.block.buzz.app.dev";
-    assert!(super::buffer_contains_identifier(buf, id));
-}
-
-#[test]
-fn longer_id_matches_when_short_prefix_also_present() {
-    // The longer ID still matches when a shorter prefix token appears earlier.
-    let mut buf = b"xyz.block.buzz.app".to_vec();
-    buf.push(0);
-    buf.extend_from_slice(br#""identifier":"xyz.block.buzz.app.dev""#);
-    let id = b"xyz.block.buzz.app.dev";
-    assert!(super::buffer_contains_identifier(&buf, id));
-}
-
-#[test]
-fn identifier_empty_returns_false() {
-    let buf = b"anything";
-    assert!(!super::buffer_contains_identifier(buf, b""));
-}
-
-// ── marker_entry tests ──────────────────────────────────────────────────
-
-#[test]
-fn marker_entry_is_namespaced_by_instance_id() {
-    // The spawn stamp and sweep matcher both go through buzz_marker_entry, pinning the on-the-wire
-    // format and guards against a dev build (`...app.dev`) matching a
-    // release build's (`...app`) agents.
-    assert_eq!(
-        super::buzz_marker_entry("xyz.block.buzz.app"),
-        b"BUZZ_MANAGED_AGENT=xyz.block.buzz.app".to_vec()
-    );
-    assert_ne!(
-        super::buzz_marker_entry("xyz.block.buzz.app"),
-        super::buzz_marker_entry("xyz.block.buzz.app.dev")
-    );
-}
-
 #[test]
 fn buzz_agent_has_mcp_hooks() {
     let p = known_acp_runtime("buzz-agent").expect("should resolve");
@@ -91,6 +7,104 @@ fn buzz_agent_has_mcp_hooks() {
     assert_eq!(p.mcp_command, Some("buzz-dev-mcp"));
 }
 
+#[test]
+fn managed_adapter_rejects_path_shaped_buzz_agent_override() {
+    let command = format!("/tmp/buzz-agent{}", std::env::consts::EXE_SUFFIX);
+    let error = super::validate_managed_adapter_descriptor(&command, &[])
+        .expect_err("a basename match must not authorize a custom executable");
+    assert!(error.contains("unsupported_managed_adapter"));
+}
+
+#[test]
+fn managed_adapter_rejects_non_default_arguments() {
+    let error = super::validate_managed_adapter_descriptor(
+        &crate::managed_agents::default_agent_command(),
+        &["--unsafe".into()],
+    )
+    .expect_err("custom native capabilities must fail closed");
+    assert!(error.contains("unsupported_managed_adapter"));
+}
+
+#[test]
+fn managed_adapter_accepts_canonical_catalog_entry() {
+    super::validate_managed_adapter_descriptor(
+        &crate::managed_agents::default_agent_command(),
+        &[],
+    )
+    .expect("the bundled default must remain supported");
+}
+
+#[test]
+fn managed_adapter_binary_must_be_a_desktop_or_test_profile_sibling() {
+    assert!(super::is_bundled_sibling(
+        std::path::Path::new("/bundle/buzz-agent"),
+        std::path::Path::new("/bundle/buzz-desktop"),
+    ));
+    assert!(super::is_bundled_sibling(
+        std::path::Path::new("/target/debug/buzz-agent"),
+        std::path::Path::new("/target/debug/deps/desktop-tests"),
+    ));
+    assert!(!super::is_bundled_sibling(
+        std::path::Path::new("/tmp/buzz-agent"),
+        std::path::Path::new("/bundle/buzz-desktop"),
+    ));
+}
+
+#[test]
+fn bundled_sibling_candidate_uses_app_or_test_target_directory() {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    assert_eq!(
+        super::adapter::bundled_sibling_candidate(
+            std::path::Path::new("/bundle/buzz-desktop"),
+            "buzz-dev-mcp",
+        ),
+        Some(std::path::PathBuf::from(format!(
+            "/bundle/buzz-dev-mcp{suffix}"
+        ))),
+    );
+    assert_eq!(
+        super::adapter::bundled_sibling_candidate(
+            std::path::Path::new("/target/debug/deps/desktop-tests"),
+            "buzz-dev-mcp",
+        ),
+        Some(std::path::PathBuf::from(format!(
+            "/target/debug/buzz-dev-mcp{suffix}"
+        ))),
+    );
+}
+
+#[test]
+fn canonical_executable_rejects_empty_build_placeholder() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir
+        .path()
+        .join(format!("buzz-agent{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&path, []).expect("write placeholder");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("mark placeholder executable");
+    }
+    assert!(
+        super::adapter::canonical_executable(&path).is_none(),
+        "an empty Cargo placeholder must not shadow the real workspace binary"
+    );
+
+    std::fs::write(&path, b"not-empty").expect("write executable fixture");
+    assert_eq!(
+        super::adapter::canonical_executable(&path),
+        Some(std::fs::canonicalize(&path).expect("canonical fixture")),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synchronous_control_rpc_bridge_does_not_nest_runtime() {
+    let value =
+        crate::managed_agents::block_on_runtime_io(async { Ok::<_, std::io::Error>(42_u8) })
+            .expect("control RPC bridge");
+    assert_eq!(value, 42);
+}
 #[test]
 fn buzz_agent_resolved_via_path() {
     assert!(known_acp_runtime("/usr/local/bin/buzz-agent").is_some_and(|p| p.mcp_hooks));
@@ -117,9 +131,252 @@ fn unknown_command_returns_none() {
 
 // ── build_respond_to_env tests ───────────────────────────────────────
 
-use super::test_fixtures::{expected_mode, expected_owner_only, fixture};
+use super::test_fixtures::{expected_mode, expected_owner_only};
 use super::{build_respond_to_env, build_respond_to_env_with_policy};
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
+
+/// Construct a minimal record fixture for env-building tests. Only the
+/// fields read by `build_respond_to_env` matter here.
+fn fixture(
+    respond_to: RespondTo,
+    allowlist: Vec<String>,
+    auth_tag: Option<String>,
+) -> ManagedAgentRecord {
+    ManagedAgentRecord {
+        pubkey: "p".into(),
+        name: "n".into(),
+        persona_id: None,
+        private_key_nsec: "nsec1fake".into(),
+        auth_tag,
+        relay_url: "ws://localhost:3000".into(),
+        avatar_url: None,
+        acp_command: "buzz-acp".into(),
+        agent_command: "goose".into(),
+        agent_command_override: None,
+        agent_args: vec![],
+        mcp_command: String::new(),
+        turn_timeout_seconds: 320,
+        idle_timeout_seconds: None,
+        max_turn_duration_seconds: None,
+        parallelism: 1,
+        system_prompt: None,
+        model: None,
+        provider: None,
+        persona_source_version: None,
+        env_vars: std::collections::BTreeMap::new(),
+        start_on_app_launch: false,
+        auto_restart_on_config_change: true,
+        runtime_pid: None,
+        backend: Default::default(),
+        backend_agent_id: None,
+        provider_binary_path: None,
+        provider_policy_pending: false,
+        effort_level: None,
+        team_id: None,
+        persona_team_dir: None,
+        persona_name_in_team: None,
+        created_at: "now".into(),
+        updated_at: "now".into(),
+        last_started_at: None,
+        last_stopped_at: None,
+        last_exit_code: None,
+        last_error: None,
+        last_error_code: None,
+        respond_to,
+        respond_to_allowlist: allowlist,
+        display_name: None,
+        slug: None,
+        runtime: None,
+        name_pool: Vec::new(),
+        is_builtin: false,
+        is_active: true,
+        shared: false,
+        source_team: None,
+        source_team_persona_slug: None,
+        catalog_source: None,
+        definition_respond_to: None,
+        definition_respond_to_allowlist: Vec::new(),
+        definition_parallelism: None,
+        relay_mesh: None,
+    }
+}
+
+fn configured_env(
+    command: &std::process::Command,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    command
+        .get_envs()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn managed_acp_env_unset_timeouts_preserve_harness_defaults_and_pair_controls() {
+    let record = fixture(RespondTo::OwnerOnly, vec![], None);
+    let lock_path = std::path::Path::new("/tmp/buzz/runtime-locks/pair.lock");
+    let mut command = std::process::Command::new("buzz-acp");
+
+    super::configure_managed_acp_turn_environment(&mut command, &record, lock_path);
+    let env = configured_env(&command);
+
+    assert_eq!(env.get("BUZZ_ACP_TURN_TIMEOUT"), Some(&None));
+    assert_eq!(env.get("BUZZ_ACP_IDLE_TIMEOUT"), Some(&None));
+    assert_eq!(env.get("BUZZ_ACP_MAX_TURN_DURATION"), Some(&None));
+    assert_eq!(
+        env.get("BUZZ_ACP_MULTIPLE_EVENT_HANDLING"),
+        Some(&Some("steer".into()))
+    );
+    assert_eq!(env.get("BUZZ_ACP_DEDUP"), Some(&Some("queue".into())));
+    assert_eq!(
+        env.get("BUZZ_ACP_RUNTIME_LOCK_PATH"),
+        Some(&Some(lock_path.display().to_string()))
+    );
+    assert_eq!(super::effective_acp_turn_limits(&record), (900, 7_200));
+    let log_line = super::acp_turn_limits_log_line(&record);
+    assert!(log_line.contains("idle 900s"));
+    assert!(log_line.contains("maximum duration 7200s"));
+    assert!(log_line.contains("do not bound managed runtime or job-runner lifetime"));
+}
+
+#[test]
+fn managed_acp_env_emits_only_explicit_split_timeout_overrides() {
+    let mut record = fixture(RespondTo::OwnerOnly, vec![], None);
+    record.idle_timeout_seconds = Some(45);
+    record.max_turn_duration_seconds = Some(180);
+    let mut command = std::process::Command::new("buzz-acp");
+
+    super::configure_managed_acp_turn_environment(
+        &mut command,
+        &record,
+        std::path::Path::new("/tmp/pair.lock"),
+    );
+    let env = configured_env(&command);
+
+    assert_eq!(env.get("BUZZ_ACP_TURN_TIMEOUT"), Some(&None));
+    assert_eq!(env.get("BUZZ_ACP_IDLE_TIMEOUT"), Some(&Some("45".into())));
+    assert_eq!(
+        env.get("BUZZ_ACP_MAX_TURN_DURATION"),
+        Some(&Some("180".into()))
+    );
+}
+
+#[test]
+fn durable_and_job_publication_rollout_gates_are_independent() {
+    let rollback = super::ManagedRuntimeFeatureGates::from_values(Some("false"), Some("true"));
+    assert_eq!(
+        rollback.launch_mode(),
+        super::ManagedRuntimeLaunchMode::LegacyPhase0
+    );
+    let auto_default = super::ManagedRuntimeFeatureGates::from_values(None, Some("true"));
+    assert_eq!(
+        auto_default.launch_mode(),
+        super::ManagedRuntimeLaunchMode::DurableV2 {
+            job_event_publication: true
+        }
+    );
+
+    let durable_private =
+        super::ManagedRuntimeFeatureGates::from_values(Some("true"), Some("false"));
+    assert_eq!(
+        durable_private.launch_mode(),
+        super::ManagedRuntimeLaunchMode::DurableV2 {
+            job_event_publication: false
+        }
+    );
+
+    let durable_public = super::ManagedRuntimeFeatureGates::from_values(Some("1"), Some("yes"));
+    assert_eq!(
+        durable_public.launch_mode(),
+        super::ManagedRuntimeLaunchMode::DurableV2 {
+            job_event_publication: true
+        }
+    );
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_rollout_gate_environment(&mut command, rollback.launch_mode());
+    let env = configured_env(&command);
+    assert_eq!(
+        env.get("BUZZ_ACP_DURABLE_RUNTIME"),
+        Some(&Some("false".into()))
+    );
+    assert_eq!(
+        env.get("BUZZ_ACP_JOB_EVENT_PUBLICATION"),
+        Some(&Some("false".into()))
+    );
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_rollout_gate_environment(&mut command, durable_public.launch_mode());
+    let env = configured_env(&command);
+    assert_eq!(
+        env.get("BUZZ_ACP_DURABLE_RUNTIME"),
+        Some(&Some("true".into()))
+    );
+    assert_eq!(
+        env.get("BUZZ_ACP_JOB_EVENT_PUBLICATION"),
+        Some(&Some("true".into()))
+    );
+}
+
+#[test]
+fn managed_job_env_explicitly_disables_unavailable_driver_and_roots() {
+    let mut command = std::process::Command::new("buzz-acp");
+
+    super::environment::configure_managed_job_environment(&mut command, None, None);
+    let env = configured_env(&command);
+
+    assert_eq!(env.get("BUZZ_ACP_LH_COMMAND"), Some(&Some(String::new())));
+    assert_eq!(
+        env.get("BUZZ_ACP_JOB_WORKSPACE_ROOTS"),
+        Some(&Some(String::new()))
+    );
+}
+
+#[test]
+fn managed_job_env_keeps_each_valid_operator_value_when_the_other_is_unavailable() {
+    let workspace = tempfile::tempdir().expect("temp dir");
+    let canonical_workspace = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let expected_roots = std::env::join_paths([&canonical_workspace])
+        .expect("valid workspace roots")
+        .to_string_lossy()
+        .into_owned();
+    let executable = std::env::current_exe().expect("current executable");
+    let canonical_executable = std::fs::canonicalize(&executable)
+        .expect("canonical executable")
+        .to_string_lossy()
+        .into_owned();
+
+    let mut no_driver = std::process::Command::new("buzz-acp");
+    super::environment::configure_managed_job_environment(
+        &mut no_driver,
+        None,
+        Some(workspace.path().as_os_str()),
+    );
+    let no_driver_env = configured_env(&no_driver);
+    assert_eq!(
+        no_driver_env.get("BUZZ_ACP_LH_COMMAND"),
+        Some(&Some(String::new()))
+    );
+    assert_eq!(
+        no_driver_env.get("BUZZ_ACP_JOB_WORKSPACE_ROOTS"),
+        Some(&Some(expected_roots.clone()))
+    );
+
+    let mut no_roots = std::process::Command::new("buzz-acp");
+    super::environment::configure_managed_job_environment(&mut no_roots, Some(executable), None);
+    let no_roots_env = configured_env(&no_roots);
+    assert_eq!(
+        no_roots_env.get("BUZZ_ACP_LH_COMMAND"),
+        Some(&Some(canonical_executable))
+    );
+    assert_eq!(
+        no_roots_env.get("BUZZ_ACP_JOB_WORKSPACE_ROOTS"),
+        Some(&Some(String::new()))
+    );
+}
 
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
@@ -550,38 +807,6 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
     );
 }
 
-// ── name_matches_known_binary / name_matches_interpreter tests ───────────
-
-#[test]
-fn name_matches_known_binary_rejects_node() {
-    // `node` must NOT be in KNOWN_AGENT_BINARIES — adding it there would
-    // sweep all node processes on the machine regardless of ownership.
-    assert!(!super::name_matches_known_binary("node"));
-}
-
-#[test]
-fn name_matches_interpreter_accepts_node() {
-    // `node` IS a known script interpreter and must be recognized.
-    assert!(super::name_matches_interpreter("node"));
-}
-
-#[test]
-fn name_matches_interpreter_rejects_unknown() {
-    // Interpreters not in KNOWN_SCRIPT_INTERPRETERS must not match.
-    assert!(!super::name_matches_interpreter("python3"));
-    assert!(!super::name_matches_interpreter("deno"));
-    assert!(!super::name_matches_interpreter("bun"));
-}
-
-#[test]
-fn name_matches_interpreter_rejects_node_prefix() {
-    // A name that starts with "node" but is longer must not match —
-    // exact equality is required to avoid false positives.
-    assert!(!super::name_matches_interpreter("node_modules"));
-    assert!(!super::name_matches_interpreter("nodejs"));
-    assert!(!super::name_matches_interpreter("node-gyp"));
-}
-
 #[test]
 fn claude_spawn_uses_the_probed_cli_executable() {
     let _guard = crate::managed_agents::lock_path_mutex();
@@ -678,315 +903,106 @@ fn batch_shim_no_extension_is_not_rejected() {
     );
 }
 
-// ── PGID-based orphan sweep tests ───────────────────────────────────────
-
-/// Validates the kernel invariant that the orphan sweep PGID fix relies on:
-/// a grandchild process inherits the PGID of the process group leader (the
-/// harness), so checking PGID membership in `skip_pids` correctly identifies
-/// live descendants even when their ppid is an intermediate process (e.g.
-/// goose) rather than the harness itself.
-#[cfg(unix)]
-#[test]
-fn grandchild_inherits_pgid_of_process_group_leader() {
-    use std::os::unix::process::CommandExt;
-    use std::process::Command;
-
-    // Spawn a "harness" process in its own process group (mirrors
-    // `command.process_group(0)` in the real spawn path). The harness
-    // spawns an intermediate child which in turn spawns a grandchild.
-    // This mirrors the real tree: buzz-acp → goose → buzz-dev-mcp.
-    //
-    // The intermediate `sh` backgrounds the grandchild and echoes its PID,
-    // so the grandchild's ppid is the intermediate (not the harness).
-    //
-    // The trailing `sleep 10` keeps the harness (the process group leader)
-    // alive through the assertions below: without it the harness exits as
-    // soon as the intermediate echoes, and under parallel test load it can
-    // be reaped before `getpgid(harness_pid)` runs (observed flake —
-    // getpgid returned -1). The group is killed in cleanup, so the sleep
-    // never runs to term.
-    //
-    // Absolute `/bin/sh` and `/bin/sleep` rather than bare names: parallel
-    // tests holding `lock_path_mutex` legitimately swap PATH to a tempdir,
-    // and this test doesn't need the lock — but a PATH lookup during the
-    // swap window fails with NotFound, and a child spawned during it
-    // inherits the poisoned PATH for its lifetime, so the script's inner
-    // lookups must be absolute too (observed flake).
-    let mut harness = {
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args([
-            "-c",
-            "/bin/sh -c '/bin/sleep 10 & echo $!' & wait $!; /bin/sleep 10",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .process_group(0);
-        cmd.spawn().expect("spawn harness")
-    };
-
-    // Read the grandchild PID from stdout.
-    use std::io::BufRead;
-    let stdout = harness.stdout.take().unwrap();
-    let reader = std::io::BufReader::new(stdout);
-    let grandchild_pid: i32 = reader
-        .lines()
-        .next()
-        .expect("should get a line")
-        .expect("should read line")
-        .trim()
-        .parse()
-        .expect("should parse grandchild PID");
-
-    let harness_pid = harness.id() as i32;
-
-    // The harness is the process group leader (PGID == its own PID).
-    let harness_pgid = unsafe { libc::getpgid(harness_pid) };
-    assert_eq!(
-        harness_pgid, harness_pid,
-        "harness should be its own process group leader"
-    );
-
-    // The grandchild's PGID should equal the harness PID — this is the
-    // invariant our orphan sweep fix relies on.
-    let grandchild_pgid = unsafe { libc::getpgid(grandchild_pid) };
-    assert_eq!(
-        grandchild_pgid, harness_pid,
-        "grandchild PGID should match harness PID (process group leader)"
-    );
-
-    // The grandchild's ppid is NOT the harness — it's the intermediate sh.
-    // This proves the ppid-only check would miss it (the regression path).
-    #[cfg(target_os = "macos")]
-    {
-        let mut info = std::mem::MaybeUninit::<super::BSDInfo>::zeroed();
-        let ret = unsafe {
-            super::proc_pidinfo(
-                grandchild_pid,
-                super::PROC_PIDTBSDINFO,
-                0,
-                info.as_mut_ptr() as *mut libc::c_void,
-                std::mem::size_of::<super::BSDInfo>() as libc::c_int,
-            )
-        };
-        assert!(ret > 0, "proc_pidinfo should succeed for grandchild");
-        let info = unsafe { info.assume_init() };
-        assert_ne!(
-            info.pbi_ppid as i32, harness_pid,
-            "grandchild ppid must NOT be the harness (it's the intermediate sh)"
-        );
-    }
-
-    // With skip_pids containing the harness PID, the grandchild's PGID
-    // is in skip_pids — so it would NOT be flagged as an orphan.
-    let skip_pids: Vec<u32> = vec![harness_pid as u32];
-    assert!(
-        skip_pids.contains(&(grandchild_pgid as u32)),
-        "grandchild's PGID should be found in skip_pids"
-    );
-
-    // Cleanup: kill the process group.
-    unsafe { libc::kill(-harness_pid, libc::SIGTERM) };
-    let _ = harness.wait();
-}
-
-/// Validates that `walk_has_tracked_ancestor` catches the production case the
-/// old PGID check missed: the intermediate process is in its OWN process group
-/// (mirroring the node npm-shim wrapper that starts `codex-acp`). The
-/// grandchild's PGID matches the intermediate's PID, not the harness's — so
-/// `skip_pids.contains(&grandchild_pgid)` returns false. The ancestor walk
-/// must still find the harness as an ancestor and return true.
-#[cfg(unix)]
-#[test]
-fn own_group_grandchild_detected_by_ancestor_walk() {
-    use std::os::unix::process::CommandExt;
-    use std::process::Command;
-
-    // The test process is the "harness". Spawn an intermediate with its own
-    // process group (mirrors the node shim). It backgrounds a grandchild
-    // (sleep 30) and prints the grandchild PID so we can inspect it.
-    //
-    // Absolute `/bin/sh` and `/bin/sleep` — no PATH lookups anywhere in this
-    // tree. Parallel tests holding `lock_path_mutex` legitimately swap PATH to
-    // a tempdir; the outer spawn during that window fails with NotFound, and a
-    // child spawned during it inherits the poisoned PATH for its lifetime, so
-    // inner lookups must be absolute too (observed flake).
-    let mut intermediate = {
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", "/bin/sleep 30 & echo $!; wait"])
-            .stdout(std::process::Stdio::piped())
-            .process_group(0);
-        cmd.spawn().expect("spawn intermediate")
-    };
-
-    use std::io::BufRead;
-    let stdout = intermediate.stdout.take().unwrap();
-    let reader = std::io::BufReader::new(stdout);
-    let grandchild_pid: u32 = reader
-        .lines()
-        .next()
-        .expect("should get a line")
-        .expect("should read line")
-        .trim()
-        .parse()
-        .expect("should parse grandchild PID");
-
-    let intermediate_pid = intermediate.id();
-    let harness_pid = std::process::id();
-
-    // The intermediate is its own process group leader.
-    let intermediate_pgid = unsafe { libc::getpgid(intermediate_pid as i32) };
-    assert_eq!(
-        intermediate_pgid, intermediate_pid as i32,
-        "intermediate should be its own process group leader"
-    );
-
-    // The grandchild inherits the intermediate's group — NOT the harness's.
-    let grandchild_pgid = unsafe { libc::getpgid(grandchild_pid as i32) };
-    assert_eq!(
-        grandchild_pgid, intermediate_pid as i32,
-        "grandchild PGID should be the intermediate, not the harness"
-    );
-    assert_ne!(
-        grandchild_pgid, harness_pid as i32,
-        "grandchild PGID must not equal harness PID — this is the false-positive shape"
-    );
-
-    // The ancestor walk finds the harness even though PGID doesn't match it.
-    let skip_pids = vec![harness_pid];
-    let found =
-        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &skip_pids, super::sweep::ppid_of);
-    assert!(
-        found,
-        "walk must detect grandchild as a live descendant of the tracked harness"
-    );
-
-    // Contrast: empty skip_pids → not a descendant of any tracked harness.
-    let not_found =
-        super::sweep::walk_has_tracked_ancestor(grandchild_pid, &[], super::sweep::ppid_of);
-    assert!(
-        !not_found,
-        "walk with empty skip_pids must return false for a real orphan"
-    );
-
-    // Guard against PID reuse: verify the intermediate is still alive before
-    // cleanup so a recycled PID can't corrupt the kill target.
-    assert!(
-        intermediate
-            .try_wait()
-            .expect("try_wait on intermediate")
-            .is_none(),
-        "intermediate exited before cleanup — its PID may have been recycled"
-    );
-
-    // Cleanup: SIGKILL the intermediate's process group (takes sleep 30 with it).
-    unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
-    let _ = intermediate.wait();
-}
-
-// ── pair receipt validation tests ───────────────────────────────────────
-
-fn receipt_fixture(
-    key: crate::managed_agents::ManagedAgentRuntimeKey,
-) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
-    crate::managed_agents::ManagedAgentRuntimeReceipt {
-        key,
-        pid: std::process::id(),
-        desktop_instance_id: "test-instance".into(),
-        started_at: "now".into(),
-    }
-}
-
-#[test]
-fn receipt_validation_rejects_noncanonical_identity() {
-    let mut receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
-    );
-    receipt.key.relay_url = "WSS://RELAY.EXAMPLE/".into();
-    let path = std::path::PathBuf::from(format!("{}.json", receipt.key.runtime_id()));
-    assert!(!super::valid_agent_runtime_receipt(
-        &path,
-        &receipt,
-        "test-instance"
-    ));
-}
-
-#[test]
-fn receipt_validation_rejects_wrong_pair_filename() {
-    let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
-    );
-    assert!(!super::valid_agent_runtime_receipt(
-        std::path::Path::new("corrupted.json"),
-        &receipt,
-        "test-instance"
-    ));
-}
-
-#[test]
-fn replacement_removes_receipt_only_after_confirmed_exit() {
-    use std::cell::{Cell, RefCell};
-
-    let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
-    );
-    let path = std::path::Path::new("pair.json");
-    let terminated = Cell::new(None);
-    let polls = Cell::new(0);
-    let removed = RefCell::new(None);
-
-    super::terminate_runtime_receipt_with(
-        path,
-        &receipt,
-        |pid| {
-            terminated.set(Some(pid));
-            Ok(())
-        },
-        |_| {
-            let poll = polls.get() + 1;
-            polls.set(poll);
-            poll < 2
-        },
-        |path| *removed.borrow_mut() = Some(path.to_path_buf()),
-    )
-    .unwrap();
-
-    assert_eq!(terminated.get(), Some(receipt.pid));
-    assert_eq!(polls.get(), 2);
-    assert_eq!(removed.into_inner().as_deref(), Some(path));
-}
-
-#[test]
-fn replacement_failure_keeps_receipt() {
-    use std::cell::Cell;
-
-    let receipt = receipt_fixture(
-        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
-            .unwrap(),
-    );
-    let removed = Cell::new(false);
-    let error = super::terminate_runtime_receipt_with(
-        std::path::Path::new("pair.json"),
-        &receipt,
-        |_| Err("signal failed".into()),
-        |_| false,
-        |_| removed.set(true),
-    )
-    .unwrap_err();
-
-    assert_eq!(error, "signal failed");
-    assert!(!removed.get());
-}
-
 // ── workspace pair-key resolution (summary/stop scoping) ────────────────
 
+#[test]
+fn missing_phase_zero_receipt_with_legacy_pid_requires_manual_stop() {
+    assert_eq!(
+        super::process::classify_missing_legacy_receipt(Some(42), false),
+        super::LegacyMigrationGate::ManualLegacyStopRequired
+    );
+    assert_eq!(
+        super::process::classify_missing_legacy_receipt(None, false),
+        super::LegacyMigrationGate::Clear
+    );
+    assert_eq!(
+        super::process::classify_missing_legacy_receipt(None, true),
+        super::LegacyMigrationGate::ManualLegacyStopRequired
+    );
+}
+
+#[test]
+fn phase_zero_lock_proof_is_bound_to_pair_and_exact_lock_path() {
+    let key = super::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+        .expect("valid pair key");
+    let lock_path = std::path::Path::new("/tmp/buzz-pair.lock");
+    let mut receipt = super::super::LegacyManagedAgentRuntimeReceipt {
+        schema_version: buzz_runtime_pkg::LEGACY_RUNTIME_RECEIPT_SCHEMA_VERSION,
+        key: key.clone(),
+        pid: 42,
+        process_start_marker: "marker".into(),
+        desktop_instance_id: "desktop-generation".into(),
+        started_at: "2026-08-02T00:00:00Z".into(),
+        lock_protocol_version: super::super::RUNTIME_LOCK_PROTOCOL_VERSION,
+        lock_path_hash: super::super::runtime_lock_path_hash(lock_path),
+    };
+    assert!(super::process::legacy_receipt_has_lock_proof(
+        &receipt, &key, lock_path
+    ));
+
+    receipt.lock_path_hash = "00".repeat(32);
+    assert!(!super::process::legacy_receipt_has_lock_proof(
+        &receipt, &key, lock_path
+    ));
+    receipt.lock_path_hash = super::super::runtime_lock_path_hash(lock_path);
+    receipt.key =
+        super::ManagedAgentRuntimeKey::new("bb".repeat(32), "wss://relay.example").unwrap();
+    assert!(!super::process::legacy_receipt_has_lock_proof(
+        &receipt, &key, lock_path
+    ));
+}
+#[test]
+fn automatic_rollout_is_phase_zero_first_then_default_on_v2() {
+    let preferred = super::ManagedRuntimeFeatureGates::from_values(None, None).launch_mode();
+    assert_eq!(
+        super::process::select_rollout_launch_mode(
+            preferred,
+            false,
+            false,
+            super::LegacyMigrationGate::Clear,
+        ),
+        Ok(super::ManagedRuntimeLaunchMode::LegacyPhase0)
+    );
+    assert_eq!(
+        super::process::select_rollout_launch_mode(
+            preferred,
+            false,
+            true,
+            super::LegacyMigrationGate::Clear,
+        ),
+        Ok(super::ManagedRuntimeLaunchMode::DurableV2 {
+            job_event_publication: true,
+        })
+    );
+    assert_eq!(
+        super::process::select_rollout_launch_mode(
+            preferred,
+            true,
+            false,
+            super::LegacyMigrationGate::Clear,
+        ),
+        Ok(super::ManagedRuntimeLaunchMode::DurableV2 {
+            job_event_publication: true,
+        })
+    );
+    assert_eq!(
+        super::process::select_rollout_launch_mode(
+            preferred,
+            false,
+            true,
+            super::LegacyMigrationGate::ManualLegacyStopRequired,
+        ),
+        Err(super::LegacyMigrationGate::ManualLegacyStopRequired)
+    );
+}
 #[test]
 fn unpinned_record_resolves_pair_key_per_workspace() {
     // Community-scoped truth: an unpinned agent running only on relay A must
     // read as running in workspace A and stopped in workspace B — the pair
+
     // key the summary looks up differs per workspace.
     let pubkey = "aa".repeat(32);
+
     let key_a = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
     let key_b = super::resolve_workspace_pair_key(&pubkey, "", "wss://two.example").unwrap();
 
@@ -1013,6 +1029,38 @@ fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
 }
 
 #[test]
+fn legacy_migration_without_lock_proof_requires_manual_stop() {
+    assert_eq!(
+        super::process::classify_legacy_migration(false, false, false),
+        super::LegacyMigrationGate::ManualLegacyStopRequired
+    );
+}
+
+#[test]
+fn legacy_migration_with_held_pair_lock_reports_active_runtime() {
+    assert_eq!(
+        super::process::classify_legacy_migration(true, true, true),
+        super::LegacyMigrationGate::LegacyRuntimeActive
+    );
+}
+
+#[test]
+fn legacy_migration_with_released_pair_lock_allows_cutover() {
+    assert_eq!(
+        super::process::classify_legacy_migration(true, false, false),
+        super::LegacyMigrationGate::Clear
+    );
+}
+
+#[test]
+fn live_legacy_pid_without_the_proven_pair_lock_blocks_cutover() {
+    assert_eq!(
+        super::process::classify_legacy_migration(true, false, true),
+        super::LegacyMigrationGate::ManualLegacyStopRequired
+    );
+}
+
+#[test]
 fn workspace_pair_key_is_canonical() {
     // Spawn stamps the canonical key; lookup must hit the same entry even
     // when the workspace relay is written in a non-canonical form.
@@ -1025,250 +1073,268 @@ fn workspace_pair_key_is_canonical() {
 #[test]
 fn invalid_pubkey_resolves_no_pair_key() {
     // Key-less records (keys minted on first start) cannot form a pair key;
-    // the summary must fall back to the stopped/legacy-pid path, not panic.
+    // the summary must fall back to stopped state rather than panic.
     assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
 }
 
-// ── Custom-harness orphan sweep coverage ─────────────────────────────────────
-//
-// The sweep/receipt ownership gate must include any process carrying the
-// `BUZZ_MANAGED_AGENT` env marker, regardless of whether the binary name
-// matches `KNOWN_AGENT_BINARIES`. Custom harnesses use arbitrary binary names
-// so name-match alone would silently leak their orphans on crash.
-//
-// Previously: macOS used a two-check OR+AND pattern (equivalent to just marker),
-//             Linux used an AND-gate (name + marker) — wrong for custom harnesses.
-// Fix: all platforms gate on `process_has_buzz_marker` alone; the receipt path
-//      is verified below via `valid_agent_runtime_receipt_with` (injectable),
-//      which no longer takes a name-check predicate at all — reinstating an
-//      AND-gate would be a signature change these tests would catch.
-
-// ── Collector-discriminating sweep tests (C-9 / Thufir F6) ──────────────────
-//
-// `kill_stale_tracked_processes_with` and `valid_agent_runtime_receipt_with`
-// accept injectable predicates so the sweep logic can be verified without
-// spawning real processes.  These tests drive the injection path directly,
-// discriminating on custom-harness vs known-binary vs marker presence.
+// ── restart_eligible tests ──────────────────────────────────────────────
 
 #[test]
-fn kill_stale_custom_harness_with_marker_is_terminated() {
-    // A record with a PID not in the live runtime map and with the Buzz marker
-    // should be terminated even though the binary name is not in KNOWN_AGENT_BINARIES.
-    let mut record = minimal_record("pubkey-custom");
-    record.runtime_pid = Some(9001);
-    let mut records = vec![record];
-    let runtimes = std::collections::HashMap::new();
-
-    let mut killed = vec![];
-    let changed = super::kill_stale_tracked_processes_with(
-        &mut records,
-        &runtimes,
-        |_pid| true, // simulate: marker present (custom harness we own)
-        |pid| {
-            killed.push(pid);
-            Ok(())
-        },
-    );
-
-    assert!(changed, "stale record with marker should mark changed");
-    assert_eq!(killed, vec![9001u32], "marked process must be killed");
-    assert!(
-        records[0].runtime_pid.is_none(),
-        "runtime_pid must be cleared"
-    );
+fn restart_eligible_true_when_non_orphan_has_hash_drift() {
+    assert!(super::restart_eligible(false, None, false, true, false));
 }
 
 #[test]
-fn kill_stale_process_without_marker_is_skipped() {
-    // A record PID without the marker (not our process — e.g. custom binary
-    // from another tool) should be skipped for termination but still cleared.
-    let mut record = minimal_record("pubkey-foreign");
-    record.runtime_pid = Some(9002);
-    let mut records = vec![record];
-    let runtimes = std::collections::HashMap::new();
-
-    let mut killed = vec![];
-    let changed = super::kill_stale_tracked_processes_with(
-        &mut records,
-        &runtimes,
-        |_pid| false, // simulate: no marker (not our process)
-        |pid| {
-            killed.push(pid);
-            Ok(())
-        },
-    );
-
-    assert!(
-        changed,
-        "stale record without marker should still mark changed"
-    );
-    assert!(
-        killed.is_empty(),
-        "process without marker must not be killed"
-    );
-    assert!(
-        records[0].runtime_pid.is_none(),
-        "runtime_pid must be cleared regardless"
-    );
+fn restart_eligible_true_when_non_orphan_has_availability_drift() {
+    assert!(super::restart_eligible(false, None, false, false, true));
 }
 
 #[test]
-fn kill_stale_live_pair_is_not_touched() {
-    // A record whose PID is in the live runtime map is NOT stale — skip it entirely.
-    use crate::managed_agents::ManagedAgentRuntimeKey;
-    let pubkey = "aa".repeat(32); // 64 hex chars — satisfies ManagedAgentRuntimeKey validation
-    let mut record = minimal_record(&pubkey);
-    record.runtime_pid = Some(9003);
-    let key = ManagedAgentRuntimeKey::new(pubkey, "wss://relay.example").unwrap();
-    let mut runtimes = std::collections::HashMap::new();
-    // Insert a placeholder runtime — value shape doesn't matter for the key lookup.
-    runtimes.insert(key, make_pair_runtime_placeholder());
-    let original_pid = record.runtime_pid;
-    let mut records = vec![record];
-
-    let mut killed = vec![];
-    let changed = super::kill_stale_tracked_processes_with(
-        &mut records,
-        &runtimes,
-        |_pid| true,
-        |pid| {
-            killed.push(pid);
-            Ok(())
-        },
-    );
-
-    assert!(!changed, "live pair must not be marked changed");
-    assert!(killed.is_empty(), "live pair process must not be killed");
-    assert_eq!(
-        records[0].runtime_pid, original_pid,
-        "live pair runtime_pid must not be cleared"
-    );
+fn restart_eligible_false_when_orphan_has_hash_drift() {
+    // An orphan can never be restarted successfully — spawn refuses it — so hash drift alone must not surface "Restart required".
+    assert!(!super::restart_eligible(false, None, true, true, false));
 }
 
 #[test]
-fn receipt_valid_with_marker_and_running() {
-    // Custom harness receipt: custom binary (not in KNOWN_AGENT_BINARIES), has_marker=true, is_running=true.
-    // Must be valid — marker is the authoritative gate.
-    use crate::managed_agents::ManagedAgentRuntimeKey;
-    let key = ManagedAgentRuntimeKey::new("bb".repeat(32), "wss://relay.example").unwrap();
-    let receipt = receipt_fixture(key.clone());
-    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
-
-    let valid = super::valid_agent_runtime_receipt_with(
-        &path,
-        &receipt,
-        "test-instance",
-        |_pid| true,       // is_running
-        |_pid, _iid| true, // has_marker: true (custom binary — no name gate)
-    );
-    assert!(
-        valid,
-        "custom harness with marker and running pid must be valid"
-    );
+fn restart_eligible_false_when_orphan_has_availability_drift() {
+    assert!(!super::restart_eligible(false, None, true, false, true));
 }
 
 #[test]
-fn receipt_invalid_known_binary_without_marker() {
-    // Known binary name but no marker — stray process, must not be valid.
-    use crate::managed_agents::ManagedAgentRuntimeKey;
-    let key = ManagedAgentRuntimeKey::new("cc".repeat(32), "wss://relay.example").unwrap();
-    let receipt = receipt_fixture(key.clone());
-    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
-
-    let valid = super::valid_agent_runtime_receipt_with(
-        &path,
-        &receipt,
-        "test-instance",
-        |_pid| true,        // is_running
-        |_pid, _iid| false, // has_marker: false (not our process)
-    );
-    assert!(!valid, "known binary without marker must not be valid");
+fn restart_eligible_false_when_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(false, None, true, false, false));
 }
 
 #[test]
-fn receipt_invalid_when_process_not_running() {
-    // Even with marker, a non-running process must not be valid.
-    use crate::managed_agents::ManagedAgentRuntimeKey;
-    let key = ManagedAgentRuntimeKey::new("dd".repeat(32), "wss://relay.example").unwrap();
-    let receipt = receipt_fixture(key.clone());
-    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
-
-    let valid = super::valid_agent_runtime_receipt_with(
-        &path,
-        &receipt,
-        "test-instance",
-        |_pid| false,      // is_running: false
-        |_pid, _iid| true, // has_marker
-    );
-    assert!(
-        !valid,
-        "non-running process must not be valid regardless of marker"
-    );
+fn restart_eligible_false_when_non_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(false, None, false, false, false));
 }
 
-// ── Test helpers (spawn-key regressions: see `runtime/spawn_key.rs`) ───────
-
-fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
-    serde_json::from_str(&format!(
-        r#"{{
-            "pubkey": "{pubkey}",
-            "name": "test",
-            "private_key_nsec": "nsec1fake",
-            "relay_url": "",
-            "acp_command": "buzz-acp",
-            "agent_command": "buzz-agent",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": null,
-            "model": null,
-            "provider": null,
-            "env_vars": {{}},
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }}"#
-    ))
-    .expect("minimal_record fixture")
+#[test]
+fn restart_eligible_defers_all_drift_while_a_job_is_active() {
+    assert!(!super::restart_eligible(true, None, false, true, true));
 }
 
-fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
-    use std::process::{Command, Stdio};
-    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
-    // `true` exits immediately with 0 — just a handle we need for type purposes.
-    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
-    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
-    #[cfg(unix)]
-    let program = "/usr/bin/true";
-    #[cfg(windows)]
-    let program = "true";
-    let child = Command::new(program)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn true for placeholder");
-    let process = crate::managed_agents::ManagedAgentProcess {
-        child,
-        log_path: Default::default(),
-        spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
-            &minimal_record(&"cc".repeat(32)),
-            &[],
-            &[],
-            "wss://relay.example",
-            &Default::default(),
-            false,
-        ),
-        setup_mode: false,
-        adapter_availability: None,
-        start_nonce: "test-nonce".to_string(),
-        #[cfg(windows)]
-        job: None,
+#[test]
+fn restart_eligible_defers_all_drift_for_every_nonterminal_assignment() {
+    use buzz_runtime_pkg::protocol::AssignmentState::{
+        Blocked, NeedsApproval, Reading, Recovering, Waiting, Working,
     };
-    crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+
+    for state in [
+        Reading,
+        Working,
+        Waiting,
+        NeedsApproval,
+        Blocked,
+        Recovering,
+    ] {
+        assert!(
+            !super::restart_eligible(false, Some(state), false, true, true),
+            "{state:?} must fence config-drift restart"
+        );
+    }
+}
+
+#[test]
+fn terminal_assignment_does_not_fence_config_drift_restart() {
+    use buzz_runtime_pkg::protocol::AssignmentState::{Cancelled, Completed, Failed};
+    for state in [Completed, Failed, Cancelled] {
+        assert!(super::restart_eligible(
+            false,
+            Some(state),
+            false,
+            true,
+            false
+        ));
+    }
+}
+
+#[test]
+fn fresh_desktop_app_state_reattaches_without_restarting_runtime_or_job() {
+    use std::sync::Arc;
+
+    use buzz_runtime_pkg::{
+        protocol::{
+            ControlError, ControlOperation, ControlPayload, JobState, JobStatus,
+            ManagedAgentRuntimeKey as RuntimeKey, PublicationState, RuntimeDiagnostics,
+            RuntimeReceipt, RuntimeStatusSnapshot, WorkState, CONTROL_PROTOCOL_VERSION,
+            RUNTIME_RECEIPT_SCHEMA_VERSION,
+        },
+        ControlHandlerFn, ControlServerConfig, RuntimeServer,
+    };
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    let temp = tempfile::tempdir().expect("create Desktop reattach fixture");
+    let receipt_path = temp.path().join("runtime-receipt.json");
+    let lock_path = temp.path().join("pair.lock");
+    std::fs::write(&lock_path, b"").expect("create pair lock path");
+
+    let key =
+        crate::managed_agents::ManagedAgentRuntimeKey::new("ab".repeat(32), "wss://relay.example")
+            .expect("build canonical pair key");
+    let runtime_id = key.runtime_id();
+    let generation = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+
+    #[cfg(unix)]
+    let mut runner = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn long-running job fixture");
+    #[cfg(windows)]
+    let mut runner = std::process::Command::new("ping")
+        .args(["-n", "30", "127.0.0.1"])
+        .spawn()
+        .expect("spawn long-running job fixture");
+    let runner_pid = runner.id();
+    let runner_marker =
+        buzz_runtime_pkg::process_start_marker(runner_pid).expect("read runner start marker");
+
+    let job = JobStatus {
+        job_id,
+        request_event_id: Some("cd".repeat(32)),
+        source_event_id: Some("ef".repeat(32)),
+        channel_id: Uuid::new_v4(),
+        state: JobState::Running,
+        attempt: 1,
+        progress_seq: 1,
+        summary: "governed job remains active".into(),
+        started_at: Some(Utc::now()),
+        finished_at: None,
+        exit_code: None,
+        error_code: None,
+        publication_state: PublicationState::Published,
+        runner_pid: Some(runner_pid),
+        runner_start_marker: Some(runner_marker),
+    };
+    let status = RuntimeStatusSnapshot {
+        runtime_id: runtime_id.clone(),
+        generation,
+        work_state: WorkState::Working,
+        recovering: false,
+        recovery_reason: None,
+        queued_inbox: 0,
+        in_turn_inbox: 0,
+        dead_letter_inbox: 0,
+        capacity_rejections: 0,
+        active_assignment: None,
+        active_job: Some(job_id),
+        active_jobs: vec![job_id],
+        diagnostics: RuntimeDiagnostics::default(),
+    };
+    let server_config = ControlServerConfig::new(runtime_id.clone(), generation);
+    let controller_token = server_config.controller_token.clone();
+    let model_token = server_config.model_token.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let server_status = status.clone();
+    let server_job = job.clone();
+    let server_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime control fixture");
+        runtime.block_on(async move {
+            let server = RuntimeServer::bind(server_config)
+                .await
+                .expect("bind runtime control fixture");
+            ready_tx
+                .send(server.local_addr().expect("read runtime control address"))
+                .expect("publish runtime control address");
+            let handler = Arc::new(ControlHandlerFn(move |_capability, operation| {
+                let status = server_status.clone();
+                let job = server_job.clone();
+                async move {
+                    match operation {
+                        ControlOperation::Status => Ok(ControlPayload::Status(status)),
+                        ControlOperation::JobsStatus { job_id } if job_id == job.job_id => {
+                            Ok(ControlPayload::Job(job))
+                        }
+                        _ => Err(ControlError::new(
+                            "unsupported",
+                            "unsupported test operation",
+                        )),
+                    }
+                }
+            }));
+            tokio::select! {
+                result = server.serve(handler) => {
+                    result.expect("serve runtime control fixture");
+                }
+                _ = stop_rx => {}
+            }
+        });
+    });
+    let control_addr = ready_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("runtime control fixture must start");
+    let runtime_pid = std::process::id();
+    let receipt = RuntimeReceipt {
+        schema_version: RUNTIME_RECEIPT_SCHEMA_VERSION,
+        key: RuntimeKey {
+            pubkey: key.pubkey.clone(),
+            relay_url: key.relay_url.clone(),
+        },
+        runtime_id,
+        pid: runtime_pid,
+        process_start_marker: buzz_runtime_pkg::process_start_marker(runtime_pid)
+            .expect("read runtime process marker"),
+        generation,
+        control_addr,
+        controller_token,
+        model_token,
+        started_at: Utc::now(),
+        protocol_version: CONTROL_PROTOCOL_VERSION,
+        lock_protocol_version: crate::managed_agents::RUNTIME_LOCK_PROTOCOL_VERSION,
+        lock_path_hash: crate::managed_agents::runtime_lock_path_hash(&lock_path),
+        ready: true,
+    };
+    buzz_runtime_pkg::write_runtime_receipt(&receipt_path, &receipt)
+        .expect("write authenticated runtime receipt");
+
+    let adopt = || {
+        let state = crate::app_state::build_app_state();
+        let (receipt, controller, status) = super::adopt_schema_v2_runtime(&receipt_path, &key)
+            .expect("fresh Desktop state must authenticate runtime receipt");
+        let active_job = tauri::async_runtime::block_on(controller.jobs_status(job_id))
+            .expect("fresh Desktop state must recover active job");
+        let pair = crate::managed_agents::ManagedAgentPairRuntime::connected(
+            None,
+            receipt,
+            receipt_path.clone(),
+            controller,
+            &status,
+            Some(active_job),
+        );
+        let observed = (
+            pair.pid(),
+            pair.active_job
+                .as_ref()
+                .and_then(|job| job.runner_pid)
+                .expect("reattached Desktop must retain runner PID"),
+            status.generation,
+        );
+        state
+            .managed_agent_processes
+            .lock()
+            .expect("lock fresh Desktop runtime registry")
+            .insert(key.clone(), pair);
+        (state, observed)
+    };
+
+    let (first_app_state, first) = adopt();
+    drop(first_app_state);
+    let (relaunched_app_state, second) = adopt();
+    assert_eq!(second, first, "Desktop relaunch must adopt, never respawn");
+    assert_eq!(second.0, runtime_pid);
+    assert_eq!(second.1, runner_pid);
+    assert_eq!(second.2, generation);
+    drop(relaunched_app_state);
+
+    let _ = stop_tx.send(());
+    server_thread.join().expect("join runtime control fixture");
+    let _ = runner.kill();
+    let _ = runner.wait();
 }

@@ -8,9 +8,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::keyring_service;
-use crate::managed_agents::{
-    ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
-};
+use crate::managed_agents::{ManagedAgentRecord, ManagedAgentRuntimeKey};
 use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
@@ -32,13 +30,22 @@ fn agent_secret_store() -> Option<&'static SecretStore> {
     }
 }
 
+fn create_owner_only_dir(path: &Path) -> Result<(), String> {
+    buzz_runtime_pkg::ensure_owner_only_runtime_dir(path).map_err(|error| {
+        format!(
+            "failed to create or verify owner-only dir {}: {error}",
+            path.display()
+        )
+    })
+}
+
 pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("failed to resolve app data dir: {error}"))?
         .join("agents");
-    fs::create_dir_all(&dir).map_err(|error| format!("failed to create agents dir: {error}"))?;
+    create_owner_only_dir(&dir)?;
     Ok(dir)
 }
 
@@ -91,6 +98,79 @@ pub fn managed_agent_runtime_log_path(
     key: &ManagedAgentRuntimeKey,
 ) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{}.log", key.runtime_id())))
+}
+
+fn runtime_lock_path_in(base_dir: &Path, key: &ManagedAgentRuntimeKey) -> PathBuf {
+    base_dir
+        .join("runtime-locks")
+        .join(format!("{}.lock", key.runtime_id()))
+}
+
+/// Pair-scoped lock path shared by Desktop and `buzz-acp`.
+///
+/// The directory is created owner-only on Unix so a lock used to establish
+/// runtime exclusivity is never placed in a group/world-writable directory.
+pub fn managed_agent_runtime_lock_path(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    let base_dir = managed_agents_base_dir(app)?;
+    let lock_dir = base_dir.join("runtime-locks");
+    create_owner_only_dir(&lock_dir)?;
+    Ok(runtime_lock_path_in(&base_dir, key))
+}
+pub fn managed_agent_runtime_state_path(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    Ok(managed_agents_base_dir(app)?
+        .join("runtimes")
+        .join(key.runtime_id()))
+}
+
+/// Owner-only pair-scoped runtime state directory. The runtime receipt and
+/// SQLite database live here so Desktop can reconnect without owning a child
+/// handle.
+pub fn managed_agent_runtime_state_dir(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    let dir = managed_agent_runtime_state_path(app, key)?;
+    create_owner_only_dir(&dir)?;
+    Ok(dir)
+}
+
+pub fn managed_agent_runtime_receipt_path(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    Ok(managed_agent_runtime_state_path(app, key)?.join("runtime.json"))
+}
+pub fn managed_agent_legacy_runtime_receipt_path(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    Ok(agent_pids_dir(app)?.join(format!("{}.json", key.runtime_id())))
+}
+
+pub fn read_all_schema_v2_runtime_receipts(
+    app: &AppHandle,
+) -> Vec<(PathBuf, buzz_runtime_pkg::RuntimeReceipt)> {
+    let Ok(runtimes_dir) = managed_agents_base_dir(app).map(|base| base.join("runtimes")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(runtimes_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path().join("runtime.json");
+            buzz_runtime_pkg::read_runtime_receipt(&path)
+                .ok()
+                .map(|receipt| (path, receipt))
+        })
+        .collect()
 }
 
 /// Log path to surface for an agent whose runtime is not tracked in memory:
@@ -653,9 +733,14 @@ fn maybe_rotate_log(path: &Path) {
 
 pub(crate) fn open_log_file(path: &Path) -> Result<File, String> {
     maybe_rotate_log(path);
-    OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
         .open(path)
         .map_err(|error| format!("failed to open log file {}: {error}", path.display()))
 }
@@ -723,81 +808,26 @@ pub(crate) fn append_log_marker(path: &Path, message: &str) -> Result<(), String
 
 fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("agent-pids");
-    fs::create_dir_all(&dir)
-        .map_err(|error| format!("failed to create agent-pids dir: {error}"))?;
+    create_owner_only_dir(&dir)?;
     Ok(dir)
 }
 
-/// Persist a pair-scoped runtime receipt atomically. Callers must register the
-/// process in memory in the same runtime transition; on write failure they must
-/// terminate the child before releasing that transition.
-pub fn write_agent_runtime_receipt(
-    app: &AppHandle,
-    receipt: &ManagedAgentRuntimeReceipt,
-) -> Result<(), String> {
-    let path = agent_pids_dir(app)?.join(format!("{}.json", receipt.key.runtime_id()));
-    let payload = serde_json::to_vec(receipt)
-        .map_err(|error| format!("failed to serialize runtime receipt: {error}"))?;
-    atomic_write_json_restricted(&path, &payload)
-}
-
-pub fn remove_agent_runtime_receipt(app: &AppHandle, key: &ManagedAgentRuntimeKey) {
-    if let Ok(dir) = agent_pids_dir(app) {
-        let _ = fs::remove_file(dir.join(format!("{}.json", key.runtime_id())));
-    }
-}
-
-pub fn remove_agent_runtime_receipt_path(path: &Path) {
-    let _ = fs::remove_file(path);
-}
-
-pub fn read_all_agent_runtime_receipts(
-    app: &AppHandle,
-) -> Vec<(PathBuf, ManagedAgentRuntimeReceipt)> {
-    let Ok(dir) = agent_pids_dir(app) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|entry| {
-            let path = entry.path();
-            let bytes = fs::read(&path).ok()?;
-            serde_json::from_slice(&bytes)
-                .ok()
-                .map(|receipt| (path, receipt))
-        })
-        .collect()
-}
-
-/// Remove the PID file for an agent (e.g. on normal stop).
-pub fn remove_agent_pid_file(app: &AppHandle, pubkey: &str) {
-    if let Ok(dir) = agent_pids_dir(app) {
-        let _ = fs::remove_file(dir.join(format!("{pubkey}.pid")));
-    }
-}
-
-/// Read all PID files from `agent-pids/`, returning `(pubkey, pid)` pairs.
-pub fn read_all_agent_pid_files(app: &AppHandle) -> Vec<(String, u32)> {
-    let Ok(dir) = agent_pids_dir(app) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            let pubkey = name.strip_suffix(".pid")?;
-            let pid: u32 = fs::read_to_string(entry.path()).ok()?.trim().parse().ok()?;
-            Some((pubkey.to_string(), pid))
-        })
-        .collect()
+pub fn quarantine_agent_runtime_receipt_path(path: &Path) -> Result<PathBuf, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "runtime receipt path has no valid file name".to_string())?;
+    let quarantined = path.with_file_name(format!(
+        "{file_name}.quarantine-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::rename(path, &quarantined).map_err(|error| {
+        format!(
+            "failed to quarantine runtime receipt {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(quarantined)
 }
 
 pub fn read_log_tail(path: &Path, max_lines: usize) -> Result<String, String> {
@@ -853,55 +883,6 @@ pub fn read_log_tail(path: &Path, max_lines: usize) -> Result<String, String> {
 
 fn bytecount_newlines(buf: &[u8]) -> usize {
     buf.iter().filter(|&&b| b == b'\n').count()
-}
-
-/// A meaningful error recovered from an exited agent's log tail.
-pub struct AgentLogError {
-    /// The full log line, wrapped as `Agent reported error…` for display.
-    pub message: String,
-    /// JSON-RPC error code parsed from the line's `(code N)` marker, or a
-    /// synthetic code for known bare prefixes. `None` for legacy-format
-    /// lines that carry no code (or when the code fails to parse as i64).
-    pub code: Option<i64>,
-}
-
-pub fn meaningful_agent_error_from_log(path: &Path) -> Option<AgentLogError> {
-    let tail = read_log_tail(path, 200).ok()?;
-    tail.lines().rev().map(str::trim).find_map(|line| {
-        // New format: "Agent reported error (code -32002): ..."
-        if let Some(rest) = line.strip_prefix("Agent reported error (code ") {
-            if let Some(paren_end) = rest.find("): ") {
-                let code = rest[..paren_end].parse::<i64>().ok();
-                return Some(AgentLogError {
-                    message: line.to_string(),
-                    code,
-                });
-            }
-        }
-        // Legacy format (older buzz-acp builds): "Agent reported error: ..."
-        if line.starts_with("Agent reported error:") {
-            return Some(AgentLogError {
-                message: line.to_string(),
-                code: None,
-            });
-        }
-        // Bare prefixes emitted by older agent binaries whose Display still leaks
-        // unwrapped errors. Promote these so they surface instead of the generic
-        // "harness exited with status N" fallback.
-        if line.starts_with("llm auth:") {
-            return Some(AgentLogError {
-                message: format!("Agent reported error: {line}"),
-                code: Some(-32001),
-            });
-        }
-        if line.starts_with("llm model not found:") {
-            return Some(AgentLogError {
-                message: format!("Agent reported error: {line}"),
-                code: Some(-32002),
-            });
-        }
-        None
-    })
 }
 
 #[cfg(test)]

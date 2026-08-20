@@ -20,6 +20,7 @@ import {
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
+import type { AgentJobView } from "@/features/messages/lib/agentJobProjection";
 import { buildVideoReviewContextsByMessageId } from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -67,6 +68,7 @@ type TimelineMessageListProps = {
    *  the deferred-render fallback — replies usually are not local timeline
    *  rows, so without the relay map every summary row unmounts mid-scrollback. */
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
+  onCancelJob?: (job: AgentJobView) => void;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
@@ -140,6 +142,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   mainEntries,
   threadSummaries,
   messages,
+  onCancelJob,
   onDelete,
   onEdit,
   onMarkUnread,
@@ -264,6 +267,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
               playEntrance={item.entry.message.id === entranceMessageId}
               onEntranceComplete={onEntranceMessageComplete}
+              onCancelJob={onCancelJob}
               onDelete={onDelete}
               onEdit={onEdit}
               onMarkRead={onMarkRead}
@@ -299,6 +303,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       onEntranceMessageComplete,
       messageFooters,
       onDelete,
+      onCancelJob,
       onEdit,
       onMarkRead,
       onMarkUnread,

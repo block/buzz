@@ -451,7 +451,7 @@ async fn restart_setup_mode_agents_after_install(
                 let setup_mode = runtimes
                     .iter()
                     .find(|(key, _)| key.pubkey == record.pubkey)
-                    .map(|(_, p)| p.setup_mode)
+                    .map(|(_, runtime)| runtime.setup_mode())
                     .unwrap_or(false);
                 let effective = resolve_effective_agent_env(
                     record,
@@ -462,7 +462,11 @@ async fn restart_setup_mode_agents_after_install(
                 let now_ready = matches!(agent_readiness(&effective), AgentReadiness::Ready);
                 let pid_alive = runtimes.iter().any(|(key, runtime)| {
                     key.pubkey.eq_ignore_ascii_case(&record.pubkey)
-                        && crate::managed_agents::process_is_running(runtime.child.id())
+                        && !matches!(
+                            runtime.lifecycle,
+                            crate::managed_agents::ManagedAgentRuntimeLifecycle::Failed
+                                | crate::managed_agents::ManagedAgentRuntimeLifecycle::Stopped
+                        )
                 });
                 should_restart_after_install(
                     is_local,
@@ -510,10 +514,10 @@ async fn restart_single_agent_after_install(
     use crate::{
         app_state::AppState,
         managed_agents::{
-            agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
+            agent_readiness, clear_legacy_runtime_pids, find_managed_agent_mut, known_acp_runtime,
             load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
             resolve_effective_agent_env, save_managed_agents, stop_managed_agent_process,
-            sync_managed_agent_processes, AgentReadiness, BackendKind,
+            AgentReadiness, BackendKind,
         },
     };
     use tauri::Manager;
@@ -536,12 +540,8 @@ async fn restart_single_agent_after_install(
             .lock()
             .map_err(|e| format!("failed to acquire runtimes lock: {e}"))?;
 
-        // Sync process state so PID liveness reflects current reality.
-        let (sync_changed, _) = sync_managed_agent_processes(
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app_for_stop),
-        );
+        // Clear migration-only scalar PID bookkeeping.
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app_for_stop, &records)?;
         }
@@ -578,7 +578,7 @@ async fn restart_single_agent_after_install(
         let setup_mode = runtimes
             .iter()
             .find(|(key, _)| key.pubkey == pubkey_owned)
-            .map(|(_, p)| p.setup_mode)
+            .map(|(_, p)| p.setup_mode())
             .unwrap_or(false);
         if !setup_mode {
             return Err(format!(

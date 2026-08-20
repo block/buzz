@@ -314,7 +314,8 @@ pub struct ManagedAgentRecord {
     /// frontend only fires when the agent is idle, connected, and local.
     #[serde(default = "default_auto_restart_on_config_change")]
     pub auto_restart_on_config_change: bool,
-    #[serde(default)]
+    /// Deserialization-only scalar PID migration input; schema v2 never serializes or trusts it.
+    #[serde(default, skip_serializing)]
     pub runtime_pid: Option<u32>,
     #[serde(default)]
     pub backend: BackendKind,
@@ -470,10 +471,9 @@ pub struct ManagedAgentProcess {
     pub adapter_availability: Option<AcpAvailabilityStatus>,
     /// Unpredictable identity shared only with this harness generation.
     pub start_nonce: String,
-    /// Win32 Job Object owning the harness + its entire process tree. Closing
-    /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
-    /// tree — the Windows mirror of the Unix process-group teardown. `None`
-    /// if job creation/assignment failed (we fall back to `Child::kill()`).
+    /// Non-killing Win32 Job Object grouping the harness tree while Desktop is
+    /// connected. Dropping this handle does not terminate the durable runtime.
+    /// `None` if job creation/assignment failed.
     #[cfg(windows)]
     pub job: Option<crate::managed_agents::JobHandle>,
 }

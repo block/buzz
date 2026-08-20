@@ -1,5 +1,11 @@
 import type { Page } from "@playwright/test";
-import type { ChannelTemplate, RelayEvent } from "../../src/shared/api/types";
+import type {
+  ChannelTemplate,
+  ManagedAgentActiveAssignment,
+  ManagedAgentActiveJob,
+  ManagedAgentRuntimeStatus,
+  RelayEvent,
+} from "../../src/shared/api/types";
 import type { MockManagedAgentSeed } from "../../src/testing/e2eBridge";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
@@ -236,13 +242,10 @@ type MockBridgeOptions = {
   managedAgentRuntimes?: Array<{
     pubkey: string;
     relayUrl: string;
-    lifecycle?:
-      | "starting"
-      | "listening"
-      | "waking"
-      | "ready"
-      | "failed"
-      | "stopped";
+    lifecycle?: ManagedAgentRuntimeStatus["lifecycle"];
+    pid?: number | null;
+    activeAssignment?: ManagedAgentActiveAssignment | null;
+    activeJob?: ManagedAgentActiveJob | null;
   }>;
   personas?: MockPersonaSeed[];
   /** Community catalog replaceable-event heads returned by relay queries. */

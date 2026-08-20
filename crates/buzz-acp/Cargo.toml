@@ -20,6 +20,7 @@ path = "src/main.rs"
 buzz-core = { workspace = true }
 buzz-sdk = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
+buzz-runtime = { workspace = true }
 
 # Nostr
 nostr = { workspace = true }
@@ -61,6 +62,7 @@ tracing-subscriber = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+fs2 = { workspace = true }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
@@ -71,11 +73,16 @@ toml = "1.0"
 # Filter expressions
 evalexpr = { workspace = true }
 
-# Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
-# has a #[cfg(not(unix))] fallback in acp.rs.
+# Process-group kill is Unix-only; Windows adapter trees use buzz-runtime's
+# Job Object helper, and other targets retain the direct-child fallback.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["process", "signal"] }
+signal-hook = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_JobObjects", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
+tempfile = "3"

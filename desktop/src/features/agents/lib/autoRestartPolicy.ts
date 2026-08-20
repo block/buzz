@@ -1,3 +1,4 @@
+import type { ManagedAgentAssignmentState } from "@/shared/api/types";
 import type { AgentWorkingSource } from "../agentWorkingSignal";
 
 /**
@@ -33,6 +34,8 @@ export type AutoRestartInputs = {
    * observer stream) and therefore never sufficient to fire on its own —
    * the connected gate plus the continuity window carry that risk. */
   workingSource: AgentWorkingSource;
+  /** Authenticated durable assignment state; every nonterminal state fences restart. */
+  activeAssignmentState: ManagedAgentAssignmentState | null;
   /** Observer relay connection state; anything but "connected" inhibits. */
   connected: boolean;
   /** Only local agents can be restarted by this loop. */
@@ -61,6 +64,7 @@ export function decideAutoRestart(
     working,
     workingSource,
     connected,
+    activeAssignmentState,
     isLocalBackend,
     isRunning,
     edgeConsumed,
@@ -77,10 +81,22 @@ export function decideAutoRestart(
   // `workingSource` travel together, but check both so a partial reader
   // can never slip through.
   if (working || workingSource !== "none") return "hold";
+  if (isNonterminalAssignmentState(activeAssignmentState)) return "hold";
   // One attempt per rising edge: a consumed edge badges until it cycles.
   if (edgeConsumed) return "hold";
 
   return quiescentForMs >= AUTO_RESTART_QUIESCENCE_MS ? "fire" : "arm";
+}
+
+export function isNonterminalAssignmentState(
+  state: ManagedAgentAssignmentState | null | undefined,
+): boolean {
+  return (
+    state != null &&
+    state !== "completed" &&
+    state !== "failed" &&
+    state !== "cancelled"
+  );
 }
 
 /**

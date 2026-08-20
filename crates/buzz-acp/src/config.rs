@@ -4,29 +4,33 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use clap::ValueEnum;
 use nostr::Keys;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
 
-/// Default idle timeout (seconds) when neither `--idle-timeout` nor the
-/// deprecated `--turn-timeout` is set.
+/// Default ACP-turn idle safety valve (seconds) when neither `--idle-timeout`
+/// nor the deprecated `--turn-timeout` is set.
 ///
 /// Sized for slow turns where the agent may go silent on its outer ACP channel
 /// while running long sub-tools (e.g. a buzz-agent running another agent, or
 /// codex/claude doing multi-minute single tool calls). 900s gives 300s of
 /// breathing room above the 600s max shell timeout, so legitimate long-running
-/// tool calls don't race the idle deadline.
+/// tool calls don't race the idle deadline. This does not limit the harness
+/// runtime or detached job lifetime.
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
-/// Default absolute wall-clock cap per agent turn (2 hours).
+/// Default absolute wall-clock safety valve per ACP turn (2 hours). This does
+/// not limit the harness runtime or detached job lifetime.
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 
@@ -34,6 +38,14 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// meaningless and risks arithmetic overflow when deriving the in-flight
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
+
+const MANAGED_BASE_PROMPT: &str = r#"[Base]
+You are a persistent Buzz coworker using a physically restricted managed capability profile.
+Use jobs_start for governed Legacy Harness work; it returns after durable acceptance, and the runtime owns progress and completion independently of this turn.
+Use jobs_status and jobs_logs for local job observation. Cancellation requires an authenticated controller or authorized signed public cancel event and is unavailable to this model profile.
+Repository access is read-only through files_read, files_list, and search_text.
+No shell, process execution, file mutation, git mutation, direct LH invocation, credential access, or Buzz CLI path exists in this profile. Never ask to enable one.
+"#;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -267,18 +279,61 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
-    /// Idle timeout: max seconds of silence before killing a turn.
-    /// Resets on any agent stdout activity.
+    /// ACP-turn idle safety valve: max seconds of agent stdout silence before
+    /// cancelling that turn. Does not limit harness runtime or detached jobs.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
     pub idle_timeout: Option<u64>,
 
-    /// Absolute wall-clock cap per turn (safety valve).
+    /// ACP-turn absolute wall-clock safety valve. Does not limit harness
+    /// runtime or detached jobs.
     #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
     pub max_turn_duration: u64,
 
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
     #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
     pub turn_timeout: Option<u64>,
+
+    /// Pair-scoped lock file used to prevent two harnesses for the same managed
+    /// agent and relay from running concurrently.
+    #[arg(long, env = "BUZZ_ACP_RUNTIME_LOCK_PATH")]
+    pub runtime_lock_path: Option<PathBuf>,
+
+    /// Pair-scoped directory containing runtime.sqlite3.
+    #[arg(long, env = "BUZZ_ACP_RUNTIME_STATE_DIR")]
+    pub runtime_state_dir: Option<PathBuf>,
+    /// Operator-resolved Legacy Harness executable. Managed runtimes require an
+    /// absolute, executable path and canonicalize it before accepting work.
+    #[arg(long, env = "BUZZ_ACP_LH_COMMAND")]
+    pub lh_command: Option<PathBuf>,
+
+    /// Platform path-list of operator-approved job workspace roots.
+    #[arg(long, env = "BUZZ_ACP_JOB_WORKSPACE_ROOTS")]
+    pub job_workspace_roots: Option<OsString>,
+
+    /// Stable pair-scoped runtime identifier.
+    #[arg(long, env = "BUZZ_ACP_RUNTIME_ID")]
+    pub runtime_id: Option<String>,
+
+    /// Owner-only schema-v2 runtime receipt path.
+    #[arg(long, env = "BUZZ_RUNTIME_RECEIPT")]
+    pub runtime_receipt_path: Option<PathBuf>,
+
+    /// Staged rollout gate for schema-v2 state, receipt, and control.
+    #[arg(long, env = "BUZZ_ACP_DURABLE_RUNTIME", default_value_t = false)]
+    pub durable_runtime: bool,
+
+    /// Independent Phase-3 gate for public job events and the managed
+    /// model-facing capability profile. It is effective only in durable mode.
+    #[arg(long, env = "BUZZ_ACP_JOB_EVENT_PUBLICATION", default_value_t = false)]
+    pub job_event_publication: bool,
+
+    /// Owner-only schema-v1 receipt written after the legacy pair lock wins.
+    #[arg(long, env = "BUZZ_ACP_LEGACY_RUNTIME_RECEIPT")]
+    pub legacy_runtime_receipt_path: Option<PathBuf>,
+
+    /// Desktop generation label carried in a schema-v1 receipt.
+    #[arg(long, env = "BUZZ_MANAGED_AGENT", hide = true)]
+    pub desktop_instance_id: Option<String>,
 
     #[arg(
         long,
@@ -514,6 +569,38 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
+/// Privileged operator-owned inputs for the durable managed runtime.
+///
+/// Required runtime identity and state paths are validated at startup. Optional
+/// job-driver inputs remain unavailable until an operator configures them.
+#[derive(Debug, Clone)]
+pub struct ManagedRuntimeConfig {
+    pub runtime_id: String,
+    pub state_dir: PathBuf,
+    pub receipt_path: PathBuf,
+    pub lh_executable: Option<PathBuf>,
+    pub workspace_roots: Vec<PathBuf>,
+    pub lock_path_hash: String,
+}
+
+/// Phase-0 receipt destination trusted only after this process owns the pair lock.
+#[derive(Debug, Clone)]
+pub struct LegacyRuntimeConfig {
+    pub receipt_path: PathBuf,
+    pub desktop_instance_id: String,
+    pub lock_path_hash: String,
+}
+
+fn effective_rollout_gates(
+    durable_runtime_requested: bool,
+    job_event_publication_requested: bool,
+) -> (bool, bool) {
+    (
+        durable_runtime_requested,
+        durable_runtime_requested && job_event_publication_requested,
+    )
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
@@ -523,6 +610,18 @@ pub struct Config {
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
+    /// Pair-scoped OS lock file. `None` preserves standalone harness behavior.
+    pub runtime_lock_path: Option<PathBuf>,
+    /// Validated privileged configuration. Its presence makes inbox and session
+    /// durability mandatory; managed launches have no transient fallback.
+    pub managed_runtime: Option<ManagedRuntimeConfig>,
+    /// Schema-v1 proof emitted only by the lock-owning legacy harness.
+    pub legacy_runtime: Option<LegacyRuntimeConfig>,
+    /// Enables relay publication/ingest for job events. This never implies
+    /// schema-v2 durability and is false unless durable mode is active.
+    pub job_event_publication: bool,
+    /// Enables the physically restricted managed model-facing capability profile.
+    pub managed_capability_profile: bool,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
@@ -726,6 +825,315 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
             _ => character,
         })
         .collect()
+}
+fn managed_bundle_dir(harness_executable: &Path) -> Option<&Path> {
+    let parent = harness_executable.parent()?;
+    if parent.file_name().is_some_and(|name| name == "deps") {
+        parent.parent()
+    } else {
+        Some(parent)
+    }
+}
+
+fn validate_managed_bundled_executable(
+    configured_command: &str,
+    executable_name: &str,
+    harness_executable: &Path,
+) -> Result<PathBuf, ConfigError> {
+    let unsupported = || {
+        ConfigError::ConfigFile(
+            "unsupported_managed_adapter: durable managed mode requires the canonical bundled buzz-agent and buzz-dev-mcp executables"
+                .into(),
+        )
+    };
+    let configured = Path::new(configured_command.trim());
+    if configured.as_os_str().is_empty() || !configured.is_absolute() {
+        return Err(unsupported());
+    }
+
+    let harness = std::fs::canonicalize(harness_executable).map_err(|_| unsupported())?;
+    let expected_harness_name = format!("buzz-acp{}", std::env::consts::EXE_SUFFIX);
+    if harness.file_name() != Some(std::ffi::OsStr::new(&expected_harness_name)) {
+        return Err(unsupported());
+    }
+    let bundle_dir = managed_bundle_dir(&harness).ok_or_else(unsupported)?;
+    let expected = bundle_dir.join(format!("{executable_name}{}", std::env::consts::EXE_SUFFIX));
+    let expected_link = std::fs::symlink_metadata(&expected).map_err(|_| unsupported())?;
+    if expected_link.file_type().is_symlink() {
+        return Err(unsupported());
+    }
+    let canonical_expected = std::fs::canonicalize(&expected).map_err(|_| unsupported())?;
+    let canonical_configured = std::fs::canonicalize(configured).map_err(|_| unsupported())?;
+    if configured != canonical_configured || canonical_configured != canonical_expected {
+        return Err(unsupported());
+    }
+
+    let metadata = std::fs::metadata(&canonical_configured).map_err(|_| unsupported())?;
+    if !metadata.is_file() {
+        return Err(unsupported());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(unsupported());
+        }
+    }
+    Ok(canonical_configured)
+}
+
+/// Borrowed operator-supplied inputs for one managed runtime configuration.
+struct ManagedRuntimeInputs<'a> {
+    agent_command: &'a str,
+    mcp_command: &'a str,
+    harness_executable: &'a Path,
+    runtime_lock_path: Option<&'a Path>,
+    state_dir: Option<&'a Path>,
+    runtime_id: Option<&'a str>,
+    receipt_path: Option<&'a Path>,
+    lh_command: Option<&'a Path>,
+    workspace_roots: Option<&'a OsString>,
+}
+
+fn managed_runtime_config(
+    inputs: ManagedRuntimeInputs<'_>,
+) -> Result<ManagedRuntimeConfig, ConfigError> {
+    let ManagedRuntimeInputs {
+        agent_command,
+        mcp_command,
+        harness_executable,
+        runtime_lock_path,
+        state_dir,
+        runtime_id,
+        receipt_path,
+        lh_command,
+        workspace_roots,
+    } = inputs;
+    validate_managed_bundled_executable(agent_command, "buzz-agent", harness_executable)?;
+    validate_managed_bundled_executable(mcp_command, "buzz-dev-mcp", harness_executable)?;
+    let runtime_lock_path = runtime_lock_path.ok_or_else(|| {
+        ConfigError::ConfigFile("managed runtime requires BUZZ_ACP_RUNTIME_LOCK_PATH".into())
+    })?;
+    if !runtime_lock_path.is_absolute() {
+        return Err(ConfigError::ConfigFile(
+            "BUZZ_ACP_RUNTIME_LOCK_PATH must be absolute".into(),
+        ));
+    }
+    let lock_path_hash = hex::encode(Sha256::digest(
+        runtime_lock_path.as_os_str().as_encoded_bytes(),
+    ));
+
+    let state_dir = state_dir.ok_or_else(|| {
+        ConfigError::ConfigFile("managed runtime requires BUZZ_ACP_RUNTIME_STATE_DIR".into())
+    })?;
+    ensure_owner_only_dir(state_dir)?;
+    let state_dir = std::fs::canonicalize(state_dir).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "invalid runtime state directory {}: {error}",
+            state_dir.display()
+        ))
+    })?;
+
+    let runtime_id = runtime_id
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        })
+        .ok_or_else(|| {
+            ConfigError::ConfigFile("managed runtime requires a safe BUZZ_ACP_RUNTIME_ID".into())
+        })?
+        .to_string();
+
+    let receipt_path = receipt_path.ok_or_else(|| {
+        ConfigError::ConfigFile("managed runtime requires BUZZ_RUNTIME_RECEIPT".into())
+    })?;
+    if !receipt_path.is_absolute() {
+        return Err(ConfigError::ConfigFile(
+            "BUZZ_RUNTIME_RECEIPT must be an absolute path".into(),
+        ));
+    }
+    let receipt_parent = receipt_path.parent().ok_or_else(|| {
+        ConfigError::ConfigFile("BUZZ_RUNTIME_RECEIPT has no parent directory".into())
+    })?;
+    ensure_owner_only_dir(receipt_parent)?;
+    let receipt_parent = std::fs::canonicalize(receipt_parent).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "invalid runtime receipt directory {}: {error}",
+            receipt_parent.display()
+        ))
+    })?;
+    if !receipt_parent.starts_with(&state_dir) {
+        return Err(ConfigError::ConfigFile(
+            "BUZZ_RUNTIME_RECEIPT must be contained by BUZZ_ACP_RUNTIME_STATE_DIR".into(),
+        ));
+    }
+    let file_name = receipt_path
+        .file_name()
+        .ok_or_else(|| ConfigError::ConfigFile("BUZZ_RUNTIME_RECEIPT must name a file".into()))?;
+    let receipt_path = receipt_parent.join(file_name);
+
+    let lh_executable =
+        if let Some(configured_lh) = lh_command.filter(|path| !path.as_os_str().is_empty()) {
+            if !configured_lh.is_absolute() {
+                return Err(ConfigError::ConfigFile(
+                    "driver_unavailable: BUZZ_ACP_LH_COMMAND must be absolute".into(),
+                ));
+            }
+            let canonical = std::fs::canonicalize(configured_lh).map_err(|error| {
+                ConfigError::ConfigFile(format!(
+                    "driver_unavailable: cannot resolve {}: {error}",
+                    configured_lh.display()
+                ))
+            })?;
+            let metadata = std::fs::metadata(&canonical).map_err(|error| {
+                ConfigError::ConfigFile(format!(
+                    "driver_unavailable: cannot inspect {}: {error}",
+                    canonical.display()
+                ))
+            })?;
+            if !metadata.is_file() || !is_executable(&metadata) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "driver_unavailable: {} is not an executable file",
+                    canonical.display()
+                )));
+            }
+            Some(canonical)
+        } else {
+            None
+        };
+
+    let raw_roots = workspace_roots.filter(|roots| !roots.is_empty());
+    let mut canonical_roots = Vec::new();
+    if let Some(raw_roots) = raw_roots {
+        for root in std::env::split_paths(raw_roots) {
+            if !root.is_absolute() {
+                return Err(ConfigError::ConfigFile(format!(
+                    "workspace_not_allowed: workspace root {} must be absolute",
+                    root.display()
+                )));
+            }
+            let canonical = std::fs::canonicalize(&root).map_err(|error| {
+                ConfigError::ConfigFile(format!(
+                    "workspace_not_allowed: cannot resolve workspace root {}: {error}",
+                    root.display()
+                ))
+            })?;
+            if !canonical.is_dir() {
+                return Err(ConfigError::ConfigFile(format!(
+                    "workspace_not_allowed: workspace root {} is not a directory",
+                    canonical.display()
+                )));
+            }
+            if !canonical_roots.contains(&canonical) {
+                canonical_roots.push(canonical);
+            }
+        }
+    }
+
+    Ok(ManagedRuntimeConfig {
+        lock_path_hash,
+        runtime_id,
+        state_dir,
+        receipt_path,
+        lh_executable,
+        workspace_roots: canonical_roots,
+    })
+}
+
+fn legacy_runtime_config(
+    runtime_lock_path: Option<&Path>,
+    receipt_path: Option<&Path>,
+    desktop_instance_id: Option<&str>,
+) -> Result<Option<LegacyRuntimeConfig>, ConfigError> {
+    let Some(receipt_path) = receipt_path else {
+        return Ok(None);
+    };
+    let runtime_lock_path = runtime_lock_path.ok_or_else(|| {
+        ConfigError::ConfigFile(
+            "schema-v1 runtime receipt requires BUZZ_ACP_RUNTIME_LOCK_PATH".into(),
+        )
+    })?;
+    if !runtime_lock_path.is_absolute() || !receipt_path.is_absolute() {
+        return Err(ConfigError::ConfigFile(
+            "schema-v1 runtime lock and receipt paths must be absolute".into(),
+        ));
+    }
+    let desktop_instance_id = desktop_instance_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| {
+            ConfigError::ConfigFile("schema-v1 runtime receipt requires BUZZ_MANAGED_AGENT".into())
+        })?
+        .to_string();
+    let parent = receipt_path.parent().ok_or_else(|| {
+        ConfigError::ConfigFile("schema-v1 runtime receipt has no parent directory".into())
+    })?;
+    ensure_owner_only_dir(parent)?;
+    let parent = std::fs::canonicalize(parent).map_err(|error| {
+        ConfigError::ConfigFile(format!(
+            "invalid schema-v1 runtime receipt directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+    let file_name = receipt_path.file_name().ok_or_else(|| {
+        ConfigError::ConfigFile("schema-v1 runtime receipt must name a file".into())
+    })?;
+    Ok(Some(LegacyRuntimeConfig {
+        receipt_path: parent.join(file_name),
+        desktop_instance_id,
+        lock_path_hash: hex::encode(Sha256::digest(
+            runtime_lock_path.as_os_str().as_encoded_bytes(),
+        )),
+    }))
+}
+
+fn ensure_owner_only_dir(path: &Path) -> Result<(), ConfigError> {
+    #[cfg(windows)]
+    {
+        return buzz_runtime::ensure_owner_only_runtime_dir(path).map_err(|error| {
+            ConfigError::ConfigFile(format!(
+                "runtime directory {} is not owner-only: {error}",
+                path.display()
+            ))
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
+        buzz_runtime::ensure_owner_only_runtime_dir(path).map_err(|error| {
+            ConfigError::ConfigFile(format!(
+                "runtime directory {} is not owner-only: {error}",
+                path.display()
+            ))
+        })
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(windows)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_file()
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
@@ -1090,6 +1498,48 @@ impl Config {
             };
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
+        let (durable_runtime, job_event_publication) =
+            effective_rollout_gates(args.durable_runtime, args.job_event_publication);
+        let managed_runtime = if durable_runtime {
+            let harness_executable = std::env::current_exe().map_err(|_| {
+                ConfigError::ConfigFile(
+                    "unsupported_managed_adapter: cannot verify bundled executable identity".into(),
+                )
+            })?;
+            Some(managed_runtime_config(ManagedRuntimeInputs {
+                agent_command: &agent_command,
+                mcp_command: &args.mcp_command,
+                harness_executable: &harness_executable,
+                runtime_lock_path: args.runtime_lock_path.as_deref(),
+                state_dir: args.runtime_state_dir.as_deref(),
+                runtime_id: args.runtime_id.as_deref(),
+                receipt_path: args.runtime_receipt_path.as_deref(),
+                lh_command: args.lh_command.as_deref(),
+                workspace_roots: args.job_workspace_roots.as_ref(),
+            })?)
+        } else {
+            None
+        };
+        let legacy_runtime = if durable_runtime {
+            None
+        } else {
+            legacy_runtime_config(
+                args.runtime_lock_path.as_deref(),
+                args.legacy_runtime_receipt_path.as_deref(),
+                args.desktop_instance_id.as_deref(),
+            )?
+        };
+        if let Some(runtime) = &managed_runtime {
+            persona_env_vars.push((
+                "BUZZ_RUNTIME_RECEIPT".into(),
+                runtime.receipt_path.to_string_lossy().into_owned(),
+            ));
+        }
+        let managed_capability_profile = job_event_publication;
+        let base_prompt_content = managed_capability_profile
+            .then(|| MANAGED_BASE_PROMPT.to_string())
+            .or(base_prompt_content);
+        let no_base_prompt = !managed_capability_profile && args.no_base_prompt;
 
         let config = Config {
             keys,
@@ -1099,6 +1549,11 @@ impl Config {
             mcp_command: args.mcp_command,
             idle_timeout_secs,
             max_turn_duration_secs,
+            runtime_lock_path: args.runtime_lock_path,
+            managed_runtime,
+            legacy_runtime,
+            job_event_publication,
+            managed_capability_profile,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
@@ -1141,7 +1596,7 @@ impl Config {
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
-            no_base_prompt: args.no_base_prompt,
+            no_base_prompt,
             base_prompt_content,
         };
 
@@ -1163,8 +1618,20 @@ impl Config {
             modes.sort();
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
+        let runtime_lock = if self.runtime_lock_path.is_some() {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let runtime_mode = if self.managed_runtime.is_some() {
+            "schema_v2"
+        } else if self.legacy_runtime.is_some() {
+            "schema_v1"
+        } else {
+            "standalone"
+        };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} acp_turn_idle_safety_valve={}s acp_turn_hard_safety_valve={}s runtime_job_lifetime=not_limited_by_acp_turn_safety_valves runtime_lock={} runtime_mode={} job_event_publication={} managed_capability_profile={} agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1172,6 +1639,10 @@ impl Config {
             self.mcp_command,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
+            runtime_lock,
+            runtime_mode,
+            self.job_event_publication,
+            self.managed_capability_profile,
             self.agents,
             self.heartbeat_interval_secs,
             self.subscribe_mode,
@@ -1480,6 +1951,11 @@ mod tests {
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
+            runtime_lock_path: None,
+            managed_runtime: None,
+            legacy_runtime: None,
+            job_event_publication: false,
+            managed_capability_profile: false,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -2479,14 +2955,20 @@ channels = "ALL"
     fn test_config_summary_includes_idle_and_max_turn() {
         let config = test_config(SubscribeMode::Mentions);
         let summary = config.summary();
-        let expected_idle = format!("idle_timeout={DEFAULT_IDLE_TIMEOUT_SECS}s");
+        let expected_idle = format!("acp_turn_idle_safety_valve={DEFAULT_IDLE_TIMEOUT_SECS}s");
         assert!(
             summary.contains(&expected_idle),
             "summary should include {expected_idle}: {summary}"
         );
         assert!(
-            summary.contains(&format!("max_turn={DEFAULT_MAX_TURN_DURATION_SECS}s")),
-            "summary should include max_turn: {summary}"
+            summary.contains(&format!(
+                "acp_turn_hard_safety_valve={DEFAULT_MAX_TURN_DURATION_SECS}s"
+            )),
+            "summary should include ACP turn hard safety valve: {summary}"
+        );
+        assert!(
+            summary.contains("runtime_job_lifetime=not_limited_by_acp_turn_safety_valves"),
+            "summary should distinguish turn limits from runtime/job lifetime: {summary}"
         );
     }
 
@@ -2810,6 +3292,69 @@ channels = "ALL"
         "0000000000000000000000000000000000000000000000000000000000000001";
 
     #[test]
+    fn unset_turn_limits_resolve_to_900_and_7200_seconds() {
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("clap should parse args");
+        assert_eq!(args.idle_timeout, None);
+        assert_eq!(args.turn_timeout, None);
+        assert_eq!(args.max_turn_duration, 7200);
+
+        let config = Config::from_args(args).expect("default config should resolve");
+        assert_eq!(config.idle_timeout_secs, 900);
+        assert_eq!(config.max_turn_duration_secs, 7200);
+    }
+
+    #[test]
+    fn runtime_lock_path_cli_flag_flows_into_config() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--runtime-lock-path",
+            "/tmp/buzz-acp-runtime.lock",
+        ])
+        .expect("clap should parse runtime lock path");
+
+        let config = Config::from_args(args).expect("runtime lock path config should resolve");
+        assert_eq!(
+            config.runtime_lock_path,
+            Some(PathBuf::from("/tmp/buzz-acp-runtime.lock"))
+        );
+        assert!(
+            config.managed_runtime.is_none(),
+            "the legacy pair lock alone must not imply schema-v2 managed state"
+        );
+    }
+
+    #[test]
+    fn rollout_gates_are_independent_and_publication_never_implies_durability() {
+        assert_eq!(effective_rollout_gates(false, false), (false, false));
+        assert_eq!(effective_rollout_gates(false, true), (false, false));
+        assert_eq!(effective_rollout_gates(true, false), (true, false));
+        assert_eq!(effective_rollout_gates(true, true), (true, true));
+    }
+
+    #[test]
+    fn partial_managed_runtime_inputs_fail_closed_instead_of_falling_back() {
+        let state_dir = std::env::temp_dir().join("buzz-partial-managed-runtime");
+        let args = CliArgs::try_parse_from(vec![
+            "buzz-acp".to_string(),
+            "--private-key".to_string(),
+            TEST_PRIVATE_KEY.to_string(),
+            "--durable-runtime".to_string(),
+            "--agent-command".to_string(),
+            "buzz-agent".to_string(),
+            "--runtime-state-dir".to_string(),
+            state_dir.display().to_string(),
+        ])
+        .expect("clap should parse managed state input");
+
+        let error = Config::from_args(args)
+            .expect_err("enabled durable mode must not fall back to transient behavior");
+        assert!(error.to_string().contains("unsupported_managed_adapter"));
+    }
+
+    #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
         // --allowed-respond-to=owner-only,allowlist + --respond-to=anyone → ConfigError
         let args = CliArgs::try_parse_from([
@@ -3019,5 +3564,318 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+    struct ManagedConfigFixture {
+        root: PathBuf,
+        lock: PathBuf,
+        state: PathBuf,
+        workspace: PathBuf,
+        harness_executable: PathBuf,
+        agent_executable: PathBuf,
+        mcp_executable: PathBuf,
+        executable: PathBuf,
+        receipt: PathBuf,
+    }
+
+    impl ManagedConfigFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!("buzz-acp-config-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&root).expect("create fixture root");
+            let root = std::fs::canonicalize(root).expect("canonical fixture root");
+            let state = root.join("state");
+            let workspace = root.join("workspace");
+            std::fs::create_dir_all(&state).expect("create state");
+            std::fs::create_dir_all(&workspace).expect("create workspace");
+            let harness_executable = root.join(format!("buzz-acp{}", std::env::consts::EXE_SUFFIX));
+            let agent_executable = root.join(format!("buzz-agent{}", std::env::consts::EXE_SUFFIX));
+            let mcp_executable = root.join(format!("buzz-dev-mcp{}", std::env::consts::EXE_SUFFIX));
+            let executable = root.join("lh");
+            for path in [
+                &harness_executable,
+                &agent_executable,
+                &mcp_executable,
+                &executable,
+            ] {
+                std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("write fake executable");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                        .expect("make fake executable");
+                }
+            }
+            let receipt = state.join("runtime.json");
+            let lock = state.join("runtime.lock");
+            Self {
+                root,
+                lock,
+                state,
+                workspace,
+                harness_executable,
+                agent_executable,
+                mcp_executable,
+                executable,
+                receipt,
+            }
+        }
+
+        fn roots(&self) -> OsString {
+            std::env::join_paths([&self.workspace]).expect("join workspace roots")
+        }
+
+        fn agent_command(&self) -> &str {
+            self.agent_executable.to_str().expect("UTF-8 fixture path")
+        }
+
+        fn mcp_command(&self) -> &str {
+            self.mcp_executable.to_str().expect("UTF-8 fixture path")
+        }
+
+        /// Canonical managed inputs with no job driver and no approved roots.
+        fn inputs(&self) -> ManagedRuntimeInputs<'_> {
+            ManagedRuntimeInputs {
+                agent_command: self.agent_command(),
+                mcp_command: self.mcp_command(),
+                harness_executable: &self.harness_executable,
+                runtime_lock_path: Some(&self.lock),
+                state_dir: Some(&self.state),
+                runtime_id: Some("agent_pair"),
+                receipt_path: Some(&self.receipt),
+                lh_command: None,
+                workspace_roots: None,
+            }
+        }
+    }
+
+    impl Drop for ManagedConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn managed_runtime_rejects_arbitrary_same_named_agent_and_mcp() {
+        let fixture = ManagedConfigFixture::new();
+        let spoof_dir = fixture.root.join("spoof");
+        std::fs::create_dir_all(&spoof_dir).expect("create spoof dir");
+        let spoof_agent = spoof_dir.join(format!("buzz-agent{}", std::env::consts::EXE_SUFFIX));
+        let spoof_mcp = spoof_dir.join(format!("buzz-dev-mcp{}", std::env::consts::EXE_SUFFIX));
+        std::fs::copy(&fixture.agent_executable, &spoof_agent).expect("copy spoof agent");
+        std::fs::copy(&fixture.mcp_executable, &spoof_mcp).expect("copy spoof MCP");
+
+        let agent_error = validate_managed_bundled_executable(
+            spoof_agent.to_str().expect("UTF-8 fixture path"),
+            "buzz-agent",
+            &fixture.harness_executable,
+        )
+        .expect_err("an arbitrary buzz-agent basename must fail closed");
+        assert!(agent_error
+            .to_string()
+            .contains("unsupported_managed_adapter"));
+
+        let mcp_error = validate_managed_bundled_executable(
+            spoof_mcp.to_str().expect("UTF-8 fixture path"),
+            "buzz-dev-mcp",
+            &fixture.harness_executable,
+        )
+        .expect_err("an arbitrary MCP executable must fail closed");
+        assert!(mcp_error
+            .to_string()
+            .contains("unsupported_managed_adapter"));
+    }
+
+    #[test]
+    fn managed_runtime_rejects_bare_path_inferred_commands() {
+        let fixture = ManagedConfigFixture::new();
+        for (command, executable_name) in [
+            ("buzz-agent", "buzz-agent"),
+            ("buzz-dev-mcp", "buzz-dev-mcp"),
+        ] {
+            let error = validate_managed_bundled_executable(
+                command,
+                executable_name,
+                &fixture.harness_executable,
+            )
+            .expect_err("managed executable identity must never be inferred from PATH");
+            assert!(error.to_string().contains("unsupported_managed_adapter"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_runtime_requires_executable_agent_and_mcp_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let agent_fixture = ManagedConfigFixture::new();
+        std::fs::set_permissions(
+            &agent_fixture.agent_executable,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("remove agent executable bit");
+        let agent_error = validate_managed_bundled_executable(
+            agent_fixture.agent_command(),
+            "buzz-agent",
+            &agent_fixture.harness_executable,
+        )
+        .expect_err("non-executable bundled agent must fail closed");
+        assert!(agent_error
+            .to_string()
+            .contains("unsupported_managed_adapter"));
+
+        let mcp_fixture = ManagedConfigFixture::new();
+        std::fs::set_permissions(
+            &mcp_fixture.mcp_executable,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("remove MCP executable bit");
+        let mcp_error = validate_managed_bundled_executable(
+            mcp_fixture.mcp_command(),
+            "buzz-dev-mcp",
+            &mcp_fixture.harness_executable,
+        )
+        .expect_err("non-executable bundled MCP must fail closed");
+        assert!(mcp_error
+            .to_string()
+            .contains("unsupported_managed_adapter"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_runtime_rejects_windows_command_shims() {
+        let fixture = ManagedConfigFixture::new();
+        for extension in ["cmd", "bat"] {
+            let shim = fixture.root.join(format!("buzz-agent.{extension}"));
+            std::fs::write(&shim, b"@exit /b 0\r\n").expect("write command shim");
+            let error = validate_managed_bundled_executable(
+                shim.to_str().expect("UTF-8 fixture path"),
+                "buzz-agent",
+                &fixture.harness_executable,
+            )
+            .expect_err("Windows command shims are not bundled executable identities");
+            assert!(error.to_string().contains("unsupported_managed_adapter"));
+        }
+    }
+
+    #[test]
+    fn managed_runtime_rejects_missing_mcp() {
+        let fixture = ManagedConfigFixture::new();
+        std::fs::remove_file(&fixture.mcp_executable).expect("remove bundled MCP");
+        let error = managed_runtime_config(fixture.inputs())
+            .expect_err("managed mode without the bundled MCP must fail closed");
+        assert!(error.to_string().contains("unsupported_managed_adapter"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_runtime_rejects_symlinked_command_paths() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = ManagedConfigFixture::new();
+        let symlink_dir = fixture.root.join("symlink");
+        std::fs::create_dir_all(&symlink_dir).expect("create symlink dir");
+        let symlinked_agent =
+            symlink_dir.join(format!("buzz-agent{}", std::env::consts::EXE_SUFFIX));
+        symlink(&fixture.agent_executable, &symlinked_agent).expect("create agent symlink");
+        let error = validate_managed_bundled_executable(
+            symlinked_agent.to_str().expect("UTF-8 fixture path"),
+            "buzz-agent",
+            &fixture.harness_executable,
+        )
+        .expect_err("a symlink alias must not authorize managed mode");
+        assert!(error.to_string().contains("unsupported_managed_adapter"));
+    }
+
+    #[test]
+    fn non_managed_custom_commands_remain_unchanged() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "custom-native-adapter",
+            "--mcp-command",
+            "custom-mcp",
+        ])
+        .expect("standalone custom commands must still parse");
+        let config = Config::from_args(args).expect("standalone custom commands must remain valid");
+        assert_eq!(config.agent_command, "custom-native-adapter");
+        assert_eq!(config.mcp_command, "custom-mcp");
+        assert!(config.managed_runtime.is_none());
+    }
+
+    #[test]
+    fn managed_runtime_accepts_canonical_bundled_pair_and_canonicalizes_operator_paths() {
+        let fixture = ManagedConfigFixture::new();
+        let roots = fixture.roots();
+        let config = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(&fixture.executable),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
+        .expect("valid managed config");
+
+        assert_eq!(
+            config.lh_executable,
+            Some(std::fs::canonicalize(&fixture.executable).expect("canonical executable"))
+        );
+        assert_eq!(
+            config.workspace_roots,
+            vec![std::fs::canonicalize(&fixture.workspace).expect("canonical workspace")]
+        );
+    }
+
+    #[test]
+    fn managed_runtime_allows_unavailable_lh_and_roots_but_rejects_relative_lh() {
+        let fixture = ManagedConfigFixture::new();
+        let empty_roots = OsString::new();
+        let unavailable = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(Path::new("")),
+            workspace_roots: Some(&empty_roots),
+            ..fixture.inputs()
+        })
+        .expect("unavailable job configuration must not block conversation");
+        assert_eq!(unavailable.lh_executable, None);
+        assert!(unavailable.workspace_roots.is_empty());
+
+        let missing = managed_runtime_config(fixture.inputs())
+            .expect("missing job configuration must not block conversation");
+        assert_eq!(missing.lh_executable, None);
+        assert!(missing.workspace_roots.is_empty());
+
+        let roots = fixture.roots();
+        let relative = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(Path::new("lh")),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
+        .expect_err("relative LH must fail");
+        assert!(relative.to_string().contains("driver_unavailable"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_runtime_rejects_non_executable_lh_and_custom_adapter() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = ManagedConfigFixture::new();
+        let roots = fixture.roots();
+        std::fs::set_permissions(&fixture.executable, std::fs::Permissions::from_mode(0o600))
+            .expect("remove executable bit");
+        let error = managed_runtime_config(ManagedRuntimeInputs {
+            lh_command: Some(&fixture.executable),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
+        .expect_err("non-executable LH must fail");
+        assert!(error.to_string().contains("driver_unavailable"));
+
+        let custom = managed_runtime_config(ManagedRuntimeInputs {
+            agent_command: "custom-agent",
+            lh_command: Some(&fixture.executable),
+            workspace_roots: Some(&roots),
+            ..fixture.inputs()
+        })
+        .expect_err("custom managed adapter must fail closed");
+        assert!(custom.to_string().contains("unsupported_managed_adapter"));
     }
 }

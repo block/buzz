@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-cli = { path = "../buzz-cli" }
+buzz-runtime = { workspace = true }
+buzz-sdk = { workspace = true }
 git-credential-nostr = { path = "../git-credential-nostr" }
 git-sign-nostr = { path = "../git-sign-nostr" }
 nostr = { workspace = true }
@@ -23,6 +25,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 similar = "3"
@@ -39,6 +42,11 @@ reqwest = { workspace = true }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 buzz-core = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

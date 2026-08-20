@@ -65,3 +65,20 @@ export function mentionsKnownAgent(
     knownAgentPubkeys.has(pubkey.toLowerCase()),
   );
 }
+
+export function channelTimelineEmptyTitle(channel: Channel | null | undefined) {
+  if (!channel) {
+    return "No channel selected";
+  }
+  return channel.channelType === "forum"
+    ? "Forum channels are next"
+    : "No messages yet";
+}
+
+export function channelTimelineEmptyDescription(
+  channel: Channel | null | undefined,
+) {
+  return channel?.channelType === "forum"
+    ? "Select a stream or DM to load real message history in this first integration pass."
+    : "Messages and sub-replies will appear here once the relay has history for this channel.";
+}

@@ -8,10 +8,12 @@ import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
+import { useManagedAgentRuntimeStatus } from "@/features/agents/managedAgentRuntimeHooks";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useNow } from "@/shared/lib/useNow";
 import type {
   ManagedAgent,
+  ManagedAgentRuntimeStatus,
   PresenceLookup,
   PresenceStatus,
 } from "@/shared/api/types";
@@ -20,6 +22,7 @@ import { Button } from "@/shared/ui/button";
 import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
+import { ManagedAgentRuntimeSummary } from "./ManagedAgentRuntimeSummary";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
@@ -53,6 +56,7 @@ export function ManagedAgentRow({
   onSelectLogAgent: (pubkey: string | null) => void;
 }) {
   const isLocal = agent.backend.type === "local";
+  const runtime = useManagedAgentRuntimeStatus(agent.pubkey, agent.relayUrl);
   const runtimeSource =
     agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
   const personaLabel = agent.personaId
@@ -126,6 +130,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
                 status={agent.status}
+                runtime={runtime}
               />
               <RuntimeBlock agent={agent} runtimeSource={runtimeSource} />
             </div>
@@ -149,6 +154,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
                 status={agent.status}
+                runtime={runtime}
               />
               <RuntimeBlock agent={agent} runtimeSource={runtimeSource} />
             </div>
@@ -360,6 +366,7 @@ function StatusBlock({
   presenceStatus,
   processDetail,
   status,
+  runtime,
 }: {
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
   isWorking: boolean;
@@ -367,17 +374,24 @@ function StatusBlock({
   presenceStatus: PresenceStatus | undefined;
   processDetail: string;
   status: ManagedAgent["status"];
+  runtime: ManagedAgentRuntimeStatus | undefined;
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
       <SubsectionLabel className="lg:hidden">Status</SubsectionLabel>
-      <AgentStatusBadge
-        isWorking={isWorking}
-        presenceLoaded={presenceLoaded}
-        presenceStatus={presenceStatus}
-        status={status}
-      />
-      <p className="text-xs text-muted-foreground">{processDetail}</p>
+      {runtime ? (
+        <ManagedAgentRuntimeSummary runtime={runtime} />
+      ) : (
+        <AgentStatusBadge
+          isWorking={isWorking}
+          presenceLoaded={presenceLoaded}
+          presenceStatus={presenceStatus}
+          status={status}
+        />
+      )}
+      <p className="text-xs text-muted-foreground">
+        {runtime?.pid != null ? `PID ${runtime.pid}` : processDetail}
+      </p>
       {friendlyError ? (
         <p
           className={cn(

@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
@@ -588,6 +589,249 @@ impl ChannelInfoResolver {
     }
 }
 
+const WORK_STATUS_PUBLISH_INTERVAL: Duration = Duration::from_secs(15);
+const WORK_STATUS_TEXT_LIMIT: usize = 280;
+
+#[derive(Debug)]
+enum WorkProjectionEvent {
+    TurnStarted(String),
+    TurnFinished(String),
+    PermissionRequested(String),
+    PermissionCleared(String),
+    Refresh,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkStatusHandle {
+    tx: mpsc::UnboundedSender<WorkProjectionEvent>,
+}
+
+impl WorkStatusHandle {
+    fn send(&self, event: WorkProjectionEvent) {
+        let _ = self.tx.send(event);
+    }
+
+    pub(crate) fn refresh(&self) {
+        self.send(WorkProjectionEvent::Refresh);
+    }
+}
+
+struct WorkProjectionTurnGuard {
+    status: Option<WorkStatusHandle>,
+    turn_id: String,
+}
+
+impl WorkProjectionTurnGuard {
+    fn new(status: Option<WorkStatusHandle>, turn_id: String) -> Self {
+        if let Some(status) = &status {
+            status.send(WorkProjectionEvent::TurnStarted(turn_id.clone()));
+        }
+        Self { status, turn_id }
+    }
+}
+
+impl Drop for WorkProjectionTurnGuard {
+    fn drop(&mut self) {
+        if let Some(status) = &self.status {
+            status.send(WorkProjectionEvent::TurnFinished(self.turn_id.clone()));
+        }
+    }
+}
+
+#[derive(Default)]
+struct WorkProjectionFacts {
+    active_turns: HashSet<String>,
+    permission_gates: HashSet<String>,
+}
+
+impl WorkProjectionFacts {
+    fn apply(&mut self, event: WorkProjectionEvent) {
+        match event {
+            WorkProjectionEvent::TurnStarted(turn_id) => {
+                self.active_turns.insert(turn_id);
+            }
+            WorkProjectionEvent::TurnFinished(turn_id) => {
+                self.active_turns.remove(&turn_id);
+                self.permission_gates.remove(&turn_id);
+            }
+            WorkProjectionEvent::PermissionRequested(turn_id) => {
+                self.permission_gates.insert(turn_id);
+            }
+            WorkProjectionEvent::PermissionCleared(turn_id) => {
+                self.permission_gates.remove(&turn_id);
+            }
+            WorkProjectionEvent::Refresh => {}
+        }
+    }
+}
+
+pub(crate) fn spawn_work_status_publisher(
+    store: buzz_runtime::StoreHandle,
+    rest_client: RestClient,
+    keys: nostr::Keys,
+) -> WorkStatusHandle {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_work_status_publisher(store, rest_client, keys, rx));
+    WorkStatusHandle { tx }
+}
+
+async fn run_work_status_publisher(
+    store: buzz_runtime::StoreHandle,
+    rest_client: RestClient,
+    keys: nostr::Keys,
+    mut rx: mpsc::UnboundedReceiver<WorkProjectionEvent>,
+) {
+    let mut facts = WorkProjectionFacts::default();
+    let mut dirty = false;
+    let mut last_publish: Option<tokio::time::Instant> = None;
+    let mut last_text: Option<String> = None;
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let publish_at = last_publish
+            .map(|last| last + WORK_STATUS_PUBLISH_INTERVAL)
+            .filter(|_| dirty);
+        tokio::select! {
+            event = rx.recv() => {
+                let Some(event) = event else { break };
+                facts.apply(event);
+                dirty = true;
+                if last_publish.is_none() {
+                    if let Some(text) = publish_projected_work_status(
+                        &store, &rest_client, &keys, &facts, last_text.as_deref()
+                    ).await {
+                        last_text = Some(text);
+                        dirty = false;
+                        last_publish = Some(tokio::time::Instant::now());
+                    }
+                }
+            }
+            _ = poll.tick() => {
+                dirty = true;
+            }
+            _ = async {
+                match publish_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(text) = publish_projected_work_status(
+                    &store, &rest_client, &keys, &facts, last_text.as_deref()
+                ).await {
+                    last_text = Some(text);
+                    dirty = false;
+                    last_publish = Some(tokio::time::Instant::now());
+                }
+            }
+        }
+    }
+}
+
+async fn publish_projected_work_status(
+    store: &buzz_runtime::StoreHandle,
+    rest_client: &RestClient,
+    keys: &nostr::Keys,
+    facts: &WorkProjectionFacts,
+    last_text: Option<&str>,
+) -> Option<String> {
+    let snapshot = match store.assignment_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(%error, "failed to snapshot durable work state");
+            return None;
+        }
+    };
+    let active_job = match snapshot
+        .active_assignment
+        .as_ref()
+        .and_then(|assignment| assignment.active_job_id)
+        .or_else(|| snapshot.active_jobs.first().copied())
+    {
+        Some(job_id) => match store.get_job(job_id).await {
+            Ok(job) => job,
+            Err(error) => {
+                tracing::warn!(%error, %job_id, "failed to load active job for status");
+                None
+            }
+        },
+        None => None,
+    };
+    let state = buzz_runtime::project_work_state(
+        true,
+        snapshot.recovering,
+        !facts.permission_gates.is_empty(),
+        !facts.active_turns.is_empty(),
+        snapshot.active_assignment.as_ref(),
+        active_job.as_ref(),
+    );
+    let text = format_work_status(
+        state,
+        snapshot.active_assignment.as_ref(),
+        active_job.as_ref(),
+    );
+    if snapshot.terminal_assignment.is_some() {
+        if let Err(error) = store.clear_terminal_assignment().await {
+            tracing::warn!(%error, "failed to clear terminal assignment hot state");
+            return None;
+        }
+    }
+    if last_text == Some(text.as_str()) {
+        return Some(text);
+    }
+    let event = match buzz_sdk::build_user_status(&text, None).and_then(|builder| {
+        builder
+            .sign_with_keys(keys)
+            .map_err(|error| buzz_sdk::SdkError::InvalidInput(error.to_string()))
+    }) {
+        Ok(event) => event,
+        Err(error) => {
+            tracing::warn!(%error, "failed to build durable work status");
+            return None;
+        }
+    };
+    if let Err(error) = rest_client.submit_event(&event).await {
+        tracing::warn!(%error, "failed to publish durable work status");
+        return None;
+    }
+    Some(text)
+}
+
+fn format_work_status(
+    state: buzz_runtime::WorkState,
+    assignment: Option<&buzz_runtime::AssignmentRecord>,
+    job: Option<&buzz_runtime::JobRecord>,
+) -> String {
+    let state = serde_json::to_value(state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "idle".to_owned());
+    let mut text = state;
+    if let Some(summary) = assignment
+        .map(|assignment| single_line(&assignment.summary))
+        .filter(|summary| !summary.is_empty())
+    {
+        text.push_str(" — ");
+        text.push_str(&summary);
+    }
+    if let Some(job) = job {
+        text.push_str(" — job ");
+        text.push_str(&job.job_id.to_string());
+    }
+    truncate_utf8(&mut text, WORK_STATUS_TEXT_LIMIT);
+    text
+}
+
+fn truncate_utf8(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+}
+
 pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
@@ -641,6 +885,11 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Durable runtime state store. `None` preserves the packaged ephemeral path.
+    pub runtime_store: Option<buzz_runtime::StoreHandle>,
+    /// Coalesced NIP-38 work-state publisher. Presence remains a separate
+    /// online/offline availability signal.
+    pub work_status: Option<WorkStatusHandle>,
 }
 
 impl AgentPool {
@@ -991,6 +1240,465 @@ async fn resolve_new_session_channel_context(
     (is_dm, title_channel, Some(info.channel_type))
 }
 
+async fn claim_batch_assignment(
+    ctx: &PromptContext,
+    batch: &FlushBatch,
+    session_id: &str,
+) -> Result<Option<buzz_runtime::AssignmentRecord>, AcpError> {
+    let Some(store) = ctx.runtime_store.as_ref() else {
+        return Ok(None);
+    };
+    let Some(source) = batch.events.first() else {
+        return Ok(None);
+    };
+    let source_event_id = source.event.id.to_hex();
+    let assignment = claim_source_assignment(
+        store,
+        batch.channel_id,
+        source_event_id.clone(),
+        &source.event.content,
+        session_id,
+    )
+    .await?;
+    let assignment = assignment_for_prompt_source(assignment, batch.channel_id, &source_event_id);
+    if assignment.is_some() {
+        if let Some(status) = &ctx.work_status {
+            status.refresh();
+        }
+    }
+    Ok(assignment)
+}
+fn assignment_for_prompt_source(
+    assignment: buzz_runtime::AssignmentRecord,
+    channel_id: Uuid,
+    source_event_id: &str,
+) -> Option<buzz_runtime::AssignmentRecord> {
+    (assignment.channel_id == channel_id
+        && assignment.source_event_id.as_deref() == Some(source_event_id))
+    .then_some(assignment)
+}
+
+async fn claim_source_assignment(
+    store: &buzz_runtime::StoreHandle,
+    channel_id: Uuid,
+    source_event_id: String,
+    source_content: &str,
+    session_id: &str,
+) -> Result<buzz_runtime::AssignmentRecord, AcpError> {
+    let mut summary = single_line(source_content);
+    truncate_utf8(&mut summary, 4 * 1024);
+    let mut assignment = store
+        .claim_assignment(
+            channel_id,
+            Some(source_event_id),
+            summary,
+            Some(session_id.to_owned()),
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(store_error)?;
+    if assignment.active_job_id.is_some() {
+        return Ok(assignment);
+    }
+
+    let source_event_id = assignment.source_event_id.as_deref();
+    let matching_jobs = store
+        .list_jobs(buzz_runtime::JobListFilter {
+            channel_id: Some(assignment.channel_id),
+            state: None,
+        })
+        .await
+        .map_err(store_error)?
+        .into_iter()
+        .filter(|job| {
+            job.source_event_id.as_deref() == source_event_id
+                || job.request_event_id.as_deref() == source_event_id
+        })
+        .collect::<Vec<_>>();
+    let mut active_matches = matching_jobs.iter().filter(|job| !job.state.is_terminal());
+    let matching_job = match (active_matches.next(), active_matches.next()) {
+        (Some(job), None) => Some(job),
+        (None, None) => matching_jobs.first(),
+        _ => None,
+    };
+    if let Some(job) = matching_job {
+        let job_id = job.job_id;
+        assignment = store
+            .link_assignment_job(&assignment.assignment_id, job_id, chrono::Utc::now())
+            .await
+            .map_err(store_error)?;
+        if let Some(current_job) = store.get_job(job_id).await.map_err(store_error)? {
+            assignment = project_already_terminal_job(store, assignment, &current_job).await?;
+        }
+    }
+    Ok(assignment)
+}
+
+async fn project_already_terminal_job(
+    store: &buzz_runtime::StoreHandle,
+    assignment: buzz_runtime::AssignmentRecord,
+    job: &buzz_runtime::JobRecord,
+) -> Result<buzz_runtime::AssignmentRecord, AcpError> {
+    let target = match job.state {
+        buzz_runtime::JobState::Succeeded => buzz_runtime::AssignmentState::Completed,
+        buzz_runtime::JobState::Failed | buzz_runtime::JobState::Lost => {
+            buzz_runtime::AssignmentState::Failed
+        }
+        buzz_runtime::JobState::Cancelled => buzz_runtime::AssignmentState::Cancelled,
+        _ => return Ok(assignment),
+    };
+    let evidence = terminal_job_evidence(job);
+    let reason = (target != buzz_runtime::AssignmentState::Completed).then_some(evidence.clone());
+    let delivery_evidence =
+        (target == buzz_runtime::AssignmentState::Completed).then_some(evidence);
+    let now = chrono::Utc::now();
+    let result = store
+        .set_assignment_state(
+            &assignment.assignment_id,
+            buzz_runtime::AssignmentSetStateRequest {
+                state: target,
+                summary: None,
+                reason: reason.clone(),
+                blocker: None,
+                approval_gate_id: None,
+                delivery_evidence: delivery_evidence.clone(),
+                reply_event_id: None,
+            },
+            now,
+        )
+        .await;
+    match result {
+        Ok(updated) => Ok(updated),
+        Err(buzz_runtime::StoreError::TerminalAssignment { state, .. }) => {
+            let mut terminal = assignment;
+            terminal.state = state;
+            terminal.reason = (state != buzz_runtime::AssignmentState::Completed)
+                .then_some(reason)
+                .flatten();
+            terminal.delivery_evidence = (state == buzz_runtime::AssignmentState::Completed)
+                .then_some(delivery_evidence)
+                .flatten();
+            terminal.last_progress_at = now;
+            terminal.updated_at = now;
+            Ok(terminal)
+        }
+        Err(error) => Err(store_error(error)),
+    }
+}
+
+fn terminal_job_evidence(job: &buzz_runtime::JobRecord) -> String {
+    let state = match job.state {
+        buzz_runtime::JobState::Succeeded => "succeeded",
+        buzz_runtime::JobState::Failed => "failed",
+        buzz_runtime::JobState::Cancelled => "cancelled",
+        buzz_runtime::JobState::Lost => "lost",
+        _ => "nonterminal",
+    };
+    let terminal_event = job.terminal_event_id.as_deref().unwrap_or("unpublished");
+    let mut evidence = format!(
+        "durable job {} attempt {} {state}; terminal event {terminal_event}",
+        job.job_id, job.attempt
+    );
+    if let Some(exit_code) = job.exit_code {
+        evidence.push_str(&format!("; exit code {exit_code}"));
+    }
+    if let Some(error_code) = job.error_code.as_deref() {
+        evidence.push_str("; error code ");
+        evidence.push_str(error_code);
+    }
+    truncate_utf8(&mut evidence, buzz_runtime::MAX_ASSIGNMENT_TEXT_BYTES);
+    evidence
+}
+
+fn assignment_restore_request(
+    assignment: &buzz_runtime::AssignmentRecord,
+) -> buzz_runtime::AssignmentSetStateRequest {
+    buzz_runtime::AssignmentSetStateRequest {
+        state: assignment.state,
+        summary: Some(assignment.summary.clone()),
+        reason: assignment.reason.clone(),
+        blocker: assignment.blocker.clone(),
+        approval_gate_id: assignment.approval_gate_id.clone(),
+        delivery_evidence: assignment.delivery_evidence.clone(),
+        reply_event_id: assignment.reply_event_id.clone(),
+    }
+}
+
+fn install_permission_projection(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    assignment: Option<&buzz_runtime::AssignmentRecord>,
+    turn_id: &str,
+) {
+    let (Some(store), Some(assignment)) = (ctx.runtime_store.clone(), assignment.cloned()) else {
+        agent.acp.set_permission_boundary_hook(None);
+        return;
+    };
+    let assignment_id = assignment.assignment_id;
+    let prior = Arc::new(Mutex::new(None::<buzz_runtime::AssignmentRecord>));
+    let status = ctx.work_status.clone();
+    let turn_id = turn_id.to_owned();
+    agent
+        .acp
+        .set_permission_boundary_hook(Some(Arc::new(move |boundary| {
+            let store = store.clone();
+            let assignment_id = assignment_id.clone();
+            let prior = Arc::clone(&prior);
+            let status = status.clone();
+            let turn_id = turn_id.clone();
+            Box::pin(async move {
+                match boundary {
+                    crate::acp::PermissionBoundary::Requested { gate_id } => {
+                        let active = match store.active_assignment().await {
+                            Ok(Some(active)) if active.assignment_id == assignment_id => active,
+                            Ok(_) => return,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to read assignment at permission boundary");
+                                return;
+                            }
+                        };
+                        if let Ok(mut slot) = prior.lock() {
+                            *slot = Some(active);
+                        }
+                        let request = buzz_runtime::AssignmentSetStateRequest {
+                            state: buzz_runtime::AssignmentState::NeedsApproval,
+                            summary: None,
+                            reason: None,
+                            blocker: None,
+                            approval_gate_id: Some(gate_id),
+                            delivery_evidence: None,
+                            reply_event_id: None,
+                        };
+                        if let Err(error) = store
+                            .set_assignment_state(&assignment_id, request, chrono::Utc::now())
+                            .await
+                        {
+                            tracing::warn!(%error, "failed to project needs-approval assignment state");
+                            return;
+                        }
+                        if let Some(status) = status {
+                            status.send(WorkProjectionEvent::PermissionRequested(turn_id));
+                        }
+                    }
+                    crate::acp::PermissionBoundary::Cleared => {
+                        let restore = prior.lock().ok().and_then(|mut slot| slot.take());
+                        if let Some(restore) = restore {
+                            if let Err(error) = store
+                                .set_assignment_state(
+                                    &assignment_id,
+                                    assignment_restore_request(&restore),
+                                    chrono::Utc::now(),
+                                )
+                                .await
+                            {
+                                tracing::warn!(%error, "failed to restore assignment after permission boundary");
+                            }
+                        }
+                        if let Some(status) = status {
+                            status.send(WorkProjectionEvent::PermissionCleared(turn_id));
+                        }
+                    }
+                }
+            })
+        })));
+}
+
+fn adapter_fingerprint(agent: &OwnedAgent) -> String {
+    format!("{}:acp-v{}", agent.agent_name, agent.protocol_version)
+}
+
+fn session_config_hash(agent: &OwnedAgent, ctx: &PromptContext) -> Result<String, AcpError> {
+    let encoded = serde_json::to_vec(&serde_json::json!({
+        "cwd": ctx.cwd,
+        "mcpServers": ctx.mcp_servers,
+        "basePrompt": ctx.base_prompt,
+        "systemPrompt": ctx.system_prompt,
+        "teamInstructions": ctx.team_instructions,
+        "sessionTitle": ctx.session_title,
+        "permissionMode": ctx.permission_mode.as_wire_str(),
+        "desiredModel": agent.desired_model,
+    }))?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn store_error(error: impl std::fmt::Display) -> AcpError {
+    AcpError::Protocol(format!("runtime session store error: {error}"))
+}
+
+async fn persist_channel_session(
+    agent: &OwnedAgent,
+    ctx: &PromptContext,
+    channel_id: Uuid,
+    session_id: &str,
+    resume_mode: buzz_runtime::ResumeMode,
+) -> Result<(), AcpError> {
+    let Some(store) = &ctx.runtime_store else {
+        return Ok(());
+    };
+    store
+        .upsert_channel_session(buzz_runtime::SessionRecord {
+            channel_id,
+            session_id: session_id.to_string(),
+            adapter_fingerprint: adapter_fingerprint(agent),
+            cwd: ctx.cwd.clone(),
+            config_hash: session_config_hash(agent, ctx)?,
+            resume_mode,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .map_err(store_error)
+}
+
+async fn delete_channel_session(ctx: &PromptContext, channel_id: Uuid) -> Result<(), AcpError> {
+    if let Some(store) = &ctx.runtime_store {
+        store
+            .delete_channel_session(channel_id)
+            .await
+            .map_err(store_error)?;
+    }
+    Ok(())
+}
+
+async fn invalidate_session_durable(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    source: &PromptSource,
+) {
+    if let PromptSource::Channel(channel_id) = source {
+        if let Err(error) = delete_channel_session(ctx, *channel_id).await {
+            tracing::error!(
+                target: "pool::session",
+                channel_id = %channel_id,
+                "failed to delete durable session mapping: {error}"
+            );
+        }
+    }
+    agent.state.invalidate(source);
+}
+
+async fn invalidate_all_sessions_durable(agent: &mut OwnedAgent, ctx: &PromptContext) {
+    let channel_ids = agent.state.sessions.keys().copied().collect::<Vec<_>>();
+    for channel_id in channel_ids {
+        if let Err(error) = delete_channel_session(ctx, channel_id).await {
+            tracing::error!(
+                target: "pool::session",
+                channel_id = %channel_id,
+                "failed to delete durable session mapping: {error}"
+            );
+        }
+    }
+    agent.state.invalidate_all();
+}
+
+fn invalid_persisted_session_error(error: &AcpError) -> bool {
+    let AcpError::AgentError { code, message } = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    *code == -32602
+        || message.contains("unknown session")
+        || message.contains("session not found")
+        || message.contains("invalid session")
+        || message.contains("incompatible")
+        || message.contains("config mismatch")
+}
+
+async fn recovery_block(
+    ctx: &PromptContext,
+    channel_id: Uuid,
+    had_persisted_session: bool,
+) -> Result<Option<String>, AcpError> {
+    let Some(store) = ctx.runtime_store.as_ref() else {
+        return Ok(None);
+    };
+    let Some(assignment) = store.active_assignment().await.map_err(store_error)? else {
+        return Ok(None);
+    };
+    if assignment.channel_id != channel_id
+        || (!had_persisted_session && assignment.state == buzz_runtime::AssignmentState::Reading)
+    {
+        return Ok(None);
+    }
+    let job = match assignment.active_job_id {
+        Some(job_id) => store.get_job(job_id).await.map_err(store_error)?,
+        None => None,
+    };
+    Ok(Some(format_recovery_block(&assignment, job.as_ref())))
+}
+
+fn format_recovery_block(
+    assignment: &buzz_runtime::AssignmentRecord,
+    job: Option<&buzz_runtime::JobRecord>,
+) -> String {
+    let assignment_state = serde_json::to_value(assignment.state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "recovering".to_owned());
+    let source = assignment.source_event_id.as_deref().unwrap_or("none");
+    let job_line = job.map_or_else(
+        || "none".to_owned(),
+        |job| {
+            let state = serde_json::to_value(job.state)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_owned());
+            format!(
+                "{} | {} | progress sequence {} | {}",
+                job.job_id,
+                state,
+                job.progress_seq,
+                single_line(&job.summary)
+            )
+        },
+    );
+    format!(
+        "[Recovery]\n\
+         Active assignment: {} | {} | {}\n\
+         Source event: {}\n\
+         Active job: {}\n\
+         Latest progress: {}",
+        assignment.assignment_id,
+        assignment_state,
+        single_line(&assignment.summary),
+        source,
+        job_line,
+        assignment.last_progress_at.to_rfc3339()
+    )
+}
+
+fn format_assignment_block(assignment: &buzz_runtime::AssignmentRecord) -> String {
+    let state = serde_json::to_value(assignment.state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned());
+    format!(
+        "[Assignment]\n\
+         Authenticated assignment ID: {}\n\
+         Current state: {}\n\
+         For assignment_set_state, pass this exact value as assignment_id. Do not use a source event ID or job ID.\n\
+         To complete this assignment later, use state \"completed\" and include delivery evidence.",
+        assignment.assignment_id, state
+    )
+}
+
+fn assemble_prompt_blocks<'a>(
+    slash_command: Option<&'a str>,
+    assignment: Option<&'a str>,
+    recovery: Option<&'a str>,
+    prompt_sections: &'a [String],
+) -> Vec<&'a str> {
+    slash_command
+        .into_iter()
+        .chain(assignment)
+        .chain(recovery)
+        .chain(prompt_sections.iter().map(String::as_str))
+        .collect()
+}
+
+fn single_line(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
 ///
@@ -1008,6 +1716,7 @@ struct NewSessionChannelContext<'a> {
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
+    channel_id: Option<Uuid>,
     agent_core: Option<&str>,
     channel: NewSessionChannelContext<'_>,
 ) -> Result<String, AcpError> {
@@ -1057,6 +1766,16 @@ async fn create_session_and_apply_model(
             session_title.as_deref(),
         )
         .await?;
+    if let Some(channel_id) = channel_id {
+        persist_channel_session(
+            agent,
+            ctx,
+            channel_id,
+            &resp.session_id,
+            buzz_runtime::ResumeMode::Fresh,
+        )
+        .await?;
+    }
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
@@ -1291,6 +2010,78 @@ fn mcp_servers_with_git_origin(
         }
     }
     servers
+}
+
+async fn recover_or_create_channel_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    channel_id: Uuid,
+    agent_core: Option<&str>,
+    channel: NewSessionChannelContext<'_>,
+) -> Result<(String, bool, Option<String>), AcpError> {
+    let persisted = match &ctx.runtime_store {
+        Some(store) => store
+            .get_channel_session(channel_id)
+            .await
+            .map_err(store_error)?,
+        None => None,
+    };
+
+    if let Some(record) = persisted {
+        let fingerprint_matches = record.adapter_fingerprint == adapter_fingerprint(agent)
+            && record.cwd == ctx.cwd
+            && record.config_hash == session_config_hash(agent, ctx)?;
+        if fingerprint_matches {
+            let recovery = if agent.acp.session_resume_supported() {
+                agent
+                    .acp
+                    .session_resume(&record.session_id, &ctx.cwd, ctx.mcp_servers.clone())
+                    .await
+                    .map(|_| buzz_runtime::ResumeMode::Resume)
+            } else if agent.acp.session_load_supported() {
+                agent
+                    .acp
+                    .session_load(&record.session_id, &ctx.cwd, ctx.mcp_servers.clone())
+                    .await
+                    .map(|_| buzz_runtime::ResumeMode::Load)
+            } else {
+                Err(AcpError::Protocol(
+                    "adapter cannot recover persisted ACP sessions".into(),
+                ))
+            };
+
+            match recovery {
+                Ok(mode) => {
+                    persist_channel_session(agent, ctx, channel_id, &record.session_id, mode)
+                        .await?;
+                    return Ok((record.session_id, false, None));
+                }
+                Err(error) if invalid_persisted_session_error(&error) => {
+                    tracing::warn!(
+                        target: "pool::session",
+                        channel_id = %channel_id,
+                        "persisted ACP session is invalid; creating a fresh recovery session: {error}"
+                    );
+                }
+                Err(AcpError::Protocol(_))
+                    if !agent.acp.session_resume_supported()
+                        && !agent.acp.session_load_supported() => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        delete_channel_session(ctx, channel_id).await?;
+        let session_id =
+            create_session_and_apply_model(agent, ctx, Some(channel_id), agent_core, channel)
+                .await?;
+        let recovery = recovery_block(ctx, channel_id, true).await?;
+        return Ok((session_id, true, recovery));
+    }
+
+    let session_id =
+        create_session_and_apply_model(agent, ctx, Some(channel_id), agent_core, channel).await?;
+    let recovery = recovery_block(ctx, channel_id, false).await?;
+    Ok((session_id, true, recovery))
 }
 
 /// Outcome of a live model-switch RPC returned by [`apply_model_switch`].
@@ -1780,6 +2571,8 @@ pub async fn run_prompt_task(
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
+    let _work_projection_guard =
+        WorkProjectionTurnGuard::new(batch.as_ref().and(ctx.work_status.clone()), turn_id.clone());
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
@@ -1977,18 +2770,32 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
 
-    let (session_id, is_new_session) = match &source {
+    let (session_id, is_new_session, recovery) = match &source {
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
-                (sid.clone(), false)
+                (sid.clone(), false, None)
             } else {
+                if batch.is_none() {
+                    send_prompt_result(
+                        &result_tx,
+                        &turn_id,
+                        agent,
+                        source,
+                        PromptOutcome::Error(AcpError::Protocol(
+                            "channel prompt missing durable inbox batch".into(),
+                        )),
+                        None,
+                    );
+                    return;
+                }
                 // The title is channel-qualified (`Agent · #channel`) so one
                 // agent in several channels doesn't produce identical session
                 // rows; `title_channel` comes from the single resolve above and
                 // is `None` for DM, unresolved, and unnamed channels.
-                match create_session_and_apply_model(
+                match recover_or_create_channel_session(
                     &mut agent,
                     &ctx,
+                    *cid,
                     agent_core.as_deref(),
                     NewSessionChannelContext {
                         huddle_instructions: huddle_instructions.as_deref(),
@@ -2000,10 +2807,10 @@ pub async fn run_prompt_task(
                 )
                 .await
                 {
-                    Ok(sid) => {
+                    Ok((sid, created, recovery)) => {
                         tracing::info!(
                             target: "pool::session",
-                            "created session {sid} for channel {cid}"
+                            "resolved session {sid} for channel {cid}"
                         );
                         agent.state.sessions.insert(*cid, sid.clone());
                         agent
@@ -2017,10 +2824,10 @@ pub async fn run_prompt_task(
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
                         }
-                        (sid, true)
+                        (sid, created, recovery)
                     }
                     Err(AcpError::AgentExited) => {
-                        agent.state.invalidate_all();
+                        invalidate_all_sessions_durable(&mut agent, &ctx).await;
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2049,12 +2856,13 @@ pub async fn run_prompt_task(
         }
         PromptSource::Heartbeat => {
             if let Some(sid) = &agent.state.heartbeat_session {
-                (sid.clone(), false)
+                (sid.clone(), false, None)
             } else {
                 match create_session_and_apply_model(
                     &mut agent,
                     &ctx,
                     None,
+                    agent_core.as_deref(),
                     NewSessionChannelContext {
                         huddle_instructions: None,
                         canvas: None,
@@ -2072,12 +2880,12 @@ pub async fn run_prompt_task(
                             agent.index
                         );
                         agent.state.heartbeat_session = Some(sid.clone());
-                        // Seed a zero usage baseline: buzz-acp spawned this session.
+                        // Seed zero usage baseline: buzz-acp spawned this session.
                         agent.acp.notify_session_spawned(&sid);
-                        (sid, true)
+                        (sid, true, None)
                     }
                     Err(AcpError::AgentExited) => {
-                        agent.state.invalidate_all();
+                        invalidate_all_sessions_durable(&mut agent, &ctx).await;
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -2120,6 +2928,30 @@ pub async fn run_prompt_task(
         }),
     );
 
+    let claimed_assignment = match batch.as_ref() {
+        Some(batch) => match claim_batch_assignment(&ctx, batch, &session_id).await {
+            Ok(assignment) => assignment,
+            Err(error) => {
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::Error(error),
+                    requeue_batch_if_queue(&ctx, batch.clone().into()),
+                );
+                return;
+            }
+        },
+        None => None,
+    };
+    // Build the authenticated assignment context before installing the
+    // permission hook. The same block is then included in the ACP prompt that
+    // can produce permission requests, so state updates never depend on
+    // guessing an event or job identifier.
+    let assignment_block = claimed_assignment.as_ref().map(format_assignment_block);
+    install_permission_projection(&mut agent, &ctx, claimed_assignment.as_ref(), &turn_id);
+
     // Standing context is fixed for the life of a session. Agents with
     // systemPrompt support already hold it from session/new; legacy agents
     // receive it in the session's first user message and never again.
@@ -2147,7 +2979,7 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => agent.state.heartbeat_standing_context_sent,
     };
 
-    if is_new_session {
+    if is_new_session && recovery.is_none() {
         if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
         {
             tracing::info!(
@@ -2197,7 +3029,7 @@ pub async fn run_prompt_task(
                     .await;
                 }
                 Err(AcpError::AgentExited) => {
-                    agent.state.invalidate_all();
+                    invalidate_all_sessions_durable(&mut agent, &ctx).await;
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -2230,10 +3062,10 @@ pub async fn run_prompt_task(
                                 Some(acp_stop_to_core(&stop_reason)),
                             )
                             .await;
-                            agent.state.invalidate(&source);
+                            invalidate_session_durable(&mut agent, &ctx, &source).await;
                         }
                         Err(AcpError::AgentExited) => {
-                            agent.state.invalidate_all();
+                            invalidate_all_sessions_durable(&mut agent, &ctx).await;
                             send_prompt_result(
                                 &result_tx,
                                 &turn_id,
@@ -2249,7 +3081,7 @@ pub async fn run_prompt_task(
                                 target: "pool::session",
                                 "cancel_with_cleanup failed during initial_message timeout: {e}"
                             );
-                            agent.state.invalidate(&source);
+                            invalidate_session_durable(&mut agent, &ctx, &source).await;
                         }
                     }
                     send_prompt_result(
@@ -2269,7 +3101,7 @@ pub async fn run_prompt_task(
                         "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
-                    agent.state.invalidate_all();
+                    invalidate_all_sessions_durable(&mut agent, &ctx).await;
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -2285,7 +3117,7 @@ pub async fn run_prompt_task(
                         target: "pool::session",
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    invalidate_session_durable(&mut agent, &ctx, &source).await;
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -2435,12 +3267,12 @@ pub async fn run_prompt_task(
     // own block. Per-section blocks let the observer size trimmer elide a
     // section body in place while every `[Header]` line survives at the head
     // of its own leaf — so the "Prompt context" panel counts every section.
-    let prompt_blocks: Vec<&str> = match slash_command {
-        Some(ref cmd) => std::iter::once(cmd.as_str())
-            .chain(prompt_sections.iter().map(String::as_str))
-            .collect(),
-        None => prompt_sections.iter().map(String::as_str).collect(),
-    };
+    let prompt_blocks = assemble_prompt_blocks(
+        slash_command.as_deref(),
+        assignment_block.as_deref(),
+        recovery.as_deref(),
+        &prompt_sections,
+    );
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
@@ -2529,7 +3361,7 @@ pub async fn run_prompt_task(
                         {
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
-                                agent.state.invalidate(&source);
+                                invalidate_session_durable(&mut agent, &ctx, &source).await;
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
@@ -2564,9 +3396,9 @@ pub async fn run_prompt_task(
                                     batch,
                                 );
                                 if failure.invalidate_all {
-                                    agent.state.invalidate_all();
+                                    invalidate_all_sessions_durable(&mut agent, &ctx).await;
                                 } else {
-                                    agent.state.invalidate(&source);
+                                    invalidate_session_durable(&mut agent, &ctx, &source).await;
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
@@ -2618,6 +3450,22 @@ pub async fn run_prompt_task(
                                 target: "pool::prompt",
                                 "control signal arrived but turn already completed — treating as success"
                             );
+                        }
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel { .. }
+                        ) {
+                            if let PromptSource::Channel(channel_id) = &source {
+                                if let Err(error) =
+                                    delete_channel_session(&ctx, *channel_id).await
+                                {
+                                    tracing::error!(
+                                        target: "pool::session",
+                                        channel_id = %channel_id,
+                                        "failed to delete durable session mapping: {error}"
+                                    );
+                                }
+                            }
                         }
                         if let PromptSource::Channel(cid) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
@@ -2701,7 +3549,7 @@ pub async fn run_prompt_task(
                     target: "pool::session",
                     "rotating session for {source:?} after {stop_reason:?}",
                 );
-                agent.state.invalidate(&source);
+                invalidate_session_durable(&mut agent, &ctx, &source).await;
             }
 
             let core_stop = acp_stop_to_core(&stop_reason);
@@ -2727,7 +3575,7 @@ pub async fn run_prompt_task(
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
-            agent.state.invalidate_all();
+            invalidate_all_sessions_durable(&mut agent, &ctx).await;
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -2787,7 +3635,7 @@ pub async fn run_prompt_task(
                         "agent {} exited during cancel_with_cleanup",
                         agent.index
                     );
-                    agent.state.invalidate_all();
+                    invalidate_all_sessions_durable(&mut agent, &ctx).await;
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -2812,7 +3660,7 @@ pub async fn run_prompt_task(
                         target: "pool::prompt",
                         "cancel_with_cleanup error: {e} — invalidating session"
                     );
-                    agent.state.invalidate(&source);
+                    invalidate_session_durable(&mut agent, &ctx, &source).await;
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
                         &ctx,
@@ -2841,7 +3689,7 @@ pub async fn run_prompt_task(
                 "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) — agent process is unrecoverable, invalidating all sessions",
                 ctx.max_turn_duration.as_secs()
             );
-            agent.state.invalidate_all();
+            invalidate_all_sessions_durable(&mut agent, &ctx).await;
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
                 &ctx,
@@ -2866,8 +3714,8 @@ pub async fn run_prompt_task(
             // AgentError means the agent caught a problem before mutating
             // session state (e.g. bad LLM response). The session is healthy —
             // don't invalidate it. Other errors may have corrupted state.
-            if !matches!(e, AcpError::AgentError { .. }) {
-                agent.state.invalidate(&source);
+            if invalid_persisted_session_error(&e) || !matches!(e, AcpError::AgentError { .. }) {
+                invalidate_session_durable(&mut agent, &ctx, &source).await;
             }
             let usage = agent.acp.take_turn_usage();
             publish_agent_turn_metric(
@@ -4709,6 +5557,182 @@ mod tests {
         }
     }
 
+    async fn create_terminal_remote_job(
+        store: &buzz_runtime::StoreHandle,
+        channel_id: Uuid,
+        request_event_id: &str,
+        terminal_state: buzz_runtime::JobState,
+    ) -> buzz_runtime::JobRecord {
+        let job_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let created = store
+            .create_remote_job(buzz_runtime::NewJob {
+                job_id,
+                request_event_id: request_event_id.to_owned(),
+                requester_pubkey: "requester".into(),
+                executable: std::env::current_exe().unwrap(),
+                request: buzz_runtime::JobStartRequest {
+                    channel_id,
+                    source_event_id: None,
+                    driver: "lh".into(),
+                    argv: vec!["run".into()],
+                    cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                    summary: "fast remote job".into(),
+                },
+                attempt: 1,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+        let buzz_runtime::CreateJobOutcome::Created(requested) = created else {
+            panic!("new job must be created");
+        };
+        let running = store
+            .transition_job(
+                buzz_runtime::JobTransition {
+                    job_id,
+                    attempt: requested.attempt,
+                    next_state: buzz_runtime::JobState::Running,
+                    runner: None,
+                    progress_seq: None,
+                    exit_code: None,
+                    result_json: None,
+                    error_code: None,
+                    terminal_event_id: None,
+                    publication_state: None,
+                    publication_error: None,
+                    occurred_at: now,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let terminal_event_id = format!("{job_id}-terminal");
+        let kind = if terminal_state == buzz_runtime::JobState::Succeeded {
+            43_004
+        } else {
+            43_006
+        };
+        store
+            .transition_job(
+                buzz_runtime::JobTransition {
+                    job_id,
+                    attempt: running.attempt,
+                    next_state: terminal_state,
+                    runner: None,
+                    progress_seq: None,
+                    exit_code: Some(if terminal_state == buzz_runtime::JobState::Succeeded {
+                        0
+                    } else {
+                        1
+                    }),
+                    result_json: Some(format!("{{\"state\":\"{terminal_state:?}\"}}")),
+                    error_code: (terminal_state != buzz_runtime::JobState::Succeeded)
+                        .then(|| "terminal_test".into()),
+                    terminal_event_id: Some(terminal_event_id.clone()),
+                    publication_state: Some(buzz_runtime::PublicationState::Pending),
+                    publication_error: None,
+                    occurred_at: chrono::Utc::now(),
+                },
+                Some(buzz_runtime::OutboxEvent {
+                    event_id: terminal_event_id,
+                    job_id: Some(job_id),
+                    channel_id,
+                    ordering_key: format!("job:{job_id}"),
+                    kind,
+                    seq: None,
+                    is_terminal: true,
+                    event_json: "{}".into(),
+                    created_at: chrono::Utc::now(),
+                }),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn terminal_remote_job_before_assignment_claim_projects_terminal_and_releases_hot_work() {
+        let cases = [
+            (
+                buzz_runtime::JobState::Succeeded,
+                buzz_runtime::AssignmentState::Completed,
+            ),
+            (
+                buzz_runtime::JobState::Failed,
+                buzz_runtime::AssignmentState::Failed,
+            ),
+            (
+                buzz_runtime::JobState::Cancelled,
+                buzz_runtime::AssignmentState::Cancelled,
+            ),
+        ];
+        for (index, (job_state, assignment_state)) in cases.into_iter().enumerate() {
+            let directory = tempfile::tempdir().unwrap();
+            let store =
+                buzz_runtime::StoreHandle::open(directory.path().join("runtime.sqlite3")).unwrap();
+            let channel_id = Uuid::new_v4();
+            let source_event_id = format!("{:064x}", index + 1);
+
+            let terminal_job =
+                create_terminal_remote_job(&store, channel_id, &source_event_id, job_state).await;
+            let assignment = claim_source_assignment(
+                &store,
+                channel_id,
+                source_event_id.clone(),
+                "run the remote repair",
+                "session-1",
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(assignment.state, assignment_state);
+            assert_eq!(assignment.active_job_id, Some(terminal_job.job_id));
+            let evidence = assignment
+                .delivery_evidence
+                .as_ref()
+                .or(assignment.reason.as_ref())
+                .expect("terminal assignment must retain job evidence");
+            assert!(evidence.contains(&terminal_job.job_id.to_string()));
+            assert!(evidence.contains(
+                terminal_job
+                    .terminal_event_id
+                    .as_deref()
+                    .expect("terminal job must have event evidence")
+            ));
+            assert!(
+                store.active_assignment().await.unwrap().is_none(),
+                "terminal job must not leave a stale reading assignment"
+            );
+
+            let later = claim_source_assignment(
+                &store,
+                Uuid::new_v4(),
+                format!("{:064x}", index + 100),
+                "later unrelated work",
+                "session-2",
+            )
+            .await
+            .unwrap();
+            assert_eq!(later.state, buzz_runtime::AssignmentState::Reading);
+            assert_ne!(later.assignment_id, assignment.assignment_id);
+            let snapshot = store.assignment_snapshot().await.unwrap();
+            assert_eq!(
+                snapshot
+                    .terminal_assignment
+                    .as_ref()
+                    .map(|record| (record.assignment_id.as_str(), record.state)),
+                Some((assignment.assignment_id.as_str(), assignment_state))
+            );
+            assert_eq!(
+                snapshot
+                    .active_assignment
+                    .as_ref()
+                    .map(|record| record.assignment_id.as_str()),
+                Some(later.assignment_id.as_str())
+            );
+        }
+    }
+
     // MINOR (#2884): the permission-mode RPC is gated on agent_supports_mode.
     // An advertised mode issues set_config_option; an absent one is skipped so
     // the harness falls back to per-tool auto-approval. Pin both edges directly.
@@ -4776,6 +5800,290 @@ mod tests {
             .env
             .iter()
             .any(|entry| entry.name == "BUZZ_GIT_ORIGIN_CHANNEL_ID"));
+    }
+
+    #[test]
+    fn fresh_recovery_block_contains_only_durable_assignment_job_progress_once() {
+        let now = chrono::Utc::now();
+        let channel_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let assignment = buzz_runtime::AssignmentRecord {
+            assignment_id: "assignment-1".into(),
+            source_event_id: Some("source-event".into()),
+            channel_id,
+            state: buzz_runtime::AssignmentState::Working,
+            summary: "repair\nproduction".into(),
+            active_job_id: Some(job_id),
+            session_id: Some("old-session".into()),
+            reply_event_id: None,
+            last_progress_at: now,
+            reason: None,
+            blocker: Some("/private/path".into()),
+            approval_gate_id: None,
+            delivery_evidence: None,
+            updated_at: now,
+        };
+        let job = buzz_runtime::JobRecord {
+            job_id,
+            request_event_id: Some("request-event".into()),
+            source_event_id: Some("source-event".into()),
+            channel_id,
+            requester_pubkey: "requester".into(),
+            driver: "lh".into(),
+            executable: "/operator/lh".into(),
+            argv: vec!["lockdown".into()],
+            cwd: "/private/workspace".into(),
+            summary: "verified\nrepair".into(),
+            state: buzz_runtime::JobState::Running,
+            runner: None,
+            attempt: 1,
+            progress_seq: 4,
+            exit_code: None,
+            result_json: None,
+            error_code: None,
+            terminal_event_id: None,
+            publication_state: buzz_runtime::PublicationState::Pending,
+            publication_error: None,
+            created_at: now,
+            started_at: Some(now),
+            finished_at: None,
+            updated_at: now,
+        };
+
+        let block = format_recovery_block(&assignment, Some(&job));
+        assert_eq!(block.matches("[Recovery]").count(), 1);
+        assert_eq!(block.lines().count(), 5);
+        assert!(block.contains("assignment-1 | working | repair production"));
+        assert!(block.contains("Source event: source-event"));
+        assert!(block.contains(&format!(
+            "Active job: {job_id} | running | progress sequence 4 | verified repair"
+        )));
+        assert!(!block.contains("/private"));
+        assert!(!block.contains("old-session"));
+    }
+
+    #[test]
+    fn assignment_block_exposes_only_the_authenticated_assignment_id_and_state() {
+        let now = chrono::Utc::now();
+        let assignment_id = Uuid::new_v4().to_string();
+        let source_event_id = "e".repeat(64);
+        let job_id = Uuid::new_v4();
+        let assignment = buzz_runtime::AssignmentRecord {
+            assignment_id: assignment_id.clone(),
+            source_event_id: Some(source_event_id.clone()),
+            channel_id: Uuid::new_v4(),
+            state: buzz_runtime::AssignmentState::Working,
+            summary: "repair production".into(),
+            active_job_id: Some(job_id),
+            session_id: Some("session-1".into()),
+            reply_event_id: None,
+            last_progress_at: now,
+            reason: None,
+            blocker: None,
+            approval_gate_id: None,
+            delivery_evidence: None,
+            updated_at: now,
+        };
+
+        let block = format_assignment_block(&assignment);
+
+        assert!(block.contains(&format!("Authenticated assignment ID: {assignment_id}")));
+        assert!(block.contains("Current state: working"));
+        assert!(block.contains("pass this exact value as assignment_id"));
+        assert!(block.contains("state \"completed\""));
+        assert!(!block.contains(&source_event_id));
+        assert!(!block.contains(&job_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn normal_prompt_assignment_id_drives_non_job_states_and_releases_next_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            buzz_runtime::StoreHandle::open(directory.path().join("runtime.sqlite3")).unwrap();
+        let channel_id = Uuid::new_v4();
+        let source_event_id = "a".repeat(64);
+        let assignment = claim_source_assignment(
+            &store,
+            channel_id,
+            source_event_id.clone(),
+            "review the incident",
+            "session-1",
+        )
+        .await
+        .unwrap();
+        let block = format_assignment_block(&assignment);
+        let prompt_assignment_id = block
+            .lines()
+            .find_map(|line| line.strip_prefix("Authenticated assignment ID: "))
+            .expect("normal prompt must expose an authenticated assignment ID");
+
+        assert_eq!(prompt_assignment_id, assignment.assignment_id);
+        assert!(
+            assignment_for_prompt_source(assignment.clone(), channel_id, &source_event_id)
+                .is_some()
+        );
+        assert!(
+            assignment_for_prompt_source(assignment.clone(), channel_id, &"b".repeat(64)).is_none()
+        );
+        assert!(
+            assignment_for_prompt_source(assignment.clone(), Uuid::new_v4(), &source_event_id)
+                .is_none()
+        );
+
+        let waiting = store
+            .set_assignment_state(
+                prompt_assignment_id,
+                buzz_runtime::AssignmentSetStateRequest {
+                    state: buzz_runtime::AssignmentState::Waiting,
+                    summary: None,
+                    reason: Some("waiting for reviewer".into()),
+                    blocker: None,
+                    approval_gate_id: None,
+                    delivery_evidence: None,
+                    reply_event_id: None,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.state, buzz_runtime::AssignmentState::Waiting);
+
+        let blocked = store
+            .set_assignment_state(
+                prompt_assignment_id,
+                buzz_runtime::AssignmentSetStateRequest {
+                    state: buzz_runtime::AssignmentState::Blocked,
+                    summary: None,
+                    reason: None,
+                    blocker: Some("reviewer unavailable".into()),
+                    approval_gate_id: None,
+                    delivery_evidence: None,
+                    reply_event_id: None,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blocked.state, buzz_runtime::AssignmentState::Blocked);
+
+        let completed = store
+            .set_assignment_state(
+                prompt_assignment_id,
+                buzz_runtime::AssignmentSetStateRequest {
+                    state: buzz_runtime::AssignmentState::Completed,
+                    summary: None,
+                    reason: None,
+                    blocker: None,
+                    approval_gate_id: None,
+                    delivery_evidence: Some("review delivered in source thread".into()),
+                    reply_event_id: None,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(completed.state, buzz_runtime::AssignmentState::Completed);
+        assert!(store.active_assignment().await.unwrap().is_none());
+
+        let next = claim_source_assignment(
+            &store,
+            Uuid::new_v4(),
+            "c".repeat(64),
+            "new unrelated work",
+            "session-2",
+        )
+        .await
+        .unwrap();
+        assert_ne!(next.assignment_id, prompt_assignment_id);
+        assert_eq!(next.state, buzz_runtime::AssignmentState::Reading);
+    }
+
+    #[test]
+    fn non_recovery_turn_places_assignment_context_before_event_context() {
+        let assignment =
+            "[Assignment]\nAuthenticated assignment ID: 00000000-0000-0000-0000-000000000001";
+        let event_context = vec!["[Buzz]\nnew assigned work".to_owned()];
+
+        let blocks = assemble_prompt_blocks(None, Some(assignment), None, &event_context);
+
+        assert_eq!(blocks, vec![assignment, event_context[0].as_str()]);
+    }
+
+    #[test]
+    fn each_later_assignment_block_carries_its_own_completion_id() {
+        let now = chrono::Utc::now();
+        let make_assignment = |assignment_id: String| buzz_runtime::AssignmentRecord {
+            assignment_id,
+            source_event_id: None,
+            channel_id: Uuid::new_v4(),
+            state: buzz_runtime::AssignmentState::Reading,
+            summary: "new assignment".into(),
+            active_job_id: None,
+            session_id: None,
+            reply_event_id: None,
+            last_progress_at: now,
+            reason: None,
+            blocker: None,
+            approval_gate_id: None,
+            delivery_evidence: None,
+            updated_at: now,
+        };
+        let first_id = Uuid::new_v4().to_string();
+        let second_id = Uuid::new_v4().to_string();
+
+        let first = format_assignment_block(&make_assignment(first_id.clone()));
+        let second = format_assignment_block(&make_assignment(second_id.clone()));
+
+        assert!(first.contains(&first_id));
+        assert!(!first.contains(&second_id));
+        assert!(second.contains(&second_id));
+        assert!(!second.contains(&first_id));
+        assert!(second.contains("state \"completed\""));
+    }
+
+    #[test]
+    fn permission_boundary_projects_then_recomputes_without_losing_turn() {
+        let mut facts = WorkProjectionFacts::default();
+        facts.apply(WorkProjectionEvent::TurnStarted("turn-1".into()));
+        assert!(facts.active_turns.contains("turn-1"));
+        assert!(facts.permission_gates.is_empty());
+
+        facts.apply(WorkProjectionEvent::PermissionRequested("turn-1".into()));
+        assert!(facts.permission_gates.contains("turn-1"));
+        assert!(facts.active_turns.contains("turn-1"));
+
+        facts.apply(WorkProjectionEvent::PermissionCleared("turn-1".into()));
+        assert!(facts.permission_gates.is_empty());
+        assert!(facts.active_turns.contains("turn-1"));
+
+        facts.apply(WorkProjectionEvent::TurnFinished("turn-1".into()));
+        assert!(facts.permission_gates.is_empty());
+        assert!(facts.active_turns.is_empty());
+    }
+
+    #[test]
+    fn work_status_never_exposes_blocker_details_or_local_paths() {
+        let now = chrono::Utc::now();
+        let assignment = buzz_runtime::AssignmentRecord {
+            assignment_id: "owned".into(),
+            source_event_id: Some("source".into()),
+            channel_id: Uuid::new_v4(),
+            state: buzz_runtime::AssignmentState::Blocked,
+            summary: "waiting for review".into(),
+            active_job_id: None,
+            session_id: None,
+            reply_event_id: None,
+            last_progress_at: now,
+            reason: Some("external review".into()),
+            blocker: Some("/private/workspace/secret".into()),
+            approval_gate_id: None,
+            delivery_evidence: None,
+            updated_at: now,
+        };
+        let text = format_work_status(buzz_runtime::WorkState::Blocked, Some(&assignment), None);
+        assert_eq!(text, "blocked — waiting for review");
+        assert!(!text.contains("/private"));
+        assert!(!text.contains("secret"));
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
@@ -6023,7 +7331,7 @@ done"#
             );
             agent = result.agent;
         }
-        agent.acp.shutdown().await;
+        agent.acp.shutdown().await.expect("acp shutdown");
 
         let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
             .expect("read captured ACP requests")
@@ -6147,7 +7455,7 @@ done"#
             );
             agent = result.agent;
         }
-        agent.acp.shutdown().await;
+        agent.acp.shutdown().await.expect("acp shutdown");
 
         let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
             .expect("read captured ACP requests")
@@ -6314,7 +7622,7 @@ done"#
         let delivery = &agent.state.deliveries[&channel_id];
         assert!(delivery.delivered_event_ids.contains(&carry_over_id));
         assert!(delivery.delivered_event_ids.contains(&new_event_id));
-        agent.acp.shutdown().await;
+        agent.acp.shutdown().await.expect("acp shutdown");
         server.abort();
 
         let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
@@ -6471,7 +7779,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             result.outcome,
             PromptOutcome::Ok(StopReason::EndTurn)
         ));
-        result.agent.acp.shutdown().await;
+        result.agent.acp.shutdown().await.expect("acp shutdown");
         server.abort();
 
         let request: serde_json::Value =
@@ -7959,6 +9267,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            runtime_store: None,
+            work_status: None,
         }
     }
 
@@ -8581,6 +9891,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -8618,6 +9929,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -8652,6 +9964,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -8684,6 +9997,7 @@ done"#
         create_session_and_apply_model(
             &mut agent,
             &ctx,
+            None,
             None,
             NewSessionChannelContext {
                 huddle_instructions: None,
@@ -8724,6 +10038,7 @@ exit 0"#
         let err = create_session_and_apply_model(
             &mut agent,
             &ctx,
+            None,
             None,
             NewSessionChannelContext {
                 huddle_instructions: None,
@@ -8852,6 +10167,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -8923,6 +10239,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -8978,6 +10295,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -9020,6 +10338,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -9060,6 +10379,7 @@ done"#
         create_session_and_apply_model(
             &mut agent,
             &ctx,
+            None,
             None,
             NewSessionChannelContext {
                 huddle_instructions: None,
@@ -9127,6 +10447,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -9163,6 +10484,7 @@ done"#
         create_session_and_apply_model(
             &mut agent,
             &ctx,
+            None,
             None,
             NewSessionChannelContext {
                 huddle_instructions: None,
@@ -9237,6 +10559,7 @@ done"#
             &mut agent,
             &ctx,
             None,
+            None,
             NewSessionChannelContext {
                 huddle_instructions: None,
                 canvas: None,
@@ -9277,6 +10600,7 @@ done"#
         create_session_and_apply_model(
             &mut agent,
             &ctx,
+            None,
             None,
             NewSessionChannelContext {
                 huddle_instructions: None,

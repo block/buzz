@@ -18,6 +18,7 @@ import {
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { AgentJobView } from "@/features/messages/lib/agentJobProjection";
 import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -68,6 +69,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   onCancelEdit?: () => void;
   onCancelReply: () => void;
   onClose: () => void;
+  onCancelJob?: (job: AgentJobView) => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditLastOwnMessage?: () => boolean;
@@ -211,6 +213,7 @@ export function MessageThreadPanel({
   onCancelEdit,
   onCancelReply,
   onClose,
+  onCancelJob,
   onHeaderTitleClick,
   onResetWidth,
   onResizeStart,
@@ -601,6 +604,8 @@ export function MessageThreadPanel({
                 isFollowingThread={isFollowingThread}
                 isUnread={isMessageUnreadById?.(threadHead.id)}
                 message={threadHead}
+                onCancelJob={onCancelJob}
+                layoutVariant="thread-reply"
                 onDelete={
                   onDelete &&
                   canManageMessageForCurrentUser(
@@ -754,6 +759,7 @@ export function MessageThreadPanel({
                         isContinuation={isContinuation}
                         isUnread={isMessageUnreadById?.(entry.message.id)}
                         message={entry.message}
+                        onCancelJob={onCancelJob}
                         onCollapseDepthGuide={handleCollapseDepthGuide}
                         onCollapseDepthGuideHoverChange={
                           handleCollapseBranchHoverChange

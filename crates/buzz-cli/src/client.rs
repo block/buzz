@@ -746,6 +746,58 @@ impl BuzzClient {
             .map_err(|e| CliError::Other(format!("signing failed: {e}")))
     }
 
+    async fn get_authenticated_url(&self, url: String) -> Result<String, CliError> {
+        self.with_retry_body(|| {
+            let url = url.clone();
+            async move {
+                let auth = sign_nip98(&self.keys, "GET", &url, None)?;
+                let response = self
+                    .with_auth_tag(
+                        self.http
+                            .get(&url)
+                            .header("Authorization", auth)
+                            .header("Accept", "application/json"),
+                    )
+                    .send()
+                    .await?;
+                self.handle_response(response).await
+            }
+        })
+        .await
+    }
+
+    /// Fetch one canonical indexed agent-job projection and signed event chain.
+    pub async fn agent_job_status(&self, job_id: uuid::Uuid) -> Result<String, CliError> {
+        self.get_authenticated_url(format!("{}/jobs/{job_id}", self.relay_url))
+            .await
+    }
+
+    /// List canonical indexed jobs involving the authenticated identity.
+    pub async fn agent_jobs_list(
+        &self,
+        agent: Option<&str>,
+        channel: Option<uuid::Uuid>,
+        state: Option<&str>,
+        limit: u16,
+    ) -> Result<String, CliError> {
+        let mut url = url::Url::parse(&format!("{}/jobs", self.relay_url))
+            .map_err(|error| CliError::Other(format!("invalid relay jobs URL: {error}")))?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(agent) = agent {
+                query.append_pair("agent", agent);
+            }
+            if let Some(channel) = channel {
+                query.append_pair("channel", &channel.to_string());
+            }
+            if let Some(state) = state {
+                query.append_pair("state", state);
+            }
+            query.append_pair("limit", &limit.to_string());
+        }
+        self.get_authenticated_url(url.to_string()).await
+    }
+
     /// GET a public, unauthenticated relay endpoint (e.g. the NIP-11 `/info`
     /// document), returning the raw JSON body. No NIP-98 Authorization and no
     /// `x-auth-tag` header — the endpoint is public relay metadata, not a
@@ -2495,5 +2547,89 @@ mod tests {
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
         );
+    }
+}
+
+#[cfg(test)]
+mod indexed_job_client_tests {
+    use std::sync::Arc;
+
+    use axum::{
+        extract::State,
+        http::{HeaderMap, Uri},
+        routing::get,
+        Json, Router,
+    };
+    use base64::Engine;
+    use nostr::{JsonUtil, Keys};
+    use tokio::{net::TcpListener, sync::Mutex};
+    use uuid::Uuid;
+
+    use super::BuzzClient;
+
+    type Captured = Arc<Mutex<Vec<(Uri, HeaderMap)>>>;
+
+    async fn capture(
+        State(captured): State<Captured>,
+        uri: Uri,
+        headers: HeaderMap,
+    ) -> Json<serde_json::Value> {
+        captured.lock().await.push((uri, headers));
+        Json(serde_json::json!({}))
+    }
+
+    #[tokio::test]
+    async fn indexed_job_reads_sign_exact_get_urls() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/jobs", get(capture))
+            .route("/jobs/{job_id}", get(capture))
+            .with_state(captured.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            BuzzClient::new(format!("http://{address}"), Keys::generate(), None, None).unwrap();
+        let job_id = Uuid::parse_str("12345678-1234-4234-8234-123456789abc").unwrap();
+
+        client.agent_job_status(job_id).await.unwrap();
+        client
+            .agent_jobs_list(Some("aa"), Some(Uuid::nil()), Some("running"), 25)
+            .await
+            .unwrap();
+
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].0.path_and_query().unwrap().as_str(),
+            "/jobs/12345678-1234-4234-8234-123456789abc"
+        );
+        assert_eq!(
+            requests[1].0.path_and_query().unwrap().as_str(),
+            "/jobs?agent=aa&channel=00000000-0000-0000-0000-000000000000&state=running&limit=25"
+        );
+
+        for (uri, headers) in requests.iter() {
+            let encoded = headers["authorization"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("Nostr ")
+                .unwrap();
+            let event_json = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap();
+            let event = nostr::Event::from_json(event_json).unwrap();
+            let tag = |name: &str| {
+                event.tags.iter().find_map(|tag| {
+                    let values = tag.as_slice();
+                    (values.first().map(String::as_str) == Some(name))
+                        .then(|| values.get(1).cloned())
+                        .flatten()
+                })
+            };
+            assert_eq!(tag("method").as_deref(), Some("GET"));
+            let expected_url = format!("http://{address}{uri}");
+            assert_eq!(tag("u").as_deref(), Some(expected_url.as_str()));
+        }
     }
 }

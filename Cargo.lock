@@ -832,10 +832,12 @@ dependencies = [
  "base64 0.22.1",
  "buzz-core",
  "buzz-persona",
+ "buzz-runtime",
  "buzz-sdk",
  "chrono",
  "clap",
  "evalexpr",
+ "fs2",
  "futures-util",
  "hex",
  "httparse",
@@ -846,6 +848,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "signal-hook",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -855,6 +859,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -892,6 +897,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
+ "buzz-runtime",
  "dirs",
  "getrandom 0.4.3",
  "hex",
@@ -976,6 +982,7 @@ dependencies = [
  "base64 0.22.1",
  "buzz-core",
  "buzz-persona",
+ "buzz-runtime",
  "buzz-sdk",
  "buzz-ws-client",
  "bytes",
@@ -1097,8 +1104,11 @@ dependencies = [
  "base64 0.22.1",
  "buzz-cli",
  "buzz-core",
+ "buzz-runtime",
+ "buzz-sdk",
  "git-credential-nostr",
  "git-sign-nostr",
+ "hex",
  "ignore",
  "image",
  "nix 0.31.3",
@@ -1109,12 +1119,14 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "similar",
  "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -1340,6 +1352,27 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "buzz-runtime"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "libc",
+ "nostr 0.44.7",
+ "rand 0.10.1",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2840,6 +2873,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fancy-regex"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3030,6 +3075,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -3405,6 +3460,15 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+]
+
+[[package]]
+name = "hashlink"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+dependencies = [
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -4575,10 +4639,11 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.30.1"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 dependencies = [
+ "cc",
  "pkg-config",
  "vcpkg",
 ]
@@ -8103,6 +8168,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusqlite"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
+dependencies = [
+ "bitflags 2.13.0",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink 0.10.0",
+ "libsqlite3-sys",
+ "smallvec",
+]
+
+[[package]]
 name = "rust-ini"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9122,7 +9201,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "hashbrown 0.16.1",
- "hashlink",
+ "hashlink 0.11.0",
  "indexmap",
  "log",
  "memchr",

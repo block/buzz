@@ -8,6 +8,7 @@ import {
 } from "@/features/messages/lib/timelineSnapshot";
 import { preloadTimelineImages } from "@/features/messages/lib/timelineImagePreload";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { AgentJobView } from "@/features/messages/lib/agentJobProjection";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -89,6 +90,7 @@ type MessageTimelineProps = {
   isFollowingThreadById?: (rootId: string) => boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   onDelete?: (message: TimelineMessage) => void;
+  onCancelJob?: (job: AgentJobView) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
@@ -188,6 +190,7 @@ const MessageTimelineBase = React.forwardRef<
     profiles,
     ownerProfiles,
     onDelete,
+    onCancelJob,
     onEdit,
     onMarkUnread,
     onMarkRead,
@@ -665,6 +668,7 @@ const MessageTimelineBase = React.forwardRef<
       hideAgentAccessBadges={hideAgentAccessBadges}
       threadSummaries={threadSummaries}
       messages={renderedMessages}
+      onCancelJob={onCancelJob}
       onDelete={onDelete}
       onEdit={onEdit}
       onMarkUnread={onMarkUnread}

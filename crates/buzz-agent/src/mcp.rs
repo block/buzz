@@ -82,10 +82,13 @@ const PASSTHROUGH_ENV: &[&str] = &[
     // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
     // non-secret signed ownership attestation needed by portable owner-scoped
     // CLI operations; MCP subprocesses are trusted like the agent runtime.
+    // BUZZ_RUNTIME_RECEIPT selects and authenticates the restricted managed
+    // capability profile; dropping it would expose the standalone DevMcp.
     "NOSTR_PRIVATE_KEY",
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
     "BUZZ_AUTH_TAG",
+    "BUZZ_RUNTIME_RECEIPT",
     // Agent display name — dev-mcp uses it as the git author name. On the
     // Desktop path this arrives via the wire `mcpServers[].env` declaration
     // (which wins here anyway); the allowlist entry covers ACP clients that
@@ -120,17 +123,72 @@ struct ServerSpec {
     env: Vec<(String, String)>,
     cwd: String,
 }
+#[derive(Clone)]
+enum ProcessTree {
+    #[cfg(unix)]
+    Unix(u32),
+    #[cfg(windows)]
+    Windows(Arc<buzz_runtime::windows_job::WindowsJobObject>),
+    #[cfg(not(any(unix, windows)))]
+    DirectChildOnly,
+}
+
+impl ProcessTree {
+    fn terminate(&self, name: &str, stage: &str) {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(pgid) => killpg(*pgid, name, stage),
+            #[cfg(windows)]
+            Self::Windows(job) => {
+                let result = job.terminate();
+                tracing::info!(
+                    "terminate MCP Job Object {name} ({stage}) ok={}",
+                    result.is_ok()
+                );
+            }
+            #[cfg(not(any(unix, windows)))]
+            Self::DirectChildOnly => {
+                tracing::info!("relying on transport Drop to kill MCP {name} ({stage})");
+            }
+        }
+    }
+
+    async fn terminate_and_wait_empty(
+        &self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<(), AgentError> {
+        #[cfg(windows)]
+        {
+            let Self::Windows(job) = self;
+            job.terminate_and_wait_empty(timeout)
+                .await
+                .map_err(|error| {
+                    AgentError::Mcp(format!(
+                        "MCP server '{name}' Job Object cleanup was not verified: {error}"
+                    ))
+                })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = timeout;
+            self.terminate(name, "shutdown");
+            Ok(())
+        }
+    }
+}
 
 enum ClientState {
     Healthy {
         client: Arc<Client>,
-        pgid: Option<u32>,
+        process_tree: Option<ProcessTree>,
         tools: Arc<Vec<String>>,
     },
     Dead {
         attempts: u32,
         next_retry: Instant,
         reason: String,
+        process_tree: Option<ProcessTree>,
         // Preserved from the last Healthy state so tools() filtering stays accurate while dead.
         tools: Arc<Vec<String>>,
     },
@@ -145,8 +203,14 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        if let ClientState::Healthy { pgid: Some(p), .. } = &**self.client.load() {
-            killpg(*p, &self.name, "drop");
+        let state = self.client.load();
+        let tree = match &**state {
+            ClientState::Healthy { process_tree, .. } | ClientState::Dead { process_tree, .. } => {
+                process_tree
+            }
+        };
+        if let Some(tree) = tree {
+            tree.terminate(&self.name, "drop");
         }
     }
 }
@@ -156,6 +220,7 @@ enum RestartCheck {
     Ready {
         attempt_n: u32,
         prev_tools: Arc<Vec<String>>,
+        process_tree: Option<ProcessTree>,
     },
 }
 
@@ -174,9 +239,15 @@ fn check_restart_state(server: &Server, max_attempts: u32) -> Result<RestartChec
                 server.name
             )))
         }
-        ClientState::Dead { attempts, tools, .. } => Ok(RestartCheck::Ready {
+        ClientState::Dead {
+            attempts,
+            tools,
+            process_tree,
+            ..
+        } => Ok(RestartCheck::Ready {
             attempt_n: attempts + 1,
             prev_tools: tools.clone(),
+            process_tree: process_tree.clone(),
         }),
     }
 }
@@ -244,14 +315,15 @@ impl McpRegistry {
                     .collect(),
                 cwd: cwd.to_owned(),
             };
-            let (client, pgid, tool_names, raw_tools) = spawn_one(&spec, reg.init_timeout).await?;
+            let (client, process_tree, tool_names, raw_tools) =
+                spawn_one(&spec, reg.init_timeout).await?;
             let server_idx = reg.servers.len();
             let server = Arc::new(Server {
                 name: spec.name.clone(),
                 spec,
                 client: ArcSwap::from_pointee(ClientState::Healthy {
                     client: Arc::new(client),
-                    pgid,
+                    process_tree,
                     tools: Arc::new(tool_names),
                 }),
                 restart_lock: AsyncMutex::new(()),
@@ -443,7 +515,7 @@ impl McpRegistry {
             .collect()
     }
 
-    /// Kill the server's process group and mark it dead. Idempotent:
+    /// Kill the server's owned process tree and mark it dead. Idempotent:
     /// if the server is already Dead (or unknown), this is a no-op.
     /// Counts as one attempt toward the restart budget so that a
     /// pathological server (starts fine, deadlocks on every call)
@@ -454,24 +526,27 @@ impl McpRegistry {
             None => return,
         };
         let current = server.client.load_full();
-        let (pgid, tools) = match &*current {
+        let (process_tree, tools) = match &*current {
             ClientState::Dead { .. } => return,
-            ClientState::Healthy { pgid, tools, .. } => (*pgid, tools.clone()),
+            ClientState::Healthy {
+                process_tree,
+                tools,
+                ..
+            } => (process_tree.clone(), tools.clone()),
         };
         let dead = Arc::new(ClientState::Dead {
             attempts: 1,
             next_retry: Instant::now() + backoff(1, self.backoff_base, self.backoff_max),
             reason: reason.to_owned(),
+            process_tree: process_tree.clone(),
             tools,
         });
-        // CAS so we don't clobber a concurrent restart that already
-        // transitioned the state. If the swap fails, the kill below is
-        // still safe — the pgid we read belonged to a process we observed
-        // as Healthy, and killpg on an already-reaped pgid is a no-op.
+        // The tree handle is an identity-bearing object, not a reusable PID.
+        // A failed CAS cannot make it target a replacement server.
         let prev = server.client.compare_and_swap(&current, dead);
         if Arc::ptr_eq(&prev, &current) {
-            if let Some(p) = pgid {
-                killpg(p, &server.name, "kill_server");
+            if let Some(tree) = process_tree {
+                tree.terminate(&server.name, "kill_server");
             }
             tracing::error!(
                 "MCP server '{}' killed and marked dead (reason={reason})",
@@ -490,16 +565,17 @@ impl McpRegistry {
         match &*current {
             ClientState::Healthy {
                 client,
-                pgid,
+                process_tree,
                 tools,
             } if Arc::ptr_eq(client, failed_client) => {
-                if let Some(p) = *pgid {
-                    killpg(p, &server.name, "call_failed");
+                if let Some(tree) = process_tree {
+                    tree.terminate(&server.name, "call_failed");
                 }
                 let dead = Arc::new(ClientState::Dead {
                     attempts: 1,
                     next_retry: Instant::now() + backoff(1, self.backoff_base, self.backoff_max),
                     reason: reason.to_owned(),
+                    process_tree: process_tree.clone(),
                     tools: tools.clone(),
                 });
                 let _ = server.client.compare_and_swap(&current, dead);
@@ -681,13 +757,19 @@ impl McpRegistry {
 
         let _guard = server.restart_lock.lock().await;
 
-        let (attempt_n, prev_tools) = match check_restart_state(server, self.max_attempts)? {
-            RestartCheck::Healthy => return Ok(()),
-            RestartCheck::Ready {
-                attempt_n,
-                prev_tools,
-            } => (attempt_n, prev_tools),
-        };
+        let (attempt_n, prev_tools, prior_tree) =
+            match check_restart_state(server, self.max_attempts)? {
+                RestartCheck::Healthy => return Ok(()),
+                RestartCheck::Ready {
+                    attempt_n,
+                    prev_tools,
+                    process_tree,
+                } => (attempt_n, prev_tools, process_tree),
+            };
+        if let Some(tree) = prior_tree {
+            tree.terminate_and_wait_empty(&server.name, Duration::from_secs(5))
+                .await?;
+        }
 
         let started = Instant::now();
         tracing::info!(
@@ -696,10 +778,10 @@ impl McpRegistry {
             self.max_attempts
         );
         match spawn_one(&server.spec, self.init_timeout).await {
-            Ok((client, pgid, tool_names, _raw_tools)) => {
+            Ok((client, process_tree, tool_names, _raw_tools)) => {
                 server.client.store(Arc::new(ClientState::Healthy {
                     client: Arc::new(client),
-                    pgid,
+                    process_tree,
                     tools: Arc::new(tool_names),
                 }));
 
@@ -722,6 +804,7 @@ impl McpRegistry {
                     attempts: attempt_n,
                     next_retry,
                     reason: reason.clone(),
+                    process_tree: None,
                     tools: prev_tools,
                 }));
 
@@ -733,12 +816,51 @@ impl McpRegistry {
             }
         }
     }
+    /// Terminates every MCP tree and returns only after Windows Job Objects
+    /// have boundedly reported zero active processes.
+    pub async fn shutdown(&self) -> Result<(), AgentError> {
+        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+        let trees: Vec<(String, ProcessTree)> = self
+            .servers
+            .iter()
+            .filter_map(|server| {
+                let state = server.client.load();
+                let tree = match &**state {
+                    ClientState::Healthy { process_tree, .. }
+                    | ClientState::Dead { process_tree, .. } => process_tree,
+                };
+                tree.as_ref()
+                    .map(|tree| (server.name.clone(), tree.clone()))
+            })
+            .collect();
+        let mut first_error = None;
+        for (name, tree) in trees {
+            if let Err(error) = tree.terminate_and_wait_empty(&name, SHUTDOWN_TIMEOUT).await {
+                tracing::warn!(%error, server = %name, "MCP tree cleanup failed");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
 }
 
 async fn spawn_one(
     spec: &ServerSpec,
     timeout: Duration,
-) -> Result<(Client, Option<u32>, Vec<String>, Vec<rmcp::model::Tool>), AgentError> {
+) -> Result<
+    (
+        Client,
+        Option<ProcessTree>,
+        Vec<String>,
+        Vec<rmcp::model::Tool>,
+    ),
+    AgentError,
+> {
     let mut cmd = Command::new(&spec.command);
     cmd.args(&spec.args);
     cmd.env_clear();
@@ -762,25 +884,52 @@ async fn spawn_one(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    #[cfg(windows)]
+    let windows_job = Arc::new(
+        buzz_runtime::windows_job::WindowsJobObject::create_kill_on_close().map_err(|error| {
+            AgentError::Mcp(format!("create Job Object for {}: {error}", spec.name))
+        })?,
+    );
     configure_no_window(&mut cmd);
 
     let transport = TokioChildProcess::new(cmd)
         .map_err(|e| AgentError::Mcp(format!("spawn {}: {e}", spec.name)))?;
-    let pgid = transport.id();
+    let child_pid = transport.id();
+    #[cfg(windows)]
+    {
+        let pid = child_pid.ok_or_else(|| {
+            AgentError::Mcp(format!(
+                "spawn {} returned no process identifier",
+                spec.name
+            ))
+        })?;
+        windows_job
+            .assign_spawned_pid_and_resume(pid)
+            .map_err(|error| {
+                AgentError::Mcp(format!("govern MCP process {}: {error}", spec.name))
+            })?;
+    }
 
-    struct PgidGuard {
-        pgid: Option<u32>,
+    #[cfg(unix)]
+    let process_tree = child_pid.map(ProcessTree::Unix);
+    #[cfg(windows)]
+    let process_tree = Some(ProcessTree::Windows(windows_job));
+    #[cfg(not(any(unix, windows)))]
+    let process_tree = child_pid.map(|_| ProcessTree::DirectChildOnly);
+
+    struct ProcessTreeGuard {
+        tree: Option<ProcessTree>,
         name: String,
     }
-    impl Drop for PgidGuard {
+    impl Drop for ProcessTreeGuard {
         fn drop(&mut self) {
-            if let Some(p) = self.pgid.take() {
-                killpg(p, &self.name, "spawn_dropped");
+            if let Some(tree) = self.tree.take() {
+                tree.terminate(&self.name, "spawn_dropped");
             }
         }
     }
-    let mut guard = PgidGuard {
-        pgid,
+    let mut guard = ProcessTreeGuard {
+        tree: process_tree.clone(),
         name: spec.name.clone(),
     };
 
@@ -808,8 +957,8 @@ async fn spawn_one(
         }
     };
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-    guard.pgid = None;
-    Ok((client, pgid, names, tools))
+    guard.tree = None;
+    Ok((client, process_tree, names, tools))
 }
 
 /// Send `notifications/cancelled` to the MCP server, fire-and-forget.
@@ -880,10 +1029,6 @@ fn killpg(pgid: u32, name: &str, stage: &str) {
         "killpg MCP {name} ({stage}) pgid={pgid} ok={}",
         result.is_ok()
     );
-}
-#[cfg(not(unix))]
-fn killpg(_pgid: u32, name: &str, stage: &str) {
-    tracing::info!("relying on Drop to kill MCP {name} ({stage})");
 }
 
 fn valid_name(s: &str) -> bool {
@@ -1024,10 +1169,10 @@ fn tool_result_content(
 /// No-op on non-Windows platforms.
 fn configure_no_window(cmd: &mut Command) {
     #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    buzz_runtime::windows_job::WindowsJobObject::prepare_command(
+        cmd,
+        buzz_runtime::windows_job::CREATE_NO_WINDOW,
+    );
     #[cfg(not(windows))]
     let _ = cmd;
 }
@@ -1039,6 +1184,11 @@ mod content_tests {
     #[test]
     fn passthrough_includes_buzz_owner_attestation() {
         assert!(PASSTHROUGH_ENV.contains(&"BUZZ_AUTH_TAG"));
+    }
+
+    #[test]
+    fn passthrough_includes_managed_runtime_receipt() {
+        assert!(PASSTHROUGH_ENV.contains(&"BUZZ_RUNTIME_RECEIPT"));
     }
 
     #[test]
@@ -1190,15 +1340,8 @@ mod content_tests {
 
     #[cfg(windows)]
     #[test]
-    fn configure_no_window_compiles_and_applies_flag_on_windows() {
-        // On Windows, creation_flags(0x0800_0000) must be accepted without panicking.
-        // The call is a setter with no getter on tokio::process::Command, so the
-        // regression test confirms the flag is SET by checking the std inner command.
+    fn configure_no_window_compiles_with_suspended_assignment_flag() {
         let mut cmd = Command::new("cmd.exe");
         configure_no_window(&mut cmd);
-        // std::process::Command on Windows does have as_inner / get_creation_flags via
-        // CommandExt — but tokio wraps it; we verify by ensuring the call compiles and
-        // the resulting spawn wouldn't OOM (build+flag-set is the full contract here).
-        // The real protection is the cfg-gated production path in spawn_one().
     }
 }

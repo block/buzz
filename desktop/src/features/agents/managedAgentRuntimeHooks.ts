@@ -17,7 +17,10 @@ import {
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
-import { canonicalRelayUrl } from "./managedAgentRuntimeStatus";
+import {
+  canonicalRelayUrl,
+  findManagedAgentRuntime,
+} from "./managedAgentRuntimeStatus";
 
 export const managedAgentRuntimesQueryKey = ["managed-agent-runtimes"] as const;
 
@@ -97,12 +100,33 @@ export function bootstrapManagedAgentRuntimePairs(
     });
 }
 
-export function useManagedAgentRuntimesQuery(options?: { enabled?: boolean }) {
+export function useManagedAgentRuntimesQuery(options?: {
+  enabled?: boolean;
+  refetchInterval?: number | false;
+}) {
   return useQuery({
     enabled: options?.enabled ?? true,
     queryKey: managedAgentRuntimesQueryKey,
     queryFn: listManagedAgentRuntimes,
+    refetchInterval: options?.refetchInterval,
   });
+}
+
+export function useManagedAgentRuntimeStatus(
+  pubkey: string,
+  relayUrl: string | null | undefined,
+): ManagedAgentRuntimeStatus | undefined {
+  const activeCommunityId = loadActiveCommunityId();
+  const resolvedRelayUrl =
+    relayUrl ??
+    loadCommunities().find((community) => community.id === activeCommunityId)
+      ?.relayUrl;
+  const query = useManagedAgentRuntimesQuery({
+    enabled: Boolean(resolvedRelayUrl),
+    refetchInterval: resolvedRelayUrl ? 5_000 : false,
+  });
+  if (!resolvedRelayUrl) return undefined;
+  return findManagedAgentRuntime(query.data ?? [], pubkey, resolvedRelayUrl);
 }
 
 /**

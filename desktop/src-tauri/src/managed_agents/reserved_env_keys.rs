@@ -73,6 +73,19 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // for same-session sweep decisions.
     "BUZZ_MANAGED_AGENT",
     "BUZZ_MANAGED_AGENT_START_NONCE",
+    // Durable runtime identity/state: privileged job configuration is
+    // resolved by Desktop. A descriptor must never redirect receipt/state
+    // paths, downgrade durability, or choose executable/workspace roots
+    // used by the privileged supervisor.
+    "BUZZ_RUNTIME_RECEIPT",
+    "BUZZ_ACP_RUNTIME_ID",
+    "BUZZ_ACP_RUNTIME_STATE_DIR",
+    "BUZZ_ACP_RUNTIME_LOCK_PATH",
+    "BUZZ_ACP_LH_COMMAND",
+    "BUZZ_ACP_JOB_WORKSPACE_ROOTS",
+    "BUZZ_ACP_DURABLE_RUNTIME",
+    "BUZZ_ACP_JOB_EVENT_PUBLICATION",
+    "BUZZ_ACP_LEGACY_RUNTIME_RECEIPT",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

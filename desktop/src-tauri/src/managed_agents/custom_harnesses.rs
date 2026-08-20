@@ -57,8 +57,7 @@ pub(crate) struct HarnessDefinition {
     #[serde(default)]
     pub args: Vec<String>,
     /// Environment variables injected at spawn time. Definition env is applied
-    /// first and LOSES on conflict with Buzz-injected vars — `BUZZ_MANAGED_AGENT`
-    /// is always authoritative and cannot be overridden here.
+    /// first and loses on conflict with Buzz-owned runtime metadata.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Link to external docs for manual install/setup instructions.
@@ -902,8 +901,8 @@ mod tests {
 
     #[test]
     fn validate_rejects_reserved_key_buzz_managed_agent() {
-        // BUZZ_MANAGED_AGENT and BUZZ_MANAGED_AGENT_START_NONCE are the
-        // ownership markers — supplying them in a definition must be rejected.
+        // Runtime diagnostic and observer nonce fields are reserved; supplying
+        // either through a definition would forge controller-visible metadata.
         let mut env = BTreeMap::new();
         env.insert(
             "BUZZ_MANAGED_AGENT".to_string(),
@@ -921,7 +920,7 @@ mod tests {
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
             err.contains("reserved by Buzz"),
-            "ownership marker key must be rejected: {err}"
+            "runtime metadata key must be rejected: {err}"
         );
     }
 

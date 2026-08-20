@@ -138,7 +138,6 @@ fn explicit_path_resolution_ignores_non_executable_files() {
 
     let _ = std::fs::remove_dir_all(dir);
 }
-
 #[test]
 fn classifies_available_when_adapter_found() {
     let (status, cmd, path) = classify_runtime(

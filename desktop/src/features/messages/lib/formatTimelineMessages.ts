@@ -13,6 +13,7 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { reduceAgentJobEvents } from "@/features/messages/lib/agentJobProjection";
 import {
   formatOwnerLabel,
   resolveUserLabel,
@@ -101,10 +102,16 @@ export function countTopLevelTimelineRows(events: RelayEvent[]): number {
       }
     }
   }
-
+  const jobProjection = reduceAgentJobEvents(
+    events.filter((event) => !deletedEventIds.has(event.id)),
+  );
   let count = 0;
   for (const event of events) {
-    if (!isTimelineContentEvent(event) || deletedEventIds.has(event.id)) {
+    if (
+      !isTimelineContentEvent(event) ||
+      deletedEventIds.has(event.id) ||
+      jobProjection.collapsedEventIds.has(event.id)
+    ) {
       continue;
     }
     const { parentId } = getThreadReference(event.tags);
@@ -296,9 +303,14 @@ export function formatTimelineMessages(
       });
     }
   }
-
+  const jobProjection = reduceAgentJobEvents(
+    events.filter((event) => !deletedEventIds.has(event.id)),
+  );
   const visibleEvents = events.filter(
-    (event) => isTimelineContentEvent(event) && !deletedEventIds.has(event.id),
+    (event) =>
+      isTimelineContentEvent(event) &&
+      !deletedEventIds.has(event.id) &&
+      !jobProjection.collapsedEventIds.has(event.id),
   );
   const eventsById = new Map(visibleEvents.map((event) => [event.id, event]));
   const reactionPresence = new Map<
@@ -540,6 +552,7 @@ export function formatTimelineMessages(
           )
           .map(({ earliestCreatedAt: _drop, ...pill }) => pill);
       })(),
+      jobView: jobProjection.viewsByRepresentativeEventId.get(event.id),
     };
   });
 }

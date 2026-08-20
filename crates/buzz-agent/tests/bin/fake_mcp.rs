@@ -16,11 +16,10 @@
 //!   FAKE_MCP_PID_FILE=path   — write the child PID to `path` on startup
 //!                              (for tests that want to verify the child died)
 //!   FAKE_MCP_SPAWN_GRANDCHILD=1
-//!                            — on `tools/call`, spawn a `sleep 999`
-//!                              grandchild before hanging. Its PID is
-//!                              written to FAKE_MCP_GRANDCHILD_PID_FILE
-//!                              so a test can verify the entire process
-//!                              tree dies on timeout.
+//!                            — on `tools/call`, spawn a long-lived child
+//!                              (`sleep` on Unix, `ping -t` on Windows). Its PID
+//!                              is written to FAKE_MCP_GRANDCHILD_PID_FILE so a
+//!                              test can verify the entire process tree dies.
 //!   FAKE_MCP_GRANDCHILD_PID_FILE=path
 //!                            — path to write the grandchild PID to.
 //!   FAKE_MCP_STOP_HOOK=1     — expose a `_Stop` hook tool
@@ -248,13 +247,25 @@ fn main() {
                     .and_then(|p| p.get("name"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                // Optionally spawn a long-sleeping grandchild so the test
-                // can verify process-group killing reaches the whole tree.
+                // Optionally spawn a long-lived grandchild so lifecycle tests
+                // can verify process-tree termination reaches descendants.
                 if env_flag("FAKE_MCP_SPAWN_GRANDCHILD") {
-                    let child = std::process::Command::new("sleep")
-                        .arg("999")
-                        .spawn()
-                        .expect("spawn grandchild");
+                    #[cfg(unix)]
+                    let mut command = {
+                        let mut command = std::process::Command::new("sleep");
+                        command.arg("999");
+                        command
+                    };
+                    #[cfg(windows)]
+                    let mut command = {
+                        let mut command = std::process::Command::new("ping.exe");
+                        command.args(["-t", "127.0.0.1"]);
+                        command
+                    };
+                    command
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    let child = command.spawn().expect("spawn grandchild");
                     if let Ok(path) = std::env::var("FAKE_MCP_GRANDCHILD_PID_FILE") {
                         let _ = std::fs::write(&path, child.id().to_string());
                     }

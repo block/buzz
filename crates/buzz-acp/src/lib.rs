@@ -2,8 +2,15 @@
 
 mod acp;
 mod config;
+#[doc(hidden)]
+pub mod e2e_support;
 mod engram_fetch;
 mod filter;
+mod job_runner;
+mod job_supervisor;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod job_windows;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -15,14 +22,17 @@ mod usage;
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_JOB_ACCEPTED, KIND_JOB_CANCEL, KIND_JOB_ERROR, KIND_JOB_PROGRESS, KIND_JOB_REQUEST,
+    KIND_JOB_RESULT, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -59,6 +69,96 @@ fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
+/// Process-lifetime guard for the pair-scoped managed-agent runtime lock.
+///
+/// The file is intentionally retained after exit. The OS releases the lock
+/// when this guard closes, including on abnormal process termination.
+struct RuntimeLockGuard {
+    _file: std::fs::File,
+}
+
+impl RuntimeLockGuard {
+    /// Acquire the configured lock without waiting.
+    fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create runtime lock directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let file = options
+            .open(path)
+            .with_context(|| format!("failed to open runtime lock {}", path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let mode = file
+                .metadata()
+                .with_context(|| format!("failed to inspect runtime lock {}", path.display()))?
+                .mode();
+            if mode & 0o077 != 0 {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .with_context(|| {
+                        format!(
+                            "failed to restrict runtime lock permissions {}",
+                            path.display()
+                        )
+                    })?;
+            }
+        }
+
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                anyhow::anyhow!("runtime lock is already held: {}", path.display())
+            } else {
+                anyhow::anyhow!("failed to acquire runtime lock {}: {error}", path.display())
+            }
+        })?;
+
+        Ok(Self { _file: file })
+    }
+}
+
+fn publish_phase_zero_receipt(
+    keys: &nostr::Keys,
+    relay_url: &str,
+    legacy: &config::LegacyRuntimeConfig,
+    _runtime_lock: &RuntimeLockGuard,
+) -> Result<()> {
+    let receipt = buzz_runtime::LegacyRuntimeReceipt {
+        schema_version: buzz_runtime::LEGACY_RUNTIME_RECEIPT_SCHEMA_VERSION,
+        key: buzz_runtime::ManagedAgentRuntimeKey {
+            pubkey: keys.public_key().to_hex(),
+            relay_url: relay_url.to_string(),
+        },
+        pid: std::process::id(),
+        process_start_marker: buzz_runtime::current_process_start_marker()
+            .context("failed to read schema-v1 runtime process identity")?,
+        desktop_instance_id: legacy.desktop_instance_id.clone(),
+        started_at: chrono::Utc::now(),
+        lock_protocol_version: 1,
+        lock_path_hash: legacy.lock_path_hash.clone(),
+    };
+    buzz_runtime::write_legacy_runtime_receipt(&legacy.receipt_path, &receipt)
+        .context("failed to publish owner-only schema-v1 runtime receipt")
+}
+
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -88,6 +188,124 @@ async fn publish_presence(
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
     Ok(())
+}
+
+const OUTBOX_DRAIN_INTERVAL: Duration = Duration::from_secs(1);
+const OUTBOX_BATCH_LIMIT: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OutboxPublishDecision {
+    Published,
+    Retry(String),
+    Rejected(String),
+}
+
+async fn publish_outbox_record(
+    rest_client: &relay::RestClient,
+    record: &buzz_runtime::OutboxRecord,
+) -> OutboxPublishDecision {
+    let event = match serde_json::from_str::<nostr::Event>(&record.event.event_json) {
+        Ok(event) => event,
+        Err(error) => {
+            return OutboxPublishDecision::Rejected(format!("invalid stored event: {error}"));
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(10), rest_client.submit_event(&event)).await {
+        Ok(Ok(response)) => classify_outbox_response(&response),
+        Ok(Err(error)) => {
+            let message = error.to_string();
+            if permanent_outbox_error(&message) {
+                OutboxPublishDecision::Rejected(message)
+            } else {
+                OutboxPublishDecision::Retry(message)
+            }
+        }
+        Err(_) => OutboxPublishDecision::Retry("relay publication timeout".into()),
+    }
+}
+
+fn classify_outbox_response(response: &serde_json::Value) -> OutboxPublishDecision {
+    if response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+    {
+        return OutboxPublishDecision::Published;
+    }
+    let reason = response
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("relay permanently rejected event")
+        .to_owned();
+    let normalized = reason.to_ascii_lowercase();
+    if normalized.contains("duplicate") || normalized.contains("already exists") {
+        OutboxPublishDecision::Published
+    } else {
+        OutboxPublishDecision::Rejected(reason)
+    }
+}
+
+fn permanent_outbox_error(message: &str) -> bool {
+    [
+        "HTTP 400", "HTTP 401", "HTTP 403", "HTTP 404", "HTTP 405", "HTTP 409", "HTTP 410",
+        "HTTP 413", "HTTP 415", "HTTP 422",
+    ]
+    .iter()
+    .any(|status| message.contains(status))
+}
+
+fn outbox_retry_at(
+    attempt: u32,
+    now: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    let seconds = 5_u64.saturating_mul(1_u64 << attempt.min(6)).min(300);
+    now + chrono::Duration::seconds(seconds as i64)
+}
+
+async fn run_outbox_publisher(store: buzz_runtime::StoreHandle, rest_client: relay::RestClient) {
+    loop {
+        let records = match store
+            .pending_outbox(OUTBOX_BATCH_LIMIT, chrono::Utc::now())
+            .await
+        {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::error!(%error, "failed to read relay outbox");
+                tokio::time::sleep(OUTBOX_DRAIN_INTERVAL).await;
+                continue;
+            }
+        };
+        for record in records {
+            let now = chrono::Utc::now();
+            let transition = match publish_outbox_record(&rest_client, &record).await {
+                OutboxPublishDecision::Published => {
+                    store.mark_outbox_published(record.id, now).await
+                }
+                OutboxPublishDecision::Retry(error) => {
+                    let available_at = outbox_retry_at(record.attempt, now);
+                    store
+                        .mark_outbox_retry(record.id, error, available_at)
+                        .await
+                }
+                OutboxPublishDecision::Rejected(reason) => {
+                    tracing::error!(
+                        outbox_id = record.id,
+                        event_id = %record.event.event_id,
+                        "owner alert: relay permanently rejected durable job event"
+                    );
+                    store.mark_outbox_rejected(record.id, reason, now).await
+                }
+            };
+            if let Err(error) = transition {
+                tracing::error!(
+                    %error,
+                    outbox_id = record.id,
+                    "failed to commit outbox publication decision"
+                );
+            }
+        }
+        tokio::time::sleep(OUTBOX_DRAIN_INTERVAL).await;
+    }
 }
 
 fn emit_runtime_lifecycle(
@@ -1877,13 +2095,83 @@ mod idle_pool_sleep_tests {
 }
 
 pub fn run() -> Result<()> {
+    // The runner is a minimal spec-only process. Dispatch before legacy env
+    // propagation, clap, tracing, crypto, relay, or ACP initialization.
+    if is_subcommand("__job-runner") {
+        return job_runner::run_from_process_args();
+    }
+    if is_subcommand("__e2e-acp-adapter") {
+        return e2e_support::run_process_backed_adapter_fixture();
+    }
+
     config::propagate_legacy_env_vars();
-    tokio_main()
+
+    if ["models", "auth-methods", "authenticate"]
+        .iter()
+        .any(|name| is_subcommand(name))
+    {
+        return tokio_main(None, None, None);
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
+        )
+        .compact()
+        .init();
+
+    let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let runtime_lock = config
+        .runtime_lock_path
+        .as_deref()
+        .map(RuntimeLockGuard::acquire)
+        .transpose()?;
+    if let Some(legacy) = config.legacy_runtime.as_ref() {
+        let runtime_lock = runtime_lock.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("schema-v1 runtime receipt requires an acquired pair lock")
+        })?;
+        publish_phase_zero_receipt(&config.keys, &config.relay_url, legacy, runtime_lock)?;
+    }
+    std::env::remove_var("BUZZ_ACP_LEGACY_RUNTIME_RECEIPT");
+    let managed_auth_tag = config
+        .managed_runtime
+        .as_ref()
+        .and_then(|_| std::env::var("BUZZ_AUTH_TAG").ok())
+        .filter(|value| !value.is_empty());
+    if config.managed_runtime.is_some() {
+        // Cache owner resolution while privileged configuration is still
+        // available, then remove every Buzz credential/operator input from the
+        // inherited environment before any model-facing process exists.
+        if config.agent_owner.is_none() {
+            config.agent_owner = resolve_agent_owner(&config);
+        }
+        for name in [
+            "BUZZ_PRIVATE_KEY",
+            "BUZZ_ACP_PRIVATE_KEY",
+            "BUZZ_AUTH_TAG",
+            "BUZZ_API_TOKEN",
+            "BUZZ_ACP_API_TOKEN",
+            "BUZZ_RELAY_URL",
+            "BUZZ_ACP_LH_COMMAND",
+            "BUZZ_ACP_JOB_WORKSPACE_ROOTS",
+            "BUZZ_ACP_RUNTIME_STATE_DIR",
+            "BUZZ_ACP_RUNTIME_LOCK_PATH",
+            "BUZZ_ACP_RUNTIME_ID",
+            "BUZZ_RUNTIME_RECEIPT",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    tokio_main(Some(config), runtime_lock, managed_auth_tag)
 }
 
 #[tokio::main]
-async fn tokio_main() -> Result<()> {
-    // Install the ring crypto provider for rustls (required for wss:// connections).
+async fn tokio_main(
+    config: Option<Config>,
+    _runtime_lock: Option<RuntimeLockGuard>,
+    managed_auth_tag: Option<String>,
+) -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
@@ -1919,14 +2207,8 @@ async fn tokio_main() -> Result<()> {
         return run_authenticate(args).await;
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
-        )
-        .compact()
-        .init();
-
-    let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let mut config =
+        config.ok_or_else(|| anyhow::anyhow!("missing harness configuration after startup"))?;
 
     // ── Setup-mode early branch ───────────────────────────────────────────────
     //
@@ -1960,11 +2242,188 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    // A validated managed launch marks recovery durably before inspecting any
+    // nonterminal state. The marker remains set until inbox, runner,
+    // assignment, and session reconciliation have all acknowledged completion.
+    // Standalone harnesses remain in-memory; there is no managed transient fallback.
+    let runtime_store = if let Some(runtime) = config.managed_runtime.as_ref() {
+        buzz_runtime::ensure_owner_only_runtime_dir(&runtime.state_dir)
+            .context("runtime state directory is not owner-only")?;
+        let store = buzz_runtime::StoreHandle::open(runtime.state_dir.join("runtime.sqlite3"))
+            .context("failed to open durable runtime store")?;
+        let pending = store
+            .begin_startup_recovery("runtime_restart")
+            .await
+            .context("failed to begin durable runtime recovery")?;
+        tracing::info!(
+            in_turn_inbox = pending.in_turn_inbox,
+            active_assignment = pending.active_assignment.is_some(),
+            active_jobs = pending.active_jobs.len(),
+            channel_sessions = pending.channel_sessions.len(),
+            "durable runtime recovery started"
+        );
+        store
+            .set_recovery_state(true, Some("inbox_reconciliation".into()))
+            .await
+            .context("failed to record inbox reconciliation state")?;
+        let recovered = store
+            .recover_in_turn(chrono::Utc::now())
+            .await
+            .context("failed to recover durable inbox")?;
+        store
+            .complete_startup_recovery_phase(buzz_runtime::StartupRecoveryPhase::Inbox)
+            .await
+            .context("failed to finish inbox reconciliation")?;
+        tracing::info!(
+            requeued = recovered.requeued,
+            dead_lettered = recovered.dead_lettered,
+            "durable inbox reconciled"
+        );
+        Some(store)
+    } else {
+        None
+    };
+    let mut runtime_job_supervisor = None;
+    let mut managed_shutdown_rx = None;
+    let _control_server_task = if let (Some(store), Some(runtime)) =
+        (runtime_store.as_ref(), config.managed_runtime.clone())
+    {
+        let generation = Uuid::new_v4();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        store
+            .set_recovery_state(true, Some("runner_reconciliation".into()))
+            .await
+            .context("failed to record runner reconciliation state")?;
+        let supervisor = job_supervisor::JobSupervisor::new(
+            runtime.clone(),
+            store.clone(),
+            config.keys.clone(),
+            generation,
+            shutdown_tx.clone(),
+        )
+        .context("failed to initialize durable job supervisor")?;
+        supervisor.reconcile().await.map_err(|error| {
+            anyhow::anyhow!("failed to reconcile durable jobs: {}", error.message)
+        })?;
+        store
+            .complete_startup_recovery_phase(buzz_runtime::StartupRecoveryPhase::Runners)
+            .await
+            .context("failed to finish runner reconciliation")?;
+        store
+            .set_recovery_state(true, Some("assignment_reconciliation".into()))
+            .await
+            .context("failed to record assignment reconciliation state")?;
+        let assignment_snapshot = store
+            .assignment_snapshot()
+            .await
+            .context("failed to reconcile durable assignment state")?;
+        tracing::info!(
+            active_assignment = assignment_snapshot.active_assignment.is_some(),
+            active_jobs = assignment_snapshot.active_jobs.len(),
+            "durable assignments reconciled"
+        );
+        store
+            .complete_startup_recovery_phase(buzz_runtime::StartupRecoveryPhase::Assignments)
+            .await
+            .context("failed to finish assignment reconciliation")?;
+        runtime_job_supervisor = Some(supervisor.clone());
+
+        let server_config =
+            buzz_runtime::ControlServerConfig::new(runtime.runtime_id.clone(), generation);
+        let server = buzz_runtime::RuntimeServer::bind(server_config)
+            .await
+            .context("failed to bind runtime control server")?;
+        let control_addr = server
+            .local_addr()
+            .context("failed to read runtime control address")?;
+        let server_config = server.config().clone();
+        let receipt = buzz_runtime::RuntimeReceipt {
+            schema_version: buzz_runtime::RUNTIME_RECEIPT_SCHEMA_VERSION,
+            key: buzz_runtime::ManagedAgentRuntimeKey {
+                pubkey: config.keys.public_key().to_hex(),
+                relay_url: config.relay_url.clone(),
+            },
+            runtime_id: runtime.runtime_id,
+            pid: std::process::id(),
+            process_start_marker: buzz_runtime::current_process_start_marker()
+                .context("failed to read runtime process identity")?,
+            generation,
+            control_addr,
+            controller_token: server_config.controller_token,
+            model_token: server_config.model_token,
+            started_at: chrono::Utc::now(),
+            protocol_version: buzz_runtime::CONTROL_PROTOCOL_VERSION,
+            lock_protocol_version: 1,
+            lock_path_hash: runtime.lock_path_hash,
+            ready: true,
+        };
+        buzz_runtime::write_runtime_receipt(&runtime.receipt_path, &receipt)
+            .context("failed to publish owner-only runtime receipt")?;
+        let monitor = supervisor.clone();
+        let mut monitor_shutdown = shutdown_rx.clone();
+        let _job_reconcile_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        if let Err(error) = monitor.reconcile().await {
+                            tracing::error!(
+                                code = %error.code,
+                                "durable job reconciliation failed"
+                            );
+                        }
+                    }
+                    changed = monitor_shutdown.changed() => {
+                        if changed.is_err() || *monitor_shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        managed_shutdown_rx = Some(shutdown_rx);
+        let handler: Arc<dyn buzz_runtime::ControlHandler> = Arc::new(supervisor);
+        Some(tokio::spawn(async move {
+            if let Err(error) = server.serve(handler).await {
+                tracing::error!(%error, "runtime control server stopped");
+                let _ = shutdown_tx.send(true);
+            }
+        }))
+    } else {
+        None
+    };
+
+    if let Some(store) = runtime_store.as_ref() {
+        store
+            .set_recovery_state(true, Some("session_reconciliation".into()))
+            .await
+            .context("failed to record session reconciliation state")?;
+    }
+
     let mut pool = if config.lazy_pool {
         AgentPool::from_slots((0..config.agents).map(|_| None).collect())
     } else {
         initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
     };
+
+    if let Some(store) = runtime_store.as_ref() {
+        let sessions = store
+            .channel_sessions()
+            .await
+            .context("failed to reconcile durable channel sessions")?;
+        tracing::info!(
+            channel_sessions = sessions.len(),
+            "durable channel sessions reconciled"
+        );
+        let complete = store
+            .complete_startup_recovery_phase(buzz_runtime::StartupRecoveryPhase::Sessions)
+            .await
+            .context("failed to finish session reconciliation")?;
+        if !complete {
+            anyhow::bail!("durable runtime recovery checklist remained incomplete");
+        }
+    }
     let mut pool_ready = !config.lazy_pool;
     let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
 
@@ -1973,18 +2432,33 @@ async fn tokio_main() -> Result<()> {
     // the initial subscribe_since for channels discovered at startup. The Subscribe
     // handler falls back to subscribe_since when last_seen is None, closing the
     // blind spot between "agents ready" and "first REQ sent".
-    let startup_watermark: u64 = std::time::SystemTime::now()
+    let now_watermark = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    let startup_watermark = match &runtime_store {
+        Some(store) => store
+            .replay_watermark()
+            .await
+            .context("failed to read durable replay watermark")?
+            .unwrap_or(now_watermark),
+        None => now_watermark,
+    };
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
-    // Parse BUZZ_AUTH_TAG into a nostr::Tag for NIP-OA relay membership delegation.
-    let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
+    // Keep the raw attestation for the managed MCP while parsing a copy for
+    // the relay. Managed startup scrubbed the inherited environment before any
+    // model-facing process existed, so relying on another env read here would
+    // silently drop hosted-community authorization.
+    let managed_auth_tag_json = managed_auth_tag.or_else(|| {
+        std::env::var("BUZZ_AUTH_TAG")
+            .ok()
+            .filter(|value| !value.is_empty())
+    });
+    let relay_auth_tag: Option<nostr::Tag> = managed_auth_tag_json
+        .as_deref()
+        .and_then(|value| buzz_sdk::nip_oa::parse_auth_tag(value).ok());
 
     let mut relay =
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
@@ -2119,7 +2593,18 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    if config.job_event_publication {
+        for filter in channel_filters.values_mut() {
+            if let Some(kinds) = &mut filter.kinds {
+                for kind in [KIND_JOB_REQUEST, KIND_JOB_CANCEL] {
+                    if !kinds.contains(&kind) {
+                        kinds.push(kind);
+                    }
+                }
+            }
+        }
+    }
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2147,9 +2632,17 @@ async fn tokio_main() -> Result<()> {
     }
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
+    let work_status = runtime_store.clone().map(|store| {
+        pool::spawn_work_status_publisher(store, relay.rest_client(), config.keys.clone())
+    });
+    if let Some(status) = &work_status {
+        status.refresh();
+    }
+
     let dedup_mode = config.dedup_mode;
-    let mut queue =
-        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let mut queue = EventQueue::new(dedup_mode)
+        .with_in_flight_deadline(config.max_turn_duration_secs)
+        .with_runtime_store(runtime_store.clone());
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -2173,8 +2666,9 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let channel_membership = relay::ChannelMembershipResolver::new(relay.rest_client());
     let ctx = Arc::new(PromptContext {
-        mcp_servers: build_mcp_servers(&config),
+        mcp_servers: build_mcp_servers_with_auth(&config, managed_auth_tag_json.as_deref()),
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
@@ -2182,6 +2676,7 @@ async fn tokio_main() -> Result<()> {
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
+        work_status,
         team_instructions: config.team_instructions.clone(),
         base_prompt: if config.no_base_prompt {
             None
@@ -2207,6 +2702,12 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        runtime_store: runtime_store.clone(),
+    });
+    let _outbox_publisher = config.job_event_publication.then(|| {
+        runtime_store
+            .clone()
+            .map(|store| tokio::spawn(run_outbox_publisher(store, relay.rest_client())))
     });
 
     if !config.memory_enabled {
@@ -2313,6 +2814,14 @@ async fn tokio_main() -> Result<()> {
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    if let Some(mut runtime_shutdown) = managed_shutdown_rx.take() {
+        let tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if runtime_shutdown.changed().await.is_ok() && *runtime_shutdown.borrow() {
+                let _ = tx.send(());
+            }
+        });
+    }
 
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
@@ -2395,7 +2904,7 @@ async fn tokio_main() -> Result<()> {
         // busy spin — whenever the queued work drained after a failed wake.
         let mut lazy_wake_work_pending = false;
         if config.lazy_pool && !pool_ready {
-            lazy_wake_work_pending = queue.has_flushable_work();
+            lazy_wake_work_pending = queue.has_flushable_work_managed().await?;
             if let Some(attempt) = pool_lifecycle
                 .start_wake_if_due(lazy_wake_work_pending, tokio::time::Instant::now())
             {
@@ -2417,7 +2926,9 @@ async fn tokio_main() -> Result<()> {
                     if let Err(error) = wake_tx.send((attempt, result)).await {
                         let (_attempt, result) = error.0;
                         if let Ok(mut abandoned_pool) = result {
-                            shutdown_agent_pool(&mut abandoned_pool).await;
+                            if let Err(error) = shutdown_agent_pool(&mut abandoned_pool).await {
+                                tracing::error!(%error, "abandoned adapter pool cleanup was not verified");
+                            }
                         }
                     }
                 });
@@ -2457,9 +2968,9 @@ async fn tokio_main() -> Result<()> {
             // indefinitely on quiet channels — dispatch_pending is only
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
-            if queue.has_flushable_work() {
+            if queue.has_flushable_work_managed().await? {
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -2511,7 +3022,7 @@ async fn tokio_main() -> Result<()> {
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
             for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
             {
                 typing_channels.insert(channel_id, thread_tags);
             }
@@ -2675,7 +3186,18 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    } else if let Some(mut filter) =
+                                        config::resolve_dynamic_channel_filter(&config, ch, &rules)
+                                    {
+                                        if config.job_event_publication {
+                                            if let Some(kinds) = &mut filter.kinds {
+                                                for kind in [KIND_JOB_REQUEST, KIND_JOB_CANCEL] {
+                                                    if !kinds.contains(&kind) {
+                                                        kinds.push(kind);
+                                                    }
+                                                }
+                                            }
+                                        }
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -2695,7 +3217,7 @@ async fn tokio_main() -> Result<()> {
                                     // removed channel. Events already in-flight will
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
-                                    let drained_ids = queue.drain_channel(ch);
+                                    let drained_ids = queue.drain_channel_managed(ch).await?;
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
                                     } else {
@@ -2879,12 +3401,90 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
-                            let prompt_tag = match matched {
-                                Some(m) => m.prompt_tag,
-                                None => {
-                                    tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
-                                    continue;
+                            let is_agent_job_protocol_event =
+                                is_agent_job_protocol_kind(kind_u32);
+                            if is_agent_job_protocol_event && !config.job_event_publication {
+                                tracing::debug!(
+                                    event_id = %buzz_event.event.id,
+                                    "dropping job protocol event while publication gate is disabled"
+                                );
+                                continue;
+                            }
+                            let is_remote_job_control =
+                                kind_u32 == KIND_JOB_REQUEST || kind_u32 == KIND_JOB_CANCEL;
+                            let prompt_tag = if is_agent_job_protocol_event {
+                                if is_remote_job_control {
+                                    if runtime_job_supervisor.is_none() {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %buzz_event.event.id,
+                                            "dropping remote job control because durable supervisor is unavailable"
+                                        );
+                                        continue;
+                                    }
+                                    if !event_targets_only_agent(&buzz_event.event, &pubkey_hex) {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %buzz_event.event.id,
+                                            "dropping job control event not addressed exclusively to this runtime"
+                                        );
+                                        continue;
+                                    }
+                                    if !subscribed_channel_ids.contains(&buzz_event.channel_id) {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %buzz_event.event.id,
+                                            "dropping job control event outside this runtime's active channel subscriptions"
+                                        );
+                                        continue;
+                                    }
+                                    if kind_u32 == KIND_JOB_REQUEST {
+                                        let requester = buzz_event.event.pubkey.to_hex();
+                                        match channel_membership
+                                            .resolve(buzz_event.channel_id, &requester)
+                                            .await
+                                        {
+                                            relay::ChannelMembership::Member => {}
+                                            relay::ChannelMembership::NotMember => {
+                                                tracing::warn!(
+                                                    channel_id = %buzz_event.channel_id,
+                                                    event_id = %buzz_event.event.id,
+                                                    requester,
+                                                    "dropping remote job request from a nonmember"
+                                                );
+                                                continue;
+                                            }
+                                            relay::ChannelMembership::Unknown => {
+                                                tracing::warn!(
+                                                    channel_id = %buzz_event.channel_id,
+                                                    event_id = %buzz_event.event.id,
+                                                    requester,
+                                                    "dropping remote job request because current membership is unavailable"
+                                                );
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                                "@job".to_owned()
+                            } else {
+                                match filter::match_event(
+                                    &buzz_event.event,
+                                    buzz_event.channel_id,
+                                    &rules,
+                                    &pubkey_hex,
+                                )
+                                .await
+                                {
+                                    Some(matched) => matched.prompt_tag,
+                                    None => {
+                                        tracing::debug!(
+                                            channel_id = %buzz_event.channel_id,
+                                            kind = buzz_event.event.kind.as_u16(),
+                                            "event matched no rule — dropping"
+                                        );
+                                        continue;
+                                    }
                                 }
                             };
                             // Capture author pubkey before queue.push() moves
@@ -2903,6 +3503,108 @@ async fn tokio_main() -> Result<()> {
                             // backed payload) so the cost is negligible.
                             let event_for_steer = buzz_event.event.clone();
                             let prompt_tag_for_steer = prompt_tag.clone();
+                            if !is_agent_job_protocol_event
+                                && matches!(config.dedup_mode, DedupMode::Drop)
+                                && queue.is_channel_in_flight(buzz_event.channel_id)
+                            {
+                                tracing::debug!(
+                                    channel_id = %buzz_event.channel_id,
+                                    "dropping event for in-flight channel before durable acceptance"
+                                );
+                                continue;
+                            }
+                            // Durability is the acceptance boundary. Never add a
+                            // seen reaction for a row that was not committed.
+                            if let Some(store) = &ctx.runtime_store {
+                                match store
+                                    .enqueue_inbox(buzz_runtime::InboxEvent {
+                                        channel_id: buzz_event.channel_id,
+                                        event: buzz_event.event.clone(),
+                                        received_at: chrono::Utc::now(),
+                                    })
+                                    .await
+                                    .context("failed to persist accepted inbox event")?
+                                {
+                                    buzz_runtime::EnqueueOutcome::Enqueued => {}
+                                    buzz_runtime::EnqueueOutcome::Duplicate => {
+                                        tracing::debug!(
+                                            event_id = %event_id_hex,
+                                            "durable inbox replay deduplicated"
+                                        );
+                                        if !is_agent_job_protocol_event {
+                                            continue;
+                                        }
+                                        // A runtime may have crashed after
+                                        // persisting a control but before the
+                                        // supervisor saw it. Reconcile protocol
+                                        // duplicates through the idempotent
+                                        // supervisor instead of prompting ACP.
+                                    }
+                                    buzz_runtime::EnqueueOutcome::CapacityRejected => {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %event_id_hex,
+                                            "durable inbox capacity rejected new event"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
+                            if is_agent_job_protocol_event {
+                                if is_remote_job_control {
+                                    let supervisor = runtime_job_supervisor.as_ref().expect(
+                                        "remote job control was gated on supervisor availability",
+                                    );
+                                    let outcome = if kind_u32 == KIND_JOB_REQUEST {
+                                        supervisor
+                                            .start_remote_request(
+                                                &buzz_event.event,
+                                                true,
+                                                true,
+                                            )
+                                            .await
+                                    } else {
+                                        let owner_pubkey = owner_cache
+                                            .get()
+                                            .and_then(|owner| PublicKey::from_hex(owner).ok());
+                                        supervisor
+                                            .apply_remote_cancel(
+                                                &buzz_event.event,
+                                                true,
+                                                true,
+                                                owner_pubkey.as_ref(),
+                                            )
+                                            .await
+                                    };
+                                    if let Err(error) = outcome {
+                                        tracing::warn!(
+                                            code = %error.code,
+                                            channel_id = %buzz_event.channel_id,
+                                            event_id = %buzz_event.event.id,
+                                            "remote job control was rejected by the privileged supervisor"
+                                        );
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        kind = kind_u32,
+                                        channel_id = %buzz_event.channel_id,
+                                        event_id = %buzz_event.event.id,
+                                        "consuming managed job lifecycle event without an ACP turn"
+                                    );
+                                }
+                                // Job protocol events are machine controls, not
+                                // user prompts. Whether admitted or rejected by
+                                // the privileged supervisor, consume the durable
+                                // inbox row without creating or steering an ACP
+                                // turn. The signed event/job rows remain the
+                                // collaboration and audit record.
+                                consume_agent_job_protocol_event(
+                                    ctx.runtime_store.as_ref(),
+                                    &event_id_hex,
+                                )
+                                .await?;
+                                continue;
+                            }
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
@@ -2967,7 +3669,7 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -3034,7 +3736,7 @@ async fn tokio_main() -> Result<()> {
                             idle_pool_sleep_seconds = config.idle_pool_sleep_secs,
                             "idle pool sleep bound reached — tearing pool back to lazy state"
                         );
-                        shutdown_agent_pool(&mut pool).await;
+                        shutdown_agent_pool(&mut pool).await?;
                         // Return to the exact pre-wake lazy state: empty slots,
                         // Listening lifecycle. The top-of-loop wake path re-wakes
                         // on the next accepted event. No second lifecycle.
@@ -3064,10 +3766,10 @@ async fn tokio_main() -> Result<()> {
                     let _ = result_rx;
                     if !pool_ready {
                         tracing::debug!("heartbeat_skipped_pool_not_ready");
-                    } else if queue.has_flushable_work() {
+                    } else if queue.has_flushable_work_managed().await? {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3146,7 +3848,9 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
-                ) == LoopAction::Exit
+                )
+                .await
+                    == LoopAction::Exit
                 {
                     break;
                 }
@@ -3166,7 +3870,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3191,7 +3895,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3325,7 +4029,7 @@ async fn tokio_main() -> Result<()> {
                     }
                 }
                 if drop_withheld {
-                    queue.remove_event(channel_id, &event_id);
+                    queue.remove_event_managed(channel_id, &event_id).await?;
                 }
                 if release_withheld {
                     queue.release_native_steer(channel_id, &event_id);
@@ -3346,7 +4050,7 @@ async fn tokio_main() -> Result<()> {
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity).await?
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3375,6 +4079,7 @@ async fn tokio_main() -> Result<()> {
                         );
                         for (channel_id, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                .await?
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3414,9 +4119,15 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("wake task did not drain within grace period — aborting");
         wake_tasks.shutdown().await;
     }
+    let mut adapter_cleanup_error: Option<anyhow::Error> = None;
     while let Ok((_attempt, result)) = wake_rx.try_recv() {
         if let Ok(mut awakened_pool) = result {
-            shutdown_agent_pool(&mut awakened_pool).await;
+            if let Err(error) = shutdown_agent_pool(&mut awakened_pool).await {
+                tracing::error!(%error, "awakened adapter pool cleanup was not verified");
+                if adapter_cleanup_error.is_none() {
+                    adapter_cleanup_error = Some(error);
+                }
+            }
         }
     }
 
@@ -3428,7 +4139,7 @@ async fn tokio_main() -> Result<()> {
     // Tasks that finish normally send their OwnedAgent through result_rx — we
     // explicitly shut them down here to reap child processes. If the grace
     // period expires, remaining tasks are aborted and fall back to
-    // AcpClient::Drop (start_kill + try_wait — best-effort, not guaranteed).
+    // AcpClient::Drop (crash-safe tree termination, but no bounded reap proof).
     let (rx_ref, js_ref) = pool.rx_and_join_set();
     let shutdown_result = tokio::time::timeout(grace, async {
         loop {
@@ -3443,7 +4154,12 @@ async fn tokio_main() -> Result<()> {
                 maybe_result = rx_ref.recv() => {
                     if let Some(mut pr) = maybe_result {
                         let idx = pr.agent.index;
-                        pr.agent.acp.shutdown().await;
+                        if let Err(error) = pr.agent.acp.shutdown().await {
+                            tracing::error!(agent = idx, %error, "adapter tree cleanup was not verified");
+                            if adapter_cleanup_error.is_none() {
+                                adapter_cleanup_error = Some(error.into());
+                            }
+                        }
                         tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
                     }
                     // If None, channel closed — tasks are done.
@@ -3460,7 +4176,12 @@ async fn tokio_main() -> Result<()> {
     // before tasks were aborted.
     while let Ok(mut pr) = pool.result_rx_try_recv() {
         let idx = pr.agent.index;
-        pr.agent.acp.shutdown().await;
+        if let Err(error) = pr.agent.acp.shutdown().await {
+            tracing::error!(agent = idx, %error, "adapter tree cleanup was not verified");
+            if adapter_cleanup_error.is_none() {
+                adapter_cleanup_error = Some(error.into());
+            }
+        }
         tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
     }
     // Explicitly shut down idle agents still sitting in their slots.
@@ -3468,7 +4189,12 @@ async fn tokio_main() -> Result<()> {
         if let Some(agent) = slot.take() {
             let idx = agent.index;
             let mut acp = agent.acp;
-            acp.shutdown().await;
+            if let Err(error) = acp.shutdown().await {
+                tracing::error!(agent = idx, %error, "adapter tree cleanup was not verified");
+                if adapter_cleanup_error.is_none() {
+                    adapter_cleanup_error = Some(error.into());
+                }
+            }
             tracing::debug!(agent = idx, "reaped idle agent on shutdown");
         }
     }
@@ -3484,7 +4210,12 @@ async fn tokio_main() -> Result<()> {
     // shut down returned agents instead of relying on AcpClient::Drop.
     while let Ok(rr) = respawn_rx.try_recv() {
         if let Ok((mut acp, _, _)) = rr.result {
-            acp.shutdown().await;
+            if let Err(error) = acp.shutdown().await {
+                tracing::error!(agent = rr.index, %error, "adapter tree cleanup was not verified");
+                if adapter_cleanup_error.is_none() {
+                    adapter_cleanup_error = Some(error.into());
+                }
+            }
             tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
         }
     }
@@ -3516,8 +4247,265 @@ async fn tokio_main() -> Result<()> {
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
 
+    if let Some(error) = adapter_cleanup_error {
+        return Err(error.context("one or more adapter Job Objects did not become empty"));
+    }
     tracing::info!("buzz-acp stopped");
     Ok(())
+}
+#[cfg(test)]
+mod durable_outbox_projection_tests {
+    use super::*;
+
+    #[test]
+    fn relay_response_classification_is_idempotent_and_fail_closed() {
+        assert_eq!(
+            classify_outbox_response(&serde_json::json!({"accepted": true})),
+            OutboxPublishDecision::Published
+        );
+        assert_eq!(
+            classify_outbox_response(
+                &serde_json::json!({"accepted": false, "message": "duplicate event"})
+            ),
+            OutboxPublishDecision::Published
+        );
+        assert_eq!(
+            classify_outbox_response(
+                &serde_json::json!({"accepted": false, "message": "policy rejected"})
+            ),
+            OutboxPublishDecision::Rejected("policy rejected".into())
+        );
+    }
+
+    #[test]
+    fn retry_backoff_is_capped_and_permanent_http_errors_are_isolated() {
+        let now = chrono::Utc::now();
+        assert_eq!((outbox_retry_at(0, now) - now).num_seconds(), 5);
+        assert_eq!((outbox_retry_at(50, now) - now).num_seconds(), 300);
+        assert!(permanent_outbox_error(
+            "POST /events returned HTTP 403 Forbidden"
+        ));
+        assert!(!permanent_outbox_error(
+            "POST /events returned HTTP 503 Service Unavailable"
+        ));
+        assert!(!permanent_outbox_error(
+            "POST /events returned HTTP 429 Too Many Requests"
+        ));
+    }
+
+    #[test]
+    fn remote_job_control_requires_exactly_one_matching_target() {
+        let author = nostr::Keys::generate();
+        let target = nostr::Keys::generate().public_key().to_hex();
+        let other = nostr::Keys::generate().public_key().to_hex();
+        let make_event = |targets: &[&str]| {
+            let tags = targets
+                .iter()
+                .map(|target| nostr::Tag::parse(["p", *target]).unwrap())
+                .collect::<Vec<_>>();
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_JOB_REQUEST as u16), "{}")
+                .tags(tags)
+                .sign_with_keys(&author)
+                .unwrap()
+        };
+        assert!(event_targets_only_agent(&make_event(&[&target]), &target));
+        assert!(!event_targets_only_agent(&make_event(&[]), &target));
+        assert!(!event_targets_only_agent(
+            &make_event(&[&target, &other]),
+            &target
+        ));
+        assert!(!event_targets_only_agent(&make_event(&[&other]), &target));
+    }
+
+    #[test]
+    fn every_job_protocol_kind_is_classified_as_machine_control() {
+        for kind in [
+            KIND_JOB_REQUEST,
+            KIND_JOB_ACCEPTED,
+            KIND_JOB_PROGRESS,
+            KIND_JOB_RESULT,
+            KIND_JOB_CANCEL,
+            KIND_JOB_ERROR,
+        ] {
+            assert!(is_agent_job_protocol_kind(kind));
+        }
+        assert!(!is_agent_job_protocol_kind(KIND_STREAM_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn consumed_job_control_retains_durable_accounting_without_a_job_side_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            buzz_runtime::StoreHandle::open(directory.path().join("runtime.sqlite3")).unwrap();
+        let channel_id = Uuid::new_v4();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_JOB_REQUEST as u16),
+            r#"{"schema":1,"summary":"call jobs_start again"}"#,
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .unwrap();
+        let event_id = event.id.to_hex();
+        let created_at = event.created_at.as_secs();
+
+        assert_eq!(
+            store
+                .enqueue_inbox(buzz_runtime::InboxEvent {
+                    channel_id,
+                    event,
+                    received_at: chrono::Utc::now(),
+                })
+                .await
+                .unwrap(),
+            buzz_runtime::EnqueueOutcome::Enqueued
+        );
+
+        consume_agent_job_protocol_event(Some(&store), &event_id)
+            .await
+            .unwrap();
+
+        let depths = store.queue_depths().await.unwrap();
+        assert_eq!(depths.queued, 0);
+        assert_eq!(depths.in_turn, 0);
+        assert_eq!(depths.completed, 1);
+        assert_eq!(
+            store.channel_watermark(channel_id).await.unwrap(),
+            Some(created_at)
+        );
+        assert!(store
+            .list_jobs(buzz_runtime::JobListFilter::default())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod runtime_lock_tests {
+    use super::{publish_phase_zero_receipt, RuntimeLockGuard};
+    use sha2::{Digest as _, Sha256};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    #[test]
+    fn two_contenders_have_exactly_one_lock_winner() {
+        let directory =
+            std::env::temp_dir().join(format!("buzz-acp-lock-test-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("runtime.lock");
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let release = Arc::new(AtomicBool::new(false));
+        let (result_tx, result_rx) = mpsc::channel();
+        let mut contenders = Vec::new();
+
+        for _ in 0..2 {
+            let path = path.clone();
+            let start = Arc::clone(&start);
+            let release = Arc::clone(&release);
+            let result_tx = result_tx.clone();
+            contenders.push(std::thread::spawn(move || {
+                start.wait();
+                match RuntimeLockGuard::acquire(&path) {
+                    Ok(guard) => {
+                        result_tx.send(true).unwrap();
+                        while !release.load(Ordering::Acquire) {
+                            std::thread::yield_now();
+                        }
+                        drop(guard);
+                    }
+                    Err(_) => result_tx.send(false).unwrap(),
+                }
+            }));
+        }
+        drop(result_tx);
+
+        start.wait();
+        let outcomes = [
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        ];
+        assert_eq!(outcomes.into_iter().filter(|won| *won).count(), 1);
+
+        release.store(true, Ordering::Release);
+        for contender in contenders {
+            contender.join().unwrap();
+        }
+
+        let reacquired = RuntimeLockGuard::acquire(&path);
+        assert!(
+            reacquired.is_ok(),
+            "dropping the process-lifetime guard must release the OS lock"
+        );
+        drop(reacquired);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn lock_winner_atomically_writes_owner_only_phase_zero_proof() {
+        let directory =
+            std::env::temp_dir().join(format!("buzz-acp-phase-zero-{}", uuid::Uuid::new_v4()));
+        let lock_path = directory.join("runtime.lock");
+        let receipt_path = directory.join("legacy-runtime.json");
+        let lock = RuntimeLockGuard::acquire(&lock_path).expect("acquire pair lock");
+        let lock_path_hash = hex::encode(Sha256::digest(lock_path.as_os_str().as_encoded_bytes()));
+        let legacy = crate::config::LegacyRuntimeConfig {
+            receipt_path: receipt_path.clone(),
+            desktop_instance_id: "desktop-generation".into(),
+            lock_path_hash: lock_path_hash.clone(),
+        };
+        let keys = nostr::Keys::generate();
+
+        publish_phase_zero_receipt(&keys, "wss://relay.example", &legacy, &lock)
+            .expect("write phase-zero receipt");
+        let receipt =
+            buzz_runtime::read_legacy_runtime_receipt(&receipt_path).expect("read receipt");
+
+        assert_eq!(receipt.schema_version, 1);
+        assert_eq!(receipt.pid, std::process::id());
+        assert!(buzz_runtime::process_matches_marker(
+            receipt.pid,
+            &receipt.process_start_marker
+        ));
+        assert_eq!(receipt.lock_protocol_version, 1);
+        assert_eq!(receipt.lock_path_hash, lock_path_hash);
+        assert_eq!(receipt.desktop_instance_id, "desktop-generation");
+        assert!(RuntimeLockGuard::acquire(&lock_path).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&receipt_path)
+                    .expect("receipt metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+
+        drop(lock);
+        std::fs::remove_file(receipt_path).expect("remove receipt");
+        std::fs::remove_file(lock_path).expect("remove lock");
+        std::fs::remove_dir(directory).expect("remove directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_lock_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("buzz-acp-lock-mode-test-{}", uuid::Uuid::new_v4()));
+        let path = directory.join("runtime.lock");
+        let guard = RuntimeLockGuard::acquire(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(mode, 0o600);
+
+        drop(guard);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
 }
 
 #[derive(PartialEq)]
@@ -3531,6 +4519,40 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
         t.as_slice().first().map(|s| s.as_str()) == Some("p")
             && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
     })
+}
+async fn consume_agent_job_protocol_event(
+    store: Option<&buzz_runtime::StoreHandle>,
+    event_id: &str,
+) -> Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    store
+        .complete_inbox_event(event_id.to_owned())
+        .await
+        .context("failed to consume durable remote job control event")?;
+    Ok(())
+}
+
+fn event_targets_only_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
+    let mut targets = event.tags.iter().filter_map(|tag| {
+        (tag.as_slice().first().map(|value| value.as_str()) == Some("p"))
+            .then(|| tag.as_slice().get(1).map(|value| value.as_str()))
+            .flatten()
+    });
+    matches!(targets.next(), Some(target) if target == agent_pubkey_hex) && targets.next().is_none()
+}
+
+fn is_agent_job_protocol_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_JOB_REQUEST
+            | KIND_JOB_ACCEPTED
+            | KIND_JOB_PROGRESS
+            | KIND_JOB_RESULT
+            | KIND_JOB_CANCEL
+            | KIND_JOB_ERROR
+    )
 }
 
 fn is_owner_control_command(
@@ -3704,15 +4726,15 @@ fn try_native_steer(
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
 /// Flush queued work to available agents.
-fn dispatch_pending(
+async fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
     last_activity: &mut tokio::time::Instant,
-) -> Vec<(Uuid, ThreadTags)> {
+) -> Result<Vec<(Uuid, ThreadTags)>, buzz_runtime::StoreError> {
     let mut dispatched_channels = Vec::new();
     loop {
-        let batch = match queue.flush_next() {
+        let batch = match queue.flush_next_managed().await? {
             Some(b) => b,
             None => break,
         };
@@ -3728,8 +4750,8 @@ fn dispatch_pending(
             None => {
                 let pending = queue.pending_channels();
                 tracing::debug!(pending_channels = pending, "pool_exhausted");
-                queue.requeue_preserve_timestamps(batch);
-                queue.mark_complete(channel_id);
+                queue.requeue_preserve_managed(batch).await?;
+                queue.mark_complete_managed(channel_id).await?;
                 break;
             }
         };
@@ -3796,7 +4818,7 @@ fn dispatch_pending(
         queue_depth = queue.pending_channels(),
         "dispatch_pending"
     );
-    dispatched_channels
+    Ok(dispatched_channels)
 }
 
 /// Returns `true` when `error` is a non-retryable authentication failure.
@@ -3852,7 +4874,7 @@ fn spawn_failure_notice(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_prompt_result(
+async fn handle_prompt_result(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     config: &Config,
@@ -3929,7 +4951,10 @@ fn handle_prompt_result(
                 // original batch must survive with no retry/dead-letter
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
-                queue.requeue_as_cancelled(batch, reason);
+                if let Err(error) = queue.requeue_cancelled_managed(batch, reason).await {
+                    tracing::error!(%error, "durable cancelled-batch transition failed");
+                    return LoopAction::Exit;
+                }
             } else if matches!(
                 result.outcome,
                 PromptOutcome::Timeout(TimeoutKind::Hard {
@@ -3942,6 +4967,16 @@ fn handle_prompt_result(
                     "dead-lettering batch after hard-cap timeout (no recent activity) — discarding {} events",
                     batch.events.len(),
                 );
+                if let Err(error) = queue
+                    .dead_letter_current_managed(
+                        batch.channel_id,
+                        "hard_timeout_no_recent_activity".into(),
+                    )
+                    .await
+                {
+                    tracing::error!(%error, "durable dead-letter transition failed");
+                    return LoopAction::Exit;
+                }
                 let content = format!(
                     "⚠️ I couldn't process the last request (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
                     config.max_turn_duration_secs
@@ -3959,7 +4994,16 @@ fn handle_prompt_result(
                     events = batch.events.len(),
                     "hard-cap timeout with recent activity — requeueing for retry"
                 );
-                if let Some(dead) = queue.requeue(batch) {
+                if let Some(dead) = match queue
+                    .requeue_managed(batch, "hard_timeout_recent_activity".into())
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::error!(%error, "durable retry transition failed");
+                        return LoopAction::Exit;
+                    }
+                } {
                     let content = format!(
                         "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
                         config.max_turn_duration_secs
@@ -3979,12 +5023,39 @@ fn handle_prompt_result(
                     events = batch.events.len(),
                     "dead-lettering batch immediately — non-retryable auth error"
                 );
+                if let Err(error) = queue
+                    .dead_letter_current_managed(batch.channel_id, "authentication_failed".into())
+                    .await
+                {
+                    tracing::error!(%error, "durable auth dead-letter transition failed");
+                    return LoopAction::Exit;
+                }
                 let content = "⚠️ I couldn't process the last request: authentication failed. \
                     Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
-            } else if let Some(dead) = queue.requeue(batch) {
+            } else if let Some(dead) = match queue
+                .requeue_managed(
+                    batch,
+                    match &result.outcome {
+                        PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout".to_string(),
+                        PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
+                            "hard_timeout".to_string()
+                        }
+                        PromptOutcome::AgentExited => "agent_exited".to_string(),
+                        PromptOutcome::Error(error) => error.to_string(),
+                        _ => "repeated_failure".to_string(),
+                    },
+                )
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::error!(%error, "durable retry transition failed");
+                    return LoopAction::Exit;
+                }
+            } {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
                     PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
@@ -4010,7 +5081,12 @@ fn handle_prompt_result(
     }
 
     match &result.source {
-        PromptSource::Channel(ch) => queue.mark_complete(*ch),
+        PromptSource::Channel(ch) => {
+            if let Err(error) = queue.mark_complete_managed(*ch).await {
+                tracing::error!(%error, "durable completion transition failed");
+                return LoopAction::Exit;
+            }
+        }
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
 
@@ -4265,9 +5341,7 @@ fn recover_panicked_agent(
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
+                queue.requeue_panicked_managed(batch);
                 tracing::warn!("requeued batch for panicked agent {i}");
             } else {
                 tracing::debug!(
@@ -4544,7 +5618,12 @@ fn spawn_respawn_task(
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
         let mut agent = old_agent;
-        agent.acp.shutdown().await;
+        if let Err(error) = agent.acp.shutdown().await {
+            guard.send(Err(anyhow::Error::from(error).context(
+                "old adapter tree cleanup was not verified; refusing replacement",
+            )));
+            return;
+        }
         drop(agent);
 
         if !delay.is_zero() {
@@ -4569,23 +5648,45 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .to_ascii_lowercase()
 }
 
-async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
+async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) -> Result<()> {
+    let mut first_error: Option<anyhow::Error> = None;
     for slot in slots {
         if let Some(mut agent) = slot.take() {
-            agent.acp.shutdown().await;
+            if let Err(error) = agent.acp.shutdown().await {
+                if first_error.is_none() {
+                    first_error = Some(error.into());
+                }
+            }
         }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
-async fn shutdown_agent_pool(pool: &mut AgentPool) {
+async fn shutdown_agent_pool(pool: &mut AgentPool) -> Result<()> {
     pool.join_set.shutdown().await;
+    let mut first_error: Option<anyhow::Error> = None;
     while let Ok(mut result) = pool.result_rx_try_recv() {
-        result.agent.acp.shutdown().await;
+        if let Err(error) = result.agent.acp.shutdown().await {
+            if first_error.is_none() {
+                first_error = Some(error.into());
+            }
+        }
     }
     for slot in pool.agents_mut() {
         if let Some(mut agent) = slot.take() {
-            agent.acp.shutdown().await;
+            if let Err(error) = agent.acp.shutdown().await {
+                if first_error.is_none() {
+                    first_error = Some(error.into());
+                }
+            }
         }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -4638,8 +5739,8 @@ async fn initialize_agent_pool(
                     Some(shutdown) => tokio::select! {
                         biased;
                         _ = shutdown.changed() => {
-                            acp.shutdown().await;
-                            shutdown_agent_slots(&mut agent_slots).await;
+                            let _ = acp.shutdown().await;
+                            let _ = shutdown_agent_slots(&mut agent_slots).await;
                             return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
                         }
                         result = initialize => result,
@@ -4687,12 +5788,12 @@ async fn initialize_agent_pool(
                     }
                     Ok(Err(e)) => {
                         tracing::error!(agent = i, "agent initialize failed: {e}");
-                        acp.shutdown().await;
+                        let _ = acp.shutdown().await;
                         agent_slots.push(None);
                     }
                     Err(_) => {
                         tracing::error!(agent = i, "agent timed out during init (60s)");
-                        acp.shutdown().await;
+                        let _ = acp.shutdown().await;
                         agent_slots.push(None);
                     }
                 }
@@ -4754,10 +5855,10 @@ async fn spawn_and_init(
             Ok((acp, protocol_version, agent_name))
         }
         Err(e) => {
-            // Explicitly shut down the spawned child to prevent zombie/leak.
-            // Drop only does start_kill + try_wait (best-effort); shutdown()
-            // does start_kill + bounded wait (guaranteed reap).
-            acp.shutdown().await;
+            // Explicit shutdown reaps the child and, on Windows, verifies the
+            // adapter Job Object is empty. Drop is necessarily best-effort
+            // because it cannot await the process-tree verification deadline.
+            let _ = acp.shutdown().await;
             Err(anyhow::anyhow!("agent initialize failed: {e}"))
         }
     }
@@ -4789,19 +5890,22 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
     let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: agent initialize failed: {e}");
             std::process::exit(1);
         }
         Err(_) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
             std::process::exit(1);
         }
     };
 
     let methods = extract_auth_methods(&init_result);
-    client.shutdown().await;
+    client
+        .shutdown()
+        .await
+        .context("auth-method adapter tree cleanup was not verified")?;
 
     if args.json {
         let output = serde_json::json!({ "methods": methods });
@@ -4837,12 +5941,12 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
     let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: agent initialize failed: {e}");
             std::process::exit(1);
         }
         Err(_) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: agent initialize timed out ({MODELS_TIMEOUT:?})");
             std::process::exit(1);
         }
@@ -4852,7 +5956,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
         .iter()
         .any(|method| method.get("id").and_then(|id| id.as_str()) == Some(args.method_id.as_str()));
     if !supports_method {
-        client.shutdown().await;
+        let _ = client.shutdown().await;
         eprintln!(
             "error: auth method '{}' is not advertised by this adapter",
             args.method_id
@@ -4865,16 +5969,19 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 
     match result {
         Ok(Ok(_)) => {
-            client.shutdown().await;
+            client
+                .shutdown()
+                .await
+                .context("authenticate adapter tree cleanup was not verified")?;
             Ok(())
         }
         Ok(Err(e)) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: authenticate failed: {e}");
             std::process::exit(1);
         }
         Err(_) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: authenticate timed out ({AUTHENTICATE_TIMEOUT:?})");
             std::process::exit(1);
         }
@@ -4915,12 +6022,12 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     let (init_result, session_resp) = match protocol_result {
         Ok(Ok(tuple)) => tuple,
         Ok(Err(e)) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: agent communication failed: {e}");
             std::process::exit(1);
         }
         Err(_) => {
-            client.shutdown().await;
+            let _ = client.shutdown().await;
             eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
             std::process::exit(1);
         }
@@ -5015,11 +6122,22 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         }
     }
 
-    client.shutdown().await;
+    client
+        .shutdown()
+        .await
+        .context("models adapter tree cleanup was not verified")?;
     Ok(())
 }
 
+#[cfg(test)]
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    let auth_tag = std::env::var("BUZZ_AUTH_TAG")
+        .ok()
+        .filter(|value| !value.is_empty());
+    build_mcp_servers_with_auth(config, auth_tag.as_deref())
+}
+
+fn build_mcp_servers_with_auth(config: &Config, managed_auth_tag: Option<&str>) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
     }
@@ -5049,13 +6167,23 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         .expect("secret key bech32 encoding should never fail"),
                 },
             ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
+            // The managed path passes the cached value explicitly because its
+            // inherited environment was scrubbed before model startup. The
+            // standalone wrapper supplies the current environment value.
+            if let Some(auth_tag) = managed_auth_tag.filter(|value| !value.is_empty()) {
+                env.push(EnvVar {
+                    name: "BUZZ_AUTH_TAG".into(),
+                    value: auth_tag.to_owned(),
+                });
+            }
+            // The receipt is a capability-scoped local credential. Without it,
+            // buzz-dev-mcp would select the unrestricted standalone tool
+            // profile instead of ManagedMcp.
+            if config.managed_capability_profile {
+                if let Some(runtime) = config.managed_runtime.as_ref() {
                     env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
+                        name: "BUZZ_RUNTIME_RECEIPT".into(),
+                        value: runtime.receipt_path.to_string_lossy().into_owned(),
                     });
                 }
             }
@@ -6751,6 +7879,11 @@ mod build_mcp_servers_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            runtime_lock_path: None,
+            managed_runtime: None,
+            legacy_runtime: None,
+            job_event_publication: false,
+            managed_capability_profile: false,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -6806,6 +7939,35 @@ mod build_mcp_servers_tests {
         assert!(
             names.contains(&"BUZZ_PRIVATE_KEY"),
             "missing BUZZ_PRIVATE_KEY; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn managed_mcp_receives_capability_receipt_and_cached_auth_tag() {
+        let mut config = test_config();
+        config.managed_runtime = Some(config::ManagedRuntimeConfig {
+            runtime_id: "runtime-test".into(),
+            state_dir: std::path::PathBuf::from("/tmp/runtime-test"),
+            receipt_path: std::path::PathBuf::from("/tmp/runtime-test/runtime.json"),
+            lh_executable: None,
+            workspace_roots: Vec::new(),
+            lock_path_hash: "lock-hash".into(),
+        });
+        config.managed_capability_profile = true;
+
+        let servers = build_mcp_servers_with_auth(&config, Some("cached-attestation-tag"));
+        let env = &servers[0].env;
+        assert_eq!(
+            env.iter()
+                .find(|entry| entry.name == "BUZZ_RUNTIME_RECEIPT")
+                .map(|entry| entry.value.as_str()),
+            Some("/tmp/runtime-test/runtime.json")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|entry| entry.name == "BUZZ_AUTH_TAG")
+                .map(|entry| entry.value.as_str()),
+            Some("cached-attestation-tag")
         );
     }
 
@@ -6975,6 +8137,11 @@ mod error_outcome_emission_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            runtime_lock_path: None,
+            managed_runtime: None,
+            legacy_runtime: None,
+            job_event_publication: false,
+            managed_capability_profile: false,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -7119,7 +8286,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
-        );
+        )
+        .await;
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
         assert!(returned.state.deliveries[&channel_id]
@@ -7191,7 +8359,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
-        );
+        )
+        .await;
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
         assert!(returned.state.deliveries[&channel_id]
@@ -7305,7 +8474,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
-        );
+        )
+        .await;
 
         let returned = pool.agents_mut()[0].as_ref().expect("returned agent");
         assert!(!returned.state.deliveries.contains_key(&channel_id));
@@ -7368,7 +8538,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         let turn_errors: Vec<_> = observer
             .snapshot()
@@ -7535,7 +8706,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
-            );
+            )
+            .await;
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
             assert_eq!(
@@ -7626,7 +8798,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
-            );
+            )
+            .await;
             (
                 queue.pending_channels(),
                 queue.queued_event_count(&channel_id),
@@ -7732,7 +8905,8 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
-            );
+            )
+            .await;
             (
                 queue.pending_channels(),
                 queue.queued_event_count(&channel_id),
@@ -7824,7 +8998,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         let events = observer.snapshot();
         let turn_error = events
@@ -7918,7 +9093,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         let events = observer.snapshot();
         let turn_error = events
@@ -8034,7 +9210,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         // Batch preserved as a cancelled merge, not dead-lettered — same
         // treatment as a normal `Cancelled` outcome. `handle_prompt_result`
@@ -8167,7 +9344,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
-        );
+        )
+        .await;
 
         // No batch to merge — the queue has nothing pending for any channel.
         assert_eq!(
@@ -8350,7 +9528,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
-        );
+        )
+        .await;
 
         // The batch must not be requeued: pending_channels returns 0.
         assert_eq!(
@@ -8436,7 +9615,8 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             None,
             None,
-        );
+        )
+        .await;
 
         // Non-auth application error: batch IS requeued (first attempt, retry budget > 0).
         assert_eq!(

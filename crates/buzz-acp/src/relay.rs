@@ -260,6 +260,17 @@ pub struct RestClient {
 fn is_retriable_status(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 502 | 503 | 504)
 }
+const MAX_HTTP_ERROR_DETAIL_CHARS: usize = 512;
+
+fn http_error_detail(body: &str) -> Option<String> {
+    let detail: String = body
+        .trim()
+        .chars()
+        .take(MAX_HTTP_ERROR_DETAIL_CHARS)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    (!detail.is_empty()).then_some(detail)
+}
 
 /// Base retry delays for transient HTTP failures: 500ms, 1s, 2s.
 /// Jitter (±20%) is applied at call time via `jittered_duration`.
@@ -364,10 +375,17 @@ impl RestClient {
                     )));
                 }
                 Ok(resp) => {
+                    let status = resp.status();
+                    let detail = resp
+                        .text()
+                        .await
+                        .ok()
+                        .and_then(|body| http_error_detail(&body));
+                    let suffix = detail
+                        .as_deref()
+                        .map_or_else(String::new, |body| format!(": {body}"));
                     return Err(RelayError::Http(format!(
-                        "{method} {} returned HTTP {}",
-                        path,
-                        resp.status()
+                        "{method} {path} returned HTTP {status}{suffix}"
                     )));
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {
@@ -495,6 +513,151 @@ impl From<nostr::event::builder::Error> for RelayError {
     fn from(e: nostr::event::builder::Error) -> Self {
         RelayError::AuthFailed(e.to_string())
     }
+}
+
+/// Result of resolving one requester's current channel membership.
+///
+/// `Unknown` is distinct from `NotMember`: an unavailable or malformed
+/// authoritative snapshot must fail closed rather than falling back to a
+/// previously cached membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChannelMembership {
+    Member,
+    NotMember,
+    Unknown,
+}
+
+/// Authenticated current-membership resolver for privileged remote job ingress.
+///
+/// This follows the existing channel-info resolver convention: a shared cache
+/// is populated from the relay's authenticated REST query surface. Unlike
+/// immutable channel metadata, membership is refreshed for every admission so
+/// removals take effect before process creation. A failed refresh invalidates
+/// the cached channel instead of trusting stale authorization state.
+#[derive(Debug, Clone)]
+pub(crate) struct ChannelMembershipResolver {
+    cache: std::sync::Arc<std::sync::RwLock<HashMap<Uuid, CachedChannelMembership>>>,
+    rest_client: RestClient,
+}
+
+#[derive(Debug, Clone)]
+struct CachedChannelMembership {
+    members: HashSet<String>,
+    created_at: u64,
+    event_id: String,
+}
+
+impl ChannelMembershipResolver {
+    pub(crate) fn new(rest_client: RestClient) -> Self {
+        Self {
+            cache: std::sync::Arc::new(std::sync::RwLock::new(HashMap::new())),
+            rest_client,
+        }
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        channel_id: Uuid,
+        requester_pubkey: &str,
+    ) -> ChannelMembership {
+        let snapshot = match fetch_channel_membership(channel_id, &self.rest_client).await {
+            Some(snapshot) => snapshot,
+            None => {
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.remove(&channel_id);
+                }
+                return ChannelMembership::Unknown;
+            }
+        };
+        let Ok(mut cache) = self.cache.write() else {
+            return ChannelMembership::Unknown;
+        };
+        if let Some(cached) = cache.get(&channel_id) {
+            let fetched_is_older = snapshot.created_at < cached.created_at
+                || (snapshot.created_at == cached.created_at
+                    && snapshot.event_id > cached.event_id);
+            if fetched_is_older {
+                return ChannelMembership::Unknown;
+            }
+        }
+        let membership = if snapshot.members.contains(requester_pubkey) {
+            ChannelMembership::Member
+        } else {
+            ChannelMembership::NotMember
+        };
+        cache.insert(channel_id, snapshot);
+        membership
+    }
+
+    #[cfg(test)]
+    fn cached_members(&self, channel_id: Uuid) -> Option<HashSet<String>> {
+        self.cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).map(|entry| entry.members.clone()))
+    }
+}
+
+async fn fetch_channel_membership(
+    channel_id: Uuid,
+    rest_client: &RestClient,
+) -> Option<CachedChannelMembership> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(d_tag, [channel_id.to_string()])
+        .limit(1);
+    let response = match timeout(Duration::from_secs(2), rest_client.query(&[filter])).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            debug!(channel_id = %channel_id, "membership query failed: {error}");
+            return None;
+        }
+        Err(_) => {
+            debug!(channel_id = %channel_id, "membership query timed out");
+            return None;
+        }
+    };
+    let events = response.as_array()?;
+    let value = events.first()?.clone();
+    let event: Event = serde_json::from_value(value).ok()?;
+    event.verify().ok()?;
+    if event.kind.as_u16() as u32 != buzz_core::kind::KIND_NIP29_GROUP_MEMBERS {
+        return None;
+    }
+    let channels = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("d"))
+                .then(|| parts.get(1).cloned())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if channels.len() != 1 || channels[0] != channel_id.to_string() {
+        return None;
+    }
+    let members = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.first().map(String::as_str) == Some("p"))
+                .then(|| parts.get(1).cloned())
+                .flatten()
+        })
+        .filter(|pubkey| nostr::PublicKey::from_hex(pubkey).is_ok())
+        .collect();
+    Some(CachedChannelMembership {
+        members,
+        created_at: event.created_at.as_secs(),
+        event_id: event.id.to_hex(),
+    })
 }
 
 /// A parsed NIP-01 relay message.
@@ -4025,6 +4188,173 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn http_error_detail_is_bounded_and_single_line() {
+        assert_eq!(
+            http_error_detail("  {\"error\":\"invalid job kind\"}\n"),
+            Some("{\"error\":\"invalid job kind\"}".to_string())
+        );
+        let oversized = "x".repeat(MAX_HTTP_ERROR_DETAIL_CHARS + 1);
+        assert_eq!(
+            http_error_detail(&oversized).expect("bounded detail").len(),
+            MAX_HTTP_ERROR_DETAIL_CHARS
+        );
+        assert_eq!(http_error_detail(" \r\n\t "), None);
+    }
+
+    async fn membership_resolver(
+        responses: Vec<Value>,
+    ) -> (ChannelMembershipResolver, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind membership query server");
+        let base_url = format!("http://{}", listener.local_addr().expect("server address"));
+        let mut responses = VecDeque::from(responses);
+        let server = tokio::spawn(async move {
+            while let Some(body) = responses.pop_front() {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                let body = body.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest_client = RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        (ChannelMembershipResolver::new(rest_client), server)
+    }
+
+    fn membership_snapshot(channel_id: Uuid, members: &[&str], created_at: u64) -> Value {
+        let mut tags = vec![Tag::parse(["d", &channel_id.to_string()]).expect("membership d tag")];
+        tags.extend(
+            members
+                .iter()
+                .map(|member| Tag::parse(["p", *member]).expect("membership p tag")),
+        );
+        serde_json::to_value(
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16),
+                "",
+            )
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign membership snapshot"),
+        )
+        .expect("serialize membership snapshot")
+    }
+
+    #[tokio::test]
+    async fn current_membership_distinguishes_member_from_nonmember() {
+        let channel_id = Uuid::new_v4();
+        let member = Keys::generate().public_key().to_hex();
+        let nonmember = Keys::generate().public_key().to_hex();
+        let snapshot = membership_snapshot(channel_id, &[&member], 10);
+        let (resolver, server) =
+            membership_resolver(vec![json!([snapshot.clone()]), json!([snapshot])]).await;
+
+        assert_eq!(
+            resolver.resolve(channel_id, &member).await,
+            ChannelMembership::Member
+        );
+        assert_eq!(
+            resolver.resolve(channel_id, &nonmember).await,
+            ChannelMembership::NotMember
+        );
+        server.await.expect("membership query server");
+    }
+
+    #[tokio::test]
+    async fn refreshed_membership_replaces_cached_members_and_honors_revocation() {
+        let channel_id = Uuid::new_v4();
+        let requester = Keys::generate().public_key().to_hex();
+        let other = Keys::generate().public_key().to_hex();
+        let before = membership_snapshot(channel_id, &[&requester, &other], 10);
+        let after = membership_snapshot(channel_id, &[&other], 11);
+        let (resolver, server) = membership_resolver(vec![json!([before]), json!([after])]).await;
+
+        assert_eq!(
+            resolver.resolve(channel_id, &requester).await,
+            ChannelMembership::Member
+        );
+        assert!(resolver
+            .cached_members(channel_id)
+            .expect("cached initial membership")
+            .contains(&requester));
+        assert_eq!(
+            resolver.resolve(channel_id, &requester).await,
+            ChannelMembership::NotMember
+        );
+        assert!(
+            !resolver
+                .cached_members(channel_id)
+                .expect("cached replacement membership")
+                .contains(&requester),
+            "a refreshed revocation must replace the cached authorization set"
+        );
+        server.await.expect("membership query server");
+    }
+
+    #[tokio::test]
+    async fn unknown_current_membership_invalidates_stale_cached_authorization() {
+        let channel_id = Uuid::new_v4();
+        let requester = Keys::generate().public_key().to_hex();
+        let snapshot = membership_snapshot(channel_id, &[&requester], 10);
+        let (resolver, server) = membership_resolver(vec![json!([snapshot]), json!([])]).await;
+
+        assert_eq!(
+            resolver.resolve(channel_id, &requester).await,
+            ChannelMembership::Member
+        );
+        assert_eq!(
+            resolver.resolve(channel_id, &requester).await,
+            ChannelMembership::Unknown
+        );
+        assert!(
+            resolver.cached_members(channel_id).is_none(),
+            "unknown current state must not retain stale membership authority"
+        );
+        server.await.expect("membership query server");
+    }
+
+    #[tokio::test]
+    async fn stale_membership_snapshot_cannot_restore_cached_authorization() {
+        let channel_id = Uuid::new_v4();
+        let requester = Keys::generate().public_key().to_hex();
+        let other = Keys::generate().public_key().to_hex();
+        let current_revocation = membership_snapshot(channel_id, &[&other], 11);
+        let stale_membership = membership_snapshot(channel_id, &[&requester, &other], 10);
+        let (resolver, server) =
+            membership_resolver(vec![json!([current_revocation]), json!([stale_membership])]).await;
+
+        assert_eq!(
+            resolver.resolve(channel_id, &requester).await,
+            ChannelMembership::NotMember
+        );
+        assert_eq!(
+            resolver.resolve(channel_id, &requester).await,
+            ChannelMembership::Unknown,
+            "an older authenticated snapshot is not current admission proof"
+        );
+        assert!(!resolver
+            .cached_members(channel_id)
+            .expect("newer cached revocation remains")
+            .contains(&requester));
+        server.await.expect("membership query server");
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {

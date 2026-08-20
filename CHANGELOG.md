@@ -1,5 +1,12 @@
 # Changelog
 
+
+## Unreleased
+
+### Desktop and shared changes
+
+- feat(agents): durable managed agents — serialized inboxes, resumable channel sessions, authenticated detached jobs, signed relay progress, Desktop reattachment, and persistent assignment state
+
 ## v0.5.17
 
 ### Desktop and shared changes

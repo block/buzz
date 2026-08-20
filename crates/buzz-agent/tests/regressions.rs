@@ -377,6 +377,89 @@ async fn mcp_init_timeout_kills_child() {
     );
     h.shutdown().await;
 }
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn windows_agent_shutdown_cleans_mcp_descendant_before_exit() {
+    let llm = spawn_capturing_llm(vec![openai_tool_call(
+        "tc-windows-tree",
+        "fake__tool_0",
+        json!({}),
+    )])
+    .await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "30")]).await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let grandchild_pid_file = temp.path().join("grandchild.pid");
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    let cwd = std::env::current_dir()
+        .expect("current dir")
+        .to_string_lossy()
+        .into_owned();
+
+    h.send(
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    )
+    .await;
+    let _ = h.recv().await;
+    h.send(
+        "session/new",
+        json!({
+            "cwd": cwd,
+            "mcpServers": [{
+                "name": "fake",
+                "command": fake_mcp,
+                "args": [],
+                "env": [
+                    { "name": "FAKE_MCP_SPAWN_GRANDCHILD", "value": "1" },
+                    { "name": "FAKE_MCP_GRANDCHILD_PID_FILE", "value": grandchild_pid_file },
+                    { "name": "FAKE_MCP_TOOL_DELAY", "value": "30" }
+                ],
+            }],
+        }),
+    )
+    .await;
+    let session = h
+        .recv_until(|value| value.get("result").is_some() || value.get("error").is_some())
+        .await;
+    let session_id = session["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_owned();
+    h.send(
+        "session/prompt",
+        json!({
+            "sessionId": session_id,
+            "prompt": [{"type":"text","text":"start the fixture tool"}]
+        }),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !grandchild_pid_file.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fake MCP never spawned its descendant"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let grandchild_pid: u32 = std::fs::read_to_string(&grandchild_pid_file)
+        .expect("read grandchild pid")
+        .parse()
+        .expect("parse grandchild pid");
+    let grandchild_marker =
+        buzz_runtime::process_start_marker(grandchild_pid).expect("read grandchild identity");
+
+    h.stdin.shutdown().await.expect("close agent stdin");
+    let status = tokio::time::timeout(Duration::from_secs(10), h.child.wait())
+        .await
+        .expect("agent shutdown exceeded Job Object verification bound")
+        .expect("wait agent");
+    assert!(status.success(), "agent shutdown failed: {status}");
+    assert!(
+        !buzz_runtime::process_matches_marker(grandchild_pid, &grandchild_marker).unwrap_or(false),
+        "agent exited before its exact MCP descendant was gone"
+    );
+}
 
 /// A real MCP server that returns 200 tools with 100KB descriptions must
 /// be capped: tool count ≤ MAX_TOOLS_PER_SESSION (128) — we expect spawn_all

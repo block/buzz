@@ -16,11 +16,11 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
+        agent_readiness, clear_legacy_runtime_pids, find_managed_agent_mut, known_acp_runtime,
         load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
         resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        stop_managed_agent_process, validate_global_config, AgentReadiness, BackendKind,
+        GlobalAgentConfig,
     },
 };
 
@@ -68,8 +68,8 @@ pub async fn set_global_agent_config(
     //
     // Validate, snapshot old config, write new config, collect pre-filter
     // candidate pubkeys (local backend + recorded PID + old NotReady + new
-    // Ready).  The candidate list is a hint — eligibility is re-checked under
-    // lock in Phase 2 after sync_managed_agent_processes.
+    // Ready). The candidate list is a hint; eligibility is re-checked under
+    // lock in Phase 2 after legacy scalar PID cleanup.
     let app_for_write = app.clone();
     let phase1 = tokio::task::spawn_blocking(move || {
         validate_global_config(&config)?;
@@ -96,8 +96,8 @@ pub async fn set_global_agent_config(
     // ── Phase 2: async restart (outside spawn_blocking) ──────────────────
     //
     // For each candidate: stop under the lock (re-verifying eligibility after
-    // sync_managed_agent_processes), then start via start_local_agent_with_preflight
-    // — the same path as a manual restart.  This ensures owner_hex is computed
+    // legacy scalar PID cleanup), then start via start_local_agent_with_preflight
+    // — the same path as a manual restart. This ensures owner_hex is computed
     // and passed (NIP-OA auth_tag fallback), the persona is re-snapshotted, and
     // last_error is persisted on failure.
     //
@@ -180,7 +180,7 @@ fn collect_restart_candidates(
     };
     use tauri::Manager;
     let state = app.state::<AppState>();
-    let mut runtimes = state
+    let runtimes = state
         .managed_agent_processes
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -191,9 +191,13 @@ fn collect_restart_candidates(
             if record.backend != BackendKind::Local {
                 return false;
             }
-            let has_live_runtime = runtimes.iter_mut().any(|(key, runtime)| {
+            let has_live_runtime = runtimes.iter().any(|(key, runtime)| {
                 key.pubkey.eq_ignore_ascii_case(&record.pubkey)
-                    && runtime.child.try_wait().ok().flatten().is_none()
+                    && !matches!(
+                        runtime.lifecycle,
+                        crate::managed_agents::ManagedAgentRuntimeLifecycle::Failed
+                            | crate::managed_agents::ManagedAgentRuntimeLifecycle::Stopped
+                    )
             });
             if !has_live_runtime {
                 return false;
@@ -227,11 +231,11 @@ fn collect_restart_candidates(
 /// This is the per-agent restart step in Phase 2 of `set_global_agent_config`.
 /// It mirrors the semantics of a manual agent restart:
 ///
-/// 1. **Stop under lock** — acquires the store lock, calls
-///    `sync_managed_agent_processes`, re-verifies eligibility (local backend,
-///    live process, effective env changed or readiness transition), then stops
-///    the process and saves the record.  The lock is released before the start
-///    so `start_local_agent_with_preflight` can re-acquire it cleanly.
+/// 1. **Stop under lock** — acquires the store lock, clears migration-only
+///    scalar PID bookkeeping, re-verifies eligibility (local backend,
+///    authenticated runtime, effective env changed or readiness transition),
+///    then stops the runtime and saves the record. The lock is released before
+///    `start_local_agent_with_preflight` re-acquires it.
 ///    `personas_snapshot` is reused here instead of loading from disk again.
 ///
 /// 2. **Start via the normal preflight path** — calls
@@ -273,12 +277,8 @@ async fn restart_local_agent_on_config_change(
             .lock()
             .map_err(|e| format!("failed to acquire runtimes lock: {e}"))?;
 
-        // Sync process state so PID liveness reflects current reality.
-        let (sync_changed, _) = sync_managed_agent_processes(
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app_for_stop),
-        );
+        // Clear migration-only scalar PID bookkeeping.
+        let sync_changed = clear_legacy_runtime_pids(&mut records);
         if sync_changed {
             save_managed_agents(&app_for_stop, &records)?;
         }

@@ -5,6 +5,7 @@ import {
   AUTO_RESTART_QUIESCENCE_MS,
   decideAutoRestart,
   nextEdgeState,
+  isNonterminalAssignmentState,
 } from "./autoRestartPolicy.ts";
 
 // ── Chunk F policy matrix ────────────────────────────────────────────────────
@@ -21,6 +22,7 @@ function greenInputs(overrides = {}) {
     needsRestart: true,
     working: false,
     workingSource: "none",
+    activeAssignmentState: null,
     connected: true,
     isLocalBackend: true,
     isRunning: true,
@@ -53,6 +55,7 @@ const NEVER_FIRE_ROWS = [
     { workingSource: "observer" },
   ],
   ["typing source alone defers", { workingSource: "typing" }],
+  ["durable assignment fences restart", { activeAssignmentState: "waiting" }],
   ["observer relay not connected", { connected: false }],
   ["remote backend", { isLocalBackend: false }],
   ["agent not running", { isRunning: false }],
@@ -71,6 +74,34 @@ for (const [label, overrides] of NEVER_FIRE_ROWS) {
     );
   });
 }
+
+test("every nonterminal durable assignment fences config-drift restart", () => {
+  for (const state of [
+    "reading",
+    "working",
+    "waiting",
+    "needs_approval",
+    "blocked",
+    "recovering",
+  ]) {
+    assert.equal(isNonterminalAssignmentState(state), true);
+    assert.equal(
+      decideAutoRestart(greenInputs({ activeAssignmentState: state })),
+      "hold",
+      `${state} must fence restart`,
+    );
+  }
+});
+
+test("terminal assignment history does not fence a new restart", () => {
+  for (const state of ["completed", "failed", "cancelled"]) {
+    assert.equal(isNonterminalAssignmentState(state), false);
+    assert.equal(
+      decideAutoRestart(greenInputs({ activeAssignmentState: state })),
+      "fire",
+    );
+  }
+});
 
 // ── the quiescence window ───────────────────────────────────────────────────
 

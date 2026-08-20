@@ -4,15 +4,21 @@
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    agent_job::{
+        AgentJobAccepted, AgentJobCancel, AgentJobError, AgentJobProgress, AgentJobRequest,
+        AgentJobResult, MAX_AGENT_JOB_CONTENT_BYTES,
+    },
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_JOB_ACCEPTED, KIND_JOB_CANCEL, KIND_JOB_ERROR, KIND_JOB_PROGRESS, KIND_JOB_REQUEST,
+        KIND_JOB_RESULT, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_PROJECT, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+        KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -2327,6 +2333,173 @@ pub fn build_delete_addressable(
     let coord = format!("{kind}:{pk}:{d}");
     let tags = vec![tag(&["a", &coord])?];
     Ok(EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "").tags(tags))
+}
+
+fn agent_job_content<T: serde::Serialize>(payload: &T) -> Result<String, SdkError> {
+    let content = serde_json::to_string(payload)
+        .map_err(|error| SdkError::InvalidInput(format!("invalid agent job payload: {error}")))?;
+    check_content(&content, MAX_AGENT_JOB_CONTENT_BYTES)?;
+    Ok(content)
+}
+
+/// Build a durable agent-job request event (kind 43001).
+pub fn build_agent_job_request(
+    channel_id: Uuid,
+    target: nostr::PublicKey,
+    job_id: Uuid,
+    source_event_id: Option<nostr::EventId>,
+    parent_job: Option<Uuid>,
+    request: &AgentJobRequest,
+) -> Result<EventBuilder, SdkError> {
+    request
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &target.to_hex()])?,
+        tag(&["job", &job_id.to_string()])?,
+    ];
+    if let Some(source) = source_event_id {
+        tags.push(tag(&["e", &source.to_hex()])?);
+    }
+    if let Some(parent) = parent_job {
+        tags.push(tag(&["parent-job", &parent.to_string()])?);
+    }
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_JOB_REQUEST as u16),
+        agent_job_content(request)?,
+    )
+    .tags(tags)
+    .allow_self_tagging())
+}
+
+/// Build a durable agent-job accepted event (kind 43002).
+pub fn build_agent_job_accepted(
+    channel_id: Uuid,
+    requester: nostr::PublicKey,
+    request_event_id: nostr::EventId,
+    payload: &AgentJobAccepted,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    build_agent_job_lifecycle(
+        KIND_JOB_ACCEPTED,
+        channel_id,
+        requester,
+        payload.job,
+        request_event_id,
+        None,
+        agent_job_content(payload)?,
+    )
+}
+
+/// Build a durable agent-job progress event (kind 43003).
+pub fn build_agent_job_progress(
+    channel_id: Uuid,
+    requester: nostr::PublicKey,
+    request_event_id: nostr::EventId,
+    payload: &AgentJobProgress,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    build_agent_job_lifecycle(
+        KIND_JOB_PROGRESS,
+        channel_id,
+        requester,
+        payload.job,
+        request_event_id,
+        Some(payload.seq),
+        agent_job_content(payload)?,
+    )
+}
+
+/// Build a successful durable agent-job result event (kind 43004).
+pub fn build_agent_job_result(
+    channel_id: Uuid,
+    requester: nostr::PublicKey,
+    request_event_id: nostr::EventId,
+    payload: &AgentJobResult,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    build_agent_job_lifecycle(
+        KIND_JOB_RESULT,
+        channel_id,
+        requester,
+        payload.job,
+        request_event_id,
+        None,
+        agent_job_content(payload)?,
+    )
+}
+
+/// Build a durable agent-job cancellation request event (kind 43005).
+pub fn build_agent_job_cancel(
+    channel_id: Uuid,
+    target: nostr::PublicKey,
+    request_event_id: nostr::EventId,
+    payload: &AgentJobCancel,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    build_agent_job_lifecycle(
+        KIND_JOB_CANCEL,
+        channel_id,
+        target,
+        payload.job,
+        request_event_id,
+        None,
+        agent_job_content(payload)?,
+    )
+    .map(|builder| builder.allow_self_tagging())
+}
+
+/// Build a failed, cancelled, or lost durable agent-job event (kind 43006).
+pub fn build_agent_job_error(
+    channel_id: Uuid,
+    requester: nostr::PublicKey,
+    request_event_id: nostr::EventId,
+    payload: &AgentJobError,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    build_agent_job_lifecycle(
+        KIND_JOB_ERROR,
+        channel_id,
+        requester,
+        payload.job,
+        request_event_id,
+        None,
+        agent_job_content(payload)?,
+    )
+}
+
+fn build_agent_job_lifecycle(
+    kind: u32,
+    channel_id: Uuid,
+    peer: nostr::PublicKey,
+    job: Uuid,
+    request_event_id: nostr::EventId,
+    seq: Option<u64>,
+    content: String,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &peer.to_hex()])?,
+        tag(&["job", &job.to_string()])?,
+        tag(&["e", &request_event_id.to_hex()])?,
+    ];
+    if let Some(seq) = seq {
+        tags.push(tag(&["seq", &seq.to_string()])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 #[cfg(test)]

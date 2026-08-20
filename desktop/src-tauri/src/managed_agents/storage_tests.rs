@@ -9,11 +9,10 @@ use std::fs::File;
 use std::io::Write as _;
 use std::path::Path;
 
-use tempfile::NamedTempFile;
-
 use super::{
-    agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
-    KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
+    agent_keyring_name, create_owner_only_dir, hydrate_keys_with, migrate_inline_key,
+    open_log_file, persist_agent_keys_with, KeyMigration, KeyStore, KeyringProbe,
+    ManagedAgentRecord,
 };
 
 /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -313,12 +312,6 @@ fn persist_agent_keys_writes_once_per_record_with_inline_key() {
     assert!(records[1].private_key_nsec.is_empty());
 }
 
-fn write_log(content: &str) -> NamedTempFile {
-    let mut file = NamedTempFile::new().expect("temp log");
-    file.write_all(content.as_bytes()).expect("write log");
-    file
-}
-
 /// The keyringless fallback write must land `0o600` from the write itself —
 /// not a post-write `chmod` — so a crash in the umask window can never leave
 /// plaintext agent nsecs world-readable (Wes storage.rs:239, SECURITY.md:90).
@@ -343,48 +336,6 @@ fn restricted_write_lands_owner_only_without_post_write_chmod() {
         std::fs::read_to_string(&path).expect("read back"),
         r#"[{"private_key_nsec":"nsec1secret"}]"#
     );
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_wrapped_llm_auth() {
-    let file =
-        write_log("noise\nAgent reported error (code -32001): llm auth: 401 unauthorized: ...\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert!(result.message.contains("llm auth"));
-    assert_eq!(result.code, Some(-32001));
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_unwrapped_llm_auth() {
-    let file = write_log("noise\nllm auth: denied\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert_eq!(result.message, "Agent reported error: llm auth: denied");
-    assert_eq!(result.code, Some(-32001));
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_bare_model_not_found() {
-    let file = write_log("noise\nllm model not found: (some-model) 404\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert_eq!(
-        result.message,
-        "Agent reported error: llm model not found: (some-model) 404"
-    );
-    assert_eq!(result.code, Some(-32002));
-}
-
-#[test]
-fn meaningful_agent_error_from_log_promotes_legacy_format() {
-    let file = write_log("noise\nAgent reported error: llm: 500 internal\n");
-    let result = super::meaningful_agent_error_from_log(file.path()).unwrap();
-    assert_eq!(result.message, "Agent reported error: llm: 500 internal");
-    assert_eq!(result.code, None);
-}
-
-#[test]
-fn meaningful_agent_error_from_log_does_not_promote_midline_auth_text() {
-    let file = write_log("noise before llm auth: denied\n");
-    assert!(super::meaningful_agent_error_from_log(file.path()).is_none());
 }
 
 #[test]
@@ -499,6 +450,30 @@ fn newest_agent_log_breaks_mtime_ties_deterministically() {
         super::newest_agent_log_in_dir(dir.path(), PUBKEY_A),
         Some(dir.path().join(format!("{PUBKEY_A}__bbb.log"))),
         "equal mtimes must resolve to the same file on every read_dir order"
+    );
+}
+
+#[test]
+fn runtime_lock_path_is_stable_and_pair_specific() {
+    let base = Path::new("/tmp/buzz/agents");
+    let key =
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "WSS://RELAY.EXAMPLE/")
+            .expect("valid pair");
+    let same_pair =
+        crate::managed_agents::ManagedAgentRuntimeKey::new("AA".repeat(32), "wss://relay.example")
+            .expect("same canonical pair");
+    let other_relay =
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://other.example")
+            .expect("other relay pair");
+
+    let path = super::runtime_lock_path_in(base, &key);
+    let lock_dir = base.join("runtime-locks");
+    assert_eq!(path, super::runtime_lock_path_in(base, &same_pair));
+    assert_ne!(path, super::runtime_lock_path_in(base, &other_relay));
+    assert_eq!(path.parent(), Some(lock_dir.as_path()));
+    assert_eq!(
+        path.file_name(),
+        Some(std::ffi::OsStr::new(&format!("{}.lock", key.runtime_id())))
     );
 }
 
@@ -722,6 +697,54 @@ fn install_log_is_created_owner_only_without_post_write_chmod() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600, "install logs must be owner-only");
+}
+#[cfg(unix)]
+#[test]
+fn durable_runtime_artifacts_are_owner_only_at_creation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state_dir = dir.path().join("runtimes").join("pair");
+    create_owner_only_dir(&state_dir).expect("create state directory");
+    let state_mode = std::fs::metadata(&state_dir)
+        .expect("state metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(state_mode, 0o700, "runtime state must be owner-only");
+
+    let log_path = state_dir.join("runtime.log");
+    drop(open_log_file(&log_path).expect("create runtime log"));
+    let log_mode = std::fs::metadata(&log_path)
+        .expect("log metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(log_mode, 0o600, "runtime log must be owner-only");
+}
+
+#[cfg(unix)]
+#[test]
+fn durable_runtime_upgrade_tightens_existing_state_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state_dir = dir.path().join("existing-runtime");
+    std::fs::create_dir(&state_dir).expect("create legacy state directory");
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755))
+        .expect("set legacy mode");
+
+    create_owner_only_dir(&state_dir).expect("upgrade state directory permissions");
+
+    let mode = std::fs::metadata(&state_dir)
+        .expect("state metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "runtime upgrade must remove group/world access"
+    );
 }
 
 /// A run starts a new current file and keeps the previous run as `.1`, so the
