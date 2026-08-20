@@ -77,6 +77,9 @@ pub(crate) fn run_git(
         LOCAL_GIT_TIMEOUT
     };
     configure_git_auth(&mut command, auth, needs_credentials);
+    // AppImage AppRun leaks bundled lib paths into children; strip them so
+    // system git/curl resolve host libraries (#2315).
+    crate::appimage_env::sanitize_appimage_env_for_child(&mut command);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
