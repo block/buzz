@@ -1,0 +1,61 @@
+schema_version: 1
+flow: tooltip_fresh_dwell
+platforms: [macos]
+fixture: local_review_channel
+record:
+  video: window
+  screenshots: false
+  accessibility: false
+steps:
+  - name: activate_buzz
+    act: {type: activate}
+    expect:
+      exists: {role: window}
+    timeout_ms: 15000
+  - name: await_interactive_app
+    act: {type: wait, duration_ms: 100}
+    expect:
+      not_exists: {id: app-loading-gate}
+    timeout_ms: 60000
+  - name: reach_seeded_channel
+    locate:
+      - {id: channel-welcome-everyone}
+      - {role: button, name: welcome-everyone}
+    act: {type: click}
+    expect:
+      exists: {id: message-insert-mention}
+    timeout_ms: 15000
+  - name: settle_pointer_before_fresh_dwell
+    locate:
+      - {id: message-composer}
+      - {role: text-area, name: Message}
+    act: {type: move_pointer, duration_ms: 80}
+    expect:
+      not_exists: {role: tooltip, name: "Mention someone"}
+  - name: clear_tooltip_skip_delay
+    act: {type: wait, duration_ms: 800}
+    expect:
+      not_exists: {role: tooltip, name: "Mention someone"}
+  - name: transit_over_mention
+    locate:
+      - {id: message-insert-mention}
+      - {role: button, name: "Mention someone"}
+    act: {type: move_pointer}
+    expect: {enabled: true}
+  - name: complete_dwell
+    act: {type: wait, duration_ms: 0}
+    expect:
+      exists: {role: tooltip, name: "Mention someone"}
+    timeout_ms: 1000
+    measure: tooltip_open_latency
+  - name: leave_trigger
+    locate:
+      - {id: message-composer}
+      - {role: text-area, name: Message}
+    act: {type: move_pointer, duration_ms: 80}
+    expect:
+      not_exists: {role: tooltip, name: "Mention someone"}
+    timeout_ms: 1000
+cleanup:
+  terminate_app: true
+  remove_state: true

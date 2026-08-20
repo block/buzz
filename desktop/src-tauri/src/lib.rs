@@ -51,6 +51,32 @@ mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
+use serde::Serialize;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeReviewConfig {
+    relay_url: String,
+    pubkey: String,
+    probe_url: String,
+    probe_token: String,
+}
+
+#[tauri::command]
+fn native_review_config() -> Result<NativeReviewConfig, String> {
+    if std::env::var("BUZZ_NATIVE_REVIEW").as_deref() != Ok("1") {
+        return Err("native review runtime is disabled".into());
+    }
+    let required = |name: &str| {
+        std::env::var(name).map_err(|_| format!("missing native review runtime setting: {name}"))
+    };
+    Ok(NativeReviewConfig {
+        relay_url: required("BUZZ_RELAY_URL")?,
+        pubkey: required("BUZZ_REVIEW_PUBKEY")?,
+        probe_url: required("BUZZ_NATIVE_REVIEW_PROBE_URL")?,
+        probe_token: required("BUZZ_NATIVE_REVIEW_PROBE_TOKEN")?,
+    })
+}
 use builderlab::*;
 #[doc(hidden)]
 pub use commands::print_agent_access_owner_only_probe_if_requested;
@@ -523,6 +549,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            native_review_config,
             terminal_runtime::terminal_attach,
             terminal_runtime::terminal_detach,
             terminal_runtime::terminal_close,

@@ -1,0 +1,230 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buzz.local/native-review/receipt.schema.json",
+  "title": "Buzz native review receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "flow",
+    "status",
+    "started_at",
+    "finished_at",
+    "provenance",
+    "isolation",
+    "artifacts",
+    "steps",
+    "cleanup",
+    "measurements",
+    "performance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "flow": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "finished_at": {
+      "type": "string"
+    },
+    "failure": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "head_sha",
+        "dirty",
+        "dirty_state_sha256",
+        "status"
+      ],
+      "properties": {
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "dirty_state_sha256": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "artifact_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Application artifact path, resolved relative to the receipt file when not absolute"
+        },
+        "artifact_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "initial_window": {
+          "type": "object"
+        }
+      }
+    },
+    "isolation": {
+      "type": "object"
+    },
+    "artifacts": {
+      "type": "object"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_started",
+            "passed",
+            "failed"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "value",
+          "unit",
+          "step"
+        ],
+        "properties": {
+          "value": {
+            "type": "number",
+            "minimum": 0
+          },
+          "unit": {
+            "const": "ms"
+          },
+          "step": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "required": [
+        "machine"
+      ],
+      "properties": {
+        "machine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host_id_sha256",
+            "system",
+            "release",
+            "machine",
+            "cpu"
+          ],
+          "properties": {
+            "host_id_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "system": {
+              "type": "string",
+              "minLength": 1
+            },
+            "release": {
+              "type": "string",
+              "minLength": 1
+            },
+            "machine": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cpu": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "process": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sample_count"
+          ],
+          "properties": {
+            "sample_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "interval_ms": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "cpu_percent_median": {
+              "type": "number",
+              "minimum": 0
+            },
+            "cpu_percent_peak": {
+              "type": "number",
+              "minimum": 0
+            },
+            "resident_mb_median": {
+              "type": "number",
+              "minimum": 0
+            },
+            "resident_mb_peak": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    }
+  }
+}

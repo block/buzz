@@ -22,6 +22,9 @@ import { recoverLocalStorageQuotaOnStartup } from "@/shared/lib/localStorageQuot
 import { startLocalStorageSweep } from "@/shared/lib/localStorageSweep";
 import { initializeConversationDensityPreference } from "@/shared/lib/conversationDensityPreference";
 import { initializeFontSizePreference } from "@/shared/lib/fontSizePreference";
+import { invoke } from "@tauri-apps/api/core";
+import { installNativeReviewSemanticProbe } from "@/testing/nativeReviewSemanticProbe";
+import { parseNativeReviewRelay } from "@/testing/nativeReviewConfig";
 
 type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
@@ -31,6 +34,47 @@ const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
 const E2E_COMMUNITY_ID = "e2e-default-community";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 const DEV_STATE_RESET_PARAM = "resetDevState";
+
+type NativeReviewConfig = {
+  relayUrl: string;
+  pubkey: string;
+  probeUrl: string;
+  probeToken: string;
+};
+
+async function configureNativeReviewFixtureFromRuntime() {
+  const buildEnabled = import.meta.env.VITE_NATIVE_REVIEW === "1";
+  if (!buildEnabled) return;
+
+  const config = await invoke<NativeReviewConfig>("native_review_config");
+  const { relayUrl, pubkey } = config;
+  const relay = parseNativeReviewRelay(relayUrl);
+  if (!relay || !pubkey || !/^[0-9a-f]{64}$/.test(pubkey)) {
+    throw new Error(
+      "native review bootstrap requires a loopback relay and pubkey",
+    );
+  }
+  const communityId = "native-review-local";
+  const community = {
+    addedAt: new Date().toISOString(),
+    id: communityId,
+    name: "Native Review",
+    pubkey,
+    relayUrl,
+  };
+  window.localStorage.setItem("buzz-communities", JSON.stringify([community]));
+  window.localStorage.setItem("buzz-active-community-id", communityId);
+  window.localStorage.setItem(
+    `buzz-machine-onboarding-complete.v2:${pubkey}`,
+    "true",
+  );
+  window.localStorage.setItem(`buzz-onboarding-complete.v1:${pubkey}`, "true");
+  window.localStorage.setItem(
+    `buzz-community-onboarding-complete.v1:${encodeURIComponent(relayUrl)}:${pubkey}`,
+    "true",
+  );
+  installNativeReviewSemanticProbe(config);
+}
 
 function resetDevWebviewStateFromUrl() {
   if (!import.meta.env.DEV) {
@@ -124,6 +168,7 @@ async function installE2eBridgeIfConfigured() {
 
 async function bootstrap() {
   resetDevWebviewStateFromUrl();
+  await configureNativeReviewFixtureFromRuntime();
   configureDevE2eBridgeFromUrl();
   recoverLocalStorageQuotaOnStartup();
   initializeConversationDensityPreference();

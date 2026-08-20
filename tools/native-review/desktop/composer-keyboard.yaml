@@ -1,0 +1,49 @@
+schema_version: 1
+flow: composer_keyboard
+platforms: [macos]
+fixture: local_review_channel
+record:
+  video: window
+  screenshots: true
+  accessibility: true
+steps:
+  - name: activate_buzz
+    act: {type: activate}
+    expect: {exists: {role: window}}
+    timeout_ms: 15000
+  - name: await_interactive_app
+    act: {type: wait, duration_ms: 100}
+    expect: {not_exists: {id: app-loading-gate}}
+    timeout_ms: 60000
+  - name: reach_seeded_channel
+    locate:
+      - {id: channel-welcome-everyone}
+      - {role: button, name: welcome-everyone}
+    act: {type: click}
+    expect: {exists: {id: message-composer}}
+    timeout_ms: 15000
+  - name: focus_composer
+    locate:
+      - {id: message-input}
+      - {role: text-area, name: Message}
+    act: {type: click}
+    expect: {focused: {id: message-input}}
+  - name: type_draft
+    act: {type: type_text, text: "native review line 1\nnative review line 2\nnative review line 3\nnative review line 4\nnative review line 5\nnative review line 6\nnative review line 7\nnative review line 8\nnative review line 9\nnative review line 10\nnative review line 11\nnative review line 12\nnative review line 13\nnative review line 14\nnative review line 15"}
+    expect: {value: "native review line 1\nnative review line 2\nnative review line 3\nnative review line 4\nnative review line 5\nnative review line 6\nnative review line 7\nnative review line 8\nnative review line 9\nnative review line 10\nnative review line 11\nnative review line 12\nnative review line 13\nnative review line 14\nnative review line 15"}
+  - name: keep_draft_while_scrolling
+    locate:
+      - {id: message-input-scroll}
+    act: {type: scroll, delta_y: 240}
+    expect: {scroll_y_less_than: 1}
+  - name: draft_survives_scroll
+    locate:
+      - {id: message-input}
+    act: {type: wait, duration_ms: 50}
+    expect: {value: "native review line 1\nnative review line 2\nnative review line 3\nnative review line 4\nnative review line 5\nnative review line 6\nnative review line 7\nnative review line 8\nnative review line 9\nnative review line 10\nnative review line 11\nnative review line 12\nnative review line 13\nnative review line 14\nnative review line 15"}
+  - name: dismiss_focus
+    act: {type: press, key: escape}
+    expect: {value: "native review line 1\nnative review line 2\nnative review line 3\nnative review line 4\nnative review line 5\nnative review line 6\nnative review line 7\nnative review line 8\nnative review line 9\nnative review line 10\nnative review line 11\nnative review line 12\nnative review line 13\nnative review line 14\nnative review line 15"}
+cleanup:
+  terminate_app: true
+  remove_state: true
