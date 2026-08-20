@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   friendlyAgentLastError,
+  friendlyTurnErrorClass,
   friendlyTurnErrorCopy,
+  shouldShowTurnFailure,
   CLI_ACP_INTERNAL_ERROR_COPY,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
@@ -315,4 +317,52 @@ test("-32603 does not affect -32001/-32002 classification (regression)", () => {
     severity: "denied",
     copy: MODEL_NOT_FOUND_COPY,
   });
+});
+
+test("friendlyTurnErrorClass: every error_class discriminant renders human copy", () => {
+  // The closed set emitted by `classify_turn_failure` — none may leak raw.
+  const expected = {
+    timeout: "Timed out",
+    transport: "Connection lost",
+    agent_error: "Agent error",
+    protocol: "Protocol error",
+    exited: "Agent exited",
+    cancelled: "Cancelled",
+    panic: "Agent crashed",
+    error: "Error",
+  };
+  for (const [errorClass, label] of Object.entries(expected)) {
+    assert.equal(friendlyTurnErrorClass(errorClass, "error"), label);
+  }
+});
+
+test("friendlyTurnErrorClass: falls back to outcome when error_class is absent", () => {
+  // Payload from a harness build that predates the `error_class` field.
+  assert.equal(friendlyTurnErrorClass(null, "idle_timeout"), "Idle timeout");
+  assert.equal(friendlyTurnErrorClass(null, "hard_timeout"), "Hard timeout");
+  assert.equal(friendlyTurnErrorClass(null, "panic"), "Agent crashed");
+});
+
+test("friendlyTurnErrorClass: title-cases an unmapped token instead of leaking it", () => {
+  // A class added to the Rust enum before this map catches up.
+  assert.equal(
+    friendlyTurnErrorClass("some_new_class", "error"),
+    "Some New Class",
+  );
+});
+
+test("shouldShowTurnFailure: hides an 'exited' failure behind a process error", () => {
+  // One crash must not read as two independent errors.
+  assert.equal(shouldShowTurnFailure({ errorClass: "exited" }, true), false);
+});
+
+test("shouldShowTurnFailure: shows an 'exited' failure with no process error", () => {
+  assert.equal(shouldShowTurnFailure({ errorClass: "exited" }, false), true);
+});
+
+test("shouldShowTurnFailure: shows non-'exited' classes even with a process error", () => {
+  // A timeout or protocol fault is not explained by the process-exit line.
+  for (const errorClass of ["timeout", "protocol", "agent_error", null]) {
+    assert.equal(shouldShowTurnFailure({ errorClass }, true), true);
+  }
 });

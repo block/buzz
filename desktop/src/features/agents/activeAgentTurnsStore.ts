@@ -12,6 +12,7 @@ import {
   subscribeDocumentVisibility,
 } from "@/shared/lib/useDocumentVisible";
 import type { ObserverEvent } from "./ui/agentSessionTypes";
+import { asRecord, asString } from "./ui/agentSessionUtils";
 
 /** Harness emits turn_liveness every ~10s (BUZZ_ACP_TURN_LIVENESS_SECS). */
 const LIVENESS_INTERVAL_MS = 10_000;
@@ -56,6 +57,38 @@ type ActiveTurn = {
   channelId: string;
   startedAt: number;
   lastActivityAt: number;
+};
+
+/**
+ * A classified turn failure, persisted per agent so the UI can show *why*
+ * the working badge disappeared instead of it just vanishing (issue #1659).
+ * Sourced from a `turn_error`/`agent_panic` observer payload — see
+ * `emit_turn_error`/`recover_panicked_agent` in `crates/buzz-acp/src/lib.rs`.
+ */
+export type TurnFailure = {
+  /** Coarse outcome string, e.g. "error" | "idle_timeout" | "hard_timeout" | "panic". */
+  outcome: string;
+  /** Raw error text (harness Display string), not yet passed through `friendlyTurnErrorCopy`. */
+  error: string;
+  /** JSON-RPC error code when the harness reported one (`AcpError::AgentError`). */
+  code: number | null;
+  /** Stable machine discriminant from `classify_turn_failure` (timeout/transport/
+   * agent_error/protocol/exited/cancelled/panic/error), or null for payloads
+   * from a harness build that predates the field. */
+  errorClass: string | null;
+  /**
+   * When the failure happened, in DESKTOP-clock ms — the event's agent-host
+   * timestamp translated through that agent's skew offset, so the UI can render
+   * an age against `Date.now()` the same way a working badge does.
+   *
+   * Unlike a live turn's `anchorAt` (derived at read time so a later, tighter
+   * offset retroactively corrects it), this is fixed when the failure is
+   * recorded. A failure is a terminal point in the past rendered at
+   * minute granularity, so sub-second retroactive drift is invisible — and
+   * fixing it at write time keeps the value reference-stable for
+   * `useSyncExternalStore` without a derived-snapshot cache.
+   */
+  failedAt: number;
 };
 
 /** One working channel surfaced to the UI, anchored to the desktop clock. */
@@ -137,6 +170,13 @@ function watermarkChannelKey(event: ObserverEvent): string {
 // this: a turn is revived only if the recovered liveness is strictly newer
 // than its recorded terminal timestamp.
 const terminalAtByAgent = new Map<string, Map<string, number>>();
+
+// Per-agent last classified turn failure (normalized pubkey → TurnFailure).
+// Set on turn_error/agent_panic, cleared on turn_completed (see processEvent).
+// Absent entries mean "no known failure" — never store a placeholder/empty
+// TurnFailure, so `getLastTurnFailureForAgent` can use presence-in-map as the
+// sole signal.
+const lastFailureByAgent = new Map<string, TurnFailure>();
 
 let pruneInterval: ReturnType<typeof setInterval> | null = null;
 let unsubscribePruneVisibility: (() => void) | null = null;
@@ -314,6 +354,61 @@ function endTurn(
   invalidateCache(key);
 }
 
+/** Coerce a `code` payload field (untyped JSON) to a finite number, mirroring
+ * `friendlyTurnErrorCopy`'s own coercion so the two agree on what "no code"
+ * means. */
+function asFiniteNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Build a `TurnFailure` from a `turn_error`/`agent_panic` observer event.
+ *
+ * `failedAt` is translated into desktop-clock terms with the agent's skew
+ * offset, which `processEvent` has already refined from this very event before
+ * calling here. An unparseable timestamp falls back to the desktop clock
+ * directly — already in the target frame, so no offset applies.
+ */
+function extractTurnFailure(
+  agentKey: string,
+  event: ObserverEvent,
+): TurnFailure {
+  const payload = asRecord(event.payload);
+  const hostMs = parseTimestamp(event.timestamp);
+  const offset = clockOffsetByAgent.get(agentKey) ?? 0;
+  return {
+    outcome: asString(payload.outcome) ?? "error",
+    error: asString(payload.error) ?? "Unknown error",
+    code: asFiniteNumber(payload.code),
+    errorClass: asString(payload.error_class),
+    failedAt: hostMs == null ? Date.now() : hostMs + offset,
+  };
+}
+
+/**
+ * Record the agent's last classified turn failure. Called only from the
+ * turn_error/agent_panic branch of processEvent, which already sits behind
+ * the per-agent watermark gate — a replayed/stale failure event never
+ * reaches here (see the gating note above processEvent).
+ */
+function setLastTurnFailure(agentKey: string, failure: TurnFailure) {
+  lastFailureByAgent.set(agentKey, failure);
+}
+
+/**
+ * Clear the agent's last turn failure. Called from the `turn_completed` branch
+ * only when the event's `outcome` marks a genuine success — a successful
+ * completion is the "demonstrably healthy again" signal (unlike `turn_started`,
+ * which proves nothing: a turn that starts and immediately fails the same way
+ * would otherwise make the badge flicker off and back on). A cancelled turn is
+ * NOT a success and must not clear the badge, so the gate lives at the call site.
+ */
+function clearLastTurnFailure(agentKey: string) {
+  lastFailureByAgent.delete(agentKey);
+}
+
 /** True when every tracked turn for one agent is stale, but only until the
  * bounded backstop expires. Other agents' activity intentionally has no effect. */
 function shouldPausePrune(
@@ -413,7 +508,27 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
         return;
       }
       break;
-    case "turn_completed":
+    case "turn_completed": {
+      endTurn(
+        agentPubkey,
+        event.turnId ?? null,
+        event.channelId ?? null,
+        Date.parse(event.timestamp),
+      );
+      // `turn_completed` fires on EVERY turn exit path — success, error, timeout,
+      // cancel, panic (TurnCompletionGuard in crates/buzz-acp/src/pool.rs). Only a
+      // genuine success proves the agent is healthy again, so clear a persisted
+      // failure ONLY then. The backend tags the payload with `outcome`; treat "ok"
+      // — or an absent field, from a harness build that predates it — as success.
+      // A cancelled/failed turn now reports a non-"ok" outcome and no longer
+      // erases the badge from a prior genuinely-failed turn.
+      const completionOutcome = asString(asRecord(event.payload).outcome);
+      if (completionOutcome == null || completionOutcome === "ok") {
+        clearLastTurnFailure(key);
+      }
+      notifyListeners();
+      return;
+    }
     case "turn_error":
     case "agent_panic":
       endTurn(
@@ -422,6 +537,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
         event.channelId ?? null,
         Date.parse(event.timestamp),
       );
+      setLastTurnFailure(key, extractTurnFailure(key, event));
       notifyListeners();
       return;
     case "acp_read":
@@ -526,6 +642,19 @@ export function getActiveTurnsForAgent(
   return result;
 }
 
+/**
+ * Returns the agent's last classified turn failure, or null when there is
+ * none (either it never failed, or it completed a turn successfully since).
+ * Reference-stable across snapshots that don't touch this agent's entry —
+ * required for `useSyncExternalStore`.
+ */
+export function getLastTurnFailureForAgent(
+  agentPubkey: string | null | undefined,
+): TurnFailure | null {
+  if (!agentPubkey) return null;
+  return lastFailureByAgent.get(normalizePubkey(agentPubkey)) ?? null;
+}
+
 const EMPTY_TURNS: ActiveTurnSummary[] = [];
 const EMPTY_CHANNEL_TURNS: ActiveChannelTurnSummary[] = [];
 
@@ -599,6 +728,23 @@ export function useActiveAgentTurns(
 ): ActiveTurnSummary[] {
   const getSnapshot = React.useCallback(
     () => getActiveTurnsForAgent(agentPubkey),
+    [agentPubkey],
+  );
+
+  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
+}
+
+/**
+ * Hook: returns the agent's last classified turn failure (or null), so a UI
+ * badge can survive past the transient "Working in #channel" indicator that
+ * `endTurn` removes. Re-renders when the failure is set or cleared for this
+ * agent.
+ */
+export function useLastTurnFailure(
+  agentPubkey: string | null | undefined,
+): TurnFailure | null {
+  const getSnapshot = React.useCallback(
+    () => getLastTurnFailureForAgent(agentPubkey),
     [agentPubkey],
   );
 
@@ -711,6 +857,7 @@ export function resetActiveAgentTurnsStore() {
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
   terminalAtByAgent.clear();
+  lastFailureByAgent.clear();
   notifyListeners();
 }
 
@@ -723,6 +870,7 @@ type TurnsStoreSnapshot = {
   offsets: Map<string, number>;
   watermarks: Map<string, Map<string, ObserverEvent>>;
   terminals: Map<string, Map<string, number>>;
+  failures: Map<string, TurnFailure>;
 };
 
 /** Per-community snapshots. Keyed by community ID. */
@@ -734,11 +882,15 @@ const savedByCommunity = new Map<string, TurnsStoreSnapshot>();
  * tombstone map are empty there is nothing worth restoring — discard any
  * previously-saved snapshot instead.
  *
- * Deep-clones all four maps so subsequent mutations on the live maps do not
+ * Deep-clones all five maps so subsequent mutations on the live maps do not
  * corrupt the snapshot.
  */
 export function saveActiveAgentTurnsForCommunity(communityId: string): void {
-  if (activeTurnsByAgent.size === 0 && terminalAtByAgent.size === 0) {
+  if (
+    activeTurnsByAgent.size === 0 &&
+    terminalAtByAgent.size === 0 &&
+    lastFailureByAgent.size === 0
+  ) {
     savedByCommunity.delete(communityId);
     return;
   }
@@ -770,14 +922,25 @@ export function saveActiveAgentTurnsForCommunity(communityId: string): void {
     terminals.set(agentKey, new Map(tombstones));
   }
 
-  savedByCommunity.set(communityId, { turns, offsets, watermarks, terminals });
+  // Shallow-clone lastFailureByAgent — TurnFailure values are plain structs
+  // and are never mutated in place (setLastTurnFailure always writes a fresh
+  // object), so a shallow copy of the map is enough to isolate the snapshot.
+  const failures = new Map(lastFailureByAgent);
+
+  savedByCommunity.set(communityId, {
+    turns,
+    offsets,
+    watermarks,
+    terminals,
+    failures,
+  });
 }
 
 /**
  * Restore a previously saved active-turns snapshot for `communityId` into the
  * module maps.  No-op when no snapshot exists.
  *
- * Clears all four module maps before writing so the function is
+ * Clears all five module maps before writing so the function is
  * self-contained — it replaces rather than merging, regardless of whether the
  * caller pre-cleared.  At the primary call site (`useCommunityInit`) the maps
  * are already empty after `resetCommunityState()`, but this guard makes the
@@ -801,6 +964,7 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
   clockOffsetByAgent.clear();
   lastProcessed.clear();
   terminalAtByAgent.clear();
+  lastFailureByAgent.clear();
 
   const now = Date.now();
 
@@ -822,6 +986,10 @@ export function restoreActiveAgentTurnsForCommunity(communityId: string): void {
 
   for (const [agentKey, tombstones] of snap.terminals) {
     terminalAtByAgent.set(agentKey, new Map(tombstones));
+  }
+
+  for (const [agentKey, failure] of snap.failures) {
+    lastFailureByAgent.set(agentKey, failure);
   }
 
   cachedTurnSummaries.clear();
