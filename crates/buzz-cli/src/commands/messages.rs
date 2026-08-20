@@ -393,16 +393,15 @@ pub async fn cmd_get_messages(
 }
 
 pub fn resolve_thread_target(
-    channel_id: &str,
+    expected_channel_id: Uuid,
     event_id: &str,
     expected_root_id: Option<&str>,
     selected_event: &serde_json::Value,
 ) -> Result<String, CliError> {
-    let expected_channel_id = parse_uuid(channel_id)?;
     let actual_channel_id = channel_id_from_event(event_id, selected_event)?;
     if actual_channel_id != expected_channel_id {
         return Err(CliError::Usage(format!(
-            "event {event_id} does not belong to channel {channel_id}"
+            "event {event_id} does not belong to channel {expected_channel_id}"
         )));
     }
     let root_event_id = thread_ref_from_event(event_id, selected_event)?
@@ -425,10 +424,15 @@ pub async fn cmd_get_thread(
     depth_limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
+    let expected_channel_id = parse_uuid(channel_id)?;
     validate_hex64(event_id)?;
     let selected_event = fetch_event(client, event_id).await?;
-    let root_event_id =
-        resolve_thread_target(channel_id, event_id, expected_root_id, &selected_event)?;
+    let root_event_id = resolve_thread_target(
+        expected_channel_id,
+        event_id,
+        expected_root_id,
+        &selected_event,
+    )?;
     let limit = limit.unwrap_or(100).min(500);
 
     let mut reply_filter = serde_json::json!({
@@ -1050,13 +1054,15 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, event_mention_pubkeys, find_root_from_tags, match_profiles_by_name,
-        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
+        match_profiles_by_name, merge_message_mentions, missing_members,
+        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
+        resolve_thread_target, thread_ref_from_event, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
+    use nostr::Keys;
     use serde_json::json;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1068,6 +1074,26 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[tokio::test]
+    async fn malformed_channel_is_rejected_before_thread_fetch() {
+        let client =
+            BuzzClient::new("http://127.0.0.1:1".into(), Keys::generate(), None, None).unwrap();
+        let error = cmd_get_thread(
+            &client,
+            "not-a-uuid",
+            ID_A,
+            None,
+            None,
+            None,
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Usage(_)));
+        assert!(error.to_string().contains("invalid UUID"));
+    }
 
     #[test]
     fn selected_event_derives_authoritative_channel_and_root() {
@@ -1109,10 +1135,28 @@ mod tests {
             "tags": [["h", channel], ["e", ID_A, "", "root"]]
         });
 
-        assert!(resolve_thread_target(other_channel, ID_B, Some(ID_A), &selected).is_err());
-        assert!(resolve_thread_target(channel, ID_B, Some(ID_B), &selected).is_err());
+        assert!(resolve_thread_target(
+            Uuid::parse_str(other_channel).unwrap(),
+            ID_B,
+            Some(ID_A),
+            &selected,
+        )
+        .is_err());
+        assert!(resolve_thread_target(
+            Uuid::parse_str(channel).unwrap(),
+            ID_B,
+            Some(ID_B),
+            &selected,
+        )
+        .is_err());
         assert_eq!(
-            resolve_thread_target(channel, ID_B, Some(ID_A), &selected).unwrap(),
+            resolve_thread_target(
+                Uuid::parse_str(channel).unwrap(),
+                ID_B,
+                Some(ID_A),
+                &selected,
+            )
+            .unwrap(),
             ID_A
         );
     }
