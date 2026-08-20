@@ -35,11 +35,15 @@ export function useAppShellDesktopNotifications({
 }: {
   channels: Channel[];
   enabled: boolean;
-  goChannel: (channelId: string) => Promise<unknown>;
+  goChannel: (
+    channelId: string,
+    options?: { force?: boolean },
+  ) => Promise<unknown>;
   goHome: () => Promise<unknown>;
   notificationSettings: NotificationSettings;
   openSearchHit: (
     hit: import("@/shared/api/types").SearchHit,
+    behavior?: { force?: boolean },
   ) => Promise<unknown>;
   pubkey?: string;
   silentChannelIds?: ReadonlySet<string>;
@@ -153,13 +157,17 @@ export function useAppShellDesktopNotifications({
         return;
       }
 
+      // force: a notification click must always route, even when the
+      // destination href matches the current one (e.g. re-clicking a
+      // notification for the already-open channel). Without it,
+      // commitNavigation's same-href check swallows the navigation.
       const anchor = toSearchHit(target);
       if (!anchor) {
-        await goChannel(target.channelId);
+        await goChannel(target.channelId, { force: true });
         return;
       }
 
-      await openSearchHit(anchor);
+      await openSearchHit(anchor, { force: true });
     },
   );
 
