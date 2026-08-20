@@ -29,9 +29,8 @@ import {
 type WorkflowCardProps = {
   workflow: Workflow;
   channelName?: string;
-  isActive?: boolean;
   isTogglingEnabled?: boolean;
-  onSelect: (workflowId: string) => void;
+  onView: (workflow: Workflow) => void;
   onTrigger: (workflowId: string) => void;
   onToggleEnabled: (workflow: Workflow) => void;
   onEdit: (workflow: Workflow) => void;
@@ -81,9 +80,8 @@ function StatusBadge({ status }: { status: Workflow["status"] }) {
 export function WorkflowCard({
   workflow,
   channelName,
-  isActive = false,
   isTogglingEnabled = false,
-  onSelect,
+  onView,
   onTrigger,
   onToggleEnabled,
   onEdit,
@@ -102,14 +100,13 @@ export function WorkflowCard({
   return (
     <div
       className={cn(
-        "group relative min-h-60 w-full overflow-hidden rounded-2xl border border-border/70 bg-muted/50 p-5 text-left text-foreground shadow-xs transition-all hover:-translate-y-0.5 hover:border-border hover:bg-muted/65 hover:shadow-md",
-        isActive && "border-primary/50 bg-primary/5 ring-1 ring-primary/30",
+        "group relative min-h-60 w-full overflow-hidden rounded-2xl bg-muted/50 p-5 text-left text-foreground shadow-xs transition-colors hover:bg-muted/65",
       )}
       data-testid={`workflow-card-${workflow.id}`}
     >
       <button
         className="absolute inset-0 z-0 rounded-2xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        onClick={() => onSelect(workflow.id)}
+        onClick={() => onView(workflow)}
         type="button"
       >
         <span className="sr-only">View {workflow.name}</span>
@@ -159,7 +156,7 @@ export function WorkflowCard({
             {triggerSummary}
           </p>
         ) : null}
-        <h3 className="mt-1 line-clamp-2 text-xl font-bold leading-tight tracking-tight">
+        <h3 className="mt-1 line-clamp-4 text-xl font-bold leading-tight tracking-tight">
           {workflow.name}
         </h3>
         {description ? (
