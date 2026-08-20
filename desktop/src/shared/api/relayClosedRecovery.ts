@@ -8,6 +8,7 @@ import {
   sortEvents,
   type RelaySubscription,
   type RelaySubscriptionFilter,
+  type SubscriptionEventBufferItem,
 } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 
@@ -153,6 +154,23 @@ export function shouldDispatchSubscriptionEvent(
   if (replay?.seenEventIds.has(event.id)) return false;
   replay?.seenEventIds.add(event.id);
   return true;
+}
+
+export function flushEvents(
+  buffer: SubscriptionEventBufferItem[],
+  subscriptions: Map<string, RelaySubscription>,
+  generation: number,
+) {
+  for (const item of buffer) {
+    const subscription = subscriptions.get(item.subId);
+    if (
+      subscription?.mode === "live" &&
+      item.generation === generation &&
+      shouldDispatchSubscriptionEvent(subscription, item.event)
+    ) {
+      subscription.onEvent(item.event);
+    }
+  }
 }
 
 export function markReconnectLiveEose(

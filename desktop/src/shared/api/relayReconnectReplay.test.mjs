@@ -16,6 +16,7 @@ import {
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
 import {
+  flushEvents,
   markReconnectLiveEose,
   markReconnectRepairDone,
   prepareSubscriptionEvent,
@@ -967,6 +968,25 @@ test("replay dedupe clears only after both completions and never from stale gene
     }
     assert.equal(subscription.reconnectReplay, undefined);
   }
+});
+
+test("buffer flush drops stale generations and removed subscriptions", () => {
+  const delivered = [];
+  const subscription = {
+    mode: "live",
+    filter: buildChannelFilter("channel-1", 50),
+    onEvent: (value) => delivered.push(value.id),
+  };
+  flushEvents(
+    [
+      { subId: "live-1", event: event("stale", 100), generation: 6 },
+      { subId: "removed", event: event("removed", 101), generation: 7 },
+      { subId: "live-1", event: event("current", 102), generation: 7 },
+    ],
+    new Map([["live-1", subscription]]),
+    7,
+  );
+  assert.deepEqual(delivered, ["current"]);
 });
 
 test("live-before-repair and repair-before-live dispatch once", async () => {

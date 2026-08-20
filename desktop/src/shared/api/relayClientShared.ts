@@ -96,6 +96,12 @@ export type RelaySubscription =
   | FirstEventSubscription
   | LiveSubscription;
 
+export type SubscriptionEventBufferItem = {
+  subId: string;
+  event: RelayEvent;
+  generation: number;
+};
+
 export function sortEvents(events: RelayEvent[]) {
   return [...events].sort((left, right) => {
     if (left.created_at !== right.created_at) {
