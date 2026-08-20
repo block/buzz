@@ -5299,7 +5299,7 @@ void main() {
           (channelHeaderAvatar.decoration as BoxDecoration).border! as Border;
       expect(
         channelHeaderAvatarBorder.top.color,
-        AppTheme.light().colorScheme.inverseSurface.withValues(alpha: 0.15),
+        AppTheme.light().colorScheme.inverseSurface.withValues(alpha: 0.07),
       );
       expect(channelHeaderAvatarBorder.top.width, 1);
       expect(

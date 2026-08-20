@@ -94,7 +94,7 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                   border: Border.fromBorderSide(
                     BorderSide(
                       color: context.colors.inverseSurface.withValues(
-                        alpha: 0.15,
+                        alpha: 0.07,
                       ),
                       strokeAlign: BorderSide.strokeAlignOutside,
                     ),
