@@ -91,9 +91,9 @@ export function useChannelIntro({
     if (!activeChannel.archivedAt && activeChannel.isMember) {
       if (onAddAgent) {
         actions.push({
-          description: "Add an agent here.",
+          description: "Choose agents to add to this channel.",
           icon: <Bot aria-hidden className="h-6 w-6" />,
-          label: "Create agent",
+          label: "Add agents",
           onClick: onAddAgent,
           testId: "channel-intro-action-create-agent",
         });
