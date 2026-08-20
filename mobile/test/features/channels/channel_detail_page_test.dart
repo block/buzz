@@ -5195,6 +5195,55 @@ void main() {
   });
 
   group('App bar', () {
+    testWidgets('aligns the channel back button with message avatars', (
+      tester,
+    ) async {
+      final message = _textMsg(
+        id: 'avatar-alignment',
+        pubkey: 'alice',
+        content: 'Hello',
+        createdAt: 1000,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [message],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ChannelDetailPage(channel: _testChannel),
+                  ),
+                ),
+                child: const Text('Open channel'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open channel'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.getCenter(find.byKey(const ValueKey('channel-app-bar-back'))).dx,
+        moreOrLessEquals(
+          tester
+              .getCenter(
+                find.byKey(
+                  const ValueKey('channel-message-avatar-avatar-alignment'),
+                ),
+              )
+              .dx,
+        ),
+      );
+    });
+
     testWidgets('shows a tappable channel name and collective member count', (
       tester,
     ) async {
@@ -5489,55 +5538,6 @@ void main() {
   });
 
   group('Deep-link navigation', () {
-    testWidgets('aligns the thread back button with timeline avatars', (
-      tester,
-    ) async {
-      final root = _textMsg(
-        id: 'root',
-        pubkey: 'alice',
-        content: 'Thread root',
-        createdAt: 1000,
-      );
-      final timelineMessages = formatTimeline([root]);
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [root],
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-          },
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: TextButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(
-                    builder: (_) => ThreadDetailPage(
-                      threadHead: timelineMessages.single,
-                      allMessages: timelineMessages,
-                      channelId: _testChannel.id,
-                      currentPubkey: null,
-                      isMember: true,
-                      isArchived: false,
-                    ),
-                  ),
-                ),
-                child: const Text('Open thread'),
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      await tester.tap(find.text('Open thread'));
-      await tester.pumpAndSettle();
-
-      expect(
-        tester.getCenter(find.byKey(const ValueKey('thread-app-bar-back'))).dx,
-        moreOrLessEquals(Grid.gutter + messageAvatarSize / 2),
-      );
-    });
-
     testWidgets('fades the target highlight in after the thread route lands', (
       tester,
     ) async {

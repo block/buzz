@@ -321,6 +321,11 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        automaticallyImplyLeading: false,
+        leading: Navigator.canPop(context)
+            ? _channelTimelineAlignedBackButton(context)
+            : null,
+        horizontalInset: 0,
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,

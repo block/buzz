@@ -4,7 +4,6 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -46,7 +45,6 @@ import 'sticky_date_header.dart';
 import 'timeline_message.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
-part 'thread_detail_page/app_bar.dart';
 part 'thread_detail_page/message_list.dart';
 part 'thread_detail_page/sticky_date.dart';
 part 'thread_detail_helpers.dart';
@@ -822,7 +820,10 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
-      appBar: _threadAppBar(),
+      appBar: const FrostedAppBar(
+        title: Text('Thread'),
+        titleStyle: channelTitleTextStyle,
+      ),
       body: Stack(
         fit: StackFit.expand,
         children: [
