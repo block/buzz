@@ -25,7 +25,6 @@ import {
   MANAGED_AGENT_PAIR_ACTION_LABELS,
   type ManagedAgentPairAction,
 } from "@/features/agents/managedAgentRuntimeStatus";
-import { truncatePubkey } from "@/shared/lib/pubkey";
 import type {
   ChannelMember,
   ManagedAgent,
@@ -59,6 +58,7 @@ type MembersSidebarMemberCardProps = {
   member: ChannelMember;
   memberAvatarLabel: string;
   memberIsBot: boolean;
+  memberHoverLabel: string;
   memberLabel: string;
   moderationState?: MemberModerationState;
   onBan: (member: ChannelMember) => void;
@@ -127,6 +127,7 @@ export function MembersSidebarMemberCard({
   member,
   memberAvatarLabel,
   memberIsBot,
+  memberHoverLabel,
   memberLabel,
   moderationState,
   onBan,
@@ -189,7 +190,7 @@ export function MembersSidebarMemberCard({
             </div>
             <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
               <span className="truncate font-mono text-sm text-muted-foreground">
-                {truncatePubkey(member.pubkey)}
+                {memberHoverLabel}
               </span>
             </span>
           </div>
