@@ -3,18 +3,29 @@ import { normalizeRelayUrl } from "@/shared/lib/normalizeRelayUrl";
 const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
 export const MAX_CHANNEL_SECTIONS = 100;
 export const MAX_CHANNEL_SECTION_ASSIGNMENTS = 1_000;
+export const MAX_MANUALLY_UNASSIGNED_CHANNELS = 1_000;
+export const MAX_SMART_SECTION_PATTERN_LENGTH = 200;
+
+export type SmartSectionRule = {
+  pattern: string;
+  isRegex: boolean;
+  caseSensitive: boolean;
+};
 
 export type ChannelSection = {
   id: string;
   name: string;
   icon?: string;
   order: number;
+  smartRule?: SmartSectionRule;
 };
 
 export type ChannelSectionStore = {
   version: 1;
   sections: ChannelSection[];
   assignments: Record<string, string>;
+  /** Channels explicitly moved to the default Channels group by the user. */
+  manuallyUnassignedChannelIds?: string[];
 };
 
 export const DEFAULT_STORE: ChannelSectionStore = Object.freeze({
@@ -52,13 +63,25 @@ export function boundChannelSectionsStore(
       .filter(([, sectionId]) => sectionIds.has(sectionId))
       .slice(-MAX_CHANNEL_SECTION_ASSIGNMENTS),
   );
+  const manuallyUnassignedChannelIds = Array.from(
+    new Set(store.manuallyUnassignedChannelIds ?? []),
+  ).slice(-MAX_MANUALLY_UNASSIGNED_CHANNELS);
   if (
     sections.length === store.sections.length &&
-    Object.keys(assignments).length === Object.keys(store.assignments).length
+    Object.keys(assignments).length === Object.keys(store.assignments).length &&
+    manuallyUnassignedChannelIds.length ===
+      (store.manuallyUnassignedChannelIds?.length ?? 0)
   ) {
     return store;
   }
-  return { ...store, sections, assignments };
+  return {
+    ...store,
+    sections,
+    assignments,
+    ...(manuallyUnassignedChannelIds.length > 0
+      ? { manuallyUnassignedChannelIds }
+      : { manuallyUnassignedChannelIds: undefined }),
+  };
 }
 
 export function stripOrphanedAssignments(
@@ -95,12 +118,14 @@ export function parseChannelSectionPayload(
           typeof section.icon === "string" && section.icon.trim().length > 0
             ? section.icon.trim()
             : undefined;
+        const smartRule = parseSmartSectionRule(section.smartRule);
         return [
           {
             id: section.id,
             name: section.name,
             ...(icon ? { icon } : {}),
             order: section.order,
+            ...(smartRule ? { smartRule } : {}),
           },
         ];
       })
@@ -115,7 +140,44 @@ export function parseChannelSectionPayload(
           ),
         )
       : {};
-  return stripOrphanedAssignments({ version: 1, sections, assignments });
+  const manuallyUnassignedChannelIds = Array.isArray(
+    obj.manuallyUnassignedChannelIds,
+  )
+    ? Array.from(
+        new Set(
+          obj.manuallyUnassignedChannelIds.filter(
+            (channelId): channelId is string => typeof channelId === "string",
+          ),
+        ),
+      ).slice(-MAX_MANUALLY_UNASSIGNED_CHANNELS)
+    : [];
+  return stripOrphanedAssignments({
+    version: 1,
+    sections,
+    assignments,
+    ...(manuallyUnassignedChannelIds.length > 0
+      ? { manuallyUnassignedChannelIds }
+      : {}),
+  });
+}
+
+function parseSmartSectionRule(value: unknown): SmartSectionRule | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const rule = value as Record<string, unknown>;
+  if (
+    typeof rule.pattern !== "string" ||
+    rule.pattern.length === 0 ||
+    rule.pattern.length > MAX_SMART_SECTION_PATTERN_LENGTH ||
+    typeof rule.isRegex !== "boolean" ||
+    typeof rule.caseSensitive !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    pattern: rule.pattern,
+    isRegex: rule.isRegex,
+    caseSensitive: rule.caseSensitive,
+  };
 }
 
 function parseRaw(raw: string | null): ChannelSectionStore | null {

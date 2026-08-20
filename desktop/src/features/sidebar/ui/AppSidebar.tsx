@@ -42,6 +42,7 @@ import {
   SectionQuickAction,
 } from "@/features/sidebar/ui/CustomChannelSection";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
+import { useSmartSectionDialogs } from "@/features/sidebar/ui/useSmartSectionDialogs";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { HuddleProfileControl } from "@/features/huddle";
 import type {
@@ -244,18 +245,12 @@ export function AppSidebar({
     }));
   }, []);
 
-  const {
-    sections: channelSections,
-    assignments: channelAssignments,
-    createSection,
-    renameSection,
-    deleteSection,
-    moveSectionUp,
-    moveSectionDown,
-    reorderSections,
-    assignChannel,
-    unassignChannel,
-  } = useChannelSections(currentPubkey, activeCommunity?.relayUrl);
+  const streamChannels = React.useMemo(
+    () => channels.filter((channel) => channel.channelType === "stream"),
+    [channels],
+  );
+  // biome-ignore format: keep compact to stay within file size limit
+  const { sections: channelSections, assignments: channelAssignments, createSection, renameSection, deleteSection, moveSectionUp, moveSectionDown, reorderSections, assignChannel, assignChannels, unassignChannel } = useChannelSections(currentPubkey, activeCommunity?.relayUrl, streamChannels);
 
   const sectionIds = React.useMemo(
     () => channelSections.map((s) => s.id),
@@ -283,11 +278,8 @@ export function AppSidebar({
       if (channel.id === selectedChannelId) onSelectHome();
     });
 
-  const streamChannels = React.useMemo(
-    () => channels.filter((channel) => channel.channelType === "stream"),
-    [channels],
-  );
-
+  // biome-ignore format: keep compact to stay within file size limit
+  const smartSectionDialogs = useSmartSectionDialogs({ sections: channelSections, channels: streamChannels, assignments: channelAssignments, createSection, renameSection, assignChannels });
   const sectionBuckets = React.useMemo(() => {
     const bySection: Record<string, Channel[]> = {};
     const unassigned: Channel[] = [];
@@ -616,6 +608,10 @@ export function AppSidebar({
                           handleCreateChannelInSection(section.id)
                         }
                         onRenameSection={() => setRenameSectionTarget(section)}
+                        onEditSmartSection={smartSectionDialogs.openEditDialog}
+                        onFindMatchingChannels={
+                          smartSectionDialogs.openMatchesDialog
+                        }
                         onDeleteSection={() => setDeleteSectionTarget(section)}
                         onMoveSectionUp={() => moveSectionUp(section.id)}
                         onMoveSectionDown={() => moveSectionDown(section.id)}
@@ -659,6 +655,9 @@ export function AppSidebar({
                       onAssignChannel={assignChannel}
                       onUnassignChannel={unassignChannel}
                       onCreateSectionForChannel={handleCreateSectionForChannel}
+                      onCreateSmartSection={
+                        smartSectionDialogs.openCreateDialog
+                      }
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
                       onUnmuteChannel={onUnmuteChannel}
@@ -851,7 +850,7 @@ export function AppSidebar({
         }}
         onConfirm={handleCreateSectionConfirm}
       />
-
+      {smartSectionDialogs.dialogs}
       <RenameSectionDialog
         open={renameSectionTarget !== null}
         onOpenChange={(open) => {
