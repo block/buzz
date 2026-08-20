@@ -111,6 +111,11 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             // Track what changed so we can propagate to linked agent records.
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
+            let old_behavior = (
+                persona.respond_to.clone(),
+                persona.respond_to_allowlist.clone(),
+                persona.parallelism,
+            );
             let old_display_name = persona.display_name.clone();
 
             persona.display_name = display_name;
@@ -130,6 +135,12 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 persona.env_vars = env_vars;
             }
             apply_persona_behavior(persona, input.behavior)?;
+            let behavior_changed = old_behavior
+                != (
+                    persona.respond_to.clone(),
+                    persona.respond_to_allowlist.clone(),
+                    persona.parallelism,
+                );
             persona.updated_at = now_iso();
 
             let result = persona.clone();
@@ -140,7 +151,10 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
 
             // If the avatar or display_name changed, propagate to linked agent
             // records and collect relay profile sync params for the async phase.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
+            let sync_params: ProfileSyncParams = if avatar_changed
+                || name_changed
+                || behavior_changed
+            {
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
@@ -166,6 +180,30 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                         continue;
                     }
                     let mut record_changed = renamed.contains(&record.pubkey);
+
+                    if behavior_changed {
+                        let next_mode = result
+                            .respond_to
+                            .as_deref()
+                            .map(crate::managed_agents::RespondTo::parse_wire)
+                            .transpose()?;
+                        let next_mode = next_mode.unwrap_or_default();
+                        let next_allowlist =
+                            if next_mode == crate::managed_agents::RespondTo::Allowlist {
+                                crate::managed_agents::validate_respond_to_allowlist(
+                                    &result.respond_to_allowlist,
+                                )?
+                            } else {
+                                Vec::new()
+                            };
+                        if record.respond_to != next_mode
+                            || record.respond_to_allowlist != next_allowlist
+                        {
+                            record.respond_to = next_mode;
+                            record.respond_to_allowlist = next_allowlist;
+                            record_changed = true;
+                        }
+                    }
 
                     if avatar_changed {
                         // Update the persisted avatar so reconciliation on next
@@ -211,7 +249,10 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     // the stale name→pubkey binding until the next boot reconcile.
                     // Avatar-only edits are excluded — the avatar is not in the
                     // projection, so retaining would be a guaranteed no-op.
-                    for record in records.iter().filter(|r| renamed.contains(&r.pubkey)) {
+                    for record in records.iter().filter(|r| {
+                        renamed.contains(&r.pubkey)
+                            || (behavior_changed && r.persona_id.as_deref() == Some(&result.id))
+                    }) {
                         crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
                     }
                 }
