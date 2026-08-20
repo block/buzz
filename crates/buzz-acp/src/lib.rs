@@ -234,15 +234,19 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
-async fn author_allowed(
+async fn author_allowed_with_dm(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
     is_dm: bool,
+    allow_non_owner_dm: bool,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
     if is_dm {
+        if allow_non_owner_dm && !matches!(respond_to, RespondTo::Nobody) {
+            return true;
+        }
         return match respond_to {
             RespondTo::Nobody => false,
             _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
@@ -257,6 +261,26 @@ async fn author_allowed(
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
         }
     }
+}
+
+async fn author_allowed(
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    author: &str,
+    is_dm: bool,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> bool {
+    author_allowed_with_dm(
+        respond_to,
+        allowlist,
+        author,
+        is_dm,
+        false,
+        owner_cache,
+        rest_client,
+    )
+    .await
 }
 
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
@@ -2724,11 +2748,12 @@ async fn tokio_main() -> Result<()> {
                                 // exercised by non-owner authors inside DMs.
                                 let is_dm =
                                     is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
-                                let allowed = author_allowed(
+                                let allowed = author_allowed_with_dm(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
                                     is_dm,
+                                    config.allow_non_owner_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -5323,6 +5348,24 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
+    async fn test_dm_allows_external_author_when_explicitly_enabled() {
+        let cache = cache_with_sibling();
+        assert!(
+            author_allowed_with_dm(
+                &RespondTo::Anyone,
+                &HashSet::new(),
+                STRANGER,
+                true,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "the explicit DM access option must allow a non-owner author"
+        );
+    }
+
+    #[tokio::test]
     async fn test_dm_admits_owner_and_sibling_in_every_responding_mode() {
         let cache = cache_with_sibling();
         for mode in [
@@ -6596,6 +6639,7 @@ mod build_mcp_servers_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
+            allow_non_owner_dm: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -6820,6 +6864,7 @@ mod error_outcome_emission_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            allow_non_owner_dm: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,

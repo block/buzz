@@ -389,6 +389,7 @@ export type ManagedAgent = {
    * `"allowlist"`. Preserved across mode toggles.
    */
   respondToAllowlist: string[];
+  allowNonOwnerDm: boolean;
 };
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
@@ -448,6 +449,7 @@ export type CreateManagedAgentInput = {
    * normalized server-side (must be 64 hex chars each).
    */
   respondToAllowlist?: string[];
+  allowNonOwnerDm?: boolean;
   relayMesh?: RelayMeshConfig;
 };
 
@@ -712,6 +714,7 @@ export type UpdateManagedAgentInput = {
    * (validated & normalized server-side).
    */
   respondToAllowlist?: string[];
+  allowNonOwnerDm?: boolean;
 };
 export type AgentPersona = {
   id: string;

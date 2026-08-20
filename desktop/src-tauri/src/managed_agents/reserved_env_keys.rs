@@ -55,6 +55,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // gate diverge from the saved/UI-visible settings.
     "BUZZ_ACP_RESPOND_TO",
     "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+    "BUZZ_ACP_ALLOW_NON_OWNER_DM",
     "BUZZ_ACP_ALLOWED_RESPOND_TO",
     "BUZZ_ACP_AGENT_OWNER",
     // Stable agent identity used for git attribution and private-conversation

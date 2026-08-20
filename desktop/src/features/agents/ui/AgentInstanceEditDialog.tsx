@@ -162,6 +162,9 @@ export function AgentInstanceEditDialog({
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     agent.respondToAllowlist,
   );
+  const [allowNonOwnerDm, setAllowNonOwnerDm] = React.useState(
+    agent.allowNonOwnerDm,
+  );
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -198,6 +201,7 @@ export function AgentInstanceEditDialog({
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
+      setAllowNonOwnerDm(agent.allowNonOwnerDm);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
@@ -746,6 +750,8 @@ export function AgentInstanceEditDialog({
           respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
             ? respondToAllowlist
             : undefined,
+        allowNonOwnerDm:
+          allowNonOwnerDm !== agent.allowNonOwnerDm ? allowNonOwnerDm : undefined,
       };
 
       const result = await updateMutation.mutateAsync(input);
@@ -759,7 +765,15 @@ export function AgentInstanceEditDialog({
       }
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
+      const accessChanged =
+        respondTo !== agent.respondTo ||
+        allowNonOwnerDm !== agent.allowNonOwnerDm ||
+        (respondTo === "allowlist" &&
+          respondToAllowlist.join(",") !== agent.respondToAllowlist.join(","));
       onUpdated?.(result.agent);
+      if (accessChanged && isManagedAgentActive(result.agent)) {
+        toast(`${result.agent.name} access settings saved. Restart the agent to apply them.`);
+      }
       // The auto-restart policy deliberately never fires for a stopped or
       // failing agent (a broken agent must not auto-loop), so an edit meant
       // to FIX one silently waits for a manual start. Offer that start
@@ -965,6 +979,15 @@ export function AgentInstanceEditDialog({
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
             />
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <input
+                checked={allowNonOwnerDm}
+                disabled={updateMutation.isPending}
+                onChange={(event) => setAllowNonOwnerDm(event.target.checked)}
+                type="checkbox"
+              />
+              Allow non-owner users to trigger this agent in direct messages
+            </label>
             <RunOnSummarySection backend={agent.backend} />
 
             {/* Provider (runtime) */}

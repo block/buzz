@@ -823,6 +823,9 @@ pub async fn update_managed_agent(
         if input.respond_to_allowlist.is_some() {
             record.respond_to_allowlist = prospective_allowlist;
         }
+        if let Some(value) = input.allow_non_owner_dm {
+            record.allow_non_owner_dm = value;
+        }
 
         record.updated_at = now_iso();
 

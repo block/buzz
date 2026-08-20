@@ -349,6 +349,7 @@ pub fn build_managed_agent_summary(
         log_path,
         respond_to: record.respond_to,
         respond_to_allowlist: record.respond_to_allowlist.clone(),
+        allow_non_owner_dm: record.allow_non_owner_dm,
     })
 }
 
@@ -804,6 +805,10 @@ pub fn spawn_agent_child(
     for key in &gate_remove {
         command.env_remove(key);
     }
+    command.env(
+        "BUZZ_ACP_ALLOW_NON_OWNER_DM",
+        if record.allow_non_owner_dm { "true" } else { "false" },
+    );
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 

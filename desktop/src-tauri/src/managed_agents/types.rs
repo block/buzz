@@ -138,6 +138,7 @@ impl AgentDefinition {
             last_error_code: None,
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
+            allow_non_owner_dm: false,
             display_name: Some(self.display_name),
             slug: Some(self.id),
             runtime: self.runtime,
@@ -351,6 +352,10 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Allow non-owner authors to trigger this agent in direct messages.
+    /// Defaults to false; public-channel access is controlled by `respond_to`.
+    #[serde(default)]
+    pub allow_non_owner_dm: bool,
     /// Optional display name distinct from the unique `name` handle. Absorbed
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -567,6 +572,7 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    pub allow_non_owner_dm: bool,
 }
 
 #[derive(Debug, Serialize)]

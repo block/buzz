@@ -262,6 +262,9 @@ pub struct UpdateManagedAgentRequest {
     /// normalized server-side).
     #[serde(default)]
     pub respond_to_allowlist: Option<Vec<String>>,
+    /// Absent = don't touch. Present = allow non-owner authors in DMs.
+    #[serde(default)]
+    pub allow_non_owner_dm: Option<bool>,
 }
 
 #[cfg(test)]
