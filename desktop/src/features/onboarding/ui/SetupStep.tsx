@@ -53,7 +53,7 @@ type InstallResultsState = Record<string, InstallResultState>;
 function useSetupStepState(): SetupStepState {
   const runtimesQuery = useAcpRuntimesQueryForced();
   const items = runtimesQuery.data ?? [];
-  const isChecking = runtimesQuery.isLoading;
+  const isChecking = runtimesQuery.isFetching;
   const errorMessage =
     runtimesQuery.error instanceof Error ? runtimesQuery.error.message : null;
 
@@ -657,7 +657,10 @@ function RuntimeProvidersSection({
         )}
 
         {errorMessage ? (
-          <p className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive">
+          <p
+            className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive"
+            data-testid="onboarding-setup-error"
+          >
             {errorMessage}
           </p>
         ) : null}
@@ -728,7 +731,11 @@ function SetupStepContent({
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-setup-next"
-          disabled={readyRuntimeIds.length === 0}
+          disabled={
+            readyRuntimeIds.length === 0 ||
+            runtimeProviders.isChecking ||
+            !!runtimeProviders.errorMessage
+          }
           onClick={() => actions.next(readyRuntimeIds)}
           type="button"
         >

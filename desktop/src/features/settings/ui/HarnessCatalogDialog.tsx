@@ -64,6 +64,8 @@ export function HarnessCatalogDialog({
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const runtimesQuery = useAcpRuntimesQueryForced({ enabled: open });
   const isLoading = runtimesQuery.isLoading;
+  const isColdError = runtimesQuery.isError && runtimesQuery.data === undefined;
+  const isRefreshing = runtimesQuery.isFetching && !isLoading;
   const entries = React.useMemo(
     () => catalogDialogEntries(runtimesQuery.data ?? []),
     [runtimesQuery.data],
@@ -152,12 +154,28 @@ export function HarnessCatalogDialog({
               <div className="space-y-1">
                 {isLoading ? (
                   <CatalogListSkeleton />
+                ) : isColdError ? (
+                  <p
+                    className="px-4 py-2 text-sm text-sidebar-foreground/60"
+                    data-testid="harness-catalog-load-error"
+                  >
+                    Couldn't load runtimes. Close and reopen to try again.
+                  </p>
                 ) : filtered.length === 0 ? (
                   <p className="px-4 py-2 text-sm text-sidebar-foreground/60">
                     No runtimes match.
                   </p>
                 ) : (
                   <>
+                    {isRefreshing ? (
+                      <div
+                        className="flex items-center gap-1.5 px-4 py-1 text-xs text-sidebar-foreground/50"
+                        data-testid="harness-catalog-refreshing"
+                      >
+                        <Spinner className="h-2.5 w-2.5" />
+                        Refreshing…
+                      </div>
+                    ) : null}
                     {groups.setup.length > 0 ? (
                       <CatalogSection
                         count={groups.setup.length}
