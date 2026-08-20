@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import type { MarkdownProps } from "./markdown/types";
+
 /**
  * Returns true when a React element is a block-level media wrapper (image or
  * video). The `img` component in `createMarkdownComponents` marks its output
@@ -97,4 +99,30 @@ export function shallowRecordEqual(
     if (a[key] !== b[key]) return false;
   }
   return true;
+}
+
+export function markdownPropsAreEqual(
+  prev: MarkdownProps,
+  next: MarkdownProps,
+): boolean {
+  return (
+    prev.content === next.content &&
+    prev.className === next.className &&
+    prev.customEmoji === next.customEmoji &&
+    prev.hardLineBreaks === next.hardLineBreaks &&
+    prev.interactive === next.interactive &&
+    prev.mediaInset === next.mediaInset &&
+    shallowRecordEqual(
+      prev.agentMentionPubkeysByName,
+      next.agentMentionPubkeysByName,
+    ) &&
+    shallowRecordEqual(prev.mentionPubkeysByName, next.mentionPubkeysByName) &&
+    shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
+    shallowArrayEqual(prev.channelNames, next.channelNames) &&
+    prev.imetaByUrl === next.imetaByUrl &&
+    prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
+    prev.searchQuery === next.searchQuery &&
+    prev.snapshotSharedBy === next.snapshotSharedBy &&
+    prev.videoReviewContext === next.videoReviewContext
+  );
 }

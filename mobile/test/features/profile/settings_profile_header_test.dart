@@ -3,7 +3,7 @@ import 'dart:convert';
 
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/settings_profile_header.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/features/profile/user_status.dart';
 import 'package:buzz/features/profile/user_status_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
@@ -20,6 +20,26 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../helpers/widget_helpers.dart';
 
 void main() {
+  testWidgets('reserves half of the 24dp settings section gap', (tester) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          profileProvider.overrideWith(_FakeProfileNotifier.new),
+          presenceProvider.overrideWith(() => _FakePresenceNotifier('online')),
+          userStatusProvider.overrideWith(() => _FakeUserStatusNotifier(null)),
+          customEmojiListProvider.overrideWithValue(const []),
+        ],
+        child: const SettingsProfileHeader(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final header = tester.widget<Padding>(
+      find.byKey(const ValueKey('settings-profile-header')),
+    );
+    expect((header.padding as EdgeInsets).bottom, Grid.twelve);
+  });
+
   testWidgets('shows the poster until the animated avatar is ready', (
     tester,
   ) async {

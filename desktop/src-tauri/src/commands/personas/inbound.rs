@@ -124,6 +124,8 @@ pub async fn reconcile_inbound_persona_event(
                 &config,
                 agent_json,
                 cached_binary_path.as_deref(),
+                None,
+                None,
             )
             .await
             .map_err(|error| {

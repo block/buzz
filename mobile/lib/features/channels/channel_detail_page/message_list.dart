@@ -5,6 +5,7 @@ class _MessageList extends HookConsumerWidget {
   final List<TimelineMessage> allMessages;
   final String? initialMessageId;
   final String? initialThreadRootId;
+  final InitialThreadRouteBehavior initialThreadRouteBehavior;
   final Set<String> initialOrdinaryUnreadMessageIds;
   final String? initialOldestOrdinaryUnreadMessageId;
   final Set<String> initialForcedUnreadMessageIds;
@@ -15,12 +16,15 @@ class _MessageList extends HookConsumerWidget {
   final bool isArchived;
   final double appBarTitleContentHeight;
   final double composerBottomInset;
+  final FocusNode? composerFocusNode;
+  final VoidCallback? restoreComposerFocus;
 
   const _MessageList({
     required this.entries,
     required this.allMessages,
     required this.initialMessageId,
     required this.initialThreadRootId,
+    required this.initialThreadRouteBehavior,
     required this.initialOrdinaryUnreadMessageIds,
     required this.initialOldestOrdinaryUnreadMessageId,
     required this.initialForcedUnreadMessageIds,
@@ -31,6 +35,8 @@ class _MessageList extends HookConsumerWidget {
     required this.isArchived,
     required this.appBarTitleContentHeight,
     required this.composerBottomInset,
+    this.composerFocusNode,
+    this.restoreComposerFocus,
   });
 
   @override
@@ -335,8 +341,8 @@ class _MessageList extends HookConsumerWidget {
         await itemScrollController.scrollTo(
           index: 0,
           alignment: latestAlignment(),
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
+          duration: jumpToLatestScrollDuration,
+          curve: jumpToLatestScrollCurve,
         );
         if (context.mounted && !hasUserScrolled.value) {
           isAtLatest.value = true;
@@ -565,23 +571,30 @@ class _MessageList extends HookConsumerWidget {
       if (threadHead == null) return null;
       didOpenInitialThread.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted) return;
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: threadHead,
-              allMessages: allMessages,
-              channelId: channelId,
-              currentPubkey: currentPubkey,
-              isMember: isMember,
-              isArchived: isArchived,
-              initialMessageId: initialMessageId,
-            ),
+        if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) {
+          return;
+        }
+        final route = MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: allMessages,
+            channelId: channelId,
+            currentPubkey: currentPubkey,
+            isMember: isMember,
+            isArchived: isArchived,
+            initialMessageId: initialMessageId,
           ),
         );
+        final navigator = Navigator.of(context);
+        switch (initialThreadRouteBehavior) {
+          case InitialThreadRouteBehavior.push:
+            navigator.push(route);
+          case InitialThreadRouteBehavior.replaceCurrentRoute:
+            navigator.pushReplacement(route);
+        }
       });
       return null;
-    }, [initialThreadRootId, allMessages]);
+    }, [initialThreadRootId, allMessages, initialThreadRouteBehavior]);
 
     useEffect(() {
       final targetIndex = reversedIndexOf(initialMessageId);
@@ -804,6 +817,8 @@ class _MessageList extends HookConsumerWidget {
                           allMessages: allMessages,
                           isMember: isMember,
                           isArchived: isArchived,
+                          composerFocusNode: composerFocusNode,
+                          restoreComposerFocus: restoreComposerFocus,
                         ),
                         if (entry.summary != null)
                           _ThreadSummaryRow(
@@ -867,49 +882,14 @@ class _MessageList extends HookConsumerWidget {
             right: 0,
             bottom: navigationBottomInset + Grid.xs,
             child: Center(
-              child: AnimatedSwitcher(
-                key: const ValueKey('channel-jump-to-latest-switcher'),
-                duration: MediaQuery.disableAnimationsOf(context)
-                    ? Duration.zero
-                    : const Duration(milliseconds: 180),
-                reverseDuration: MediaQuery.disableAnimationsOf(context)
-                    ? Duration.zero
-                    : const Duration(milliseconds: 160),
-                switchInCurve: Curves.easeOutCubic,
-                switchOutCurve: Curves.easeInCubic,
-                transitionBuilder: (child, animation) => FadeTransition(
-                  opacity: animation,
-                  child: ScaleTransition(
-                    scale: _JumpToLatestScaleAnimation(animation),
-                    alignment: Alignment.bottomCenter,
-                    child: child,
-                  ),
-                ),
-                child: !isJumpToLatestVisible.value
-                    ? const SizedBox.shrink(
-                        key: ValueKey('channel-jump-to-latest-hidden'),
-                      )
-                    : JumpToLatestButton(
-                        key: const ValueKey('channel-jump-to-latest'),
-                        onPressed: scrollToLatest,
-                      ),
+              child: JumpToLatestSwitcher(
+                id: 'channel',
+                visible: isJumpToLatestVisible.value,
+                onPressed: scrollToLatest,
               ),
             ),
           ),
       ],
     );
   }
-}
-
-class _JumpToLatestScaleAnimation extends Animation<double>
-    with AnimationWithParentMixin<double> {
-  @override
-  final Animation<double> parent;
-
-  _JumpToLatestScaleAnimation(this.parent);
-
-  @override
-  double get value => parent.status == AnimationStatus.reverse
-      ? parent.value
-      : 0.92 + (0.08 * parent.value);
 }

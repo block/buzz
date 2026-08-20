@@ -46,8 +46,7 @@ import {
   classifyChildren,
   hasBlockMedia,
   isImageOnlyParagraph,
-  shallowArrayEqual,
-  shallowRecordEqual,
+  markdownPropsAreEqual,
 } from "./markdownUtils";
 import {
   CODE_BLOCK_CLASS,
@@ -63,6 +62,7 @@ import {
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import {
+  AuthoredDeepLinkAnchor,
   ChannelDeepLinkAnchor,
   MarkdownChannelDeepLink,
   MarkdownChannelReference,
@@ -118,7 +118,6 @@ import {
 } from "./markdown/imageLightbox";
 import { MarkdownTable } from "./markdown/MarkdownTable";
 import { ProgressiveImage } from "./markdown/ProgressiveImage";
-import { BuzzInlineLink } from "./markdown/BuzzLinkChip";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
 import { useMessageLinkPreviews } from "./markdown/useMessageLinkPreviews";
@@ -1276,15 +1275,15 @@ export function createMarkdownComponents(
       onOpenMessageLink,
       onImportSnapshotFromUrl,
       relayOrigin,
+      resolveChannelReferences,
       snapshotSharedBy,
     } = useMarkdownRuntime();
     if (!interactive) {
       return <span className="font-medium text-current">{children}</span>;
     }
 
-    // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the
-    // image lightbox button inside an anchor. Keep the image as the lightbox
-    // trigger and suppress the parent link activation for block media.
+    // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the image lightbox button inside an anchor.
+    // Keep the image as the lightbox trigger and suppress the parent link activation for block media.
     if (hasBlockMedia(React.Children.toArray(children))) {
       return <>{children}</>;
     }
@@ -1334,8 +1333,7 @@ export function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so
-    // clicks navigate in-app instead of opening the URL in the OS browser.
+    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so clicks navigate in-app instead of opening the URL in the OS browser.
     if (href) {
       if (parseChannelLink(href).ok) {
         return (
@@ -1360,22 +1358,23 @@ export function createMarkdownComponents(
               interactive={interactive}
               link={messageLinkTarget.link}
               onOpenMessageLink={onOpenMessageLink}
+              resolveChannelReference={resolveChannelReferences}
             />
           );
         }
 
         return (
-          <BuzzInlineLink
-            title={href}
+          <AuthoredDeepLinkAnchor
+            channelId={messageLinkTarget.link.channelId}
+            href={href}
             interactive={interactive}
-            onOpenLink={() => onOpenMessageLink(messageLinkTarget.link)}
+            messageLink={messageLinkTarget.link}
           >
             {children}
-          </BuzzInlineLink>
+          </AuthoredDeepLinkAnchor>
         );
       }
-      // Malformed message deep link — fall through to the default
-      // anchor (renders as a normal external link).
+      // Malformed message deep link — fall through to the default anchor.
     }
 
     // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones
@@ -1682,7 +1681,8 @@ export function createMarkdownComponents(
     }: {
       children?: React.ReactNode;
     }) {
-      const { channels, onOpenMessageLink } = useMarkdownRuntime();
+      const { channels, onOpenMessageLink, resolveChannelReferences } =
+        useMarkdownRuntime();
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1695,6 +1695,7 @@ export function createMarkdownComponents(
           interactive={interactive}
           link={parsed.value}
           onOpenMessageLink={onOpenMessageLink}
+          resolveChannelReference={resolveChannelReferences}
         />
       );
     },
@@ -1712,11 +1713,8 @@ const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 type MarkdownComponentSet = { components: Components; variant: string };
 
 /**
- * Returns the component map together with the `variant` token that fully
- * identifies it. The token doubles as the variant segment of the parse-cache
- * key (see nodeCache.ts), so the map partitioning and the key partitioning
- * come from one place and cannot drift apart: a new render flag added here
- * automatically partitions the cache too.
+ * Returns the component map and its cache-key `variant` token. The token fully
+ * identifies the map, so a new render flag partitions both together.
  */
 function getMarkdownComponents(
   interactive: boolean,
@@ -1741,6 +1739,7 @@ function MarkdownInner({
   configNudgeAuthorPubkey,
   content,
   customEmoji,
+  hardLineBreaks = true,
   imetaByUrl,
   interactive = true,
   agentMentionPubkeysByName,
@@ -1805,6 +1804,7 @@ function MarkdownInner({
       onOpenEntityLink,
       onOpenMessageLink,
       relayOrigin,
+      resolveChannelReferences: true,
       snapshotSharedBy,
       onImportSnapshotFromUrl: (
         fileBytes: number[],
@@ -1865,6 +1865,7 @@ function MarkdownInner({
           components: componentSet.components,
           content: processedContent,
           customEmoji,
+          hardLineBreaks,
           leadingInlineContent: hasLeadingInlineContent,
           mentionNames,
           searchQuery,
@@ -1877,10 +1878,10 @@ function MarkdownInner({
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
         [
-          "max-w-none wrap-anywhere text-sm leading-5 text-foreground",
+          "max-w-none wrap-anywhere text-message font-normal tracking-normal text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           "[&>*+*]:mt-3",
-          "[&>p+p]:mt-1.5",
+          "[&>p+p]:mt-conversation-paragraph [&>ol]:space-y-conversation-list [&>ul]:space-y-conversation-list",
           "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5 [&>*+h4]:mt-3.5 [&>*+h5]:mt-3.5 [&>*+h6]:mt-3.5",
           "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5 [&>h4+*]:mt-0.5 [&>h5+*]:mt-0.5 [&>h6+*]:mt-0.5",
           "[&>h1+h2]:mt-1.5! [&>h2+h3]:mt-1.5! [&>h3+h4]:mt-1.5! [&>h4+h5]:mt-1.5! [&>h5+h6]:mt-1.5!",
@@ -1921,24 +1922,8 @@ function MarkdownInner({
 export const Markdown = React.memo(
   MarkdownInner,
   (prev, next) =>
-    prev.content === next.content &&
-    prev.className === next.className &&
-    prev.customEmoji === next.customEmoji &&
-    prev.interactive === next.interactive &&
-    prev.mediaInset === next.mediaInset &&
-    shallowRecordEqual(
-      prev.agentMentionPubkeysByName,
-      next.agentMentionPubkeysByName,
-    ) &&
-    shallowRecordEqual(prev.mentionPubkeysByName, next.mentionPubkeysByName) &&
-    shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
-    shallowArrayEqual(prev.channelNames, next.channelNames) &&
-    prev.imetaByUrl === next.imetaByUrl &&
-    prev.leadingInlineContent === next.leadingInlineContent &&
-    prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
-    prev.searchQuery === next.searchQuery &&
-    prev.snapshotSharedBy === next.snapshotSharedBy &&
-    prev.videoReviewContext === next.videoReviewContext,
+    markdownPropsAreEqual(prev, next) &&
+    prev.leadingInlineContent === next.leadingInlineContent,
 );
 Markdown.displayName = "Markdown";
 export { SyntaxHighlightedCode } from "./markdown/CodeBlock";

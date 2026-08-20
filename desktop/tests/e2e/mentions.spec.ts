@@ -320,6 +320,112 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   expect(fizzIndex).toBeLessThan(charlieIndex);
 });
 
+test("duplicate owned agents preserve provenance and exact pubkey selection", async ({
+  page,
+}) => {
+  const managedPubkey = IN_CHANNEL_MANAGED_AGENT_PUBKEY;
+  const relayPubkey = ALLOWLIST_RELAY_AGENT_PUBKEY;
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: managedPubkey,
+        name: "carl",
+        status: "running",
+        channelNames: ["general"],
+        backend: {
+          type: "provider",
+          id: "mock",
+          config: {},
+        },
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: relayPubkey,
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        name: "carl",
+        respondTo: "owner-only",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    { channelId: GENERAL_CHANNEL_ID, pubkey: relayPubkey },
+  );
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@carl");
+  const dropdown = autocomplete(page);
+  const managedRow = dropdown.getByTestId(
+    `mention-suggestion-${managedPubkey}`,
+  );
+  const relayRow = dropdown.getByTestId(`mention-suggestion-${relayPubkey}`);
+  await expect(managedRow).toContainText("agent · managed here");
+  await expect(relayRow).toContainText("agent · managed elsewhere");
+
+  const collisionKeys = dropdown.getByTestId("mention-collision-npub");
+  await expect(collisionKeys).toHaveCount(2);
+  const fullNpubs = await collisionKeys.evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("title")),
+  );
+  expect(fullNpubs).toHaveLength(2);
+  expect(new Set(fullNpubs).size).toBe(2);
+
+  const initialRows = dropdown.locator("button");
+  const managedIndex = await initialRows.evaluateAll(
+    (buttons, pubkey) =>
+      buttons.findIndex(
+        (button) =>
+          button.getAttribute("data-testid") === `mention-suggestion-${pubkey}`,
+      ),
+    managedPubkey,
+  );
+  expect(managedIndex).toBeGreaterThanOrEqual(0);
+  for (let index = 0; index < managedIndex; index += 1) {
+    await input.press("ArrowDown");
+  }
+  await input.press("Enter");
+  await page.keyboard.type("local");
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@carl local"))
+    .toEqual([managedPubkey]);
+  await expect(input).toBeEmpty();
+
+  await input.fill("@carl");
+  const reopenedDropdown = autocomplete(page);
+  await expect(reopenedDropdown).toBeVisible();
+  await reopenedDropdown
+    .getByTestId(`mention-suggestion-${relayPubkey}`)
+    .click();
+  await page.keyboard.type("remote");
+  await page.getByTestId("send-message").click();
+  const sendWithoutInviting = page.getByRole("button", { name: "Do nothing" });
+  try {
+    await sendWithoutInviting.waitFor({ state: "visible", timeout: 2_000 });
+    await sendWithoutInviting.click();
+  } catch {
+    // In-channel selections send immediately without opening the prompt.
+  }
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
+    .toEqual([relayPubkey]);
+});
+
 test("relay-only shared agents emit an outbound mention tag when selected", async ({
   page,
 }) => {
@@ -1460,7 +1566,9 @@ test("selected relay agents revoked during send emit no p tag", async ({
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 
-test("owner-only builds hide other-owned relay agents", async ({ page }) => {
+test("owner-only builds admit cross-owner relay agents authorized by allowlist", async ({
+  page,
+}) => {
   await installMockBridge(page, {
     ownerOnlyAccessBuild: true,
     searchProfiles: [
@@ -1474,6 +1582,7 @@ test("owner-only builds hide other-owned relay agents", async ({ page }) => {
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
         name: "quinn",
         respondTo: "allowlist",
         respondToAllowlist: [MOCK_VIEWER_PUBKEY],
@@ -1483,9 +1592,35 @@ test("owner-only builds hide other-owned relay agents", async ({ page }) => {
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await page.getByTestId("message-input").fill("@quinn");
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+  await page.getByTestId("send-message").click();
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 
 test("owner-only builds show verified same-owner relay agents", async ({
@@ -1541,13 +1676,23 @@ test("relay-only allowlisted agents stay hidden outside their channel", async ({
   await expect(autocomplete(page)).toHaveCount(0);
 });
 
-test("relay-only anyone agents are visible when a channel is shared", async ({
+test("owner-only builds admit cross-owner relay agents authorized for anyone", async ({
   page,
 }) => {
   await installMockBridge(page, {
+    ownerOnlyAccessBuild: true,
+    searchProfiles: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
+        isAgent: true,
+      },
+    ],
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
         name: "quinn",
         respondTo: "anyone",
         channelNames: ["general"],

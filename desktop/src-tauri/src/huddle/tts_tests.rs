@@ -785,22 +785,12 @@ fn apply_fade_out_single_sample() {
 
 // ── build_sentence_append_buffer tests ───────────────────────────────────
 
-/// `first_append` still flips on the first append for `tts_active` gating.
-#[test]
-fn build_sentence_append_buffer_flips_first_append() {
-    let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], false);
-    assert_eq!(buf, vec![0.5; 100]);
-    assert!(!first, "first call must flip the flag");
-}
-
 /// Playback chunks are contiguous: Pocket's generated pause is not extended
 /// with a fixed inter-sentence silence budget.
 #[test]
 fn sentence_append_buffer_does_not_inject_silence() {
-    let mut first = true;
-    let first_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], false);
-    let second_buf = build_sentence_append_buffer(&mut first, vec![0.25; 100], false);
+    let first_buf = build_sentence_append_buffer(vec![0.5; 100], false);
+    let second_buf = build_sentence_append_buffer(vec![0.25; 100], false);
 
     assert_eq!(first_buf, vec![0.5; 100]);
     assert_eq!(second_buf, vec![0.25; 100]);
@@ -810,8 +800,7 @@ fn sentence_append_buffer_does_not_inject_silence() {
 /// the first phoneme while the output path wakes back up.
 #[test]
 fn idle_playback_gets_an_onset_cushion() {
-    let mut first = true;
-    let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], true);
+    let buf = build_sentence_append_buffer(vec![0.5; 100], true);
 
     assert_eq!(buf.len(), SENTENCE_LEAD_IN_SAMPLES + 100);
     assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
