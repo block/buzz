@@ -4,6 +4,7 @@
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    decision_card::{DecisionCardPayload, DecisionResponsePayload},
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
@@ -12,7 +13,8 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_STREAM_DECISION_CARD, KIND_STREAM_DECISION_RESPONSE, KIND_USER_STATUS,
+        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -242,6 +244,92 @@ pub fn build_message(
     Ok(EventBuilder::new(Kind::Custom(9), content)
         .tags(tags)
         .allow_self_tagging())
+}
+
+/// Build a channel-native decision card (kind 40009).
+///
+/// `fallback_markdown` remains readable in clients that do not understand the
+/// structured `decision_card` tag. The payload hash binds future responses to
+/// the exact structured proposal the human saw.
+pub fn build_decision_card(
+    channel_id: Uuid,
+    payload: &DecisionCardPayload,
+    fallback_markdown: &str,
+    thread_ref: Option<&ThreadRef>,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.into()))?;
+    check_content(fallback_markdown, 64 * 1024)?;
+    if fallback_markdown.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "decision card Markdown fallback must not be empty".into(),
+        ));
+    }
+
+    let encoded = payload
+        .canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    check_content(&encoded, 16 * 1024)?;
+    let payload_hash = payload
+        .payload_hash()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["decision_card", &encoded])?,
+        tag(&["payload_hash", &payload_hash])?,
+        tag(&["shadow", if payload.shadow { "1" } else { "0" }])?,
+    ];
+    if let Some(expires_at) = payload.expires_at {
+        tags.push(tag(&["expiration", &expires_at.to_string()])?);
+    }
+    if let Some(thread_ref) = thread_ref {
+        thread_tags(thread_ref, &mut tags)?;
+    }
+
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_STREAM_DECISION_CARD as u16),
+        fallback_markdown,
+    )
+    .tags(tags))
+}
+
+/// Build a durable response to a decision card (kind 40010).
+///
+/// The NIP-10 reference keeps the receipt in the card's originating thread;
+/// `fallback_markdown` makes the outcome explicit in older clients.
+pub fn build_decision_response(
+    channel_id: Uuid,
+    payload: &DecisionResponsePayload,
+    fallback_markdown: &str,
+    thread_ref: &ThreadRef,
+) -> Result<EventBuilder, SdkError> {
+    payload
+        .validate()
+        .map_err(|error| SdkError::InvalidInput(error.into()))?;
+    check_content(fallback_markdown, 64 * 1024)?;
+    if fallback_markdown.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "decision response Markdown fallback must not be empty".into(),
+        ));
+    }
+
+    let encoded = serde_json::to_string(payload)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    check_content(&encoded, 8 * 1024)?;
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    thread_tags(thread_ref, &mut tags)?;
+    tags.extend([
+        tag(&["decision_response", &encoded])?,
+        tag(&["payload_hash", &payload.payload_hash])?,
+        tag(&["shadow", if payload.shadow { "1" } else { "0" }])?,
+    ]);
+
+    Ok(EventBuilder::new(
+        Kind::Custom(KIND_STREAM_DECISION_RESPONSE as u16),
+        fallback_markdown,
+    )
+    .tags(tags))
 }
 
 /// Build an encrypted agent observer frame (kind 24200).

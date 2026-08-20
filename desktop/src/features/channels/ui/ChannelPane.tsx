@@ -38,6 +38,7 @@ import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPre
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
+import { DecisionCardDevAction } from "@/features/decision-cards/ui/DecisionCardDevAction";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
   containsWelcomePersonaMention,
@@ -714,6 +715,29 @@ export const ChannelPane = React.memo(function ChannelPane({
                   onSend={handleSendMessage}
                   profiles={profiles}
                   showBackgroundUploadProgress={false}
+                  toolbarExtraActions={
+                    (import.meta.env.DEV ||
+                      import.meta.env.VITE_DECISION_CARD_DEV === "1") &&
+                    activeChannel?.id ? (
+                      <DecisionCardDevAction
+                        channelId={activeChannel.id}
+                        recipientPubkeys={
+                          activeChannel.channelType === "dm"
+                            ? [
+                                ...new Set([
+                                  ...activeChannel.memberPubkeys,
+                                  ...activeChannel.participantPubkeys,
+                                ]),
+                              ].filter(
+                                (pubkey) =>
+                                  pubkey.toLowerCase() !==
+                                  currentPubkey?.toLowerCase(),
+                              )
+                            : []
+                        }
+                      />
+                    ) : undefined
+                  }
                   placeholder={
                     timeoutState.active
                       ? "You're timed out by community moderators."

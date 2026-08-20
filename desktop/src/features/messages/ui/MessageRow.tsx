@@ -14,6 +14,10 @@ import {
 import type { TimelineMessage } from "@/features/messages/types";
 import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
+import {
+  DecisionCard,
+  DecisionReceiptCard,
+} from "@/features/decision-cards/ui/DecisionCard";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -30,6 +34,8 @@ import {
 } from "@/features/messages/lib/threadTreeLayout";
 import {
   KIND_HUDDLE_STARTED,
+  KIND_STREAM_DECISION_CARD,
+  KIND_STREAM_DECISION_RESPONSE,
   KIND_STREAM_MESSAGE_DIFF,
 } from "@/shared/constants/kinds";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
@@ -364,6 +370,10 @@ export const MessageRow = React.memo(
 
     const renderBody = () => {
       switch (message.kind) {
+        case KIND_STREAM_DECISION_CARD:
+          return <DecisionCard channelId={channelId} message={message} />;
+        case KIND_STREAM_DECISION_RESPONSE:
+          return <DecisionReceiptCard message={message} />;
         case KIND_STREAM_MESSAGE_DIFF:
           return (
             <React.Suspense

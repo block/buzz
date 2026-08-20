@@ -21,6 +21,8 @@ export const KIND_STREAM_MESSAGE_EDIT = 40003;
 export const KIND_CHANNEL_THREAD_SUMMARY = 39005;
 export const KIND_CHANNEL_WINDOW_BOUNDS = 39006;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
+export const KIND_STREAM_DECISION_CARD = 40009;
+export const KIND_STREAM_DECISION_RESPONSE = 40010;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
 export const KIND_JOB_REQUEST = 43001;
@@ -87,6 +89,8 @@ export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_STREAM_MESSAGE_V2,
   KIND_FORUM_POST,
   KIND_FORUM_COMMENT,
+  KIND_STREAM_DECISION_CARD,
+  KIND_STREAM_DECISION_RESPONSE,
 ] as const;
 
 // Keep this in sync with the Home-feed mention query in buzz-db.
@@ -133,6 +137,8 @@ export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_STREAM_MESSAGE, // 9
   KIND_STREAM_MESSAGE_V2, // 40002
   KIND_STREAM_MESSAGE_DIFF, // 40008 — diff messages (own row)
+  KIND_STREAM_DECISION_CARD, // 40009 — native decision card
+  KIND_STREAM_DECISION_RESPONSE, // 40010 — durable decision receipt
   KIND_SYSTEM_MESSAGE, // 40099 — system rows (join/leave/channel-created)
   KIND_JOB_REQUEST, // 43001
   KIND_JOB_ACCEPTED, // 43002
