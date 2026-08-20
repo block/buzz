@@ -922,7 +922,7 @@ export function MessageThreadPanel({
               placeholder={
                 isHuddleTranscript
                   ? "Message the huddle"
-                  : `Reply in thread to ${threadHead.author}`
+                  : "Reply in thread · same agent session"
               }
               profiles={profiles}
               replyTarget={composerReplyTarget}
