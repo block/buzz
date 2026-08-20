@@ -1164,6 +1164,25 @@ test("inline issue chips show the repository name without the event hash", () =>
   assert.equal(pullRequestText, "buzz-world · c3b589fa");
 });
 
+test("inline entity chip labels are bounded without truncating their accessible names", () => {
+  const longRepository = `repo-${"x".repeat(50)}`;
+  const html = renderToStaticMarkup(
+    renderEntityLinkAnchor({
+      children: null,
+      href: `buzz://repo?owner=${OWNER_HEX}&d=${longRepository}`,
+      onOpenEntityLink: () => {},
+      relayOrigin: null,
+    }),
+  );
+  const visibleText = html.replace(/<[^>]+>/g, "");
+  assert.equal(Array.from(visibleText).length, 48);
+  assert.match(visibleText, /…$/);
+  assert.match(
+    html,
+    new RegExp(`aria-label="Open repository ${longRepository}"`),
+  );
+});
+
 test("inline message chips omit fetched metadata and the event hash", () => {
   const channelId = "580ca78b-9dae-46f3-8854-bd671853ba32";
   const markdown = renderCachedMarkdown({

@@ -21,8 +21,14 @@ const TooltipProvider = ({
   />
 );
 
-const Tooltip = (props: React.ComponentProps<typeof TooltipPrimitive.Root>) => (
-  <TooltipPrimitive.Root {...props} disableHoverableContent />
+const Tooltip = ({
+  disableHoverableContent = true,
+  ...props
+}: React.ComponentProps<typeof TooltipPrimitive.Root>) => (
+  <TooltipPrimitive.Root
+    disableHoverableContent={disableHoverableContent}
+    {...props}
+  />
 );
 
 const TooltipTrigger = TooltipPrimitive.Trigger;

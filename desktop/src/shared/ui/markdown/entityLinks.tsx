@@ -83,7 +83,7 @@ function EntityMetadataTooltip({
   const context =
     metadata === null
       ? null
-      : link.type === "issue" && resolvedTitle
+      : (link.type === "issue" || link.type === "pr") && resolvedTitle
         ? resolvedTitle
         : projectContext
           ? projectContext
@@ -106,18 +106,14 @@ function EntityMetadataTooltip({
         >
           {context ? (
             <span
-              className={
-                link.type === "issue"
-                  ? "break-words whitespace-normal"
-                  : "line-clamp-2"
-              }
+              className="line-clamp-3 [overflow-wrap:anywhere] whitespace-normal"
               data-buzz-tooltip-metadata-content=""
             >
               {context}
             </span>
           ) : null}
           <span
-            className={`${context ? "mt-1 " : ""}block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/80`}
+            className={`${context ? "mt-1 " : ""}line-clamp-2 max-w-full [overflow-wrap:anywhere] whitespace-normal text-2xs text-secondary-foreground/80`}
             data-buzz-tooltip-metadata-type=""
           >
             {footer}
@@ -319,19 +315,25 @@ export function renderEntityLinkAnchor({
     const resolvedContext = metadata?.title.trim();
     // Issue chips stay at the repository name — no event hash while the fetch
     // is in flight, no fetched title once it lands — so the inline label keeps
-    // one width across the whole lifecycle. The title lives in the tooltip.
+    // one width across the whole lifecycle. The title lives in the tooltip and
+    // accessible name.
     const chipLabel =
       parsed.value.type === "issue"
         ? parsed.value.dtag
         : resolvedContext && parsed.value.type === "pr"
           ? `${parsed.value.dtag} · ${resolvedContext}`
           : presentation.label;
+    const ariaLabel =
+      resolvedContext &&
+      (parsed.value.type === "pr" || parsed.value.type === "issue")
+        ? `${presentation.ariaLabel}: ${parsed.value.dtag} · ${resolvedContext}`
+        : presentation.ariaLabel;
     return (
       <BuzzLinkChip
         data-buzz-link-kind={parsed.value.type}
         href={href}
         icon={presentation.icon}
-        aria-label={presentation.ariaLabel}
+        aria-label={ariaLabel}
         className={cn(metadata === null && "buzz-link-unavailable")}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}

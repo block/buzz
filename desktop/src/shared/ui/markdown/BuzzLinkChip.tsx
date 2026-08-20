@@ -6,6 +6,7 @@ import { InlineChip } from "@/shared/ui/InlineChip";
 import {
   inlineChipIconClasses,
   type InlineChipIconKind,
+  truncateInlineChipLabel,
   WRAPPING_INLINE_CHIP_CLASSES,
 } from "@/shared/ui/mentionChip";
 
@@ -115,7 +116,13 @@ export function BuzzLinkChip({
     interactive,
     onOpenLink,
   });
-  const content = wrapping ? wrappingChipContent(children, Icon) : children;
+  const visibleChildren =
+    wrapping && typeof children === "string"
+      ? truncateInlineChipLabel(children)
+      : children;
+  const content = wrapping
+    ? wrappingChipContent(visibleChildren, Icon)
+    : visibleChildren;
   const chipClassName = cn(className, wrapping && WRAPPING_INLINE_CHIP_CLASSES);
   const onKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLSpanElement>) => {

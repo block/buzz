@@ -117,39 +117,33 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const prChip = row.getByRole("button", {
     name: /Open pull request .* in repository relay-tools/,
   });
+  await expect(prChip).toHaveAccessibleName(
+    `Open pull request ${PR_ID.slice(0, 8)} in repository relay-tools: relay-tools · ${PR_SUBJECT}`,
+  );
   await expect(prChip).not.toHaveAttribute("title");
   await expect(prChip).toHaveClass(/wrapping-inline-chip/);
   await expect(prChip).toHaveCSS("display", "inline");
   await expect(prChip.locator(".truncate")).toHaveCount(0);
-  // Pull-request chips still absorb their subject, so they are the chips that
-  // fragment across lines — hover the last fragment, since the bounding box of
-  // a wrapped inline element has dead space the pointer would land in.
-  const prChipFragments = await prChip.evaluate((element) =>
-    Array.from(element.getClientRects()).map((rect) => ({
-      height: rect.height,
-      left: rect.left,
-      top: rect.top,
-      width: rect.width,
-    })),
+  await expect(prChip).toHaveText(
+    `${`relay-tools · ${PR_SUBJECT}`.slice(0, 47)}…`,
   );
-  expect(prChipFragments.length).toBeGreaterThan(1);
-  const hoveredFragment = prChipFragments.at(-1);
-  if (!hoveredFragment) throw new Error("Expected a wrapped pull-request chip");
-  await page.mouse.move(
-    hoveredFragment.left + hoveredFragment.width / 2,
-    hoveredFragment.top + hoveredFragment.height / 2,
-  );
+  // Resolved subjects are bounded before rendering, so a signed value cannot
+  // turn the compact chip into an arbitrarily tall message surface.
+  expect(
+    await prChip.evaluate((element) => element.getClientRects().length),
+  ).toBeLessThanOrEqual(2);
+  await prChip.hover();
   const prTooltip = page.getByRole("tooltip");
   const prContext = prTooltip.locator(
     '[data-buzz-tooltip-metadata-content=""]',
   );
-  await expect(prContext).not.toBeEmpty();
-  await expect(prContext).not.toContainText(PR_SUBJECT);
+  await expect(prContext).toHaveText(PR_SUBJECT);
+  await expect(prContext).toHaveClass(/line-clamp-3/);
+  await expect(prContext).toHaveCSS("overflow-wrap", "anywhere");
   const prFooter = prTooltip.locator('[data-buzz-tooltip-metadata-type=""]');
   await expect(prFooter).toHaveText("Pull request · relay-tools");
-  await expect(prFooter).toHaveCSS("white-space", "nowrap");
-  await expect(prFooter).toHaveCSS("overflow", "hidden");
-  await expect(prFooter).toHaveCSS("text-overflow", "ellipsis");
+  await expect(prFooter).toHaveCSS("overflow-wrap", "anywhere");
+  await expect(prFooter).toHaveCSS("white-space", "normal");
   const tooltipSemanticColors = await prTooltip.evaluate((element) => {
     const styles = getComputedStyle(element);
     const probe = document.createElement("span");
@@ -165,7 +159,9 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     return result;
   });
   expect(tooltipSemanticColors.actual).toEqual(tooltipSemanticColors.expected);
-  await expect(prChip).toContainText(`relay-tools · ${PR_SUBJECT}`);
+  await expect(prChip).toContainText(
+    `${`relay-tools · ${PR_SUBJECT}`.slice(0, 47)}…`,
+  );
 
   const issueChip = row.getByRole("button", {
     name: /Open issue .* in repository relay-tools/,
@@ -174,6 +170,9 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   // reaches the inline label, so it neither absorbs the title nor falls back
   // to the event hash.
   await expect(issueChip).toHaveText("relay-tools");
+  await expect(issueChip).toHaveAccessibleName(
+    `Open issue ${ISSUE_ID.slice(0, 8)} in repository relay-tools: relay-tools · ${ISSUE_SUBJECT}`,
+  );
   await expect(issueChip).not.toContainText(ISSUE_SUBJECT);
   await expect(issueChip).not.toContainText(ISSUE_ID.slice(0, 8));
   await expect(issueChip).toHaveClass(/wrapping-inline-chip/);
@@ -185,7 +184,9 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     '[data-buzz-tooltip-metadata-content=""]',
   );
   await expect(issueContext).toHaveText(ISSUE_SUBJECT);
-  await expect(issueContext).not.toHaveClass(/line-clamp/);
+  await expect(issueContext).toHaveClass(/line-clamp-3/);
+  await expect(issueContext).toHaveCSS("overflow-wrap", "anywhere");
+  await expect(issueContext).toHaveCSS("white-space", "normal");
   await expect
     .poll(() =>
       issueContext.evaluate(

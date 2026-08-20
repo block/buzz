@@ -69,7 +69,7 @@ function ChannelMetadataTooltip({
         >
           {description ? (
             <span
-              className="line-clamp-2"
+              className="line-clamp-2 [overflow-wrap:anywhere] whitespace-normal"
               data-buzz-tooltip-metadata-content=""
             >
               {description}
@@ -77,7 +77,7 @@ function ChannelMetadataTooltip({
           ) : null}
           <span
             className={cn(
-              "block max-w-full truncate whitespace-nowrap text-2xs text-secondary-foreground/80",
+              "line-clamp-2 max-w-full [overflow-wrap:anywhere] whitespace-normal text-2xs text-secondary-foreground/80",
               description && "mt-1",
             )}
             data-buzz-tooltip-metadata-type=""

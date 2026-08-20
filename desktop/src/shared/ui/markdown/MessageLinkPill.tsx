@@ -102,7 +102,10 @@ function MessageLinkMetadataTooltip({
           className="w-72 max-w-[min(18rem,calc(100vw-2rem))] px-3 py-2 text-left"
           side="top"
         >
-          <span className="line-clamp-3" data-buzz-tooltip-metadata-content="">
+          <span
+            className="line-clamp-3 [overflow-wrap:anywhere] whitespace-normal"
+            data-buzz-tooltip-metadata-content=""
+          >
             {content}
           </span>
           <span
