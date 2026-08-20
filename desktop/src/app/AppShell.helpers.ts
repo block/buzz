@@ -141,6 +141,58 @@ export function toSearchHit(
   };
 }
 
+export function createDesktopNotificationActivationQueue(
+  activate: (target: DesktopNotificationTarget) => Promise<void>,
+  onError?: (error: unknown) => void,
+): (target: DesktopNotificationTarget) => void {
+  let pending = Promise.resolve();
+
+  return (target) => {
+    // Preserve native click order when macOS drains multiple queued targets.
+    // Contain failures so one rejected navigation cannot poison later clicks.
+    pending = pending
+      .then(() => activate(target))
+      .catch((error) => {
+        try {
+          onError?.(error);
+        } catch {
+          // Reporting must not poison the activation queue either.
+        }
+      });
+  };
+}
+
+export async function activateDesktopNotificationTarget(
+  target: DesktopNotificationTarget,
+  actions: {
+    goChannel: (
+      channelId: string,
+      options?: { force?: boolean },
+    ) => Promise<unknown>;
+    goHome: () => Promise<unknown>;
+    openSearchHit: (
+      hit: SearchHit,
+      behavior?: { force?: boolean },
+    ) => Promise<unknown>;
+    revealWindow: () => Promise<void>;
+  },
+): Promise<void> {
+  let navigation: Promise<unknown>;
+  if (!target.channelId) {
+    navigation = actions.goHome();
+  } else {
+    const anchor = toSearchHit(target);
+    navigation = anchor
+      ? actions.openSearchHit(anchor, { force: true })
+      : actions.goChannel(target.channelId, { force: true });
+  }
+
+  // Native activation already foregrounds the app on macOS. Other platforms
+  // still get a best-effort reveal, but it must never gate click-through.
+  void actions.revealWindow().catch(() => undefined);
+  await navigation;
+}
+
 export function deriveShellRoute(pathname: string): {
   selectedChannelId: string | null;
   selectedView: AppView;

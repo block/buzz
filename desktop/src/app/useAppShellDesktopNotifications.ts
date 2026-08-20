@@ -1,8 +1,9 @@
 import * as React from "react";
 
 import {
+  activateDesktopNotificationTarget,
+  createDesktopNotificationActivationQueue,
   shouldBounceForChannelNotification,
-  toSearchHit,
 } from "@/app/AppShell.helpers";
 import { useCommunityJoinAlerts } from "@/features/community-members/useCommunityJoinAlerts";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
@@ -150,24 +151,12 @@ export function useAppShellDesktopNotifications({
     async (
       target: import("@/features/notifications/lib/desktop").DesktopNotificationTarget,
     ) => {
-      await revealDesktopAppWindow();
-
-      if (!target.channelId) {
-        void goHome();
-        return;
-      }
-
-      // force: a notification click must always route, even when the
-      // destination href matches the current one (e.g. re-clicking a
-      // notification for the already-open channel). Without it,
-      // commitNavigation's same-href check swallows the navigation.
-      const anchor = toSearchHit(target);
-      if (!anchor) {
-        await goChannel(target.channelId, { force: true });
-        return;
-      }
-
-      await openSearchHit(anchor, { force: true });
+      await activateDesktopNotificationTarget(target, {
+        goChannel,
+        goHome,
+        openSearchHit,
+        revealWindow: revealDesktopAppWindow,
+      });
     },
   );
 
@@ -175,13 +164,20 @@ export function useAppShellDesktopNotifications({
     if (!enabled) return;
     let isCancelled = false;
     let cleanup = () => {};
+    const enqueueDesktopNotificationAction =
+      createDesktopNotificationActivationQueue(
+        (target) => handleDesktopNotificationAction(target),
+        (error) => {
+          console.error("Failed to activate desktop notification", error);
+        },
+      );
 
     void listenForDesktopNotificationActions((target) => {
       if (isCancelled) {
         return;
       }
 
-      void handleDesktopNotificationAction(target);
+      enqueueDesktopNotificationAction(target);
     }).then((dispose) => {
       if (isCancelled) {
         dispose();
