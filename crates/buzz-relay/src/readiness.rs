@@ -15,7 +15,7 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Closed label set exported by `buzz_readiness_checks_total{reason}`.
 #[cfg(test)]
-pub(crate) const READINESS_REASON_LABELS: [&str; 12] = [
+pub(crate) const READINESS_REASON_LABELS: [&str; 13] = [
     "ready",
     "shutting_down",
     "postgres_pool_timeout",
@@ -26,6 +26,7 @@ pub(crate) const READINESS_REASON_LABELS: [&str; 12] = [
     "redis_pool_error",
     "deletion_catalog_timeout",
     "deletion_catalog_error",
+    "partition_catalog_unsafe",
     "overall_timeout",
     "multiple_dependencies_failed",
 ];
@@ -33,11 +34,12 @@ pub(crate) const READINESS_REASON_LABELS: [&str; 12] = [
 /// Maximum raw Prometheus series emitted by readiness for one pod.
 ///
 /// - 12 overall reasons
-/// - 11 valid dependency/outcome pairs (Postgres 5, Redis 3, catalog 3)
-/// - 4 histograms x (15 configured buckets + `+Inf` + count + sum) = 72
-/// - 4 current-state gauges
+/// - 13 valid dependency/outcome pairs (Postgres 5, Redis 3, deletion catalog 3,
+///   partition catalog 2)
+/// - 5 histograms x (15 configured buckets + `+Inf` + count + sum) = 90
+/// - 5 current-state gauges
 #[cfg(test)]
-pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 12 + 11 + (4 * 18) + 4;
+pub(crate) const READINESS_RAW_SERIES_PER_POD: usize = 13 + 13 + (5 * 18) + 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PostgresOutcome {
@@ -131,6 +133,25 @@ impl DeletionCatalogOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PartitionCatalogOutcome {
+    Success,
+    Unsafe,
+}
+
+impl PartitionCatalogOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Unsafe => "unsafe",
+        }
+    }
+
+    fn is_success(self) -> bool {
+        self == Self::Success
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReadinessReason {
     Ready,
     ShuttingDown,
@@ -142,6 +163,7 @@ pub(crate) enum ReadinessReason {
     RedisPoolError,
     DeletionCatalogTimeout,
     DeletionCatalogError,
+    PartitionCatalogUnsafe,
     OverallTimeout,
     MultipleDependenciesFailed,
 }
@@ -159,6 +181,7 @@ impl ReadinessReason {
             Self::RedisPoolError => "redis_pool_error",
             Self::DeletionCatalogTimeout => "deletion_catalog_timeout",
             Self::DeletionCatalogError => "deletion_catalog_error",
+            Self::PartitionCatalogUnsafe => "partition_catalog_unsafe",
             Self::OverallTimeout => "overall_timeout",
             Self::MultipleDependenciesFailed => "multiple_dependencies_failed",
         }
@@ -183,6 +206,7 @@ pub(crate) struct ReadinessEvaluation {
     postgres: Option<TimedOutcome<PostgresOutcome>>,
     redis: Option<TimedOutcome<RedisOutcome>>,
     deletion_catalog: Option<TimedOutcome<DeletionCatalogOutcome>>,
+    partition_catalog: Option<TimedOutcome<PartitionCatalogOutcome>>,
     pub(crate) reason: ReadinessReason,
     total_duration: Duration,
 }
@@ -193,6 +217,7 @@ impl ReadinessEvaluation {
             postgres: None,
             redis: None,
             deletion_catalog: None,
+            partition_catalog: None,
             reason: ReadinessReason::ShuttingDown,
             total_duration: Duration::ZERO,
         }
@@ -214,11 +239,17 @@ impl ReadinessEvaluation {
         deletion_catalog: TimedOutcome<DeletionCatalogOutcome>,
         total_duration: Duration,
     ) -> Self {
-        let reason = final_reason(postgres.outcome, redis.outcome, deletion_catalog.outcome);
+        let reason = final_reason(
+            postgres.outcome,
+            redis.outcome,
+            deletion_catalog.outcome,
+            PartitionCatalogOutcome::Success,
+        );
         Self {
             postgres: Some(postgres),
             redis: Some(redis),
             deletion_catalog: Some(deletion_catalog),
+            partition_catalog: None,
             reason,
             total_duration,
         }
@@ -242,8 +273,39 @@ impl ReadinessEvaluation {
             .is_some_and(|result| result.outcome.is_success())
     }
 
+    pub(crate) fn partition_catalog_ready(self) -> bool {
+        self.partition_catalog
+            .is_some_and(|result| result.outcome.is_success())
+    }
+
+    fn with_partition_catalog(mut self, ready: bool) -> Self {
+        let outcome = if ready {
+            PartitionCatalogOutcome::Success
+        } else {
+            PartitionCatalogOutcome::Unsafe
+        };
+        self.partition_catalog = Some(TimedOutcome {
+            outcome,
+            duration: Duration::ZERO,
+        });
+        if let (Some(postgres), Some(redis), Some(deletion_catalog)) =
+            (self.postgres, self.redis, self.deletion_catalog)
+        {
+            self.reason = final_reason(
+                postgres.outcome,
+                redis.outcome,
+                deletion_catalog.outcome,
+                outcome,
+            );
+        }
+        self
+    }
+
     fn dependencies_ran(self) -> bool {
-        self.postgres.is_some() || self.redis.is_some() || self.deletion_catalog.is_some()
+        self.postgres.is_some()
+            || self.redis.is_some()
+            || self.deletion_catalog.is_some()
+            || self.partition_catalog.is_some()
     }
 }
 
@@ -251,10 +313,12 @@ fn final_reason(
     postgres: PostgresOutcome,
     redis: RedisOutcome,
     deletion_catalog: DeletionCatalogOutcome,
+    partition_catalog: PartitionCatalogOutcome,
 ) -> ReadinessReason {
     let failure_count = usize::from(!postgres.is_success())
         + usize::from(!redis.is_success())
-        + usize::from(!deletion_catalog.is_success());
+        + usize::from(!deletion_catalog.is_success())
+        + usize::from(!partition_catalog.is_success());
 
     if failure_count == 0 {
         return ReadinessReason::Ready;
@@ -262,7 +326,8 @@ fn final_reason(
     if failure_count > 1 {
         let all_failures_are_timeouts = (postgres.is_success() || postgres.is_timeout())
             && (redis.is_success() || redis.is_timeout())
-            && (deletion_catalog.is_success() || deletion_catalog.is_timeout());
+            && (deletion_catalog.is_success() || deletion_catalog.is_timeout())
+            && partition_catalog.is_success();
         return if all_failures_are_timeouts {
             ReadinessReason::OverallTimeout
         } else {
@@ -281,7 +346,13 @@ fn final_reason(
             RedisOutcome::Success => match deletion_catalog {
                 DeletionCatalogOutcome::OperationTimeout => ReadinessReason::DeletionCatalogTimeout,
                 DeletionCatalogOutcome::OperationError => ReadinessReason::DeletionCatalogError,
-                DeletionCatalogOutcome::Success => ReadinessReason::Ready,
+                DeletionCatalogOutcome::Success => {
+                    if partition_catalog.is_success() {
+                        ReadinessReason::Ready
+                    } else {
+                        ReadinessReason::PartitionCatalogUnsafe
+                    }
+                }
             },
         },
     }
@@ -414,8 +485,12 @@ impl ReadinessCoordinator {
         &self,
         db: &Db,
         redis_pool: &deadpool_redis::Pool,
+        partition_catalog_ok: bool,
     ) -> ReadinessEvaluation {
-        self.evaluator.evaluate(db, redis_pool).await
+        self.evaluator
+            .evaluate(db, redis_pool)
+            .await
+            .with_partition_catalog(partition_catalog_ok)
     }
 
     /// Allocates a health-probe generation or records a truthful shutdown fast path.
@@ -508,6 +583,9 @@ fn record_attempt_metrics(evaluation: &ReadinessEvaluation, reason: ReadinessRea
     if let Some(result) = evaluation.deletion_catalog {
         record_dependency_attempt("deletion_catalog", result.outcome.label(), result.duration);
     }
+    if let Some(result) = evaluation.partition_catalog {
+        record_dependency_attempt("partition_catalog", result.outcome.label(), result.duration);
+    }
 }
 
 fn record_dependency_attempt(dependency: &'static str, outcome: &'static str, duration: Duration) {
@@ -534,6 +612,9 @@ fn record_current_state(evaluation: &ReadinessEvaluation) {
     }
     if let Some(result) = evaluation.deletion_catalog {
         record_dependency_state("deletion_catalog", result.outcome.is_success());
+    }
+    if let Some(result) = evaluation.partition_catalog {
+        record_dependency_state("partition_catalog", result.outcome.is_success());
     }
 }
 
@@ -654,6 +735,7 @@ mod tests {
                 PostgresOutcome::PoolTimeout,
                 RedisOutcome::PoolTimeout,
                 DeletionCatalogOutcome::Success,
+                PartitionCatalogOutcome::Success,
             ),
             ReadinessReason::OverallTimeout
         );
@@ -696,7 +778,15 @@ mod tests {
             .map(DeletionCatalogOutcome::label),
             ["success", "operation_timeout", "operation_error"]
         );
-        assert_eq!(READINESS_RAW_SERIES_PER_POD, 99);
+        assert_eq!(
+            [
+                PartitionCatalogOutcome::Success,
+                PartitionCatalogOutcome::Unsafe
+            ]
+            .map(PartitionCatalogOutcome::label),
+            ["success", "unsafe"]
+        );
+        assert_eq!(READINESS_RAW_SERIES_PER_POD, 121);
     }
 
     #[test]
