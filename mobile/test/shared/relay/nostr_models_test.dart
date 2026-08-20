@@ -2,6 +2,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 
 void main() {
+  test('channel live kinds include every timeline content kind', () {
+    for (final kind in EventKind.channelTimelineContentKinds) {
+      expect(
+        EventKind.channelEventKinds,
+        contains(kind),
+        reason:
+            'timeline kind $kind is missing from live channel subscriptions',
+      );
+    }
+  });
+
   test('NostrFilter serializes and preserves authors', () {
     const filter = NostrFilter(
       kinds: [EventKind.readState],
