@@ -86,6 +86,7 @@ export default defineConfig({
         "**/community-rail.spec.ts",
         "**/boot-splash.spec.ts",
         "**/thread-reply-anchor-roleplay.spec.ts",
+        "**/thread-virtualization.spec.ts",
         "**/threadpane-ultrawide.spec.ts",
         "**/thread-focus-mode.spec.ts",
         "**/animated-avatar.spec.ts",

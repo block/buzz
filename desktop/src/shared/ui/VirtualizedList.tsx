@@ -67,6 +67,8 @@ type VirtualizedListProps<T> = {
   overscan?: number;
   /** Receives the virtualizer instance (for `scrollToIndex`, etc). */
   onVirtualizer?: (virtualizer: ListVirtualizer) => void;
+  /** Fires when the rendered window changes (for pending target retries). */
+  onRangeChanged?: (firstIndex: number, lastIndex: number) => void;
 };
 
 export function VirtualizedList<T>({
@@ -81,6 +83,7 @@ export function VirtualizedList<T>({
   innerClassName,
   overscan = 5,
   onVirtualizer,
+  onRangeChanged,
 }: VirtualizedListProps<T>) {
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const spacerRef = React.useRef<HTMLDivElement>(null);
@@ -131,6 +134,11 @@ export function VirtualizedList<T>({
   }, [onVirtualizer, virtualizer]);
 
   const virtualItems = virtualizer.getVirtualItems();
+  const firstVirtualIndex = virtualItems[0]?.index ?? -1;
+  const lastVirtualIndex = virtualItems[virtualItems.length - 1]?.index ?? -1;
+  React.useEffect(() => {
+    onRangeChanged?.(firstVirtualIndex, lastVirtualIndex);
+  }, [firstVirtualIndex, lastVirtualIndex, onRangeChanged]);
 
   // The header portals into `headerOverlayRef`, which the parent mounts before
   // this child — so it is populated on first commit. The dependency-free state
