@@ -71,7 +71,7 @@ pub(crate) enum AcpAvailabilityStatus {
 }
 
 use crate::{
-    author_allowed,
+    author_allowed_with_strict_owner,
     config::Config,
     event_mentions_agent, filter,
     relay::{HarnessRelay, RelayEventPublisher},
@@ -430,7 +430,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
         let author_hex = buzz_event.event.pubkey.to_hex();
         let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
-        let allowed = author_allowed(
+        let allowed = author_allowed_with_strict_owner(
+            config.strict_owner_pubkey,
             &config.respond_to,
             &config.respond_to_allowlist,
             &author_hex,
