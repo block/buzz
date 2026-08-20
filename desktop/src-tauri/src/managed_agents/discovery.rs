@@ -456,6 +456,21 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         .filter(|arg| !arg.is_empty())
         .collect::<Vec<_>>();
 
+    // Repair a stale `--acp` pin for the Kimi harness: the preset used to launch
+    // Kimi Code as `kimi --acp`, but the CLI's ACP mode is the subcommand
+    // `kimi acp`. Records created before the preset switched still carry
+    // `agent_args == ["--acp"]` and win over the definition at spawn time
+    // (instance args take precedence in `resolve_effective_harness_descriptor`),
+    // so those agents crash on every launch with "unknown option '--acp'".
+    // Canonicalize a sole `--acp` to `acp` only when the resolved command is
+    // Kimi — this is a harness-shape repair, not a blanket flag strip.
+    if normalize_command_identity(command) == "kimi"
+        && normalized.len() == 1
+        && normalized[0].eq_ignore_ascii_case("--acp")
+    {
+        return vec!["acp".to_string()];
+    }
+
     let Some(default_args) = default_agent_args(command) else {
         return normalized;
     };
