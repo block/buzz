@@ -22,6 +22,7 @@ import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
+import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
@@ -2284,6 +2285,62 @@ void main() {
       ).pop();
       await tester.pumpAndSettle();
       expect(messageActionBackdropActive.value, isFalse);
+    });
+
+    testWidgets('Select text enters selection mode for that message', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'msg1',
+              pubkey: 'alice',
+              content: 'hello selectable world',
+            ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectionArea), findsNothing);
+
+      await tester.longPress(find.byKey(const ValueKey('message-row-msg1')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Select text'), findsOneWidget);
+      expect(find.text('Copy text'), findsOneWidget);
+
+      await tester.tap(find.text('Select text'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Select text'), findsNothing);
+      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(find.text('Done'), findsOneWidget);
+      expect(
+        tester
+            .widget<MessageLongPressInkWell>(
+              find.byKey(const ValueKey('message-row-msg1')),
+            )
+            .enabled,
+        isFalse,
+      );
+
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectionArea), findsNothing);
+      expect(
+        tester
+            .widget<MessageLongPressInkWell>(
+              find.byKey(const ValueKey('message-row-msg1')),
+            )
+            .enabled,
+        isTrue,
+      );
     });
 
     testWidgets(

@@ -190,6 +190,30 @@ void main() {
       );
     });
 
+    testWidgets('does not wrap markdown in a SelectionArea by default', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _testable(const MessageContent(content: 'hello world')),
+      );
+
+      expect(find.byType(SelectionArea), findsNothing);
+    });
+
+    testWidgets('selectable wraps markdown in a SelectionArea', (tester) async {
+      await tester.pumpWidget(
+        _testable(
+          const MessageContent(content: 'hello world', selectable: true),
+        ),
+      );
+
+      expect(find.byType(SelectionArea), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('message-content-selection-area')),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('opens local file links through an authenticated download', (
       tester,
     ) async {

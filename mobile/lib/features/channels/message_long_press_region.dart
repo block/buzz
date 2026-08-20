@@ -60,6 +60,10 @@ class MessageLongPressInkWell extends StatelessWidget {
   final GlobalKey? snapshotKey;
   final Widget child;
 
+  /// When false, the long-press interceptor is omitted so platform text
+  /// selection can take the pointer.
+  final bool enabled;
+
   const MessageLongPressInkWell({
     super.key,
     this.onTap,
@@ -68,11 +72,19 @@ class MessageLongPressInkWell extends StatelessWidget {
     this.borderRadius,
     this.highlightColor,
     this.snapshotKey,
+    this.enabled = true,
     required this.child,
   }) : assert(onLongPress != null || onLongPressDetails != null);
 
   @override
   Widget build(BuildContext context) {
+    final inkWell = InkWell(
+      onTap: enabled ? onTap : null,
+      borderRadius: borderRadius,
+      highlightColor: highlightColor,
+      child: child,
+    );
+    if (!enabled) return inkWell;
     return _MessageLongPressRegion(
       onTap: onTap,
       onLongPress: onLongPress,
