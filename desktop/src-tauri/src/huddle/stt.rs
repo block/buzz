@@ -97,7 +97,6 @@ impl SttPipeline {
         let shutdown_worker = Arc::clone(&shutdown);
         let ptt_active_worker = ptt_active.as_ref().map(Arc::clone);
         let manual_mic_unmuted_worker = manual_mic_unmuted.as_ref().map(Arc::clone);
-        let local_barge_in = ptt_active.is_none();
         let handle = thread::Builder::new()
             .name("stt-worker".into())
             .spawn(move || {
@@ -109,7 +108,6 @@ impl SttPipeline {
                     ptt_active_worker,
                     manual_mic_unmuted_worker,
                     human_floor,
-                    local_barge_in,
                     output_device,
                 )
             })
@@ -407,7 +405,6 @@ fn stt_worker(
     ptt_active: Option<Arc<AtomicBool>>,
     manual_mic_unmuted: Option<Arc<AtomicBool>>,
     human_floor: HumanFloor,
-    local_barge_in: bool,
     output_device: Option<String>,
 ) {
     // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
@@ -511,6 +508,7 @@ fn stt_worker(
                     &text_tx,
                 );
                 endpoint.reset_segment();
+                local_barge_in_state.release(&human_floor);
             }
             transmit_was_active = transmit_now;
         }
@@ -549,7 +547,6 @@ fn stt_worker(
                     ptt_active.as_ref(),
                     manual_mic_unmuted.as_ref(),
                     &human_floor,
-                    local_barge_in,
                     &mut local_barge_in_state,
                     output_device.as_deref(),
                 );
@@ -612,7 +609,6 @@ fn process_16k_samples(
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
     human_floor: &HumanFloor,
-    local_barge_in: bool,
     local_barge_in_state: &mut LocalBargeIn,
     output_device: Option<&str>,
 ) {
@@ -633,6 +629,9 @@ fn process_16k_samples(
 
         let action =
             endpoint.process_frame(frame, prob, accepts_audio, flush_allowed, flush_frames);
+        // Open-mic VAD semantics also apply when a PTT-mode user manually
+        // opens the mic. A held shortcut keeps its explicit key-down cancel.
+        let local_barge_in = local_barge_in_enabled(ptt_active.is_some(), manually_open, ptt_held);
         if local_barge_in {
             local_barge_in_state.observe(
                 prob,
@@ -640,6 +639,8 @@ fn process_16k_samples(
                 human_floor,
                 output_device,
             );
+        } else {
+            local_barge_in_state.release(human_floor);
         }
 
         match action {
@@ -747,6 +748,15 @@ fn has_enough_voiced_audio(voiced_frames: usize) -> bool {
     voiced_frames >= MIN_VOICED_FRAMES
 }
 
+/// Whether local audio should use VAD barge-in for this frame.
+///
+/// This currently matches `vad_flush_allowed`, but the two decisions are kept
+/// separate deliberately: one assigns cancellation ownership and the other
+/// controls utterance endpointing.
+fn local_barge_in_enabled(ptt_mode: bool, manually_open: bool, ptt_held: bool) -> bool {
+    !ptt_mode || (manually_open && !ptt_held)
+}
+
 /// Whether a silence run may end the current utterance and flush it to STT.
 ///
 /// Pure VAD mode (no shortcut configured) always allows pause flushing. When
@@ -777,13 +787,21 @@ use super::drain_until_shutdown;
 #[cfg(test)]
 mod tests {
     use super::{
-        has_enough_voiced_audio, vad_flush_allowed, LocalBargeIn, VadEndpoint, VadFrameAction,
-        COUPLED_BARGE_IN_FRAMES, MIN_VOICED_FRAMES, SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES,
-        VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
+        has_enough_voiced_audio, local_barge_in_enabled, vad_flush_allowed, LocalBargeIn,
+        VadEndpoint, VadFrameAction, COUPLED_BARGE_IN_FRAMES, MIN_VOICED_FRAMES,
+        SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
     };
 
     fn frame(value: f32) -> Vec<f32> {
         vec![value; VAD_FRAME_SAMPLES]
+    }
+
+    #[test]
+    fn manual_open_mic_enables_vad_barge_in_in_ptt_mode() {
+        assert!(local_barge_in_enabled(true, true, false));
+        assert!(!local_barge_in_enabled(true, false, false));
+        assert!(!local_barge_in_enabled(true, true, true));
+        assert!(local_barge_in_enabled(false, false, false));
     }
 
     #[test]
