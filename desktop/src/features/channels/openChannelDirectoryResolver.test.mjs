@@ -1,0 +1,301 @@
+/**
+ * Mounted contracts for bounded channel-reference resolution. These exercise
+ * the real React Query hooks and Tauri boundary: a channel reference may fetch
+ * one detail event, but must never start the all-open directory scan.
+ */
+
+import assert from "node:assert/strict";
+import { after, afterEach, before, beforeEach, test } from "node:test";
+
+import { JSDOM } from "jsdom";
+
+const dom = new JSDOM("<!doctype html><html><body></body></html>", {
+  url: "http://localhost",
+});
+
+Object.assign(globalThis, {
+  HTMLElement: dom.window.HTMLElement,
+  HTMLIFrameElement: dom.window.HTMLIFrameElement,
+  IS_REACT_ACT_ENVIRONMENT: true,
+  MutationObserver: dom.window.MutationObserver,
+  document: dom.window.document,
+  localStorage: dom.window.localStorage,
+  window: dom.window,
+});
+Object.defineProperty(globalThis, "navigator", {
+  configurable: true,
+  value: dom.window.navigator,
+});
+dom.window.requestAnimationFrame = (callback) => setTimeout(callback, 0);
+globalThis.requestAnimationFrame = dom.window.requestAnimationFrame;
+
+globalThis.__TAURI_INTERNALS__ = {
+  invoke: (command, args) => ipc.invoke(command, args),
+  transformCallback: () => 1,
+};
+dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
+
+const ipc = {
+  detailCalls: [],
+  directoryCalls: 0,
+  detail: async () => {
+    throw new Error("unconfigured detail response");
+  },
+  async invoke(command, args) {
+    if (command === "get_channel_details") {
+      this.detailCalls.push(args.channelId);
+      return this.detail(args.channelId);
+    }
+    if (command === "get_open_channel_directory") {
+      this.directoryCalls += 1;
+      return [];
+    }
+    throw new Error(`unmocked Tauri command: ${command}`);
+  },
+  reset() {
+    this.detailCalls = [];
+    this.directoryCalls = 0;
+    this.detail = async () => {
+      throw new Error("unconfigured detail response");
+    };
+  },
+};
+
+let React;
+let act;
+let createRoot;
+let QueryClient;
+let QueryClientProvider;
+let CommunitiesProvider;
+let useChannelReference;
+let channelReferenceQueryKey;
+let channelsQueryKey;
+let openChannelDirectoryQueryKey;
+let isChannelReferenceOpenable;
+
+const COMMUNITY = {
+  addedAt: "2026-08-19T00:00:00.000Z",
+  id: "reference-test-community",
+  name: "Reference test",
+  relayUrl: "ws://reference.test",
+};
+const VIEWER = "a".repeat(64);
+
+function rawChannel({ id, name, visibility = "open" }) {
+  return {
+    archived_at: null,
+    channel_type: "stream",
+    description: "",
+    id,
+    is_member: false,
+    last_message_at: null,
+    member_count: 0,
+    member_pubkeys: [],
+    name,
+    participant_pubkeys: [],
+    participants: [],
+    purpose: null,
+    topic: null,
+    ttl_deadline: null,
+    ttl_seconds: null,
+    visibility,
+  };
+}
+
+function rawDetail(channel) {
+  return {
+    ...channel,
+    created_at: "2026-08-19T00:00:00.000Z",
+    created_by: VIEWER,
+    max_members: null,
+    nip29_group_id: null,
+    purpose_set_at: null,
+    purpose_set_by: null,
+    topic_required: false,
+    topic_set_at: null,
+    topic_set_by: null,
+    updated_at: "2026-08-19T00:00:00.000Z",
+  };
+}
+
+function channel({ id, name, isMember = true, visibility = "open" }) {
+  return {
+    archivedAt: null,
+    channelType: "stream",
+    description: "",
+    id,
+    isMember,
+    lastMessageAt: null,
+    memberCount: 0,
+    memberPubkeys: [],
+    name,
+    participantPubkeys: [],
+    participants: [],
+    purpose: null,
+    topic: null,
+    ttlDeadline: null,
+    ttlSeconds: null,
+    visibility,
+  };
+}
+
+function createClient({ memberChannels = [], warmChannels } = {}) {
+  const client = new QueryClient({
+    defaultOptions: {
+      queries: { gcTime: Number.POSITIVE_INFINITY, retry: false },
+    },
+  });
+  client.setQueryData(["identity"], { pubkey: VIEWER });
+  client.setQueryData(channelsQueryKey, memberChannels);
+  if (warmChannels) {
+    client.setQueryData(openChannelDirectoryQueryKey, warmChannels);
+  }
+  return client;
+}
+
+async function mountReference(client, channelId) {
+  let value;
+  function Probe({ id }) {
+    value = useChannelReference(id);
+    return null;
+  }
+
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const render = async (id) => {
+    await act(async () => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client },
+          React.createElement(
+            CommunitiesProvider,
+            null,
+            React.createElement(Probe, { id }),
+          ),
+        ),
+      );
+    });
+  };
+
+  await render(channelId);
+  return {
+    get value() {
+      return value;
+    },
+    render,
+    async settle() {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    },
+    async unmount() {
+      await act(async () => root.unmount());
+      client.clear();
+      container.remove();
+    },
+  };
+}
+
+before(async () => {
+  ({ default: React, act } = await import("react"));
+  ({ createRoot } = await import("react-dom/client"));
+  ({ QueryClient, QueryClientProvider } = await import(
+    "@tanstack/react-query"
+  ));
+  ({ CommunitiesProvider } = await import(
+    "@/features/communities/useCommunities.tsx"
+  ));
+  ({
+    channelReferenceQueryKey,
+    openChannelDirectoryQueryKey,
+    useChannelReference,
+  } = await import("./openChannelDirectory.ts"));
+  ({ channelsQueryKey } = await import("./hooks.ts"));
+  ({ isChannelReferenceOpenable } = await import("./openChannelDirectory.ts"));
+});
+
+beforeEach(() => {
+  ipc.reset();
+  localStorage.clear();
+  localStorage.setItem("buzz-communities", JSON.stringify([COMMUNITY]));
+  localStorage.setItem("buzz-active-community-id", COMMUNITY.id);
+});
+
+afterEach(() => ipc.reset());
+after(() => dom.window.close());
+
+test("an unknown id fetches one detail without scanning the open directory", async () => {
+  const client = createClient();
+  ipc.detail = async (channelId) =>
+    rawDetail(rawChannel({ id: channelId, name: "remote" }));
+  const mounted = await mountReference(client, "unknown-channel");
+
+  await mounted.settle();
+
+  assert.deepEqual(ipc.detailCalls, ["unknown-channel"]);
+  assert.equal(ipc.directoryCalls, 0);
+  assert.equal(mounted.value?.name, "remote");
+  await mounted.unmount();
+});
+
+test("member and warm-directory references avoid the bounded detail request", async () => {
+  const memberClient = createClient({
+    memberChannels: [channel({ id: "member", name: "member" })],
+  });
+  const member = await mountReference(memberClient, "member");
+  await member.settle();
+  assert.equal(member.value?.name, "member");
+  await member.unmount();
+
+  const warmClient = createClient({
+    warmChannels: [channel({ id: "warm", isMember: false, name: "warm" })],
+  });
+  const warm = await mountReference(warmClient, "warm");
+  await warm.settle();
+  assert.equal(warm.value?.name, "warm");
+  assert.deepEqual(ipc.detailCalls, []);
+  assert.equal(ipc.directoryCalls, 0);
+  await warm.unmount();
+});
+
+test("fetched private metadata remains non-openable", async () => {
+  const client = createClient();
+  ipc.detail = async (channelId) =>
+    rawDetail(
+      rawChannel({ id: channelId, name: "private", visibility: "private" }),
+    );
+  const mounted = await mountReference(client, "private-channel");
+
+  await mounted.settle();
+
+  assert.equal(mounted.value?.isMember, false);
+  assert.equal(mounted.value?.visibility, "private");
+  assert.equal(isChannelReferenceOpenable(mounted.value), false);
+  assert.equal(ipc.directoryCalls, 0);
+  await mounted.unmount();
+});
+
+test("a not-found detail result is cached as a five-minute miss", async () => {
+  const client = createClient();
+  ipc.detail = async () => {
+    throw new Error("channel not found");
+  };
+  const first = await mountReference(client, "missing-channel");
+  await first.settle();
+
+  assert.equal(first.value, undefined);
+  assert.deepEqual(ipc.detailCalls, ["missing-channel"]);
+  assert.equal(
+    client.getQueryData(channelReferenceQueryKey("missing-channel")),
+    null,
+  );
+  await first.unmount();
+
+  const second = await mountReference(client, "missing-channel");
+  await second.settle();
+  assert.deepEqual(ipc.detailCalls, ["missing-channel"]);
+  assert.equal(ipc.directoryCalls, 0);
+  await second.unmount();
+});

@@ -12,6 +12,10 @@ import {
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
 import {
+  mergeOpenChannelDirectory,
+  useOpenChannelDirectoryQuery,
+} from "@/features/channels/openChannelDirectory";
+import {
   getMinimumSearchQueryLength,
   MIN_SEARCH_QUERY_LENGTH,
   useSearchMessagesQuery,
@@ -97,7 +101,7 @@ function resolveAuthorFromOperator(
 
 export function useSearchResults({
   channelLabels,
-  channels,
+  channels: memberChannels,
   enabled,
   limit = 12,
   scopeChannelId,
@@ -112,6 +116,17 @@ export function useSearchResults({
   const [debouncedQuery, setDebouncedQuery] = React.useState("");
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const isArchivedDiscovery = useIsArchivedPredicate();
+
+  // Global search surfaces non-member open channels, so while it is active it
+  // fetches the discovery superset on demand rather than depending on the
+  // member-only poll list. Scoped search (channelId set) needs no directory.
+  const openDirectoryQuery = useOpenChannelDirectoryQuery({
+    enabled: enabled && !scopeChannelId,
+  });
+  const channels = React.useMemo(
+    () => mergeOpenChannelDirectory(memberChannels, openDirectoryQuery.data),
+    [memberChannels, openDirectoryQuery.data],
+  );
 
   const channelLookup = React.useMemo(
     () => new Map(channels.map((channel) => [channel.id, channel])),

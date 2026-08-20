@@ -143,6 +143,22 @@ export async function getChannels(
   };
 }
 
+/**
+ * Fetch the open-channel directory: every joinable open channel plus the
+ * active identity's own channels, each carrying its `isMember` flag.
+ *
+ * `getChannels` intentionally omits this discovery superset from the 60s poll
+ * because it requires an unbounded all-open relay scan. Call this on demand —
+ * when the channel browser opens or a global search goes active — with a
+ * generous staleTime so the expensive scan runs only when a user is actually
+ * looking for channels to join.
+ */
+export async function getOpenChannelDirectory(): Promise<Channel[]> {
+  return (await invokeTauri<RawChannel[]>("get_open_channel_directory")).map(
+    fromRawChannel,
+  );
+}
+
 export async function createChannel(
   input: CreateChannelInput,
 ): Promise<Channel> {
