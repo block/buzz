@@ -183,6 +183,14 @@ pub struct Config {
     /// with the `owner` role on first startup.
     pub relay_owner_pubkey: Option<String>,
 
+    /// When true (`BUZZ_AUTO_ADD_OWNER_TO_CHANNELS`), the relay owner
+    /// (`RELAY_OWNER_PUBKEY`) is automatically added as an `admin` member of
+    /// every newly created channel they did not create themselves. This keeps
+    /// the owner's channel list in sync with agent- or member-created channels
+    /// without a manual join. Default off; requires `relay_owner_pubkey` to be
+    /// set to have any effect.
+    pub auto_add_owner_to_channels: bool,
+
     /// Canonical HTTP origin of the deployment-global operator API.
     ///
     /// Every operator NIP-98 `u` tag is verified against this origin, independent
@@ -908,6 +916,7 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let auto_add_owner_to_channels = parse_bool("BUZZ_AUTO_ADD_OWNER_TO_CHANNELS", false)?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1016,6 +1025,7 @@ impl Config {
             mesh,
             mesh_demo_echo,
             relay_owner_pubkey,
+            auto_add_owner_to_channels,
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
@@ -1185,6 +1195,34 @@ mod tests {
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'")
         ));
+    }
+
+    #[test]
+    fn auto_add_owner_to_channels_defaults_off_and_opts_in() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AUTO_ADD_OWNER_TO_CHANNELS");
+
+        std::env::remove_var("BUZZ_AUTO_ADD_OWNER_TO_CHANNELS");
+        let default_off = Config::from_env()
+            .expect("default config")
+            .auto_add_owner_to_channels;
+
+        std::env::set_var("BUZZ_AUTO_ADD_OWNER_TO_CHANNELS", "true");
+        let opted_in = Config::from_env()
+            .expect("opt-in config")
+            .auto_add_owner_to_channels;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AUTO_ADD_OWNER_TO_CHANNELS", value);
+        } else {
+            std::env::remove_var("BUZZ_AUTO_ADD_OWNER_TO_CHANNELS");
+        }
+
+        assert!(!default_off, "auto-add owner must default off");
+        assert!(
+            opted_in,
+            "BUZZ_AUTO_ADD_OWNER_TO_CHANNELS=true must enable auto-add"
+        );
     }
 
     #[cfg(unix)]
