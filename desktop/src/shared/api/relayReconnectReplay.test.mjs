@@ -96,6 +96,14 @@ function replayFilter(filter, since, until) {
   return buildReconnectReplayFilter(filter, since, until);
 }
 
+function numericList(source, pattern) {
+  const match = source.match(pattern);
+  assert.ok(match, `expected source list to match ${pattern}`);
+  return [...match[1].matchAll(/\b\d[\d_]*\b/g)].map((value) =>
+    Number(value[0].replaceAll("_", "")),
+  );
+}
+
 test("channel replay lookback stays coupled to relay and DB source constants", async () => {
   const [ingest, fence] = await Promise.all([
     readFile("../crates/buzz-relay/src/handlers/ingest.rs", "utf8"),
@@ -116,6 +124,30 @@ test("channel replay lookback stays coupled to relay and DB source constants", a
     new RegExp(`FENCE_CLOCK_MARGIN_SECS: i64 = ${FENCE_CLOCK_MARGIN_SECS}`),
   );
   assert.equal(RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS, 1_865);
+});
+
+test("native and E2E repair kinds stay coupled to the live channel filter", async () => {
+  const [rustCommand, e2eBridge] = await Promise.all([
+    readFile("src-tauri/src/commands/channel_reconnect_repair.rs", "utf8"),
+    readFile("src/testing/e2eBridge.ts", "utf8"),
+  ]);
+  const expectedKinds = [...buildChannelFilter("channel-1", 50).kinds].sort(
+    (left, right) => left - right,
+  );
+  assert.deepEqual(
+    numericList(
+      rustCommand,
+      /const CHANNEL_REPAIR_KINDS: \[u32; \d+\] = \[([\s\S]*?)\];/,
+    ).sort((left, right) => left - right),
+    expectedKinds,
+  );
+  assert.deepEqual(
+    numericList(
+      e2eBridge,
+      /function handleGetChannelReconnectRepair[\s\S]*?const kinds = new Set\(\[([\s\S]*?)\]\);/,
+    ).sort((left, right) => left - right),
+    expectedKinds,
+  );
 });
 
 // ── buildReconnectReplayFilter ────────────────────────────────────────────────
@@ -291,6 +323,133 @@ test("replay splits subscriptions into batches of REPLAY_BATCH_SIZE", async () =
   assert.equal(sentIds.length, subCount, "all subs sent");
   // The delay fired after the first batch (REPLAY_BATCH_SIZE subs sent).
   assert.equal(batchBreakpoints[0], REPLAY_BATCH_SIZE);
+});
+
+test("inter-batch disposal cannot resurrect a closed subscription", async () => {
+  resetGate();
+  const frames = [];
+  const secondSubscription = {
+    mode: "live",
+    filter: { kinds: [9], "#h": ["ch-2"], limit: 50 },
+    onEvent: () => {},
+    lastSeenCreatedAt: undefined,
+  };
+  const subscriptions = new Map([
+    [
+      "sub-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+    ["sub-2", secondSubscription],
+  ]);
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    replayBatchSize: 1,
+    sendRaw: async (payload) => {
+      frames.push(`${payload[0]}:${payload[1]}`);
+    },
+    requestRepair: async () => [],
+    setTimeoutFn: (fn, _ms) => {
+      assert.equal(subscriptions.delete("sub-2"), true);
+      frames.push("CLOSE:sub-2");
+      fn();
+      return 0;
+    },
+  });
+
+  assert.deepEqual(frames, ["REQ:sub-1", "CLOSE:sub-2"]);
+});
+
+test("in-flight disposal is closed again after the stale REQ settles", async () => {
+  resetGate();
+  const frames = [];
+  let markReqStarted;
+  const reqStarted = new Promise((resolve) => {
+    markReqStarted = resolve;
+  });
+  let releaseReq;
+  const heldReq = new Promise((resolve) => {
+    releaseReq = resolve;
+  });
+  const subscription = {
+    mode: "live",
+    filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+    onEvent: () => {},
+    lastSeenCreatedAt: undefined,
+  };
+  const subscriptions = new Map([["sub-1", subscription]]);
+
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async (payload) => {
+      frames.push(`${payload[0]}:${payload[1]}`);
+      if (payload[0] === "REQ") {
+        markReqStarted();
+        await heldReq;
+      }
+    },
+    requestRepair: async () => [],
+  });
+
+  await reqStarted;
+  assert.equal(subscriptions.delete("sub-1"), true);
+  // The ordinary disposer emits CLOSE while the websocket REQ invoke is held.
+  frames.push("CLOSE:sub-1");
+  releaseReq();
+  await replayPromise;
+
+  assert.deepEqual(frames, ["REQ:sub-1", "CLOSE:sub-1", "CLOSE:sub-1"]);
+});
+
+test("inter-batch replacement cannot be overwritten by a stale REQ", async () => {
+  resetGate();
+  const sentFilters = [];
+  const subscriptions = new Map([
+    [
+      "sub-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+    [
+      "sub-2",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-old"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+  ]);
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    replayBatchSize: 1,
+    sendRaw: async (payload) => {
+      sentFilters.push(payload[2]);
+    },
+    requestRepair: async () => [],
+    setTimeoutFn: (fn, _ms) => {
+      subscriptions.set("sub-2", {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-new"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      });
+      fn();
+      return 0;
+    },
+  });
+
+  assert.deepEqual(sentFilters, [{ kinds: [9], "#h": ["ch-1"], limit: 50 }]);
 });
 
 // ── Visible-channel priority ──────────────────────────────────────────────────
@@ -673,6 +832,132 @@ test("batch-1 arms gate mid-replay: batch-2 is withheld until gate expires", asy
     1,
     "batch 2 must send the remaining sub after the gate expires",
   );
+});
+
+test("per-batch gate re-arm skips a subscription disposed while waiting", async () => {
+  resetGate(0);
+  const sentIds = [];
+  let gateArmed;
+  const gateArmedPromise = new Promise((resolve) => {
+    gateArmed = resolve;
+  });
+  const subscriptions = new Map([
+    [
+      "sub-1",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-1"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+    [
+      "sub-2",
+      {
+        mode: "live",
+        filter: { kinds: [9], "#h": ["ch-2"], limit: 50 },
+        onEvent: () => {},
+        lastSeenCreatedAt: undefined,
+      },
+    ],
+  ]);
+
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions,
+    replayBatchSize: 1,
+    sendRaw: async (payload) => {
+      sentIds.push(payload[1]);
+      if (payload[1] === "sub-1") {
+        activateRateLimit(5);
+        gateArmed();
+      }
+    },
+    requestRepair: async () => [],
+    setTimeoutFn: (fn, _ms) => {
+      fn();
+      return 0;
+    },
+  });
+
+  await gateArmedPromise;
+  assert.equal(subscriptions.delete("sub-2"), true);
+  tickTo(5_001);
+  await replayPromise;
+
+  assert.deepEqual(sentIds, ["sub-1"]);
+});
+
+test("disposed subscription receives no repair events after an in-flight page", async () => {
+  resetGate();
+  const delivered = [];
+  const subscription = {
+    mode: "live",
+    filter: buildChannelFilter("channel-1", 50),
+    onEvent: (value) => delivered.push(value.id),
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async () => {},
+    requestRepair: async () => {
+      assert.equal(subscriptions.delete("live-1"), true);
+      return [event("disposed", 1001)];
+    },
+  });
+
+  assert.deepEqual(delivered, []);
+});
+
+test("stale repair cannot clear the successor generation dedupe state", async () => {
+  resetGate();
+  const duplicate = event("successor-seen", 1001);
+  const subscription = {
+    mode: "live",
+    filter: buildChannelFilter("channel-1", 50),
+    onEvent: () => {},
+    lastSeenCreatedAt: 1000,
+  };
+  const subscriptions = new Map([["live-1", subscription]]);
+  let generationActive = true;
+  let startRepair;
+  const repairStarted = new Promise((resolve) => {
+    startRepair = resolve;
+  });
+  let finishRepair;
+  const repairPage = new Promise((resolve) => {
+    finishRepair = resolve;
+  });
+
+  const replayPromise = replayLiveSubscriptions({
+    subscriptions,
+    generation: 10,
+    isActive: () => generationActive,
+    sendRaw: async () => {},
+    requestRepair: async () => {
+      startRepair();
+      return repairPage;
+    },
+  });
+
+  await repairStarted;
+  generationActive = false;
+  subscription.reconnectReplay = {
+    generation: 11,
+    seenEventIds: new Set([duplicate.id]),
+    liveEose: false,
+    repairDone: false,
+  };
+  finishRepair([duplicate]);
+  await replayPromise;
+
+  assert.equal(subscription.reconnectReplay.generation, 11);
+  assert.deepEqual(
+    [...subscription.reconnectReplay.seenEventIds],
+    [duplicate.id],
+  );
+  assert.equal(shouldDispatchSubscriptionEvent(subscription, duplicate), false);
 });
 
 // ── Backfill failure containment ─────────────────────────────────────────────

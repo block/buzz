@@ -306,14 +306,28 @@ export async function replayLiveSubscriptions({
     if (!isActive()) return;
     const batch = replayRequests.slice(i, i + replayBatchSize);
     await Promise.all(
-      batch.map(({ subId, subscription, replaySince, shouldPageReplay }) =>
-        sendRaw([
-          "REQ",
-          subId,
-          shouldPageReplay
-            ? subscription.filter
-            : buildReconnectReplayFilter(subscription.filter, replaySince),
-        ]),
+      batch.map(
+        async ({ subId, subscription, replaySince, shouldPageReplay }) => {
+          // The subscription map may change while replay is paused behind the
+          // gate or an inter-batch delay. Never resurrect a disposed entry (or
+          // overwrite its replacement) with a REQ from this stale snapshot.
+          if (!isActive() || subscriptions.get(subId) !== subscription) return;
+          await sendRaw([
+            "REQ",
+            subId,
+            shouldPageReplay
+              ? subscription.filter
+              : buildReconnectReplayFilter(subscription.filter, replaySince),
+          ]);
+          // Disposal can race the asynchronous websocket invoke after the
+          // identity check. If this exact entry was deleted while REQ was in
+          // flight, CLOSE again after REQ settles so wire order converges to
+          // closed. A different object under the same ID is a replacement and
+          // must not be torn down by this stale replay.
+          if (isActive() && !subscriptions.has(subId)) {
+            await sendRaw(["CLOSE", subId]);
+          }
+        },
       ),
     );
     if (i + replayBatchSize < replayRequests.length) {
