@@ -488,7 +488,9 @@ export function HostedCommunitiesSettingsCard() {
                 This Builderlab account isn&apos;t linked to a Buzz identity
                 yet. Connect this device&apos;s key to create and own
                 communities under it — Buzz signs a one-time challenge locally,
-                so your private key never leaves Desktop.
+                so your private key never leaves Desktop. To link a different
+                nsec, switch identities under Account (sign out, then import or
+                create) before connecting.
               </p>
               <Button
                 className="mt-4"
