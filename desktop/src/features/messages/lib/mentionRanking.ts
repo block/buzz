@@ -36,15 +36,22 @@ function getMentionCandidateGroupRank(
   return 3;
 }
 
+// NFKC folds fullwidth punctuation/letters to their ASCII forms (｜ → |,
+// Ｈ → H), so typing a halfwidth pipe still matches names like
+// "Hermes｜居遊所總管".
+function foldForMatch(value: string): string {
+  return value.normalize("NFKC").toLowerCase();
+}
+
 function scoreMentionCandidateLabel(
   label: string,
   lowerQuery: string,
 ): number | null {
-  const lower = label.toLowerCase();
+  const lower = foldForMatch(label);
   if (lower === lowerQuery) return 0;
   if (lower.startsWith(lowerQuery)) return 1;
 
-  const words = lower.split(/[\s\-_]+/).filter(Boolean);
+  const words = lower.split(/[\s\-_|]+/).filter(Boolean);
   if (words.some((word) => word === lowerQuery)) return 2;
   if (words.some((word) => word.startsWith(lowerQuery))) return 3;
 
@@ -56,7 +63,7 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
   query: string,
   activePersonaIds: ReadonlySet<string> = new Set(),
 ): RankedMentionCandidate<T>[] {
-  const lowerQuery = query.toLowerCase();
+  const lowerQuery = foldForMatch(query);
 
   return candidates
     .map((candidate, order) => {
