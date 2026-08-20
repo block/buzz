@@ -171,7 +171,7 @@ async function expectShellHidden(page: Page) {
 }
 
 async function expectHomeView(page: Page) {
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
 }
 
 async function expectWiderThanTall(locator: Locator) {

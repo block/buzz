@@ -38,6 +38,8 @@ import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
 } from "@/features/notifications/hooks";
+import { useFibresQuery } from "@/features/triage/hooks";
+import { useFibreIngest } from "@/features/triage/useFibreIngest";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
@@ -67,7 +69,6 @@ import {
   type SettingsSection,
   isSettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
-import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
@@ -143,7 +144,6 @@ export function AppShell() {
     goProjects,
     goPulse,
     goSettings,
-    goTriage,
     goWorkflows,
     closeSettings,
     openSearchHit,
@@ -340,6 +340,9 @@ export function AppShell() {
     pubkey: identityQuery.data?.pubkey,
     silentChannelIds: huddleBackingChannelIds,
   });
+  const { enqueueLive, enqueueSelf } = useFibreIngest();
+  const fibresQuery = useFibresQuery(identityQuery.data?.pubkey);
+  const fibreOpenCount = fibresQuery.data?.openCount ?? 0;
   const {
     followedRootIds,
     isFollowing: isFollowingThread,
@@ -378,7 +381,11 @@ export function AppShell() {
       currentPubkey: identityQuery.data?.pubkey,
       mutedChannelIds,
       notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
-      onChannelMessage: handleChannelNotification,
+      onChannelMessage: (channelId, event) => {
+        handleChannelNotification(channelId, event);
+        enqueueLive(channelId, event);
+      },
+      onSelfChannelMessage: enqueueSelf,
       onDmMessage: handleDmNotification,
       onLiveMention: refetchHomeFeedFromLiveSignal,
       onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
@@ -426,7 +433,7 @@ export function AppShell() {
     unreadThreadFeedItems,
   ]);
 
-  const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
+  const { homeBadgeCountExcludingHighPriority } =
     useHomeFeedNotificationState(
       homeFeedQuery.data,
       identityQuery.data?.pubkey,
@@ -446,10 +453,6 @@ export function AppShell() {
       channels,
       huddleBackingChannelIds,
     );
-  const dueReminderBadge = useDueReminderBadgeCount(
-    identityQuery.data?.pubkey,
-    notificationSettings.settings.homeBadgeEnabled,
-  );
   const isNotifiedForThread = React.useCallback(
     (rootId: string) =>
       !mutedRootIds.has(rootId) &&
@@ -801,7 +804,7 @@ export function AppShell() {
                         currentPubkey={identityQuery.data?.pubkey}
                         errorMessage={channelsErrorMessage}
                         fallbackDisplayName={identityQuery.data?.displayName}
-                        homeBadgeCount={homeBadgeCount + dueReminderBadge}
+                        homeBadgeCount={fibreOpenCount}
                         addCommunityPrefill={addCommunityDialog.prefill}
                         isAddCommunityOpen={addCommunityDialog.open}
                         relayConnectionCard={relayConnectionCard}
@@ -859,7 +862,6 @@ export function AppShell() {
                         onSelectHome={() => void goHome()}
                         onSelectProjects={() => void goProjects()}
                         onSelectPulse={() => void goPulse()}
-                        onSelectTriage={() => void goTriage()}
                         onSelectSettings={handleOpenSettings}
                         onSelectWorkflows={() => void goWorkflows()}
                         onSetPresenceStatus={(status) =>

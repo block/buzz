@@ -39,11 +39,11 @@ test("boot splash overlay holds with a flapping bee, then dismisses", async ({
   expect(wingState).toEqual({ name: "bee-wing-left-flap", state: "running" });
 
   // The app mounts and loads beneath the overlay — boot is not delayed.
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
 
   // After the hold elapses the overlay fades out and unmounts.
   await expect(overlay).toHaveCount(0, { timeout: 6_000 });
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
 });
 
 test("boot splash overlay is skipped when the hold is zero (e2e default)", async ({
@@ -52,6 +52,6 @@ test("boot splash overlay is skipped when the hold is zero (e2e default)", async
   await installMockBridge(page);
   await page.goto("/");
 
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
   await expect(page.getByTestId("boot-splash-overlay")).toHaveCount(0);
 });

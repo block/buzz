@@ -1,8 +1,14 @@
 /// Service name for the desktop OS keyring. Debug builds default to a distinct
 /// service, while standalone worktree launches may request a scoped dev service.
+fn is_allowed_dev_keyring_service(service: &str) -> bool {
+    service.starts_with("buzz-desktop-dev.")
+        || service == "superhuman-mesh-desktop-dev"
+        || service.starts_with("superhuman-mesh-desktop-dev.")
+}
+
 fn dev_keyring_service(configured: Option<String>) -> String {
     configured
-        .filter(|service| service.starts_with("buzz-desktop-dev."))
+        .filter(|service| is_allowed_dev_keyring_service(service))
         .unwrap_or_else(|| "buzz-desktop-dev".to_string())
 }
 
@@ -38,6 +44,14 @@ mod tests {
         assert_eq!(
             dev_keyring_service(Some("buzz-desktop".to_string())),
             "buzz-desktop-dev"
+        );
+        assert_eq!(
+            dev_keyring_service(Some("superhuman-mesh-desktop-dev".to_string())),
+            "superhuman-mesh-desktop-dev"
+        );
+        assert_eq!(
+            dev_keyring_service(Some("superhuman-mesh-desktop-dev.app-rebrand".to_string())),
+            "superhuman-mesh-desktop-dev.app-rebrand"
         );
     }
 

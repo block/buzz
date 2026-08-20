@@ -492,6 +492,7 @@ test.describe("channel activity hover preview", () => {
   test("keeps multiple Inbox threads visible after opening their channel", async ({
     page,
   }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     const inboxItemIds = [
       "older-inbox-thread-for-hover",
       "second-inbox-thread-for-hover",
@@ -639,6 +640,7 @@ test.describe("channel activity hover preview", () => {
   test("reading a grouped Inbox thread preserves an unrelated manual unread", async ({
     page,
   }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await page.goto("/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -701,6 +703,7 @@ test.describe("channel activity hover preview", () => {
   test("preserves Inbox ownership while another top-level row remains unread", async ({
     page,
   }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await page.goto("/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");

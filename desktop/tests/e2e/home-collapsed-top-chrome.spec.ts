@@ -4,6 +4,7 @@ import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 test.describe("home inbox chrome", () => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   test.use({ viewport: { width: 1280, height: 720 } });
 
   test.beforeEach(async ({ page }) => {

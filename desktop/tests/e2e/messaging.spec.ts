@@ -1154,6 +1154,7 @@ test("settled-empty promoted link preview send uses REST and clears Sending afte
 test("draft auto-send promotes link preview preparation and sends exactly once", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   // A confirmed Drafts-panel send must fire once immediately, promote preview
   // preparation into the background flow, and eventually publish one enriched
   // event rather than consuming the one-shot trigger while the hook debounces.

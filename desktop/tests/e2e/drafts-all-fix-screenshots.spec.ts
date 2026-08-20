@@ -17,6 +17,7 @@ test.use({ viewport: { width: 1280, height: 720 } });
 test("Inbox All hides drafts while the Drafts filter keeps them", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
   await page.addInitScript(
     ({ draftStoreKey, draftStorageKey, channelId }) => {

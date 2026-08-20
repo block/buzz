@@ -81,17 +81,6 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
-  const goTriage = React.useCallback(
-    (behavior?: NavigationBehavior) =>
-      commitNavigation(
-        {
-          to: "/triage",
-        },
-        behavior,
-      ),
-    [commitNavigation],
-  );
-
   const goProfile = React.useCallback(
     (pubkey: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -349,7 +338,6 @@ export function useAppNavigation() {
     goPulse,
     goProfile,
     goSettings,
-    goTriage,
     goWorkflow,
     goWorkflows,
     openSearchHit,

@@ -365,6 +365,7 @@ export function useUnreadChannels(
 
   // Records an external trigger event and schedules persistence.
   const callerOnChannelMessage = liveUpdateOptions.onChannelMessage;
+  const callerOnSelfChannelMessage = liveUpdateOptions.onSelfChannelMessage;
   const recordUnreadEvent = React.useCallback(
     (channelId: string, event: ObservedUnreadEvent): boolean => {
       if (!observedPersistence.isScopeLoaded()) return false;
@@ -460,8 +461,9 @@ export function useUnreadChannels(
         bumpMembershipVersion();
       }
       bumpLatestVersion();
+      callerOnSelfChannelMessage?.(event);
     },
-    [normalizedPubkey],
+    [callerOnSelfChannelMessage, normalizedPubkey],
   );
 
   const recordThreadInteraction = React.useCallback(

@@ -422,7 +422,7 @@ test("channel owner can delete from the context menu", async ({ page }) => {
   ).toBeVisible();
   await page.getByTestId("channel-delete-confirm").click();
 
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
   await expect(page.getByTestId("stream-list")).not.toContainText("general");
 });
 

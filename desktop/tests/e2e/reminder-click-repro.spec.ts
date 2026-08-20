@@ -121,6 +121,7 @@ test.describe("reminder set → app stays clickable", () => {
   // dismissable layer are ever bundled again — body pointer-events stays
   // "none" after the dialog closes and the sidebar click below times out.
   test("03 — inbox row right-click → Remind me later", async ({ page }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await page.goto("/");
     await expect(page.getByTestId("home-inbox")).toBeVisible();
 

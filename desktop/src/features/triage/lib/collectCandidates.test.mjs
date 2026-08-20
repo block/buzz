@@ -8,6 +8,7 @@ import {
   mapWithConcurrency,
   mergeCandidates,
   PER_CHANNEL_CAP,
+  sortOldestFirst,
   triageableChannels,
 } from "./collectCandidates.ts";
 
@@ -53,6 +54,18 @@ test("candidateFromEvent flags a mention of the current user", () => {
   assert.equal(candidate.isMention, true);
   assert.equal(candidate.source, "channel");
   assert.equal(candidate.channelName, "general");
+  assert.equal(candidate.isSelf, false);
+});
+
+test("candidateFromEvent marks the current user's own messages", () => {
+  const candidate = candidateFromEvent(
+    event({ pubkey: SELF, content: "I will look into it" }),
+    channel(),
+    { currentPubkey: SELF },
+  );
+
+  assert.equal(candidate.isSelf, true);
+  assert.equal(candidate.authorPubkey, SELF);
 });
 
 test("candidateFromEvent does not flag a mention of somebody else", () => {
@@ -159,6 +172,18 @@ test("mergeCandidates sorts newest first", () => {
   );
 });
 
+test("sortOldestFirst is chronological", () => {
+  const sorted = sortOldestFirst([
+    { eventId: "new", createdAt: 9, source: "channel" },
+    { eventId: "old", createdAt: 1, source: "inbox" },
+    { eventId: "mid", createdAt: 5, source: "channel" },
+  ]);
+  assert.deepEqual(
+    sorted.map((candidate) => candidate.eventId),
+    ["old", "mid", "new"],
+  );
+});
+
 test("triageableChannels drops non-member and archived channels", () => {
   const kept = triageableChannels([
     channel({ id: "keep" }),
@@ -181,43 +206,47 @@ test("mapWithConcurrency preserves input order", async () => {
   assert.deepEqual(results, [30, 10, 20]);
 });
 
-test("collectChannelCandidates queries from readAt + 1 and keeps unread noise", async () => {
+test("collectChannelCandidates includes self-authored messages and ignores read state", async () => {
   const filters = [];
   const candidates = await collectChannelCandidates({
     channels: [channel()],
     context: { currentPubkey: SELF },
-    getChannelReadAt: () => 500,
     kindsForChannel: () => [40002],
     fetchEvents: async (filter) => {
       filters.push(filter);
       return [
-        // Un-addressed chatter: must survive, it is what triage classifies.
         event({ id: "noise", created_at: 900, content: "lol" }),
-        // At or before the frontier: already read.
         event({ id: "read", created_at: 500 }),
-        // Authored by the viewer.
-        event({ id: "mine", created_at: 900, pubkey: SELF }),
-        // Empty body carries nothing to classify.
+        event({
+          id: "mine",
+          created_at: 900,
+          pubkey: SELF,
+          content: "I will look into it",
+        }),
         event({ id: "blank", created_at: 900, content: "   " }),
       ];
     },
   });
 
   assert.deepEqual(filters, [
-    { kinds: [40002], "#h": ["channel-1"], since: 501, limit: PER_CHANNEL_CAP },
+    { kinds: [40002], "#h": ["channel-1"], since: 0, limit: PER_CHANNEL_CAP },
   ]);
-  assert.deepEqual(
-    candidates.map((candidate) => candidate.eventId),
-    ["noise"],
+  assert.deepEqual(candidates.map((candidate) => candidate.eventId).sort(), [
+    "mine",
+    "noise",
+    "read",
+  ]);
+  assert.equal(
+    candidates.find((candidate) => candidate.eventId === "mine")?.isSelf,
+    true,
   );
 });
 
-test("collectChannelCandidates starts at 0 when a channel was never read", async () => {
+test("collectChannelCandidates always queries from the beginning of history", async () => {
   const filters = [];
   await collectChannelCandidates({
     channels: [channel()],
     context: { currentPubkey: SELF },
-    getChannelReadAt: () => null,
     kindsForChannel: () => [40002],
     fetchEvents: async (filter) => {
       filters.push(filter);
@@ -232,7 +261,6 @@ test("collectChannelCandidates isolates a failing channel", async () => {
   const candidates = await collectChannelCandidates({
     channels: [channel({ id: "broken" }), channel({ id: "channel-1" })],
     context: { currentPubkey: SELF },
-    getChannelReadAt: () => null,
     kindsForChannel: () => [40002],
     fetchEvents: async (filter) => {
       if (filter["#h"][0] === "broken") throw new Error("relay refused");

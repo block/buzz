@@ -138,7 +138,6 @@ type AppSidebarProps = {
   onSelectAgents: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
-  onSelectTriage: () => void;
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
@@ -207,7 +206,6 @@ export function AppSidebar({
   onSelectAgents,
   onSelectProjects,
   onSelectPulse,
-  onSelectTriage,
   onSelectWorkflows,
   onSelectHome,
   onSelectChannel,
@@ -608,7 +606,6 @@ export function AppSidebar({
                 onSelectHome={onSelectHome}
                 onSelectProjects={onSelectProjects}
                 onSelectPulse={onSelectPulse}
-                onSelectTriage={onSelectTriage}
                 onSelectWorkflows={onSelectWorkflows}
                 selectedView={selectedView}
               />

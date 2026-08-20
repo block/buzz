@@ -3,12 +3,12 @@ import * as React from "react";
 import { computeAutoScanDelay } from "@/features/triage/lib/autoScan";
 
 /**
- * Rescans when new relevant messages arrive, debounced so a burst of activity
- * costs one scan rather than one per message.
+ * Flushes queued fibre ingest when new messages arrive, debounced so a burst
+ * of activity costs one classify call rather than one per message.
  *
- * The trigger rides signals the shell already maintains (the home feed and live
- * thread activity), so it adds no relay traffic of its own — only the scan's
- * own catch-up queries, which the debounce keeps infrequent.
+ * The trigger rides the live channel subscription the shell already maintains,
+ * so it adds no relay traffic of its own — only the ingest POST, which the
+ * debounce keeps infrequent.
  */
 export function useTriageAutoScan({
   enabled,

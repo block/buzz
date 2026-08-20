@@ -67,6 +67,7 @@ test.describe("reminders", () => {
   test("01 — inbox filter dropdown shows Reminders option", async ({
     page,
   }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await gotoInboxHome(page);
 
     await page.getByTestId("inbox-filter-trigger").click();
@@ -127,6 +128,7 @@ test.describe("reminders", () => {
   });
 
   test("04 — Reminders panel empty state", async ({ page }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await gotoInboxHome(page);
 
     await openRemindersFilter(page);
@@ -137,6 +139,7 @@ test.describe("reminders", () => {
   test("05 — Reminders panel with active pending reminder", async ({
     page,
   }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await gotoInboxHome(page);
 
     // Seed a pending reminder due in the future
@@ -171,6 +174,7 @@ test.describe("reminders", () => {
   });
 
   test("06 — Reminders panel with fired/overdue reminder", async ({ page }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await gotoInboxHome(page);
 
     // Seed a reminder that has already fired (notBefore in the past)
@@ -269,6 +273,7 @@ test.describe("reminders nav badge", () => {
   });
 
   test("09 — Inbox nav badge counts a due reminder", async ({ page }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await gotoInboxHome(page);
 
     // One overdue pending reminder (notBefore in the past) is the sole badge
@@ -297,6 +302,7 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
   test("07 — reminder row shows author and source channel", async ({
     page,
   }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await gotoInboxHome(page);
 
     const futureTimestamp = Math.floor(Date.now() / 1000) + 3600;
@@ -327,6 +333,7 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
   test("08 — clicking a reminder navigates to the message in context", async ({
     page,
   }) => {
+    test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
     await gotoInboxHome(page);
 
     const futureTimestamp = Math.floor(Date.now() / 1000) + 3600;

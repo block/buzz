@@ -1,102 +1,94 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
-  createTodo,
-  fetchSuggestions,
-  fetchTodos,
-  scanCandidates,
+  fetchFibres,
+  ingestMessages,
+  patchFibre,
+  restoreFibres,
   sendFeedback,
-  updateTodo,
-  type TriageFeedback,
-  type TriageSuggestion,
-  type TriageTodo,
-  type TriageTodoStatus,
+  type Fibre,
+  type FibreFeedback,
+  type FibreIngestMessage,
+  type FibreStatus,
+  type FibresResponse,
 } from "@/features/triage/api";
-import type { TriageCandidate } from "@/features/triage/lib/collectCandidates";
 
-/** Keyed by pubkey so a different identity never reads another's triage state. */
-export const triageQueryKeys = {
-  suggestions: (pubkey: string | undefined) =>
-    ["triage", "suggestions", pubkey ?? "anonymous"] as const,
-  todos: (pubkey: string | undefined) =>
-    ["triage", "todos", pubkey ?? "anonymous"] as const,
+/** Keyed by pubkey so a different identity never reads another's fibres. */
+export const fibreQueryKeys = {
+  fibres: (pubkey: string | undefined) =>
+    ["triage", "fibres", pubkey ?? "anonymous"] as const,
 };
 
-export function useTriageSuggestionsQuery(pubkey: string | undefined) {
+export function useFibresQuery(pubkey: string | undefined) {
   return useQuery({
     enabled: Boolean(pubkey),
-    queryKey: triageQueryKeys.suggestions(pubkey),
-    queryFn: async () => (await fetchSuggestions(pubkey as string)).suggestions,
-    staleTime: 60_000,
+    queryKey: fibreQueryKeys.fibres(pubkey),
+    queryFn: async () => fetchFibres(pubkey as string),
+    staleTime: 15_000,
+    retry: 1,
   });
 }
 
-export function useTriageTodosQuery(pubkey: string | undefined) {
-  return useQuery({
-    enabled: Boolean(pubkey),
-    queryKey: triageQueryKeys.todos(pubkey),
-    queryFn: async () => (await fetchTodos(pubkey as string)).todos,
-    staleTime: 30_000,
-  });
+function applyFibresResponse(
+  queryClient: ReturnType<typeof useQueryClient>,
+  pubkey: string | undefined,
+  response: FibresResponse,
+) {
+  queryClient.setQueryData<FibresResponse>(
+    fibreQueryKeys.fibres(pubkey),
+    response,
+  );
 }
 
-export function useTriageScanMutation(pubkey: string | undefined) {
+export function useIngestMessagesMutation(pubkey: string | undefined) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (candidates: TriageCandidate[]) => {
-      if (!pubkey) throw new Error("No identity available for triage");
-      return (await scanCandidates({ pubkey, candidates })).suggestions;
+    mutationFn: async (messages: FibreIngestMessage[]) => {
+      if (!pubkey) throw new Error("No identity available for fibre ingest");
+      if (messages.length === 0) {
+        return (
+          queryClient.getQueryData<FibresResponse>(
+            fibreQueryKeys.fibres(pubkey),
+          ) ?? { fibres: [], openCount: 0, clearedCount: 0, ingested: 0 }
+        );
+      }
+      return ingestMessages({ pubkey, messages });
     },
-    onSuccess: (suggestions) => {
-      queryClient.setQueryData<TriageSuggestion[]>(
-        triageQueryKeys.suggestions(pubkey),
-        suggestions,
-      );
-    },
-  });
-}
-
-export function useAdoptTodoMutation(pubkey: string | undefined) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (input: {
-      eventId: string;
-      channelId: string | null;
-      channelName: string | null;
-      threadRootId: string | null;
-      authorLabel: string | null;
-      preview: string;
-      reason: string;
-    }) => {
-      if (!pubkey) throw new Error("No identity available for triage");
-      return (await createTodo({ ...input, pubkey })).todo;
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: triageQueryKeys.todos(pubkey),
-      });
+    onSuccess: (response) => {
+      applyFibresResponse(queryClient, pubkey, response);
     },
   });
 }
 
-export function useResolveTodoMutation(pubkey: string | undefined) {
+export function usePatchFibreMutation(pubkey: string | undefined) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (input: { id: string; status: TriageTodoStatus }) => {
-      if (!pubkey) throw new Error("No identity available for triage");
-      return (await updateTodo({ ...input, pubkey })).todo;
+    mutationFn: async (input: { id: string; status: FibreStatus }) => {
+      if (!pubkey) throw new Error("No identity available for fibre ingest");
+      return patchFibre({ ...input, pubkey });
     },
     onMutate: async ({ id, status }) => {
-      const key = triageQueryKeys.todos(pubkey);
-      const previous = queryClient.getQueryData<TriageTodo[]>(key);
-      queryClient.setQueryData<TriageTodo[]>(key, (todos) =>
-        (todos ?? []).map((todo) =>
-          todo.id === id ? { ...todo, status } : todo,
-        ),
-      );
+      const key = fibreQueryKeys.fibres(pubkey);
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<FibresResponse>(key);
+      queryClient.setQueryData<FibresResponse>(key, (current) => {
+        if (!current) return current;
+        const fibres = current.fibres.filter((fibre) =>
+          fibre.id === id ? status === "open" : true,
+        );
+        const wasOpen = current.fibres.some(
+          (fibre) => fibre.id === id && fibre.status === "open",
+        );
+        const clearedDelta = status === "open" ? -1 : wasOpen ? 1 : 0;
+        return {
+          ...current,
+          fibres,
+          openCount: fibres.length,
+          clearedCount: Math.max(0, current.clearedCount + clearedDelta),
+        };
+      });
       return { key, previous };
     },
     onError: (_error, _input, context) => {
@@ -104,27 +96,34 @@ export function useResolveTodoMutation(pubkey: string | undefined) {
         queryClient.setQueryData(context.key, context.previous);
       }
     },
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: triageQueryKeys.todos(pubkey),
-      });
+    onSuccess: (response) => {
+      applyFibresResponse(queryClient, pubkey, response);
     },
   });
 }
 
-/**
- * Feedback is also what persists a decision: the service rewrites the stored
- * verdict, so the suggestions query must be refetched for the change to show.
- */
-export function useTriageFeedbackMutation(pubkey: string | undefined) {
+export function useRestoreFibresMutation(pubkey: string | undefined) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: TriageFeedback) => sendFeedback(input),
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: triageQueryKeys.suggestions(pubkey),
-      });
+    mutationFn: async () => {
+      if (!pubkey) throw new Error("No identity available for fibre ingest");
+      return restoreFibres(pubkey);
+    },
+    onSuccess: (response) => {
+      applyFibresResponse(queryClient, pubkey, response);
     },
   });
+}
+
+export function useFibreFeedbackMutation() {
+  return useMutation({
+    mutationFn: (input: FibreFeedback) => sendFeedback(input),
+  });
+}
+
+export function selectOpenFibres(
+  response: FibresResponse | undefined,
+): Fibre[] {
+  return response?.fibres ?? [];
 }

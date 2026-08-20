@@ -1,59 +1,29 @@
 import { createServer } from "node:http";
 
-import { classify } from "./classify.mjs";
+import { applyFibreActions } from "./apply.mjs";
+import { classifyMessages } from "./classify.mjs";
 import {
-  createTodo,
-  getSuggestions,
+  fibresPayload,
+  ingestedIds,
   listFeedback,
-  listTodos,
-  patchSuggestion,
-  putSuggestions,
+  listFibres,
+  listOpenFibres,
+  markIngested,
+  patchFibre,
+  putFibres,
   recordFeedback,
-  updateTodo,
+  restoreFibres,
 } from "./store.mjs";
 
 const PORT = Number(process.env.PORT ?? 8787);
+const INGEST_BATCH = 15;
 
-// The Tauri webview origin varies (tauri://localhost, http://localhost:1420),
-// so this PoC accepts any origin rather than maintaining an allowlist.
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
   "access-control-allow-headers": "content-type",
   "access-control-max-age": "86400",
 };
-
-/**
- * How a user decision rewrites the stored verdict. The client renders its
- * actions from `verdict`, so promotion has to actually change it — otherwise
- * an item moves lists while still offering the old buttons. `adopted` keeps a
- * message out of Important once it owns a todo.
- */
-function suggestionPatchFor(userAction) {
-  switch (userAction) {
-    case "promoted":
-      return {
-        verdict: "attention",
-        learned: true,
-        reason: "You told me this message matters.",
-        confidence: 1,
-      };
-    case "dismissed":
-      return {
-        verdict: "noise",
-        learned: true,
-        reason: "You dismissed this message.",
-        confidence: 1,
-        adopted: false,
-      };
-    case "adopted":
-      return { adopted: true };
-    case "completed":
-      return { adopted: true };
-    default:
-      return null;
-  }
-}
 
 function send(res, status, body) {
   const payload = JSON.stringify(body);
@@ -72,6 +42,46 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+function chunk(items, size) {
+  const batches = [];
+  for (let index = 0; index < items.length; index += size) {
+    batches.push(items.slice(index, index + size));
+  }
+  return batches;
+}
+
+async function ingestMessages(pubkey, incoming) {
+  const known = ingestedIds(pubkey);
+  const unseen = incoming
+    .filter((message) => message?.eventId && !known.has(message.eventId))
+    .filter((message) => (message.content ?? "").trim().length > 0)
+    .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+
+  const allChanges = [];
+  for (const batch of chunk(unseen, INGEST_BATCH)) {
+    const open = listOpenFibres(pubkey);
+    const actions = await classifyMessages(batch, open, listFeedback(pubkey));
+    const applied = applyFibreActions({
+      fibres: listFibres(pubkey),
+      messages: batch,
+      actions,
+    });
+    putFibres(pubkey, applied.fibres);
+    markIngested(pubkey, applied.ingestedEventIds);
+    allChanges.push(...applied.changes);
+  }
+
+  if (unseen.length === 0 && incoming.length > 0) {
+    markIngested(
+      pubkey,
+      incoming.map((message) => message.eventId).filter(Boolean),
+    );
+  }
+
+  const payload = fibresPayload(pubkey);
+  return { ...payload, changes: allChanges, ingested: unseen.length };
+}
+
 async function route(req, url) {
   const { pathname, searchParams } = url;
   const method = req.method ?? "GET";
@@ -80,92 +90,52 @@ async function route(req, url) {
     return [200, { status: "ok" }];
   }
 
-  if (method === "POST" && pathname === "/scan") {
+  if (method === "POST" && pathname === "/ingest") {
     const body = await readJson(req);
     const pubkey = body.pubkey;
-    const candidates = Array.isArray(body.candidates) ? body.candidates : [];
+    const messages = Array.isArray(body.messages) ? body.messages : [];
     if (!pubkey) return [400, { error: "pubkey is required" }];
-
-    const verdicts = await classify(candidates, listFeedback(pubkey));
-
-    // Store a renderable snapshot alongside each verdict so the client can
-    // reload the triage view without re-collecting candidates from the relay.
-    const byEventId = new Map(
-      candidates.map((candidate) => [candidate.eventId, candidate]),
-    );
-    // A rescan replaces the whole result set, so decisions already made have to
-    // be carried forward or an adopted message reappears in Important.
-    const adoptedEventIds = new Set(
-      getSuggestions(pubkey)
-        .filter((previous) => previous.adopted)
-        .map((previous) => previous.eventId),
-    );
-    const suggestions = verdicts.map((verdict) => {
-      const candidate = byEventId.get(verdict.eventId);
-      return {
-        ...verdict,
-        adopted: adoptedEventIds.has(verdict.eventId),
-        channelName: candidate?.channelName ?? null,
-        authorPubkey: candidate?.authorPubkey ?? null,
-        authorLabel: candidate?.authorLabel ?? null,
-        content: (candidate?.content ?? "").slice(0, 2000),
-        createdAt: candidate?.createdAt ?? null,
-        isDm: candidate?.isDm ?? false,
-        isMention: candidate?.isMention ?? false,
-      };
-    });
-
-    putSuggestions(pubkey, suggestions);
+    const result = await ingestMessages(pubkey, messages);
     console.log(
-      `[triage] scanned ${candidates.length} candidates for ${pubkey.slice(0, 8)}: ` +
-        `${suggestions.filter((s) => s.verdict === "attention").length} attention, ` +
-        `${suggestions.filter((s) => s.verdict === "noise").length} noise`,
+      `[triage] ingested ${result.ingested} messages for ${pubkey.slice(0, 8)}: ${result.openCount} open fibres`,
     );
-    return [200, { suggestions }];
+    return [200, result];
   }
 
-  if (method === "GET" && pathname === "/suggestions") {
+  if (method === "GET" && pathname === "/fibres") {
     const pubkey = searchParams.get("pubkey");
     if (!pubkey) return [400, { error: "pubkey is required" }];
-    return [200, { suggestions: getSuggestions(pubkey) }];
+    return [200, fibresPayload(pubkey)];
   }
 
-  if (method === "GET" && pathname === "/todos") {
-    const pubkey = searchParams.get("pubkey");
-    if (!pubkey) return [400, { error: "pubkey is required" }];
-    return [200, { todos: listTodos(pubkey) }];
-  }
-
-  if (method === "POST" && pathname === "/todos") {
-    const body = await readJson(req);
-    if (!body.pubkey || !body.eventId) {
-      return [400, { error: "pubkey and eventId are required" }];
-    }
-    return [201, { todo: createTodo(body.pubkey, body) }];
-  }
-
-  const todoMatch = pathname.match(/^\/todos\/([\w-]+)$/);
-  if (method === "PATCH" && todoMatch) {
+  const fibreMatch = pathname.match(/^\/fibres\/([\w-]+)$/);
+  if (method === "PATCH" && fibreMatch) {
     const body = await readJson(req);
     if (!body.pubkey) return [400, { error: "pubkey is required" }];
     if (!["done", "dismissed", "open"].includes(body.status)) {
       return [400, { error: "status must be done, dismissed, or open" }];
     }
-    const todo = updateTodo(body.pubkey, todoMatch[1], body.status);
-    return todo ? [200, { todo }] : [404, { error: "todo not found" }];
+    const fibre = patchFibre(body.pubkey, fibreMatch[1], {
+      status: body.status,
+    });
+    return fibre
+      ? [200, { fibre, ...fibresPayload(body.pubkey) }]
+      : [404, { error: "fibre not found" }];
+  }
+
+  if (method === "POST" && pathname === "/fibres/restore") {
+    const body = await readJson(req);
+    if (!body.pubkey) return [400, { error: "pubkey is required" }];
+    restoreFibres(body.pubkey);
+    return [200, fibresPayload(body.pubkey)];
   }
 
   if (method === "POST" && pathname === "/feedback") {
     const body = await readJson(req);
-    if (!body.pubkey || !body.eventId) {
-      return [400, { error: "pubkey and eventId are required" }];
+    if (!body.pubkey || !body.fibreId) {
+      return [400, { error: "pubkey and fibreId are required" }];
     }
-
     const feedback = recordFeedback(body.pubkey, body);
-    const patch = suggestionPatchFor(body.userAction);
-    if (patch) {
-      patchSuggestion(body.pubkey, body.eventId, patch);
-    }
     return [201, { feedback }];
   }
 

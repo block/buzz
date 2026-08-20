@@ -122,6 +122,7 @@ async function openDraftsPanel(page: import("@playwright/test").Page) {
 }
 
 test.describe("drafts screenshots", () => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   test.use({ viewport: { width: 1280, height: 900 } });
 
   test.beforeEach(async ({ page }) => {

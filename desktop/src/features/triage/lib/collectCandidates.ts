@@ -43,8 +43,9 @@ export type TriageCandidate = {
   isMention: boolean;
   isDm: boolean;
   isReply: boolean;
+  isSelf: boolean;
   /** `inbox` came from the pre-filtered home feed, `channel` from catch-up. */
-  source: "inbox" | "channel";
+  source: "inbox" | "channel" | "live";
 };
 
 type CandidateContext = {
@@ -73,6 +74,10 @@ export function candidateFromEvent(
     ? normalizePubkey(context.currentPubkey)
     : "";
 
+  const isSelf = Boolean(
+    normalizedSelf && event.pubkey.toLowerCase() === normalizedSelf,
+  );
+
   return {
     eventId: event.id,
     channelId:
@@ -87,6 +92,7 @@ export function candidateFromEvent(
     isMention: hasMentionForEvent(event, normalizedSelf),
     isDm: channel?.channelType === "dm",
     isReply: reference.parentId !== null && !isBroadcastReply(event.tags),
+    isSelf,
     source: "channel",
   };
 }
@@ -119,6 +125,9 @@ export function candidatesFromInboxItems(
       isMention: mentionTagged || entry.categories.includes("mention"),
       isDm: item.channelType === "dm",
       isReply: reference.parentId !== null && !isBroadcastReply(item.tags),
+      isSelf: Boolean(
+        normalizedSelf && item.pubkey.toLowerCase() === normalizedSelf,
+      ),
       source: "inbox",
     };
   });
@@ -139,6 +148,12 @@ export function mergeCandidates(
   return [...byEventId.values()]
     .sort((a, b) => b.createdAt - a.createdAt)
     .slice(0, TOTAL_CAP);
+}
+
+export function sortOldestFirst(
+  candidates: readonly TriageCandidate[],
+): TriageCandidate[] {
+  return [...candidates].sort((a, b) => a.createdAt - b.createdAt);
 }
 
 export async function mapWithConcurrency<Input, Output>(
@@ -174,15 +189,14 @@ export function triageableChannels(
 }
 
 /**
- * Layer 2: every unread message since the read frontier, deliberately WITHOUT
- * `shouldNotifyForEvent`. That filter is what makes the inbox high-signal, and
- * the noise it removes is exactly what the triage agent exists to classify.
+ * Recent messages across member channels, including the viewer's own. Fibres
+ * are extracted from self-authored commitments and ideas as well as inbound
+ * asks, so the read frontier and `shouldNotifyForEvent` are both ignored.
  */
 export async function collectChannelCandidates({
   channels,
   context,
   fetchEvents,
-  getChannelReadAt,
   kindsForChannel,
 }: {
   channels: readonly Channel[];
@@ -193,33 +207,24 @@ export async function collectChannelCandidates({
     since: number;
     limit: number;
   }) => Promise<RelayEvent[]>;
-  getChannelReadAt: (channelId: string) => number | null;
   kindsForChannel: (channelType: Channel["channelType"]) => readonly number[];
 }): Promise<TriageCandidate[]> {
   const targets = triageableChannels(channels);
-  const normalizedSelf = context.currentPubkey
-    ? normalizePubkey(context.currentPubkey)
-    : "";
 
   const perChannel = await mapWithConcurrency(
     targets,
     FETCH_CONCURRENCY,
     async (channel) => {
-      const readAt = getChannelReadAt(channel.id);
       try {
         const events = await fetchEvents({
           kinds: [...kindsForChannel(channel.channelType)],
           "#h": [channel.id],
-          since: readAt === null ? 0 : readAt + 1,
+          since: 0,
           limit: PER_CHANNEL_CAP,
         });
 
         return events
-          .filter((event) => {
-            if (event.pubkey.toLowerCase() === normalizedSelf) return false;
-            if (readAt !== null && event.created_at <= readAt) return false;
-            return event.content.trim().length > 0;
-          })
+          .filter((event) => event.content.trim().length > 0)
           .map((event) => candidateFromEvent(event, channel, context));
       } catch {
         // One unreadable channel must not sink the whole scan.

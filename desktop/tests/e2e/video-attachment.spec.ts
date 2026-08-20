@@ -1070,38 +1070,13 @@ test("video replies in threads open the review comments view", async ({
   await page
     .getByTestId("video-review-backdrop")
     .click({ position: { x: 4, y: 4 } });
-  await page.getByRole("button", { name: "Inbox", exact: true }).click();
-  const inboxRow = page.getByTestId(`home-inbox-item-${reviewComment.id}`);
-  await expect(inboxRow).toBeVisible();
-  const inboxPreviewTimecode = inboxRow.getByTestId(
-    "video-review-comment-timecode",
-  );
-  await expect(inboxPreviewTimecode.locator("xpath=ancestor::p")).toContainText(
-    "Tighten this transition.",
-  );
-  await expect(
-    inboxPreviewTimecode.locator("xpath=ancestor::blockquote"),
-  ).toBeVisible();
-  await inboxRow.click();
-
-  const inboxDetail = page.getByTestId("home-inbox-detail");
-  const inboxDetailTimecode = inboxDetail.getByRole("button", {
-    name: "Jump to 00:01",
-  });
-  await expect(inboxDetailTimecode).toBeVisible();
-  await expect(inboxDetailTimecode.locator("xpath=ancestor::p")).toContainText(
-    "Tighten this transition.",
-  );
-  await expect(
-    inboxDetailTimecode.locator("xpath=ancestor::blockquote"),
-  ).toBeVisible();
-  await inboxDetailTimecode.click();
-  await expect(page.getByTestId("video-review-dialog")).toBeVisible();
+  await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
 });
 
 test("Inbox preserves bracketed timestamps without video evidence", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await installVideoReviewHarness(page);
 
   await page.goto("/");
@@ -1131,6 +1106,7 @@ test("Inbox preserves bracketed timestamps without video evidence", async ({
 test("Inbox recognizes reference-style video ancestors with custom alt text", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await installVideoReviewHarness(page);
 
   await page.goto("/");

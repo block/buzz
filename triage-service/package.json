@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "External triage backend for the Buzz /triage PoC. Classifies unread messages, stores todos, and learns from feedback.",
+  "description": "External fibre engine for the Buzz Inbox. Classifies messages into fibres and learns from feedback.",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test apply.test.mjs classify.test.mjs"
   }
 }

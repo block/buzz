@@ -3004,6 +3004,7 @@ async function seedHomeInboxMention(
 }
 
 test("Inbox All excludes generic channel traffic", async ({ page }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await page.goto("/");
   await page.waitForFunction(() => {
     const win = window as MockFeedWindow;
@@ -3062,6 +3063,7 @@ test("Inbox All excludes generic channel traffic", async ({ page }) => {
 test("Inbox type labels keep the same height with and without a channel chip", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const dmId = "inbox-type-label-dm";
   const mentionId = "inbox-type-label-mention";
   const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
@@ -3165,6 +3167,7 @@ test("Inbox type labels keep the same height with and without a channel chip", a
 test("Inbox All never lists drafts and unread-only hides reminders", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
   await page.addInitScript(
     ({ draftStoreKey, draftStorageKey }) => {
@@ -3287,6 +3290,7 @@ test("Inbox All never lists drafts and unread-only hides reminders", async ({
 test("Inbox merges a due reminder into its represented conversation", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const messageId = "inbox-reminder-merge-message";
   const reminderId = "inbox-reminder-merge";
   await seedHomeInboxMention(page, messageId);
@@ -3349,6 +3353,7 @@ test("Inbox merges a due reminder into its represented conversation", async ({
 test("Inbox All keeps its filter when opening a due reminder", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await page.goto("/");
   await expect(page.getByTestId("home-inbox")).toBeVisible();
 
@@ -3399,6 +3404,7 @@ test("Inbox All keeps its filter when opening a due reminder", async ({
 });
 
 test("Inbox reminder rows and detail identify DM context", async ({ page }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await page.goto("/");
   await expect(page.getByTestId("home-inbox")).toBeVisible();
 
@@ -3461,6 +3467,7 @@ test("Inbox reminder rows and detail identify DM context", async ({ page }) => {
 test("Inbox detail title and source action navigate to the conversation", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await seedHomeInboxMention(page, "mock-feed-home-channel-navigate");
 
   const detail = page.getByTestId("home-inbox-detail");
@@ -3482,6 +3489,7 @@ test("Inbox detail title and source action navigate to the conversation", async 
 test("home inbox thread reply mention carries threadRootId to the channel", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const rootEventId = "mock-feed-home-thread-root";
   await seedHomeInboxMention(page, "mock-feed-home-thread-navigate", [
     ["e", rootEventId, "", "root"],
@@ -3506,6 +3514,7 @@ test("home inbox thread reply mention carries threadRootId to the channel", asyn
 test("Inbox filter changes preserve valid detail and directly select a replacement", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const threadItemId = "inbox-filter-thread";
   const actionItemId = "inbox-filter-action";
   await seedHomeInboxMention(page, threadItemId, [
@@ -3564,6 +3573,7 @@ test("Inbox filter changes preserve valid detail and directly select a replaceme
 test("Inbox keeps the unread boundary for replies from multiple agents", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await page.goto("/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(() => {
@@ -3654,6 +3664,7 @@ test("Inbox keeps the unread boundary for replies from multiple agents", async (
 test("home inbox groups consecutive DMs and opens the full conversation", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
   const dmIds = ["inbox-dm-first", "inbox-dm-second", "inbox-dm-third"];
 
@@ -3736,6 +3747,7 @@ test("home inbox groups consecutive DMs and opens the full conversation", async 
 test("home inbox manage affordance opens management without leaving home", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await seedHomeInboxMention(page, "mock-feed-home-channel-panel");
 
   await page
@@ -3784,6 +3796,7 @@ test("home inbox manage affordance opens management without leaving home", async
 test("home channel settings keeps agent lifecycle actions scoped to the active community", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await page.goto("/");
   const agentPubkey = await addGenericAgent(
     page,
@@ -4743,7 +4756,7 @@ test("manage channel can delete an owned stream", async ({ page }) => {
   ).toBeVisible();
   await page.getByTestId("channel-delete-confirm").click();
 
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
   await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
 });
 

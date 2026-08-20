@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# triage-up.sh — Run the triage backend that the desktop /triage view calls
+# triage-up.sh — Run the fibre engine that the desktop Inbox calls
 # =============================================================================
 # Usage: ./scripts/triage-up.sh [--llm] [--port N] [-d] [--stop] [--restart] [--yes]
 #
@@ -45,7 +45,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/triage-up.sh [options]
 
-Starts the triage backend for the desktop /triage view. Safe to re-run: a
+Starts the fibre engine for the desktop Inbox. Safe to re-run: a
 stale instance of this service is replaced rather than duplicated.
 
 Modes (at most one):

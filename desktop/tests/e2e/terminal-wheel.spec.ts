@@ -146,7 +146,7 @@ async function reveal(page: Page) {
   await installTerminalBackend(page);
   await installMockBridge(page);
   await page.goto("/");
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
   // Buzz Term needs a channel: TerminalBootstrap's context is null on Home, so
   // no session spawns and the chord is inert.
   await page.getByTestId("channel-general").click();

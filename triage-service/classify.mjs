@@ -1,17 +1,34 @@
-const ATTENTION_THRESHOLD = 0.5;
+import {
+  FIBRE_KINDS,
+  isFibreKind,
+  clampScore,
+} from "./apply.mjs";
 
 const URGENCY_PATTERN =
-  /\b(asap|urgent|urgently|blocker|blocked|blocking|deadline|by (?:eod|tomorrow|monday)|ptal|please review|can you|could you|need(?:s)? your|waiting on you|sign ?off|approve)\b/i;
+  /\b(asap|urgent|urgently|blocker|blocked|blocking|deadline|by (?:eod|tomorrow|monday)|ptal|please review|can you|could you|need(?:s)? your|waiting on you|sign ?off|approve|root cause)\b/i;
+
+const COMMITMENT_PATTERN =
+  /\b(i(?:'ll| will)|let me|i can get|i'll get|before standup|by tomorrow)\b/i;
 
 const LOW_VALUE_PATTERN =
   /^(?:\+1|ty|thx|thanks|thank you|nice|cool|lol|haha|ok|okay|k|got it|sounds good|congrats|welcome|gm|good morning|morning|hi|hey|hello|yep|yes|no|done|same|this|ditto|👍|🎉|✅)[\s!.?]*$/i;
 
-/**
- * Aggregate prior user corrections into per-dimension weights.
- *
- * `promoted` means the user rescued something the agent called noise, so that
- * dimension should score higher next time; `dismissed` means the opposite.
- */
+export { FIBRE_KINDS };
+
+export function summarizeFibre(fibre) {
+  return {
+    id: fibre.id,
+    kind: fibre.kind,
+    title: fibre.title,
+    summary: fibre.summary,
+    score: fibre.score,
+    people: (fibre.people ?? []).map((person) => person.label),
+    eventIds: (fibre.artifacts ?? []).map((artifact) => artifact.eventId),
+    threadRootId: fibre.artifacts?.[0]?.threadRootId ?? null,
+    channelName: fibre.channelName,
+  };
+}
+
 export function buildLessons(feedback) {
   const lessons = {
     events: new Map(),
@@ -23,10 +40,10 @@ export function buildLessons(feedback) {
 
   for (const row of feedback) {
     const delta =
-      row.userAction === "promoted" || row.userAction === "adopted"
-        ? 1
-        : row.userAction === "dismissed"
-          ? -1
+      row.userAction === "dismissed"
+        ? -1
+        : row.userAction === "done" || row.userAction === "delegated"
+          ? 1
           : 0;
     if (delta === 0) continue;
 
@@ -42,9 +59,8 @@ export function buildLessons(feedback) {
 
     if (lessons.examples.length < 12 && row.preview) {
       lessons.examples.push({
-        preview: row.preview.slice(0, 160),
+        preview: String(row.preview).slice(0, 160),
         userAction: row.userAction,
-        suggestedVerdict: row.suggestedVerdict,
       });
     }
   }
@@ -52,173 +68,275 @@ export function buildLessons(feedback) {
   return lessons;
 }
 
-/**
- * A correction on this exact message or thread overrides the heuristic outright
- * rather than nudging it. Anything less lets a strongly-scored base verdict
- * ignore an explicit instruction, which is the opposite of learning.
- */
-function lessonOverride(candidate, lessons) {
-  const event = lessons.events.get(candidate.eventId) ?? 0;
-  if (event !== 0) {
-    return { weight: event, scope: "this message" };
+function matchingOpenFibre(message, openFibres) {
+  if (message.threadRootId) {
+    const byThread = openFibres.find((fibre) =>
+      (fibre.artifacts ?? []).some(
+        (artifact) =>
+          artifact.threadRootId === message.threadRootId ||
+          artifact.eventId === message.threadRootId,
+      ),
+    );
+    if (byThread) return byThread;
   }
 
-  const thread = candidate.threadRootId
-    ? (lessons.threads.get(candidate.threadRootId) ?? 0)
-    : 0;
-  if (thread !== 0) {
-    return { weight: thread, scope: "this thread" };
-  }
+  return openFibres.find((fibre) =>
+    (fibre.artifacts ?? []).some(
+      (artifact) => artifact.eventId === message.eventId,
+    ),
+  );
+}
 
+function alreadyAttached(message, openFibres) {
+  return openFibres.some((fibre) =>
+    (fibre.artifacts ?? []).some(
+      (artifact) => artifact.eventId === message.eventId,
+    ),
+  );
+}
+
+function pickKind(message, content) {
+  if (/\b(root cause|incident|blocker|blocked|rollback)\b/i.test(content)) {
+    return "blocker";
+  }
+  if (COMMITMENT_PATTERN.test(content) && message.isSelf) {
+    return "commitment";
+  }
+  if (URGENCY_PATTERN.test(content) || (message.isMention && content.length > 20)) {
+    return content.includes("?") ? "question" : "ask";
+  }
+  if (content.includes("?")) return "question";
+  if (message.isSelf && content.length > 40) return "idea";
   return null;
 }
 
-/** Author and channel history are weaker, so they only bias the score. */
-function lessonBias(candidate, lessons) {
-  const author = lessons.authors.get(candidate.authorPubkey) ?? 0;
-  const channel = lessons.channels.get(candidate.channelId) ?? 0;
-  const raw = author * 0.25 + channel * 0.1;
-  return Math.max(-0.6, Math.min(0.6, raw));
-}
-
-function scoreCandidate(candidate, lessons) {
-  const content = (candidate.content ?? "").trim();
+function scoreFor(kind, message, lessons) {
+  let score = 40;
   const signals = [];
-  let score = 0;
 
-  if (candidate.isDm) {
-    score += 0.45;
-    signals.push("sent to you directly");
+  if (message.isMention) {
+    score += 30;
+    signals.push({ weight: "+30", label: "Direct @mention" });
   }
-  if (candidate.isMention) {
-    score += 0.4;
-    signals.push("mentions you");
+  if (message.isDm) {
+    score += 20;
+    signals.push({ weight: "+20", label: "Direct message" });
   }
-  if (URGENCY_PATTERN.test(content)) {
-    score += 0.2;
-    signals.push("asks for action");
+  if (kind === "blocker") {
+    score += 25;
+    signals.push({ weight: "+25", label: "Incident or blocker language" });
   }
-  if (content.includes("?")) {
-    score += 0.15;
-    signals.push("asks a question");
+  if (kind === "commitment") {
+    score += 15;
+    signals.push({ weight: "+15", label: "Commitment made by you" });
   }
-  if (candidate.source === "channel" && !candidate.isMention) {
-    score -= 0.25;
-    signals.push("channel chatter you were not addressed in");
+  if (kind === "ask") {
+    score += 12;
+    signals.push({ weight: "+12", label: "Actionable instruction" });
   }
-  if (LOW_VALUE_PATTERN.test(content) || content.length < 12) {
-    score -= 0.3;
-    signals.push("short acknowledgement");
+  if (contentHasQuestion(message)) {
+    score += 8;
+    signals.push({ weight: "+8", label: "Asks a question" });
   }
 
-  const bias = lessonBias(candidate, lessons);
+  const authorBias = (lessons.authors.get(message.authorPubkey) ?? 0) * 8;
+  const channelBias = (lessons.channels.get(message.channelId) ?? 0) * 4;
+  const bias = authorBias + channelBias;
   if (bias !== 0) {
     score += bias;
-    signals.push(
-      bias > 0
-        ? "similar items you kept before"
-        : "similar items you dismissed before",
-    );
+    signals.push({
+      weight: bias > 0 ? `+${bias}` : `${bias}`,
+      label:
+        bias > 0
+          ? "Similar items you kept before"
+          : "Similar items you dismissed before",
+    });
   }
 
-  const override = lessonOverride(candidate, lessons);
-  if (override) {
-    const verdict = override.weight > 0 ? "attention" : "noise";
-    return {
-      verdict,
-      confidence: 1,
-      signals: [
-        verdict === "attention"
-          ? `you told me ${override.scope} matters`
-          : `you dismissed ${override.scope} before`,
-        ...signals,
-      ],
+  return { score: clampScore(score), signals };
+}
+
+function contentHasQuestion(message) {
+  return (message.content ?? "").includes("?");
+}
+
+function headline(content) {
+  const line = content.trim().split("\n")[0]?.trim() ?? "";
+  if (line.length <= 90) return line;
+  return `${line.slice(0, 87).trimEnd()}…`;
+}
+
+/**
+ * One fibre per qualifying message. Same-thread messages update an open fibre
+ * instead of creating a second one. Never merges.
+ */
+export function heuristicActions(messages, openFibres, lessons) {
+  const actions = [];
+
+  for (const message of messages) {
+    const content = (message.content ?? "").trim();
+    if (!content || LOW_VALUE_PATTERN.test(content) || content.length < 8) {
+      actions.push({ type: "skip", eventId: message.eventId });
+      continue;
+    }
+
+    if (alreadyAttached(message, openFibres)) {
+      actions.push({ type: "skip", eventId: message.eventId });
+      continue;
+    }
+
+    const existing = matchingOpenFibre(message, openFibres);
+    if (existing) {
+      actions.push({
+        type: "update",
+        fibreId: existing.id,
+        eventIds: [message.eventId],
+      });
+      continue;
+    }
+
+    if ((lessons.events.get(message.eventId) ?? 0) < 0) {
+      actions.push({ type: "skip", eventId: message.eventId });
+      continue;
+    }
+
+    const kind = pickKind(message, content);
+    if (!kind) {
+      actions.push({ type: "skip", eventId: message.eventId });
+      continue;
+    }
+
+    const { score, signals } = scoreFor(kind, message, lessons);
+    const where = message.channelName ? ` in #${message.channelName}` : "";
+    const why =
+      signals[0]?.label
+        ? `${signals[0].label}${where}.`
+        : `Looks like a ${kind}${where}.`;
+
+    actions.push({
+      type: "create",
+      kind,
+      title: headline(content) || `New ${kind}`,
+      summary: content.slice(0, 280),
+      why,
+      whyShort: signals[0]?.label ?? why,
       score,
-      learned: true,
-    };
+      signals,
+      eventIds: [message.eventId],
+    });
   }
 
-  const verdict = score >= ATTENTION_THRESHOLD ? "attention" : "noise";
-  const confidence = Math.min(
-    1,
-    Math.abs(score - ATTENTION_THRESHOLD) * 1.6 + 0.2,
-  );
-
-  return { verdict, confidence, signals, score, learned: false };
+  return actions;
 }
 
-function composeReason(candidate, { verdict, signals, learned }) {
-  const where = candidate.channelName ? ` in #${candidate.channelName}` : "";
+export function parseLlmActions(payload, openFibres) {
+  const openIds = new Set(openFibres.map((fibre) => fibre.id));
+  const raw = Array.isArray(payload?.actions) ? payload.actions : [];
+  const actions = [];
 
-  // A learned verdict leads with the correction so the shift is visible.
-  const lead = learned
-    ? signals[0]
-    : signals.slice(0, 2).join(" and ");
-
-  if (!lead) {
-    return verdict === "attention"
-      ? `Unread message${where} that looks like it needs a response.`
-      : `Routine unread message${where}.`;
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    if (row.type === "skip") {
+      actions.push({ type: "skip", eventId: row.eventId });
+      continue;
+    }
+    if (row.type === "create") {
+      actions.push({
+        type: "create",
+        kind: isFibreKind(row.kind) ? row.kind : "fyi",
+        title: row.title,
+        summary: row.summary,
+        why: row.why,
+        whyShort: row.whyShort,
+        score: clampScore(row.score),
+        signals: Array.isArray(row.signals) ? row.signals : [],
+        eventIds: Array.isArray(row.eventIds) ? row.eventIds : [],
+      });
+      continue;
+    }
+    if (row.type === "update" && openIds.has(row.fibreId)) {
+      actions.push({
+        type: "update",
+        fibreId: row.fibreId,
+        kind: isFibreKind(row.kind) ? row.kind : undefined,
+        title: row.title,
+        summary: row.summary,
+        why: row.why,
+        whyShort: row.whyShort,
+        score: row.score,
+        signals: row.signals,
+        eventIds: Array.isArray(row.eventIds) ? row.eventIds : [],
+      });
+      continue;
+    }
+    if (row.type === "merge") {
+      const fibreIds = Array.isArray(row.fibreIds)
+        ? row.fibreIds.filter((id) => openIds.has(id))
+        : [];
+      const into = openIds.has(row.into) ? row.into : fibreIds[0];
+      if (!into || fibreIds.length < 2) continue;
+      actions.push({
+        type: "merge",
+        fibreIds,
+        into,
+        title: row.title,
+        summary: row.summary,
+        why: row.why,
+        score: row.score,
+        eventIds: Array.isArray(row.eventIds) ? row.eventIds : [],
+      });
+    }
   }
 
-  const subject = lead.charAt(0).toUpperCase() + lead.slice(1);
-  if (learned) {
-    return `${subject}${where}.`;
-  }
-
-  return verdict === "attention"
-    ? `${subject}${where}.`
-    : `${subject}${where} — safe to skip.`;
+  return actions;
 }
 
-function heuristicSuggestions(candidates, lessons) {
-  return candidates.map((candidate) => {
-    const scored = scoreCandidate(candidate, lessons);
-    return {
-      eventId: candidate.eventId,
-      channelId: candidate.channelId ?? null,
-      threadRootId: candidate.threadRootId ?? null,
-      verdict: scored.verdict,
-      reason: composeReason(candidate, scored),
-      confidence: Number(scored.confidence.toFixed(2)),
-      learned: scored.learned,
-      source: "heuristic",
-    };
-  });
-}
-
-function buildPrompt(candidates, lessons) {
+export function buildPrompt(messages, openFibres, lessons) {
   const corrections = lessons.examples.length
     ? `\nThe user previously corrected you on these; respect the pattern:\n${lessons.examples
-        .map(
-          (example) =>
-            `- "${example.preview}" -> you said ${example.suggestedVerdict}, user ${example.userAction}`,
-        )
+        .map((example) => `- "${example.preview}" -> user ${example.userAction}`)
         .join("\n")}\n`
     : "";
 
-  const items = candidates
-    .map((candidate) =>
-      JSON.stringify({
-        eventId: candidate.eventId,
-        channel: candidate.channelName,
-        author: candidate.authorLabel,
-        isDm: candidate.isDm,
-        isMention: candidate.isMention,
-        content: (candidate.content ?? "").slice(0, 500),
-      }),
-    )
-    .join("\n");
+  const fibreJson = openFibres.map(summarizeFibre);
+  const messageJson = messages.map((message) => ({
+    eventId: message.eventId,
+    channel: message.channelName,
+    author: message.authorLabel,
+    isDm: message.isDm,
+    isMention: message.isMention,
+    isSelf: message.isSelf,
+    threadRootId: message.threadRootId,
+    content: (message.content ?? "").slice(0, 500),
+  }));
 
-  return `You triage a chat inbox. For each message decide "attention" (the user should act or reply) or "noise" (safe to skip). Give a reason under 15 words explaining the decision and the thread's context.
+  return `You extract fibres from a team chat. A fibre is an idea, ask, decision, commitment, question, blocker, or FYI — not a raw message. One fibre groups one or more messages (N >= 1). A message may belong to more than one fibre.
+
+Kinds: ${FIBRE_KINDS.join(", ")}.
+
+Open (incomplete) fibres — consolidate into these when the new message belongs to the same work:
+${JSON.stringify(fibreJson)}
 ${corrections}
-Messages:
-${items}
+New messages:
+${JSON.stringify(messageJson)}
 
-Reply with JSON only: {"suggestions":[{"eventId":"...","verdict":"attention|noise","reason":"...","confidence":0.0}]}`;
+Reply with JSON only:
+{"actions":[
+  {"type":"create","kind":"ask","title":"...","summary":"...","why":"...","whyShort":"...","score":84,"signals":[{"weight":"+12","label":"..."}],"eventIds":["..."]},
+  {"type":"update","fibreId":"...","title":"...","summary":"...","why":"...","score":90,"eventIds":["..."]},
+  {"type":"merge","fibreIds":["a","b"],"into":"a","title":"...","summary":"...","score":90,"eventIds":["..."]},
+  {"type":"skip","eventId":"..."}
+]}
+
+Rules:
+- skip acknowledgements, empty, and messages that are not a fibre.
+- update an open fibre when the message continues it.
+- merge when two open fibres are the same thread of work.
+- a message may produce more than one action (create AND update).
+- score is 0-100. why explains ranking in one or two sentences.`;
 }
 
-async function llmSuggestions(candidates, lessons) {
+async function llmActions(messages, openFibres, lessons) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
 
@@ -231,7 +349,9 @@ async function llmSuggestions(candidates, lessons) {
     body: JSON.stringify({
       model: process.env.TRIAGE_MODEL ?? "gpt-4o-mini",
       response_format: { type: "json_object" },
-      messages: [{ role: "user", content: buildPrompt(candidates, lessons) }],
+      messages: [
+        { role: "user", content: buildPrompt(messages, openFibres, lessons) },
+      ],
     }),
   });
 
@@ -241,41 +361,24 @@ async function llmSuggestions(candidates, lessons) {
 
   const payload = await response.json();
   const parsed = JSON.parse(payload.choices?.[0]?.message?.content ?? "{}");
-  const byEventId = new Map(
-    (parsed.suggestions ?? []).map((suggestion) => [
-      suggestion.eventId,
-      suggestion,
-    ]),
-  );
-
-  // Fall back per-item so a partial LLM response still yields a full result set.
-  const fallback = heuristicSuggestions(candidates, lessons);
-  return fallback.map((base) => {
-    // An explicit user correction outranks the model.
-    if (base.learned) return base;
-
-    const llm = byEventId.get(base.eventId);
-    if (!llm?.verdict) return base;
-    return {
-      ...base,
-      verdict: llm.verdict === "attention" ? "attention" : "noise",
-      reason: llm.reason ?? base.reason,
-      confidence: Number(llm.confidence ?? base.confidence),
-      source: "llm",
-    };
-  });
+  return parseLlmActions(parsed, openFibres);
 }
 
-export async function classify(candidates, feedback) {
+/**
+ * Classify a batch of new messages against the current open-fibre set.
+ */
+export async function classifyMessages(messages, openFibres, feedback) {
   const lessons = buildLessons(feedback);
+  const fallback = heuristicActions(messages, openFibres, lessons);
 
   if (process.env.TRIAGE_LLM === "1") {
     try {
-      return await llmSuggestions(candidates, lessons);
+      const llm = await llmActions(messages, openFibres, lessons);
+      if (llm.length > 0) return llm;
     } catch (error) {
       console.warn(`[triage] LLM classification failed: ${error.message}`);
     }
   }
 
-  return heuristicSuggestions(candidates, lessons);
+  return fallback;
 }

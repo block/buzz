@@ -1,13 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 
-const DATA_FILE = new URL("./data.json", import.meta.url);
+const DATA_FILE = process.env.TRIAGE_DATA_FILE
+  ? pathToFileURL(process.env.TRIAGE_DATA_FILE)
+  : new URL("./data.json", import.meta.url);
 
-const EMPTY = { suggestions: {}, todos: {}, feedback: {} };
+const EMPTY = { fibres: {}, ingested: {}, feedback: {} };
+const INGESTED_CAP = 8_000;
 
 function load() {
   try {
-    return { ...EMPTY, ...JSON.parse(readFileSync(DATA_FILE, "utf8")) };
+    const parsed = JSON.parse(readFileSync(DATA_FILE, "utf8"));
+    return {
+      ...EMPTY,
+      ...parsed,
+      fibres: parsed.fibres ?? {},
+      ingested: parsed.ingested ?? {},
+      feedback: parsed.feedback ?? {},
+    };
   } catch {
     return structuredClone(EMPTY);
   }
@@ -24,68 +35,70 @@ function bucket(collection, pubkey) {
   return state[collection][pubkey];
 }
 
-export function putSuggestions(pubkey, suggestions) {
-  state.suggestions[pubkey] = suggestions;
+function sortOpen(fibres) {
+  return [...fibres].sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  });
+}
+
+export function listFibres(pubkey) {
+  return bucket("fibres", pubkey);
+}
+
+export function listOpenFibres(pubkey) {
+  return sortOpen(listFibres(pubkey).filter((fibre) => fibre.status === "open"));
+}
+
+export function clearedCount(pubkey) {
+  return listFibres(pubkey).filter((fibre) => fibre.status !== "open").length;
+}
+
+export function putFibres(pubkey, fibres) {
+  state.fibres[pubkey] = fibres;
   persist();
-  return suggestions;
+  return fibres;
 }
 
-export function getSuggestions(pubkey) {
-  return state.suggestions[pubkey] ?? [];
+export function getFibre(pubkey, id) {
+  return listFibres(pubkey).find((fibre) => fibre.id === id) ?? null;
 }
 
-/**
- * Applies a user decision to the stored verdict so it survives a client
- * reload. Without this the client would have to shadow decisions in local
- * state, which is lost the moment the view unmounts.
- */
-export function patchSuggestion(pubkey, eventId, patch) {
-  const suggestion = (state.suggestions[pubkey] ?? []).find(
-    (candidate) => candidate.eventId === eventId,
-  );
-  if (!suggestion) return null;
-  Object.assign(suggestion, patch);
+export function patchFibre(pubkey, id, patch) {
+  const fibre = getFibre(pubkey, id);
+  if (!fibre) return null;
+  Object.assign(fibre, patch, {
+    updatedAt: Math.floor(Date.now() / 1000),
+  });
   persist();
-  return suggestion;
+  return fibre;
 }
 
-export function listTodos(pubkey) {
-  return bucket("todos", pubkey);
-}
-
-export function createTodo(pubkey, input) {
-  // Adopting the same message twice is a repeated intent, not a second task.
-  const existing = bucket("todos", pubkey).find(
-    (candidate) =>
-      candidate.eventId === input.eventId && candidate.status === "open",
-  );
-  if (existing) return existing;
-
-  const todo = {
-    id: randomUUID(),
-    pubkey,
-    eventId: input.eventId,
-    channelId: input.channelId ?? null,
-    channelName: input.channelName ?? null,
-    threadRootId: input.threadRootId ?? null,
-    authorLabel: input.authorLabel ?? null,
-    preview: input.preview ?? "",
-    reason: input.reason ?? "",
-    status: "open",
-    createdAt: Math.floor(Date.now() / 1000),
-  };
-  bucket("todos", pubkey).unshift(todo);
+export function restoreFibres(pubkey) {
+  const now = Math.floor(Date.now() / 1000);
+  for (const fibre of listFibres(pubkey)) {
+    if (fibre.status === "open") continue;
+    fibre.status = "open";
+    fibre.updatedAt = now;
+  }
   persist();
-  return todo;
+  return listOpenFibres(pubkey);
 }
 
-export function updateTodo(pubkey, id, status) {
-  const todo = bucket("todos", pubkey).find((candidate) => candidate.id === id);
-  if (!todo) return null;
-  todo.status = status;
-  todo.resolvedAt = Math.floor(Date.now() / 1000);
+export function ingestedIds(pubkey) {
+  return new Set(bucket("ingested", pubkey));
+}
+
+export function markIngested(pubkey, eventIds) {
+  const existing = bucket("ingested", pubkey);
+  const seen = new Set(existing);
+  for (const eventId of eventIds) {
+    if (!eventId || seen.has(eventId)) continue;
+    existing.push(eventId);
+    seen.add(eventId);
+  }
+  state.ingested[pubkey] = existing.slice(-INGESTED_CAP);
   persist();
-  return todo;
 }
 
 export function recordFeedback(pubkey, entry) {
@@ -95,7 +108,6 @@ export function recordFeedback(pubkey, entry) {
     createdAt: Math.floor(Date.now() / 1000),
   };
   bucket("feedback", pubkey).unshift(row);
-  // Keep the learning window bounded so prompts and heuristics stay small.
   state.feedback[pubkey] = bucket("feedback", pubkey).slice(0, 200);
   persist();
   return row;
@@ -103,4 +115,13 @@ export function recordFeedback(pubkey, entry) {
 
 export function listFeedback(pubkey) {
   return bucket("feedback", pubkey);
+}
+
+export function fibresPayload(pubkey) {
+  const open = listOpenFibres(pubkey);
+  return {
+    fibres: open,
+    openCount: open.length,
+    clearedCount: clearedCount(pubkey),
+  };
 }

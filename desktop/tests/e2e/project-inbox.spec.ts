@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
+
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
