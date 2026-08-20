@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applyChannelLastMessageAt } from "./channelRecency.ts";
+import { mergeConcurrentChannelRecency } from "./channelRecencyMerge.ts";
 
 function makeChannel(id, lastMessageAt = null) {
   return { id, lastMessageAt };
@@ -51,5 +52,50 @@ test("applyChannelLastMessageAt preserves the list for invalid or unknown update
   assert.strictEqual(
     applyChannelLastMessageAt(undefined, "design", 1_767_225_660),
     undefined,
+  );
+});
+
+function mergeRecency(start, displayed, refreshed) {
+  return mergeConcurrentChannelRecency(
+    [makeChannel("general", refreshed)],
+    [makeChannel("general", displayed)],
+    [makeChannel("general", start)],
+  )[0];
+}
+
+test("mergeConcurrentChannelRecency preserves live recency for both refresh response shapes", () => {
+  // A full-list response and a not-modified response both reduce to the same
+  // refreshed/displayed/start inputs before settlement.
+  for (const responseShape of ["full-list", "not-modified"]) {
+    const result = mergeRecency(
+      "2026-01-01T00:00:00Z",
+      "2026-01-01T00:02:00Z",
+      "2026-01-01T00:01:00Z",
+    );
+    assert.equal(result.lastMessageAt, "2026-01-01T00:02:00Z", responseShape);
+  }
+});
+
+test("mergeConcurrentChannelRecency preserves monotonic and absence semantics", () => {
+  assert.equal(
+    mergeRecency(
+      "2026-01-01T00:02:00Z",
+      "2026-01-01T00:02:00Z",
+      "2026-01-01T00:01:00Z",
+    ).lastMessageAt,
+    "2026-01-01T00:02:00Z",
+  );
+  assert.equal(
+    mergeRecency("2026-01-01T00:01:00Z", "2026-01-01T00:01:00Z", null)
+      .lastMessageAt,
+    null,
+  );
+  assert.equal(
+    mergeRecency(
+      "2026-01-01T00:00:00Z",
+      "2026-01-01T00:01:00Z",
+      "2026-01-01T00:02:00Z",
+    ).lastMessageAt,
+    "2026-01-01T00:02:00Z",
   );
 });

@@ -32,6 +32,7 @@ import type {
   UpdateChannelInput,
 } from "@/shared/api/types";
 import type { OpenDmInput } from "@/shared/api/tauriChannels";
+import { mergeConcurrentChannelRecency } from "@/features/channels/lib/channelRecencyMerge";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -360,6 +361,8 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         initialSnapshotPair;
       const knownHash = cachedPair?.hash ?? null;
 
+      const channelsAtRequestStart =
+        queryClient.getQueryData<Channel[]>(channelsQueryKey);
       const payload = await getChannels(knownHash);
 
       // A not-modified response is usable only when it echoes the exact hash
@@ -377,13 +380,22 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         // Missing cache or a mismatched not-modified response: discard the hash
         // and fetch a complete authoritative list before updating persistence.
         const full = await getChannels(null);
-        const sorted = sortChannels(
+        const authoritativeChannels = sortChannels(
           applyLastMessages(
             requireFullChannelList(full.channels),
             full.lastMessages,
           ),
         );
-        const pair = { channels: sorted, hash: full.hash };
+        const displayedAtSettlement =
+          queryClient.getQueryData<Channel[]>(channelsQueryKey);
+        const sorted = sortChannels(
+          mergeConcurrentChannelRecency(
+            authoritativeChannels,
+            displayedAtSettlement,
+            channelsAtRequestStart,
+          ),
+        );
+        const pair = { channels: authoritativeChannels, hash: full.hash };
         queryClient.setQueryData(channelsSnapshotPairKey, pair);
         if (relayUrl && ownerPubkey) {
           writeChannelSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
@@ -399,22 +411,27 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
         hash: payload.hash,
       };
       queryClient.setQueryData(channelsSnapshotPairKey, pair);
-      // A matching not-modified result must merge timestamps into whatever is
-      // displayed at completion time. Reading through setQueryData avoids
-      // clobbering an optimistic mutation that landed while the request ran.
-      const sorted =
+      // Merge against the displayed cache at settlement so a newer live
+      // timestamp cannot be rolled back by an older request result. This is
+      // required for both full-list and matching not-modified responses.
+      const displayedAtSettlement =
+        queryClient.getQueryData<Channel[]>(channelsQueryKey);
+      const refreshedForDisplay =
         payload.channels === null
-          ? (queryClient.setQueryData<Channel[]>(
-              channelsQueryKey,
-              (displayedChannels) =>
-                sortChannels(
-                  applyLastMessages(
-                    displayedChannels ?? authoritativeChannels,
-                    payload.lastMessages,
-                  ),
-                ),
-            ) ?? authoritativeChannels)
+          ? sortChannels(
+              applyLastMessages(
+                displayedAtSettlement ?? authoritativeChannels,
+                payload.lastMessages,
+              ),
+            )
           : authoritativeChannels;
+      const sorted = sortChannels(
+        mergeConcurrentChannelRecency(
+          refreshedForDisplay,
+          displayedAtSettlement,
+          channelsAtRequestStart,
+        ),
+      );
       if (relayUrl && ownerPubkey) {
         writeChannelSnapshot(relayUrl, ownerPubkey, pair.channels, pair.hash);
       }
