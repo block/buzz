@@ -4,7 +4,7 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -45,6 +45,80 @@ pub enum ConfigError {
 
     #[error("config file error: {0}")]
     ConfigFile(String),
+}
+
+/// Environment variable an operator sets to pin the session working directory.
+///
+/// See `crates/buzz-persona/PERSONA_PACK_SPEC.md` § `$AGENT_CWD` Definition.
+pub const AGENT_CWD_ENV: &str = "AGENT_CWD";
+
+#[derive(Debug, Error, PartialEq)]
+pub enum AgentCwdError {
+    #[error(
+        "{AGENT_CWD_ENV} is set to `{0}`, which is not an absolute path. \
+         The session working directory must be absolute so agents can resolve \
+         workspace files without searching $HOME."
+    )]
+    NotAbsolute(String),
+
+    #[error("{AGENT_CWD_ENV} is set to `{0}`, which is not an existing directory")]
+    NotADirectory(String),
+
+    #[error(
+        "cannot determine the session working directory: {AGENT_CWD_ENV} is unset \
+         and the current directory is unavailable ({0})"
+    )]
+    Undeterminable(String),
+}
+
+/// Resolve the value buzz-acp passes as `NewSessionRequest.cwd`.
+///
+/// Implements the order the persona pack spec already documents:
+///
+/// 1. `AGENT_CWD`, when set.
+/// 2. `std::env::current_dir()` as a fallback.
+/// 3. Otherwise refuse to start.
+///
+/// An `AGENT_CWD` that is set but unusable is an error rather than a silent
+/// fall-through to step 2: an operator who pinned a workspace and got the
+/// process directory instead would only notice once an agent answered without
+/// the repository's instructions loaded.
+///
+/// `current_dir` and `is_dir` are injected so the resolution order is testable
+/// without mutating process-global state.
+pub fn resolve_agent_cwd_with(
+    env_value: Option<String>,
+    current_dir: Result<PathBuf, std::io::Error>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Result<String, AgentCwdError> {
+    if let Some(raw) = env_value {
+        let trimmed = raw.trim();
+        // An empty or whitespace-only value reads as "unset" in every shell
+        // idiom that builds it (`AGENT_CWD=${WORKSPACE}`), so fall through.
+        if !trimmed.is_empty() {
+            let path = Path::new(trimmed);
+            if !path.is_absolute() {
+                return Err(AgentCwdError::NotAbsolute(trimmed.to_string()));
+            }
+            if !is_dir(path) {
+                return Err(AgentCwdError::NotADirectory(trimmed.to_string()));
+            }
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    current_dir
+        .map(|path| path.to_string_lossy().to_string())
+        .map_err(|err| AgentCwdError::Undeterminable(err.to_string()))
+}
+
+/// Process-level entry point for [`resolve_agent_cwd_with`].
+pub fn resolve_agent_cwd() -> Result<String, AgentCwdError> {
+    resolve_agent_cwd_with(
+        std::env::var(AGENT_CWD_ENV).ok(),
+        std::env::current_dir(),
+        |path| path.is_dir(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -3019,5 +3093,104 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+
+    // ── $AGENT_CWD resolution ────────────────────────────────────────────────
+    //
+    // Pins the order documented in PERSONA_PACK_SPEC.md § `$AGENT_CWD`
+    // Definition. Resolution is injected rather than read from the process, so
+    // these run in parallel without fighting over the environment.
+
+    fn io_err() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no such directory")
+    }
+
+    #[test]
+    fn agent_cwd_env_wins_over_the_process_directory() {
+        let resolved = resolve_agent_cwd_with(
+            Some("/srv/workspaces/api".to_string()),
+            Ok(PathBuf::from("/opt/buzz")),
+            |_| true,
+        );
+        assert_eq!(resolved, Ok("/srv/workspaces/api".to_string()));
+    }
+
+    #[test]
+    fn agent_cwd_falls_back_to_the_process_directory_when_unset() {
+        let resolved = resolve_agent_cwd_with(None, Ok(PathBuf::from("/opt/buzz")), |_| true);
+        assert_eq!(resolved, Ok("/opt/buzz".to_string()));
+    }
+
+    #[test]
+    fn agent_cwd_treats_a_blank_value_as_unset() {
+        // `AGENT_CWD=${WORKSPACE}` with an unset WORKSPACE expands to "", which
+        // every shell idiom means as "I did not set this".
+        for blank in ["", "   ", "\t\n"] {
+            let resolved = resolve_agent_cwd_with(
+                Some(blank.to_string()),
+                Ok(PathBuf::from("/opt/buzz")),
+                |_| true,
+            );
+            assert_eq!(resolved, Ok("/opt/buzz".to_string()), "blank: {blank:?}");
+        }
+    }
+
+    #[test]
+    fn agent_cwd_is_trimmed() {
+        let resolved = resolve_agent_cwd_with(
+            Some("  /srv/workspaces/api\n".to_string()),
+            Ok(PathBuf::from("/opt/buzz")),
+            |_| true,
+        );
+        assert_eq!(resolved, Ok("/srv/workspaces/api".to_string()));
+    }
+
+    #[test]
+    fn relative_agent_cwd_is_rejected_instead_of_falling_back() {
+        // Falling back here would hand the agent the process directory while the
+        // operator believes the workspace is pinned — the silent failure this
+        // resolution order exists to prevent.
+        let resolved = resolve_agent_cwd_with(
+            Some("workspaces/api".to_string()),
+            Ok(PathBuf::from("/opt/buzz")),
+            |_| true,
+        );
+        assert_eq!(
+            resolved,
+            Err(AgentCwdError::NotAbsolute("workspaces/api".to_string()))
+        );
+    }
+
+    #[test]
+    fn missing_agent_cwd_directory_is_rejected() {
+        let resolved = resolve_agent_cwd_with(
+            Some("/srv/workspaces/typo".to_string()),
+            Ok(PathBuf::from("/opt/buzz")),
+            |_| false,
+        );
+        assert_eq!(
+            resolved,
+            Err(AgentCwdError::NotADirectory(
+                "/srv/workspaces/typo".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn unset_agent_cwd_and_unavailable_process_directory_refuses_to_start() {
+        let resolved = resolve_agent_cwd_with(None, Err(io_err()), |_| true);
+        assert!(
+            matches!(resolved, Err(AgentCwdError::Undeterminable(_))),
+            "expected refusal, got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn agent_cwd_never_silently_resolves_to_the_root_fallback() {
+        // The previous `unwrap_or_else(|_| PathBuf::from("/"))` produced a cwd of
+        // "/", which `workspace_section` drops — leaving protocol-v1 harnesses
+        // (#3148) to scan the whole filesystem. Refusing to start replaces it.
+        let resolved = resolve_agent_cwd_with(None, Err(io_err()), |_| true);
+        assert_ne!(resolved, Ok("/".to_string()));
     }
 }

@@ -1940,6 +1940,12 @@ async fn tokio_main() -> Result<()> {
         return setup_mode::run_setup_listener(config, payload).await;
     }
 
+    // Resolved after the setup branch on purpose: setup mode never opens a
+    // session, so a workspace typo must not block an operator from fixing the
+    // credentials that put the agent in setup mode to begin with.
+    let agent_cwd = config::resolve_agent_cwd().map_err(|e| anyhow::anyhow!("{e}"))?;
+    tracing::info!("buzz-acp session working directory: {agent_cwd}");
+
     tracing::info!("buzz-acp starting: {}", config.summary());
 
     let observer = config
@@ -2191,10 +2197,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
+        cwd: agent_cwd,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -4887,10 +4890,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        .to_string_lossy()
-        .to_string();
+    // Same resolution as the long-running path, so `models` probes the agent in
+    // the workspace the operator pinned rather than wherever the CLI was run.
+    let cwd = config::resolve_agent_cwd().map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
