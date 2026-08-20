@@ -451,6 +451,32 @@ test("conversationId falls back to event id for a top-level item with no thread 
   assert.equal(inboxItem.id, "top-level-event");
 });
 
+test("top-level kind:9 agent replies stay standalone in activity", () => {
+  const [inboxItem] = buildInboxItems({
+    channels,
+    feed: feedWith({
+      activity: [
+        item({
+          id: "agent-top-level-reply",
+          kind: 9,
+          category: "activity",
+          pubkey: "agent-pubkey",
+          content: "Reply in the channel timeline",
+          tags: [["h", CHANNEL_ID]],
+        }),
+      ],
+    }),
+  });
+
+  assert.equal(inboxItem.conversationId, "agent-top-level-reply");
+  assert.equal(inboxItem.id, "agent-top-level-reply");
+  assert.equal(inboxItem.categoryLabel, "Activity");
+  assert.deepEqual(getInboxTypeLabel(inboxItem), {
+    text: "Channel update in",
+    channelLabel: "buzz-bugs",
+  });
+});
+
 test("getInboxConversationId uses root tag when present", () => {
   const tags = [
     ["h", CHANNEL_ID],
