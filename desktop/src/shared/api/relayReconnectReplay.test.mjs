@@ -492,6 +492,47 @@ test("channel reconnect replay pages the missed window until a short page", asyn
   assert.equal(delivered.length, 1008);
 });
 
+test("native repair preserves an explicit subscription since boundary", async () => {
+  resetGate();
+  const repairRequests = [];
+  const filter = {
+    ...buildChannelFilter("channel-1", 1000),
+    since: 10_000,
+  };
+  const subscriptions = new Map([
+    [
+      "live-1",
+      {
+        mode: "live",
+        filter,
+        onEvent: () => {},
+        // The repair lookback would otherwise cross the from-now boundary.
+        lastSeenCreatedAt: 11_000,
+      },
+    ],
+  ]);
+
+  await replayLiveSubscriptions({
+    subscriptions,
+    sendRaw: async () => {},
+    requestRepair: async (request) => {
+      repairRequests.push(request);
+      return [];
+    },
+  });
+
+  assert.equal(11_000 - RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS, 9_135);
+  assert.deepEqual(repairRequests, [
+    {
+      channelId: "channel-1",
+      limit: 500,
+      since: 10_000,
+      until: undefined,
+      beforeId: undefined,
+    },
+  ]);
+});
+
 test("reconnect replay starts live REQs in parallel and preserves per-sub page order", async () => {
   resetGate();
   const sentPayloads = [];

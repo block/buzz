@@ -247,10 +247,17 @@ export async function replayLiveSubscriptions({
       // over the cursor: live events kept advancing `lastSeenCreatedAt`
       // while the older window stayed unresolved, and starting from the
       // cursor would skip it permanently.
-      const replaySince =
+      const replayFloor =
         cursorSince === undefined
           ? subscription.pendingReplaySince
           : Math.min(cursorSince, subscription.pendingReplaySince ?? Infinity);
+      // Native repair bypasses the original WS filter, so preserve its lower
+      // bound explicitly. Otherwise a from-now subscription can replay older
+      // rows and surface stale unread or notification activity on reconnect.
+      const replaySince =
+        replayFloor === undefined
+          ? undefined
+          : Math.max(replayFloor, subscription.filter.since ?? 0);
       const willRepair = shouldPageReplay && replaySince !== undefined;
       if (willRepair) {
         // Install before the restored live REQ: a live frame may beat page one.
