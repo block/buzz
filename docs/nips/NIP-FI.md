@@ -190,9 +190,12 @@ never enter the result. [FI-TRACE-VERIFIER-PARITY]
 
 Policy selects exactly one token class before parsing claims:
 
-- **RFC 9068 access token**: a Buzz-resource access token whose protected
+- **`at+jwt` access token**: a Buzz-resource access token whose protected
   `typ` is exactly `at+jwt` and whose `aud` contains the configured Buzz
-  resource audience;
+  resource audience. This class selects tokens carrying the RFC 9068 `at+jwt`
+  type but validates them under this document's claim contract; it does not
+  implement the full RFC 9068 validation profile, and the long-form media type
+  `application/at+jwt` is not accepted;
 - **dedicated Buzz assertion**: a separately minted assertion whose protected
   `typ` is exactly `nip-fi+jwt`;
 - **named compatibility access token**: absent or generic protected `typ=JWT`
@@ -202,8 +205,8 @@ Policy selects exactly one token class before parsing claims:
 
 OIDC ID Tokens always deny, even when `iss`, `aud`, and `sub` match. A generic
 or absent type has no stock fallback. Failure under one class never triggers
-validation under another. An RFC 9068 token MUST contain one non-empty bounded
-`client_id`. Issuer policy MUST distinguish a resource-owner token from a token
+validation under another. An `at+jwt` access token MUST contain one non-empty
+bounded `client_id`. Issuer policy MUST distinguish a resource-owner token from a token
 whose subject represents the OAuth client, including a client-credentials token,
 using authenticated claim semantics and mutually exclusive validation rules. A
 token that admits both interpretations denies. If client-subject tokens are
@@ -269,9 +272,9 @@ Each policy declares exactly one server-owned freshness class, included in
   artifact: issuer revocation review]
 - **`current-status`** additionally requires an authenticated witness
   `(iss, sub, token_or_session_id?, active=true, observed_at, valid_until,
-  status_version, authenticated_source_id)`. Subject and optional session
-  identifier exactly match the assertion. Ambiguous, unauthenticated, inactive,
-  or expired status denies. `valid_until` is finite and no later than
+  status_version, authenticated_source_id)`. Issuer, subject, and optional
+  session identifier exactly match the assertion. Ambiguous, unauthenticated,
+  inactive, or expired status denies. `valid_until` is finite and no later than
   `observed_at + maximum_status_age`. The upstream deadline is the minimum of
   the offline assertion deadlines and `valid_until`. Source outage cannot mint
   or extend a witness; an already verified witness remains usable only until
@@ -313,7 +316,10 @@ to lowercase hexadecimal SHA-256 of the exact bytes consumed by the
 application. Absence, duplication, mismatch, validation of only a prefix, or
 post-validation transformation denies. For an irrelevant body, no
 Authorization decision, target, capability, or effect selector derives from a
-body field not bound by NIP-98. [FI-TRACE-BODY-BINDING]
+body field not bound by NIP-98. A `payload` tag present on an operation whose
+body is declared authorization-irrelevant is validated identically against
+lowercase hexadecimal SHA-256 of the exact body bytes received; duplication or
+mismatch denies. [FI-TRACE-BODY-BINDING]
 
 Every operation has finite body and spool bounds. A known oversized body is
 rejected before hashing; a stream is rejected at octet `limit + 1`; admission
@@ -453,14 +459,18 @@ assertion revalidation material is destroyed on expiry, close, or invalidation.
 Public class is a function only of evidence the requester supplied, never of
 private per-principal server state; `authorization_unavailable` is the sole
 exception and reveals only that a required authoritative dependency is
-unreadable, never any per-principal fact. Under the private-posture rule, even
-`key_mismatch` joins the private-state anonymity set.
+unreadable, never any per-principal fact. Replay status is a function of
+committed per-principal server state, not of the supplied evidence alone;
+replayed evidence is therefore classed `authorization_denied`, indistinguishable
+from any other private-state denial, so that resubmitting captured evidence
+reveals nothing about whether the original request committed. Under the
+private-posture rule, even `key_mismatch` joins the private-state anonymity set.
 
 | Private condition | Public class | Nostr prefix and exact text | HTTP response |
 |---|---|---|---|
 | assertion/proof absent | `missing_evidence` | `auth-required: authentication required` | `401`; `WWW-Authenticate: Nostr`; `Content-Type: text/plain; charset=utf-8`; `authentication required\n` |
-| malformed, invalid, expired, or replayed evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; `evidence rejected\n` |
-| key mismatch; attestation required; binding conflict; retired pair; revoked key; lifecycle gate; binding required/expired; local policy denial | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; `authorization denied\n` |
+| malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; `evidence rejected\n` |
+| replayed evidence; key mismatch; attestation required; binding conflict; retired pair; revoked key; lifecycle gate; binding required/expired; local policy denial | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; `authorization denied\n` |
 | required current dependency unreadable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; `authorization unavailable\n` |
 
 Nostr text is the exact UTF-8 text after an applicable NIP-42/NIP-01 prefix.
@@ -545,15 +555,15 @@ policy revision. NIP-FI-CONF defines evidence and mutation-adequacy rules.
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, mixed, URL, and fallback variants deny. |
 | `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and ambiguity negative denies. |
-| `FI-TRACE-TOKEN-CLASS` | An RFC 9068 `at+jwt` access token and a dedicated `nip-fi+jwt` assertion pass only their selected class. ID tokens, wrong/generic types outside a named compatibility policy, client-only audiences, absent or ambiguous `client_id`, resource-owner/client-subject ambiguity, and every attempted cross-class fallback deny. |
+| `FI-TRACE-TOKEN-CLASS` | An `at+jwt` access token and a dedicated `nip-fi+jwt` assertion pass only their selected class. ID tokens, wrong/generic types outside a named compatibility policy, client-only audiences, absent or ambiguous `client_id`, resource-owner/client-subject ambiguity, and every attempted cross-class fallback deny. |
 | `FI-TRACE-CONTRACT-IDENTITIES` | Mutate each assertion semantic, transport semantic, and mutable dependency independently: semantic mutations change only their owning contract ID; snapshot/binding/lifecycle/policy/resource/status mutations change neither ID but force current revalidation. |
 | `FI-TRACE-VERIFIER-PARITY` | Equal authoritative input and policy produce the same canonical normalized result. |
 | `FI-TRACE-JWKS-ADD` | Retained-key rotation revalidates successfully under the changed snapshot version. |
 | `FI-TRACE-JWKS-REMOVE` | Evidence and leases under a removed key deny after snapshot change. |
 | `FI-TRACE-CURRENT-STATUS-REVOKED` | Revocation, including one racing final admission, closes authority within the advertised tested bound. |
-| `FI-TRACE-CURRENT-STATUS-STALE` | Inactive/ambiguous status denies; expiry equality, outage, delayed events, and changed status versions cannot mint or extend a witness. |
+| `FI-TRACE-CURRENT-STATUS-STALE` | Inactive/ambiguous status denies; an issuer, subject, or session-identifier mismatch denies; expiry equality, outage, delayed events, and changed status versions cannot mint or extend a witness. |
 | `FI-TRACE-CAPABILITY-REVOCATION` | Removal of a revocation-bounded external capability projection from authoritative local policy closes prepared evidence and lease use within the declared bound; assertion-only projection cannot satisfy this oracle. |
-| `FI-TRACE-BODY-BINDING` | Exact complete relevant body passes; absent/duplicate/mutated/partial/transformed payload variants deny without effects. |
+| `FI-TRACE-BODY-BINDING` | Exact complete relevant body passes; absent/duplicate/mutated/partial/transformed payload variants deny without effects; a payload tag on an irrelevant-body operation validates identically and denies on duplication or mismatch. |
 | `FI-TRACE-BODY-BOUNDS` | Oversized, over-quota, and pre-EOF variants deny with bounded work, cleanup, and no effects. |
 | `FI-TRACE-DOMAIN-SPOOF` | Client routing and forwarded authority cannot replace server-owned context. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch denies with no mutation and the private-state response. |

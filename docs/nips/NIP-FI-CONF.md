@@ -52,7 +52,9 @@ different text: a claim that does not name the revision it was judged against
 is unfalsifiable once the specification moves, and a suite that does not name
 its fixture cannot be shown to have run the pinned inputs. A report contains
 every applicable oracle from core and every claimed profile exactly once, with
-status `pass` or `not-applicable` only. Blank, skipped, expected-failure, and
+status `pass` or `not-applicable` only, except that `FI-CONF-INTEROP-EXIT`
+alone may instead carry `deferred` under the condition defined in
+**Interoperability exit test**. Blank, skipped, expected-failure, and
 not-run results cannot support a claim (`FI-CONF-CLAIM-COMPLETE`).
 
 Enrollment mode is part of the claim unit and is private. It is recorded in the
@@ -111,19 +113,21 @@ which owns that mapping and the exact response bytes.
 | # | Private condition | Public class | Defined by |
 |---|---|---|---|
 | 1 | assertion, proof, or delegation evidence absent | `missing_evidence` | core |
-| 2 | evidence present but rejected: signature, key selection, issuer, audience, time, size, ambiguity, token class, body binding, or edge provenance/replay | `evidence_rejected` | core, NIP-FI-EDGE |
-| 3 | `key_mismatch` — asserted key is not the proven actor | `authorization_denied` | core |
-| 4 | `attestation_required` — attested-key enrollment without a matching key claim | `authorization_denied` | core |
-| 5 | `binding_conflict` — either side of the active relation is taken | `authorization_denied` | core |
-| 6 | `pair_retired` | `authorization_denied` | core |
-| 7 | `key_revoked` | `authorization_denied` | core |
-| 8 | `policy_denied` — local operation policy | `authorization_denied` | core |
-| 9 | `binding_required` — enrollment policy creates no binding at this request: provisioned mode with no binding, or any unrecognized policy value | `authorization_denied` | core |
-| 10 | `identity_disabled` | `authorization_denied` | NIP-FI-LIFECYCLE |
-| 11 | `explicit_replacement_required` — pending lineage | `authorization_denied` | NIP-FI-LIFECYCLE |
-| 12 | `binding_expired` — administrative expiry | `authorization_denied` | NIP-FI-LIFECYCLE |
-| 13 | `delegation_not_current` — owner or relationship no longer current | `authorization_denied` | NIP-FI-DELEG |
-| 14 | `dependency_unreadable` | `authorization_unavailable` | core |
+| 2 | edge provenance absent or incomplete on an edge-required route (assertion may be present) | `missing_evidence` | NIP-FI-EDGE |
+| 3 | evidence present but rejected: signature, key selection, issuer, audience, time, size, ambiguity, token class, body binding, or edge provenance (present but rejected) | `evidence_rejected` | core, NIP-FI-EDGE |
+| 4 | replayed evidence — committed replay identity already claimed | `authorization_denied` | core, NIP-FI-EDGE |
+| 5 | `key_mismatch` — asserted key is not the proven actor | `authorization_denied` | core |
+| 6 | `attestation_required` — attested-key enrollment without a matching key claim | `authorization_denied` | core |
+| 7 | `binding_conflict` — either side of the active relation is taken | `authorization_denied` | core |
+| 8 | `pair_retired` | `authorization_denied` | core |
+| 9 | `key_revoked` | `authorization_denied` | core |
+| 10 | `policy_denied` — local operation policy | `authorization_denied` | core |
+| 11 | `binding_required` — enrollment policy creates no binding at this request: provisioned mode with no binding, or any unrecognized policy value | `authorization_denied` | core |
+| 12 | `identity_disabled` | `authorization_denied` | NIP-FI-LIFECYCLE |
+| 13 | `explicit_replacement_required` — pending lineage | `authorization_denied` | NIP-FI-LIFECYCLE |
+| 14 | `binding_expired` — administrative expiry | `authorization_denied` | NIP-FI-LIFECYCLE |
+| 15 | `delegation_not_current` — owner or relationship no longer current | `authorization_denied` | NIP-FI-DELEG |
+| 16 | `dependency_unreadable` | `authorization_unavailable` | core |
 
 The names in the private-condition column are fixture identifiers for this
 enumeration. Some are the symbols core's preparation pseudocode denies by name;
@@ -333,6 +337,13 @@ produce equal bytes however correct both are, so the run is parameterized by a
 - one frozen evaluation instant, and the skew and lifetime bounds in force; and
 - the domain, target resource, operation, and enrollment policy for each case.
 
+The canonical shared exit fixture is authored by this document's editors, not
+by any claiming implementation, and is published as a single file in the same
+repository as these documents, at `docs/nips/fixtures/nip-fi-conf-exit.json`,
+together with its SHA-256 digest. Both sides MUST load that file, MUST verify
+the digest before the run, and MUST record the digest with the evidence. A run
+against any other fixture instance is not `FI-CONF-INTEROP-EXIT` evidence.
+
 **Request compared object.** A minted request cannot be compared as bytes. Two
 conforming implementations may produce different signature octets for the same
 semantic input — randomized `ES256` and BIP-340 with fresh auxiliary input do,
@@ -381,6 +392,14 @@ would reject conforming pairs; the exit test itself is then the defect. The
 control is retained with the evidence, because a comparison that only ever
 reports equality proves nothing about what it would have caught.
 
+`FI-CONF-INTEROP-EXIT` is REQUIRED only once a second implementation meeting
+the independence conditions above exists. Until one exists the test cannot be
+run, and a conformance claim MUST instead record it as deferred with the
+machine-readable reason `no-independent-implementation`. A deferred exit test
+MUST be run and passed before the second implementation's conformance claim is
+accepted, and the first implementation's claim MUST be re-evidenced against
+that run.
+
 ## Applicability
 
 `not-applicable` requires a machine-readable reason and behavioral proof that
@@ -414,7 +433,9 @@ that the protected-ingress inventory has no uncovered or competing authority;
 that every listed oracle has a killed, attributed, reachable mutant and every
 survivor is recorded; that the denial-fixture enumeration is complete for the
 claimed profiles and its negative control fails as required; that the
-interoperability exit test has passed against an independent implementation;
+interoperability exit test has passed against an independent implementation, or
+is recorded as deferred under **Interoperability exit test** because no
+independent implementation exists;
 that every named deployment artifact exists at the claimed deployment revision;
 and that public and operational sinks pass privacy-canary inspection.
 
@@ -425,7 +446,7 @@ They close no item in this gate.
 
 | ID | Required outcome |
 |---|---|
-| `FI-CONF-CLAIM-COMPLETE` | A report missing an applicable oracle, duplicating one, carrying a result from another claim tuple, or claiming a status other than `pass`/`not-applicable` is rejected. |
+| `FI-CONF-CLAIM-COMPLETE` | A report missing an applicable oracle, duplicating one, carrying a result from another claim tuple, or claiming a status other than `pass`/`not-applicable` — or `deferred` on any oracle other than `FI-CONF-INTEROP-EXIT` — is rejected. |
 | `FI-CONF-DENIAL-FIXTURES` | Every enumerated private condition has a fixture; core and each claimed profile pass exact identifier/class/owner enumeration agreement; anonymity-set responses compare byte-identical; the distinguishing negative control fails. |
 | `FI-CONF-MUTATION` | Every listed oracle has a singly-applied, attributed, reachability-witnessed mutant killed by that entry's own oracle; survivors are recorded, not waived. |
 | `FI-CONF-INTEROP-EXIT` | Two independent implementations produce, from the documents alone, valid requests equal over the request compared object and per-class denials equal over the denial compared object, and accept each other's output. |

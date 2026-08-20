@@ -37,8 +37,12 @@ fallback to `client-attached` or another edge profile.
 
 Every trusted edge MUST:
 
-1. strip every inbound copy of each assertion, identity, authorization, capability,
-   provenance, and client-peer field before inserting its own fields;
+1. strip every inbound copy of each `Nostr-Federated-Identity`,
+   `Nostr-Federated-Identity-Provenance`, and `Nostr-Federated-Identity-Client-Peer`
+   field, and of every other edge profile's assertion, identity, capability,
+   provenance, and client-peer field, before inserting its own fields. A trusted
+   edge MUST NOT remove or modify the `Authorization` field, which remains reserved
+   for the independent NIP-98 proof and MUST reach final admission unmodified;
 2. cryptographically authenticate the immediate edge to the accepting origin and
    isolate the origin from direct or alternate ingress;
 3. integrity-protect every request component used by authorization;
@@ -55,7 +59,10 @@ Every trusted edge MUST:
 Header presence, source address, private-network location, hostname, or reachability
 alone is not provenance. Accepting unsigned identity or capability headers, or
 accepting signed headers without authenticating and isolating the immediate caller,
-is nonconformant.
+is nonconformant. A trusted edge that strips, rewrites, or reorders the
+`Authorization` field, or that admits a proof-transport-`0x02` request whose
+`Authorization` field did not arrive at the verifier byte-identical to the
+client-sent value, is nonconformant.
 
 An adapter's reviewed contract MUST identify its accepting origins, direct-origin
 controls, field-stripping point, immediate-caller authentication, protected request
@@ -161,6 +168,11 @@ time.
 - **Proof transport:** Serialize exactly one assigned octet from the registry below.
 - **Client peer:** Serialize the exact canonical ASCII field value.
 
+No authorization decision, target, resource, capability, or effect selector
+derives from any request component outside the protected pre-MAC components;
+body interpretation follows the server-resolved body semantics, never
+unprotected transport metadata such as `Content-Type` or `Content-Encoding`.
+
 ### Freshness, replay, and key rotation
 
 The deployment configures a positive finite `maximum_provenance_age` and a
@@ -177,6 +189,11 @@ Equality at the age bound is expired. A direct lease deadline is no later than
 state deadline.
 
 Absent, malformed, stale, future-dated, wrong-key, or mismatched provenance denies.
+On a route that requires edge provenance, absent or incomplete provenance —
+including provenance that omits the proxy-authenticated end-client peer — maps
+to the `missing_evidence` public class, regardless of whether an assertion is
+present. Provenance that is present and complete but fails verification maps to
+`evidence_rejected`.
 A v1 envelope denies. A verifier MAY try only a configured finite set of active
 secrets. Rotation does not change nonce identity: replay uniqueness is scoped to
 `(authorization_domain_id, trusted-proxy-hmac-v2, nonce)` and is independent of the
@@ -196,7 +213,9 @@ requires confidentiality and integrity.
 | `0x00` | Invalid; MUST deny. |
 | `0x01` | NIP-42 connection proof. |
 | `0x02` | NIP-98 HTTP proof. |
-| `0x03`–`0x7f` | Unassigned; allocation requires a published stable specification. |
+| `0x03` | Git smart-HTTP session proof: the proxy verifies a session-scoped Nostr authorization for a Git smart-HTTP request before forwarding. Reserved; allocation completes on publication of its transport contract (see below). |
+| `0x04` | Blossom media proof: the proxy verifies a Blossom media-HTTP authorization event for the request before forwarding. Reserved; allocation completes on publication of its transport contract (see below). |
+| `0x05`–`0x7f` | Unassigned; allocation requires a published stable specification. |
 | `0x80`–`0xfe` | Private use under an explicit shared proxy/verifier contract only. |
 | `0xff` | Reserved for a future extended encoding; invalid in HMAC-v2. |
 
@@ -205,6 +224,13 @@ identity and window, and conformance vectors. Assigned semantics never change; a
 incompatible meaning receives a new code. Unknown, unconfigured, or private-use
 codes without the same configured contract at proxy and verifier deny. Private-use
 codes MUST NOT be advertised as portable NIP-FI-EDGE interoperability.
+
+Codes `0x03` and `0x04` are reserved to fix their meanings and prevent
+reassignment; their transport contracts are not yet published, so their
+allocations are not complete. Until the contract for such a code is published,
+the code is valid only under an explicit shared proxy/verifier contract,
+exactly as for private use, and MUST NOT be presented as portable NIP-FI-EDGE
+interoperability.
 
 ## Bounded payload acquisition
 
@@ -334,6 +360,7 @@ Every implementation MUST run these normative negative cases:
 | Envelope | Absent/repeated/comma-combined fields, `v1`, missing/extra component, padding, alternate alphabet, nonce below 16 octets or above configured max, and MAC lengths 31 or 33 all deny. |
 | Domain | Uppercase/nonhyphenated UUID config fails configuration; mixed-endian UUID bytes or any one-bit domain transplant fails the baseline MAC; duplicate active UUID fails startup. |
 | Request | Mutating assertion, method, authority, path/query, body, proof code, or peer while retaining Vector 1's MAC denies. |
+| Metadata | Mutating `Content-Type` or `Content-Encoding` in flight changes no authorization decision, target, capability, or effect selector; a request whose server-resolved body semantics no longer hold denies. |
 | Path | `%2F`→`%2f`, decoding to `/`, reordering repeated query values, or adding/removing an empty `?` fails the baseline MAC. |
 | Authority | Unbracketed or non-RFC-5952 IPv6, uppercase host, trailing dot, or missing port denies before MAC comparison. |
 | Peer | Textual `::ffff:192.0.2.128`, padded IPv4, uppercase/noncanonical IPv6, or whitespace denies before MAC comparison. |
