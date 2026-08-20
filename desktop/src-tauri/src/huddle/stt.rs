@@ -349,6 +349,44 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
+#[derive(Debug)]
+enum SttLoopInput {
+    Tick,
+    Batch(Vec<Vec<u8>>),
+}
+
+fn run_stt_receive_loop(
+    audio_rx: Receiver<Vec<u8>>,
+    shutdown: &AtomicBool,
+    human_floor: HumanFloor,
+    mut process: impl FnMut(SttLoopInput, &mut local_barge_in::LocalBargeIn),
+) {
+    let mut local_barge_in_state = local_barge_in::WorkerLocalBargeIn::new(human_floor);
+
+    loop {
+        // Check shutdown flag before blocking.
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+
+        process(SttLoopInput::Tick, &mut local_barge_in_state);
+
+        // Use recv_timeout so we can periodically check the shutdown flag.
+        let bytes = match audio_rx.recv_timeout(RECV_TIMEOUT) {
+            Ok(b) => b,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // Sender dropped.
+        };
+
+        // Drain any additional pending messages to batch-process.
+        let mut batch = vec![bytes];
+        while let Ok(b) = audio_rx.try_recv() {
+            batch.push(b);
+        }
+        process(SttLoopInput::Batch(batch), &mut local_barge_in_state);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stt_worker(
     model_dir: PathBuf,
@@ -426,8 +464,6 @@ fn stt_worker(
     // computed at. Valid only while no new voiced frame has arrived since.
     let speculative_enabled = stt_speculative_decode();
     let mut speculative: Option<(String, usize)> = None;
-    let mut local_barge_in_state = local_barge_in::WorkerLocalBargeIn::new(human_floor.clone());
-
     // ── 5. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
         .as_ref()
@@ -435,77 +471,69 @@ fn stt_worker(
         || manual_mic_unmuted
             .as_ref()
             .is_some_and(|manual| manual.load(Ordering::Acquire));
-    loop {
-        // Check shutdown flag before blocking.
-        if shutdown.load(Ordering::Acquire) {
-            break;
-        }
+    run_stt_receive_loop(
+        audio_rx,
+        &shutdown,
+        human_floor.clone(),
+        |input, local_barge_in_state| {
+            match input {
+                SttLoopInput::Tick => {
+                    // Track the combined manual/PTT transmission edge. When both paths
+                    // close, the worklet stops sending frames, so flush here rather than
+                    // waiting for silence that will never arrive.
+                    if let Some(ref ptt) = ptt_active {
+                        let transmit_now = ptt.load(Ordering::Acquire)
+                            || manual_mic_unmuted
+                                .as_ref()
+                                .is_some_and(|manual| manual.load(Ordering::Acquire));
+                        if transmit_was_active
+                            && !transmit_now
+                            && endpoint.in_speech
+                            && !endpoint.speech_buf.is_empty()
+                        {
+                            flush_to_stt(
+                                &endpoint.speech_buf,
+                                endpoint.voiced_frames,
+                                &recognizer,
+                                &text_tx,
+                            );
+                            endpoint.reset_segment();
+                            local_barge_in_state.release(&human_floor);
+                        }
+                        transmit_was_active = transmit_now;
+                    }
+                }
+                SttLoopInput::Batch(batch) => {
+                    for bytes in batch {
+                        // Convert raw bytes to f32 samples (little-endian).
+                        let samples_48k = bytes_to_f32(&bytes);
+                        input_buf_48k.extend_from_slice(&samples_48k);
 
-        // Track the combined manual/PTT transmission edge. When both paths
-        // close, the worklet stops sending frames, so flush here rather than
-        // waiting for silence that will never arrive.
-        if let Some(ref ptt) = ptt_active {
-            let transmit_now = ptt.load(Ordering::Acquire)
-                || manual_mic_unmuted
-                    .as_ref()
-                    .is_some_and(|manual| manual.load(Ordering::Acquire));
-            if transmit_was_active
-                && !transmit_now
-                && endpoint.in_speech
-                && !endpoint.speech_buf.is_empty()
-            {
-                flush_to_stt(
-                    &endpoint.speech_buf,
-                    endpoint.voiced_frames,
-                    &recognizer,
-                    &text_tx,
-                );
-                endpoint.reset_segment();
-                local_barge_in_state.release(&human_floor);
+                        // Resample in chunk_in-sized blocks.
+                        while input_buf_48k.len() >= chunk_in {
+                            let chunk: Vec<f32> = input_buf_48k.drain(..chunk_in).collect();
+                            let resampled = resample_chunk(&mut resampler, &chunk);
+                            process_16k_samples(
+                                &resampled,
+                                &mut leftover_16k,
+                                &mut vad,
+                                &mut endpoint,
+                                flush_frames,
+                                (speculative_enabled, &mut speculative),
+                                &recognizer,
+                                &text_tx,
+                                ptt_active.as_ref(),
+                                manual_mic_unmuted.as_ref(),
+                                &human_floor,
+                                local_barge_in_state,
+                                output_device.as_deref(),
+                            );
+                        }
+                    }
+                }
             }
-            transmit_was_active = transmit_now;
-        }
-
-        // Use recv_timeout so we can periodically check the shutdown flag.
-        let bytes = match audio_rx.recv_timeout(RECV_TIMEOUT) {
-            Ok(b) => b,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break, // Sender dropped.
-        };
-
-        // Drain any additional pending messages to batch-process.
-        let mut batch = vec![bytes];
-        while let Ok(b) = audio_rx.try_recv() {
-            batch.push(b);
-        }
-
-        for bytes in batch {
-            // Convert raw bytes to f32 samples (little-endian).
-            let samples_48k = bytes_to_f32(&bytes);
-            input_buf_48k.extend_from_slice(&samples_48k);
-
-            // Resample in chunk_in-sized blocks.
-            while input_buf_48k.len() >= chunk_in {
-                let chunk: Vec<f32> = input_buf_48k.drain(..chunk_in).collect();
-                let resampled = resample_chunk(&mut resampler, &chunk);
-                process_16k_samples(
-                    &resampled,
-                    &mut leftover_16k,
-                    &mut vad,
-                    &mut endpoint,
-                    flush_frames,
-                    (speculative_enabled, &mut speculative),
-                    &recognizer,
-                    &text_tx,
-                    ptt_active.as_ref(),
-                    manual_mic_unmuted.as_ref(),
-                    &human_floor,
-                    &mut local_barge_in_state,
-                    output_device.as_deref(),
-                );
-            }
-        }
-    }
+        },
+    );
 
     // No final flush — leave_huddle/end_huddle emit lifecycle events before
     // the STT worker exits, so a final flush would post a kind:9 message AFTER
@@ -730,200 +758,5 @@ fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
 use super::drain_until_shutdown;
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        has_enough_voiced_audio, vad_flush_allowed, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
-        SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
-    };
-
-    fn frame(value: f32) -> Vec<f32> {
-        vec![value; VAD_FRAME_SAMPLES]
-    }
-
-    #[test]
-    fn short_vad_blips_do_not_reach_the_recognizer() {
-        assert!(!has_enough_voiced_audio(1));
-        assert!(!has_enough_voiced_audio(MIN_VOICED_FRAMES - 1));
-        assert!(has_enough_voiced_audio(MIN_VOICED_FRAMES));
-    }
-
-    #[test]
-    fn confirmed_onset_prepends_pre_roll_once() {
-        let mut endpoint = VadEndpoint::new();
-        for value in 0..VAD_PRE_ROLL_FRAMES - VAD_ONSET_FRAMES {
-            assert_eq!(
-                endpoint.process_frame(frame(value as f32), 0.0, true, true, SILENCE_FLUSH_FRAMES),
-                VadFrameAction::None
-            );
-        }
-        for value in 0..VAD_ONSET_FRAMES {
-            let action = endpoint.process_frame(
-                frame(100.0 + value as f32),
-                0.9,
-                true,
-                true,
-                SILENCE_FLUSH_FRAMES,
-            );
-            if value + 1 == VAD_ONSET_FRAMES {
-                assert_eq!(action, VadFrameAction::ConfirmedOnset);
-            } else {
-                assert_eq!(action, VadFrameAction::None);
-            }
-        }
-
-        assert_eq!(
-            endpoint.speech_buf.len(),
-            VAD_PRE_ROLL_FRAMES * VAD_FRAME_SAMPLES
-        );
-        assert_eq!(endpoint.speech_buf[0], 0.0);
-        assert_eq!(endpoint.speech_buf[VAD_FRAME_SAMPLES], 1.0);
-        assert_eq!(endpoint.pre_roll.len(), 0);
-        endpoint.process_frame(frame(200.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
-        assert_eq!(
-            endpoint.speech_buf.len(),
-            (VAD_PRE_ROLL_FRAMES + 1) * VAD_FRAME_SAMPLES
-        );
-    }
-
-    #[test]
-    fn onset_requires_consecutive_high_frames() {
-        let mut endpoint = VadEndpoint::new();
-        for probability in [0.9, 0.9, 0.2, 0.9, 0.9] {
-            assert_eq!(
-                endpoint.process_frame(frame(1.0), probability, true, true, SILENCE_FLUSH_FRAMES),
-                VadFrameAction::None
-            );
-        }
-        assert_eq!(
-            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES),
-            VadFrameAction::ConfirmedOnset
-        );
-    }
-
-    #[test]
-    fn offset_hysteresis_preserves_borderline_speech() {
-        let mut endpoint = VadEndpoint::new();
-        for _ in 0..VAD_ONSET_FRAMES {
-            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
-        }
-        assert_eq!(
-            endpoint.process_frame(frame(2.0), 0.4, true, true, SILENCE_FLUSH_FRAMES),
-            VadFrameAction::Speech
-        );
-        assert_eq!(endpoint.silence_frames, 0);
-    }
-
-    #[test]
-    fn below_offset_threshold_starts_silence() {
-        let mut endpoint = VadEndpoint::new();
-        for _ in 0..VAD_ONSET_FRAMES {
-            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
-        }
-        assert_eq!(
-            endpoint.process_frame(frame(0.0), 0.3, true, true, SILENCE_FLUSH_FRAMES),
-            VadFrameAction::FirstSilence
-        );
-        assert_eq!(endpoint.silence_frames, 1);
-    }
-
-    #[test]
-    fn short_segment_reaches_the_visible_drop_path() {
-        let mut endpoint = VadEndpoint::new();
-        for _ in 0..VAD_ONSET_FRAMES {
-            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
-        }
-        let mut action = VadFrameAction::None;
-        for _ in 0..SILENCE_FLUSH_FRAMES {
-            action = endpoint.process_frame(frame(0.0), 0.0, true, true, SILENCE_FLUSH_FRAMES);
-        }
-        assert_eq!(action, VadFrameAction::Flush);
-        assert!(!has_enough_voiced_audio(endpoint.voiced_frames));
-        assert!(!endpoint.speech_buf.is_empty());
-    }
-
-    #[test]
-    fn silence_flush_retains_only_hangover_audio() {
-        let mut endpoint = VadEndpoint::new();
-        for _ in 0..VAD_ONSET_FRAMES {
-            endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
-        }
-        let speech_len = endpoint.speech_buf.len();
-        for index in 1..=SILENCE_FLUSH_FRAMES {
-            let action = endpoint.process_frame(frame(0.0), 0.0, true, true, SILENCE_FLUSH_FRAMES);
-            if index == SILENCE_FLUSH_FRAMES {
-                assert_eq!(action, VadFrameAction::Flush);
-            }
-        }
-        assert_eq!(
-            endpoint.speech_buf.len(),
-            speech_len + 6 * VAD_FRAME_SAMPLES
-        );
-    }
-
-    #[test]
-    fn flush_boundary_never_double_includes_audio() {
-        const SEGMENT_N_MARKER: f32 = 777.0;
-        let mut endpoint = VadEndpoint::new();
-        for _ in 0..VAD_ONSET_FRAMES {
-            endpoint.process_frame(
-                frame(SEGMENT_N_MARKER),
-                0.9,
-                true,
-                true,
-                SILENCE_FLUSH_FRAMES,
-            );
-        }
-        for _ in 0..SILENCE_FLUSH_FRAMES {
-            endpoint.process_frame(
-                frame(SEGMENT_N_MARKER),
-                0.0,
-                true,
-                true,
-                SILENCE_FLUSH_FRAMES,
-            );
-        }
-        endpoint.reset_segment();
-
-        for _ in 0..VAD_ONSET_FRAMES {
-            endpoint.process_frame(frame(2.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
-        }
-        let leaked = endpoint
-            .speech_buf
-            .iter()
-            .filter(|sample| **sample == SEGMENT_N_MARKER)
-            .count();
-        assert_eq!(leaked, 0, "segment N audio leaked into segment N+1");
-    }
-
-    #[test]
-    fn reset_prevents_pre_roll_from_leaking_between_segments() {
-        const SEGMENT_N_MARKER: f32 = 777.0;
-        let mut endpoint = VadEndpoint::new();
-        endpoint.pre_roll.push_back(frame(SEGMENT_N_MARKER));
-        endpoint.reset_segment();
-        for _ in 0..VAD_ONSET_FRAMES {
-            endpoint.process_frame(frame(2.0), 0.9, true, true, SILENCE_FLUSH_FRAMES);
-        }
-        let leaked = endpoint
-            .speech_buf
-            .iter()
-            .filter(|sample| **sample == SEGMENT_N_MARKER)
-            .count();
-        assert_eq!(leaked, 0, "segment N pre-roll leaked into segment N+1");
-    }
-
-    #[test]
-    fn held_push_to_talk_never_silence_flushes() {
-        // Pure VAD mode: silence always ends the utterance.
-        assert!(vad_flush_allowed(false, false, false));
-        // Shortcut configured, nothing transmitting: nothing to flush anyway,
-        // but the pause path stays closed.
-        assert!(!vad_flush_allowed(true, false, false));
-        // Shortcut held: "I am not done talking" — never flush on silence,
-        // regardless of the manual mic state.
-        assert!(!vad_flush_allowed(true, false, true));
-        assert!(!vad_flush_allowed(true, true, true));
-        // Manually open mic with the shortcut up: normal VAD behavior.
-        assert!(vad_flush_allowed(true, true, false));
-    }
-}
+#[path = "stt_tests.rs"]
+mod tests;

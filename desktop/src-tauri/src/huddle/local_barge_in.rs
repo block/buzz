@@ -42,7 +42,12 @@ impl LocalBargeIn {
         self.acquire(human_floor, route_isolated, sustained_coupled);
     }
 
-    fn acquire(&mut self, human_floor: &HumanFloor, route_isolated: bool, sustained_coupled: bool) {
+    pub(super) fn acquire(
+        &mut self,
+        human_floor: &HumanFloor,
+        route_isolated: bool,
+        sustained_coupled: bool,
+    ) {
         self.acquired_floor = human_floor.enter_local(route_isolated, sustained_coupled);
     }
 
@@ -101,33 +106,6 @@ impl Drop for WorkerLocalBargeIn {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn worker_shutdown_releases_local_floor_for_replacement() {
-        let human_floor = HumanFloor::new();
-        {
-            let mut worker_barge_in = WorkerLocalBargeIn::new(human_floor.clone());
-            worker_barge_in.acquire(&human_floor, true, false);
-            assert!(human_floor.is_blocked());
-        }
-
-        let mut replacement = WorkerLocalBargeIn::new(human_floor.clone());
-        replacement.acquire(&human_floor, true, false);
-        assert!(replacement.acquired_floor);
-    }
-
-    #[test]
-    fn worker_channel_disconnect_releases_local_floor_for_replacement() {
-        let human_floor = HumanFloor::new();
-        let mut worker_barge_in = WorkerLocalBargeIn::new(human_floor.clone());
-        worker_barge_in.acquire(&human_floor, true, false);
-        assert!(human_floor.is_blocked());
-        drop(worker_barge_in);
-
-        let mut replacement = WorkerLocalBargeIn::new(human_floor.clone());
-        replacement.acquire(&human_floor, true, false);
-        assert!(replacement.acquired_floor);
-    }
 
     #[test]
     fn manual_open_mic_enables_vad_barge_in_in_ptt_mode() {
