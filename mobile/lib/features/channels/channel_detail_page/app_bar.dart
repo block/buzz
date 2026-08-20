@@ -3,29 +3,6 @@ part of '../channel_detail_page.dart';
 const _dmHeaderAvatarSize = 32.0;
 const _channelHeaderAvatarSize = 40.0;
 const _dmPresenceDotRatio = 8 / 14;
-const _channelBackButtonSize = 48.0;
-
-Widget _channelTimelineAlignedBackButton(BuildContext context) {
-  const timelineAvatarCenter = Grid.gutter + messageAvatarSize / 2;
-
-  return SizedBox(
-    width: timelineAvatarCenter + _channelBackButtonSize / 2,
-    height: _channelBackButtonSize,
-    child: Align(
-      alignment: Alignment.centerRight,
-      child: SizedBox.square(
-        dimension: _channelBackButtonSize,
-        child: IconButton(
-          key: const ValueKey('channel-app-bar-back'),
-          onPressed: () => Navigator.of(context).maybePop(),
-          color: context.colors.primary,
-          icon: const Icon(LucideIcons.chevronLeft),
-          tooltip: 'Back',
-        ),
-      ),
-    ),
-  );
-}
 
 bool _showsMembersAction(Channel channel) {
   if (!channel.isDm) return true;
@@ -106,7 +83,7 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                   color: context.colors.primary,
                 ),
               ),
-              const SizedBox(width: Grid.xxs),
+              const SizedBox(width: Grid.twelve),
               Expanded(
                 child: SizedBox(
                   key: const ValueKey('channel-header-text-stack'),
@@ -124,7 +101,9 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                               key: const ValueKey('channel-header-name'),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: context.textTheme.titleSmall,
+                              style: context.textTheme.titleSmall?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
                           if (channel.isEphemeral) ...[

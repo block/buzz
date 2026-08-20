@@ -5195,7 +5195,7 @@ void main() {
   });
 
   group('App bar', () {
-    testWidgets('aligns the channel back button with message avatars', (
+    testWidgets('uses native back placement with clear channel icon spacing', (
       tester,
     ) async {
       final message = _textMsg(
@@ -5230,17 +5230,13 @@ void main() {
       await tester.tap(find.text('Open channel'));
       await tester.pumpAndSettle();
 
+      final backButtonRect = tester.getRect(find.byTooltip('Back'));
+      final channelIconRect = tester.getRect(
+        find.byKey(const ValueKey('channel-header-avatar')),
+      );
       expect(
-        tester.getCenter(find.byKey(const ValueKey('channel-app-bar-back'))).dx,
-        moreOrLessEquals(
-          tester
-              .getCenter(
-                find.byKey(
-                  const ValueKey('channel-message-avatar-avatar-alignment'),
-                ),
-              )
-              .dx,
-        ),
+        channelIconRect.left - backButtonRect.right,
+        moreOrLessEquals(Grid.xs),
       );
     });
 
@@ -5288,6 +5284,13 @@ void main() {
             ?.fontSize,
         AppTheme.light().textTheme.titleSmall?.fontSize,
       );
+      expect(
+        tester
+            .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
+            .style
+            ?.fontWeight,
+        FontWeight.w600,
+      );
       final channelHeaderAvatar = tester.widget<Container>(
         find.byKey(const ValueKey('channel-header-avatar')),
       );
@@ -5316,6 +5319,13 @@ void main() {
             )
             .color,
         AppTheme.light().colorScheme.primary,
+      );
+      expect(
+        tester.getRect(find.byKey(const ValueKey('channel-header-name'))).left -
+            tester
+                .getRect(find.byKey(const ValueKey('channel-header-avatar')))
+                .right,
+        moreOrLessEquals(Grid.twelve),
       );
       expect(
         tester

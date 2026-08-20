@@ -321,37 +321,37 @@ class ChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
-        automaticallyImplyLeading: false,
-        leading: Navigator.canPop(context)
-            ? _channelTimelineAlignedBackButton(context)
-            : null,
-        horizontalInset: 0,
         iconColor: context.colors.primary,
         titleContentHeight: appBarTitleContentHeight,
         titleStyle: channelTitleTextStyle,
-        title: resolvedChannel.isDm
-            ? _DmAppBarTitle(
-                channel: resolvedChannel,
-                currentPubkey: currentPubkey,
-              )
-            : _ChannelAppBarTitle(
-                channel: resolvedChannel,
-                onTap: () async {
-                  final shouldClose = await showChannelDetailsPage(
-                    context: context,
-                    channel: resolvedChannel,
-                    currentPubkey: currentPubkey,
-                    onMemberTap: showUserProfileSheet,
-                    sectionId: ref
-                        .read(channelSectionsProvider)
-                        .store
-                        .assignments[resolvedChannel.id],
-                  );
-                  if (shouldClose == true && context.mounted) {
-                    Navigator.of(context).pop();
-                  }
-                },
-              ),
+        title: Padding(
+          padding: EdgeInsets.only(
+            left: Navigator.canPop(context) ? Grid.xs : 0,
+          ),
+          child: resolvedChannel.isDm
+              ? _DmAppBarTitle(
+                  channel: resolvedChannel,
+                  currentPubkey: currentPubkey,
+                )
+              : _ChannelAppBarTitle(
+                  channel: resolvedChannel,
+                  onTap: () async {
+                    final shouldClose = await showChannelDetailsPage(
+                      context: context,
+                      channel: resolvedChannel,
+                      currentPubkey: currentPubkey,
+                      onMemberTap: showUserProfileSheet,
+                      sectionId: ref
+                          .read(channelSectionsProvider)
+                          .store
+                          .assignments[resolvedChannel.id],
+                    );
+                    if (shouldClose == true && context.mounted) {
+                      Navigator.of(context).pop();
+                    }
+                  },
+                ),
+        ),
         actions: resolvedChannel.isDm
             ? [
                 if (_showsMembersAction(resolvedChannel))

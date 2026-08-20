@@ -146,9 +146,6 @@ class _MessageBubble extends HookConsumerWidget {
                           onTap: () =>
                               showUserProfileSheet(context, message.pubkey),
                           child: _UserAvatar(
-                            key: ValueKey(
-                              'channel-message-avatar-${message.id}',
-                            ),
                             profile: profile,
                             pubkey: message.pubkey,
                           ),
@@ -324,7 +321,6 @@ class _UserAvatar extends StatelessWidget {
   final double size;
 
   const _UserAvatar({
-    super.key,
     required this.profile,
     required this.pubkey,
     this.size = messageAvatarSize,
