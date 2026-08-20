@@ -5089,6 +5089,43 @@ mod tests {
     }
 
     #[test]
+    fn strict_owner_sibling_message_remains_readable_context() {
+        // The agent is neither the root author nor the sibling, so the
+        // agent's-newest-reply retention path cannot alter the window and the
+        // assertion below is about sibling visibility alone.
+        let agent = Keys::generate();
+        let root_id = "aa".repeat(32);
+        let context = parse_nostr_thread_response(
+            json!([
+                {
+                    "id": root_id,
+                    "pubkey": "cc".repeat(32),
+                    "content": "owner prompt",
+                    "created_at": 1
+                },
+                {
+                    "id": "dd".repeat(32),
+                    "pubkey": "bb".repeat(32),
+                    "content": "sibling context",
+                    "created_at": 2
+                }
+            ]),
+            &"aa".repeat(32),
+            2,
+            &agent.public_key(),
+        )
+        .expect("thread context must remain readable");
+
+        match context {
+            ConversationContext::Thread { messages, .. } => {
+                assert_eq!(messages[1].pubkey, "bb".repeat(32));
+                assert_eq!(messages[1].content, "sibling context");
+            }
+            _ => panic!("expected thread context"),
+        }
+    }
+
+    #[test]
     fn test_parse_thread_response_truncated() {
         let json = json!({
             "root": {
