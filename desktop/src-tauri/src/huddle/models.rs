@@ -1,4 +1,4 @@
-//! Model download manager for STT (Parakeet TDT-CTC 110M) and TTS (Pocket TTS) models.
+//! Model download manager for STT, TTS, and the flag-gated Smart Turn graph.
 //!
 //! Mental model:
 //!   app launch → start_stt_download (background) → ~/.buzz/models/parakeet-tdt-ctc-110m-en/
@@ -29,8 +29,12 @@ use super::pocket::{
 };
 use super::tts_voice_registry::POCKET_VOICES;
 
+#[path = "models_smart_turn.rs"]
+mod smart_turn_cache;
 #[path = "models_voice_upgrade.rs"]
 mod voice_upgrade;
+use smart_turn_cache::prepared_smart_turn_slot;
+pub(super) use smart_turn_cache::{smart_turn_feature_enabled, smart_turn_model_path};
 
 // ── Integrity verification ────────────────────────────────────────────────────
 //
@@ -65,8 +69,7 @@ fn pocket_license_url() -> String {
 /// `vctk/p333_023_enhanced.wav`. We rename to `reference_sample.wav` on disk
 /// so the rest of the engine code stays voice-agnostic; the friendly label
 /// only matters for attribution and PR-body docs.
-const POCKET_REFERENCE_WAV_URL: &str =
-    "https://huggingface.co/kyutai/tts-voices/resolve/323332d33f997de8394f24a193e1a76df720e01a/vctk/p333_023_enhanced.wav";
+const POCKET_REFERENCE_WAV_URL: &str = "https://huggingface.co/kyutai/tts-voices/resolve/323332d33f997de8394f24a193e1a76df720e01a/vctk/p333_023_enhanced.wav";
 
 const TTS_LICENSE_ARTIFACT: PocketModelArtifact = PocketModelArtifact {
     filename: "LICENSE",
@@ -373,7 +376,7 @@ where
 
 // ── ModelSlot ─────────────────────────────────────────────────────────────────
 
-/// Per-model state + config. `ModelManager` owns two of these (stt, tts).
+/// Per-model state + config. `ModelManager` owns one per cached voice model.
 #[derive(Clone)]
 struct ModelSlot {
     dir_name: &'static str,                  // subdir under ~/.buzz/models/
@@ -589,7 +592,7 @@ fn tts_model_slot() -> ModelSlot {
 
 // ── ModelManager ──────────────────────────────────────────────────────────────
 
-/// Manages download and location of STT/TTS model files.
+/// Manages download and location of STT and TTS model files.
 ///
 /// Cheap to clone — all inner state is behind `Arc`.
 #[derive(Clone)]
@@ -597,6 +600,7 @@ pub struct ModelManager {
     /// `~/.buzz/models/`
     models_dir: PathBuf,
     stt: ModelSlot,
+    smart_turn: ModelSlot,
     tts: ModelSlot,
 }
 
@@ -607,9 +611,10 @@ impl ModelManager {
     pub fn new() -> Option<Self> {
         let models_dir = dirs::home_dir()?.join(".buzz").join("models");
         let manager = Self {
-            models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
+            smart_turn: prepared_smart_turn_slot(&models_dir),
             tts: tts_model_slot(),
+            models_dir,
         };
         manager.tts.recover_interrupted_install(&manager.models_dir);
         Some(manager)
@@ -667,6 +672,7 @@ impl ModelManager {
     /// ~100 MB download fails. The post-install path inside
     /// `download_stt_model` handles cleanup once the new install reaches Ready.
     pub fn start_stt_download(&self, http_client: reqwest::Client) {
+        self.maybe_start_smart_turn_download(http_client.clone());
         let manager = self.clone();
         self.stt.start_download(
             &self.models_dir,

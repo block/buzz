@@ -45,6 +45,7 @@ pub mod tts;
 pub mod tts_settings;
 mod tts_voice_import;
 mod tts_voice_registry;
+mod turn_gate;
 mod window;
 pub mod wire;
 

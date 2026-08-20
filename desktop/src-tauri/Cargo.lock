@@ -1245,6 +1245,7 @@ dependencies = [
  "ort",
  "ort-sys",
  "rand 0.10.2",
+ "realfft",
  "sentencepiece-model",
  "serde",
  "serde_json",

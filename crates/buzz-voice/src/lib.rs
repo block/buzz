@@ -2,11 +2,13 @@
 
 pub mod imported;
 pub mod pocket;
+pub mod smart_turn;
 
 pub use pocket::{
     april_model_info, load_text_to_speech, load_voice_style, PocketModelInfo, PocketTts,
     VoiceStyle, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
+pub use smart_turn::{SmartTurnClassifier, SmartTurnDecision};
 
 /// One immutable artifact required by the April Pocket bundle.
 ///
