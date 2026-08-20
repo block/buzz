@@ -7396,6 +7396,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             "bash",
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
+            &[],
             false,
         )
         .await
@@ -7456,6 +7457,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let acp = AcpClient::spawn(
             "bash",
             &["-c".to_string(), "sleep 10".to_string()],
+            &[],
             &[],
             false,
         )
