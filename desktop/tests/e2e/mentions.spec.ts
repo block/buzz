@@ -1566,7 +1566,9 @@ test("selected relay agents revoked during send emit no p tag", async ({
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 
-test("owner-only builds hide other-owned relay agents", async ({ page }) => {
+test("owner-only builds admit cross-owner relay agents authorized by allowlist", async ({
+  page,
+}) => {
   await installMockBridge(page, {
     ownerOnlyAccessBuild: true,
     searchProfiles: [
@@ -1580,6 +1582,7 @@ test("owner-only builds hide other-owned relay agents", async ({ page }) => {
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
         name: "quinn",
         respondTo: "allowlist",
         respondToAllowlist: [MOCK_VIEWER_PUBKEY],
@@ -1589,9 +1592,35 @@ test("owner-only builds hide other-owned relay agents", async ({ page }) => {
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await page.getByTestId("message-input").fill("@quinn");
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+  await page.getByTestId("send-message").click();
 
-  await expect(autocomplete(page)).toHaveCount(0);
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 
 test("owner-only builds show verified same-owner relay agents", async ({
@@ -1647,13 +1676,23 @@ test("relay-only allowlisted agents stay hidden outside their channel", async ({
   await expect(autocomplete(page)).toHaveCount(0);
 });
 
-test("relay-only anyone agents are visible when a channel is shared", async ({
+test("owner-only builds admit cross-owner relay agents authorized for anyone", async ({
   page,
 }) => {
   await installMockBridge(page, {
+    ownerOnlyAccessBuild: true,
+    searchProfiles: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
+        isAgent: true,
+      },
+    ],
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
         name: "quinn",
         respondTo: "anyone",
         channelNames: ["general"],
