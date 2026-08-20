@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
+    use crate::managed_agents::RespondTo;
+
+    let allowlist_a = vec!["a".repeat(64)];
+    let allowlist_b = vec!["b".repeat(64)];
+
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+        false,
+    ));
+    assert!(managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+        false,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::OwnerOnly,
+        &allowlist_a,
+        RespondTo::OwnerOnly,
+        &allowlist_b,
+        false,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Anyone,
+        &[],
+        RespondTo::OwnerOnly,
+        &[],
+        true,
+    ));
+    assert!(!managed_agent_access_policy_changed(
+        RespondTo::Allowlist,
+        &allowlist_a,
+        RespondTo::Allowlist,
+        &allowlist_b,
+        true,
+    ));
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {
@@ -262,11 +306,15 @@ fn effective_discovery_provider_recovers_baked_provider_when_record_has_none() {
     }
 }
 
+/// A provider env-var name no environment sets, so this test does not depend on
+/// what the developer happens to have exported (e.g. `BUZZ_AGENT_PROVIDER`).
+const UNSET_PROVIDER_VAR: &str = "BUZZ_TEST_UNSET_DISCOVERY_PROVIDER";
+
 #[test]
 fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
     let env = BTreeMap::new();
     assert_eq!(
-        effective_discovery_provider(None, Some("BUZZ_AGENT_PROVIDER"), &env).as_deref(),
+        effective_discovery_provider(None, Some(UNSET_PROVIDER_VAR), &env).as_deref(),
         None
     );
     // A runtime that takes no provider env var has nothing to recover from.
@@ -274,10 +322,7 @@ fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
         effective_discovery_provider(
             None,
             None,
-            &BTreeMap::from([(
-                "BUZZ_AGENT_PROVIDER".to_string(),
-                "databricks_v2".to_string()
-            )])
+            &BTreeMap::from([(UNSET_PROVIDER_VAR.to_string(), "databricks_v2".to_string())])
         )
         .as_deref(),
         None

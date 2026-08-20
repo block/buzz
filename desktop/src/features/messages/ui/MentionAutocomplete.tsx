@@ -22,6 +22,7 @@ export type MentionSuggestion = {
   displayName: string;
   avatarUrl?: string | null;
   isAgent?: boolean;
+  agentProvenance?: "managed-here" | "managed-elsewhere";
   notInChannel?: boolean;
   ownerLabel?: string | null;
   role?: string | null;
@@ -34,6 +35,16 @@ type MentionAutocompleteProps = {
   onSelect: (suggestion: MentionSuggestion) => void;
   position?: "above" | "below";
 };
+
+export function mentionAgentLabel(
+  suggestion: MentionSuggestion,
+  hasNameCollision: boolean,
+) {
+  if (!hasNameCollision || !suggestion.agentProvenance) return "agent";
+  return suggestion.agentProvenance === "managed-here"
+    ? "agent · managed here"
+    : "agent · managed elsewhere";
+}
 
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
@@ -100,9 +111,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             (suggestion.personaId ? `persona-${suggestion.personaId}` : null) ??
             (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
             suggestion.displayName;
-          const agentLabel = "agent";
           const hasNameCollision =
             (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
+          const agentLabel = mentionAgentLabel(suggestion, hasNameCollision);
           const collisionNpub =
             hasNameCollision && suggestion.pubkey
               ? safeNpub(suggestion.pubkey)

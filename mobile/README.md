@@ -12,10 +12,10 @@ flutter pub get
 ## Run
 
 ```bash
-# From repo root (recommended — starts Docker, relay, and simulator):
+# From repo root (applies a worktree-isolated debug identity and starts/reuses Simulator):
 just mobile-dev
 
-# Direct (requires services and relay already running):
+# Direct (uses the app's configured community; apply worktree overrides first):
 cd mobile && flutter run
 ```
 
@@ -40,6 +40,20 @@ files:
   app-specific overrides like a personal `BUNDLE_IDENTIFIER` for device
   signing always win)
 - `mobile/android/worktree.properties` (read by the debug build type only)
+
+Android developers can keep a stable local test identity that takes precedence
+over the generated worktree values by creating the gitignored
+`mobile/android/AppOverrides.properties`:
+
+```properties
+appName=Buzz Pairing
+applicationIdSuffix=.device_pairing_e2e1
+```
+
+These values are consumed by the debug build type only. The standard
+`just mobile-build-android` command can still be used; regenerating
+`worktree.properties` does not overwrite `AppOverrides.properties`. Release
+and profile builds keep the production `Buzz` name and application ID.
 
 For direct Xcode / Android Studio / `flutter run` development, run
 `./scripts/mobile-worktree-overrides.sh` from the repo root once per branch

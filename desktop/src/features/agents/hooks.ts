@@ -341,14 +341,10 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
-    // Relay agent profiles (kind:10100) are near-static and the backing
-    // `list_relay_agents` command is an unfiltered relay query for the whole
-    // profile set — mounted on ~13 always-live surfaces (channel screen,
-    // members bar, mentions, sidebar, profile popovers), so a tight interval
-    // re-pulls the full set app-wide. This poll is also the ONLY refresh path:
-    // the `agents-data-changed` event fires only for local persona/team/managed
-    // reconcile (kinds PERSONA/TEAM/MANAGED_AGENT), never for kind:10100. So we
-    // keep polling but at a relaxed cadence and pause it while backgrounded.
+    // Relay agent discovery is scoped to the viewer's relay-signed channel
+    // memberships, then resolves exact agent/profile/policy coordinates in
+    // protocol-sized batches. Polling remains the only refresh path for remote
+    // changes, so keep it relaxed and pause while backgrounded.
     refetchInterval,
     enabled: options?.enabled,
     ...agentsFocusRefetchPolicy,
@@ -553,7 +549,24 @@ export function useStartManagedAgentMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (pubkey: string) => startManagedAgent(pubkey),
+    // Accepts a bare pubkey, or an object carrying the tenant scope a
+    // long-lived callback captured before its first await (the backend
+    // fails closed on a mid-flight community/identity switch).
+    mutationFn: (
+      input:
+        | string
+        | {
+            pubkey: string;
+            expectedRelayUrl?: string;
+            expectedSignerPubkey?: string;
+          },
+    ) =>
+      typeof input === "string"
+        ? startManagedAgent(input)
+        : startManagedAgent(input.pubkey, {
+            expectedRelayUrl: input.expectedRelayUrl,
+            expectedSignerPubkey: input.expectedSignerPubkey,
+          }),
     onSuccess: (updated) => {
       queryClient.setQueryData<ManagedAgent[]>(
         managedAgentsQueryKey,

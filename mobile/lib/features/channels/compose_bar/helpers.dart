@@ -1,5 +1,29 @@
 part of '../compose_bar.dart';
 
+void _useComposerFocusRestorer({
+  required ValueChanged<VoidCallback>? onChanged,
+  required ValueNotifier<bool> isExpanded,
+  required FocusNode focusNode,
+  required VoidCallback expand,
+}) {
+  useEffect(() {
+    if (onChanged == null) return null;
+
+    var isCurrent = true;
+    void restoreFocus() {
+      if (!isCurrent) return;
+      if (isExpanded.value) {
+        focusNode.requestFocus();
+      } else {
+        expand();
+      }
+    }
+
+    onChanged(restoreFocus);
+    return () => isCurrent = false;
+  }, [onChanged, focusNode]);
+}
+
 void _useComposerChannelNames(
   _MarkdownEditingController controller,
   AsyncValue<List<Channel>> channelsAsync,

@@ -4,15 +4,9 @@ import {
   getMentionableAgentPubkeys,
   type AgentEligibilityScope,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
-import { evictUsersBatchEntries } from "@/features/profile/hooks";
-import { getUsersBatch } from "@/shared/api/tauriProfiles";
-import type {
-  ManagedAgent,
-  RelayAgent,
-  UsersBatchResponse,
-} from "@/shared/api/types";
+import { revalidateRelayAgents } from "@/shared/api/tauriRelayAgents";
+import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 type DirectoryResult<T> = {
@@ -26,22 +20,16 @@ export async function revalidateAgentMentionPubkeys({
   currentPubkey,
   eligibilityScope,
   sharedChannelIds,
-  ownerOnly,
-  ownerPolicyError,
   refetchManagedAgents,
-  refetchRelayAgents,
-  refetchOwnerProfiles,
+  fetchRelayAgents,
 }: {
   pubkeys: readonly string[];
   agentPubkeys: ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
   sharedChannelIds: ReadonlySet<string>;
-  ownerOnly: boolean | undefined;
-  ownerPolicyError: Error | null;
   refetchManagedAgents: () => Promise<DirectoryResult<ManagedAgent[]>>;
-  refetchRelayAgents: () => Promise<DirectoryResult<RelayAgent[]>>;
-  refetchOwnerProfiles: (pubkeys: string[]) => Promise<UsersBatchResponse>;
+  fetchRelayAgents: (pubkeys: string[]) => Promise<RelayAgent[]>;
 }) {
   const requestedAgentPubkeys = new Set(
     pubkeys.map(normalizePubkey).filter((pubkey) => agentPubkeys.has(pubkey)),
@@ -50,22 +38,12 @@ export async function revalidateAgentMentionPubkeys({
     return [...pubkeys];
   }
 
-  const [managedResult, relayResult, ownerProfiles] = await Promise.all([
+  const [managedResult, relayAgents] = await Promise.all([
     refetchManagedAgents(),
-    refetchRelayAgents(),
-    ownerOnly
-      ? refetchOwnerProfiles([...requestedAgentPubkeys]).catch(() => null)
-      : Promise.resolve(null),
+    fetchRelayAgents([...requestedAgentPubkeys]).catch(() => null),
   ]);
-  if (
-    managedResult.error !== null ||
-    relayResult.error !== null ||
-    managedResult.data === undefined ||
-    relayResult.data === undefined ||
-    ownerOnly === undefined ||
-    ownerPolicyError !== null ||
-    (ownerOnly && ownerProfiles === null)
-  ) {
+  const relayDirectoryReady = relayAgents !== null;
+  if (managedResult.error !== null || managedResult.data === undefined) {
     return filterAdmittedMentionPubkeys(pubkeys, agentPubkeys, new Set());
   }
 
@@ -76,23 +54,22 @@ export async function revalidateAgentMentionPubkeys({
     currentPubkey,
     eligibilityScope,
     managedAgentPubkeys: managedPubkeys,
-    relayAgents: relayResult.data,
+    relayAgents: relayDirectoryReady ? relayAgents : [],
     sharedChannelIds,
   });
   const admittedPubkeys = new Set(
-    [...agentPubkeys].filter(
-      (pubkey) =>
+    [...agentPubkeys].filter((pubkey) => {
+      const isManagedAgent = managedPubkeys.has(normalizePubkey(pubkey));
+      const directoryReady = isManagedAgent || relayDirectoryReady;
+      return (
         getAgentMentionAdmission({
           isAgent: true,
-          isManagedAgent: managedPubkeys.has(pubkey),
           pubkey,
-          ownerPubkey: ownerProfiles?.profiles[pubkey]?.ownerPubkey,
-          currentPubkey,
           mentionableAgentPubkeys: mentionablePubkeys,
-          directoryReady: true,
-          ownerOnly,
-        }) === "allow",
-    ),
+          directoryReady,
+        }) === "allow"
+      );
+    }),
   );
   return filterAdmittedMentionPubkeys(pubkeys, agentPubkeys, admittedPubkeys);
 }
@@ -103,29 +80,15 @@ export function useAgentMentionRevalidation({
   currentPubkey,
   eligibilityScope,
   sharedChannelIds,
-  ownerOnly,
-  ownerPolicyError,
   refetchManagedAgents,
-  refetchRelayAgents,
 }: {
   agentPubkeys: ReadonlySet<string>;
   getSelectedAgentPubkeys: () => ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
   sharedChannelIds: ReadonlySet<string>;
-  ownerOnly: boolean | undefined;
-  ownerPolicyError: Error | null;
   refetchManagedAgents: () => Promise<DirectoryResult<ManagedAgent[]>>;
-  refetchRelayAgents: () => Promise<DirectoryResult<RelayAgent[]>>;
 }) {
-  const queryClient = useQueryClient();
-  const refetchOwnerProfiles = React.useCallback(
-    async (pubkeys: string[]) => {
-      evictUsersBatchEntries(queryClient, pubkeys);
-      return getUsersBatch(pubkeys);
-    },
-    [queryClient],
-  );
   return React.useCallback(
     (pubkeys: readonly string[]) =>
       revalidateAgentMentionPubkeys({
@@ -134,22 +97,21 @@ export function useAgentMentionRevalidation({
         currentPubkey,
         eligibilityScope,
         sharedChannelIds,
-        ownerOnly,
-        ownerPolicyError,
         refetchManagedAgents,
-        refetchRelayAgents,
-        refetchOwnerProfiles,
+        fetchRelayAgents: (requestedPubkeys) =>
+          revalidateRelayAgents(
+            requestedPubkeys,
+            eligibilityScope.type === "channel"
+              ? eligibilityScope.channelId
+              : undefined,
+          ),
       }),
     [
       agentPubkeys,
       currentPubkey,
       eligibilityScope,
       getSelectedAgentPubkeys,
-      ownerOnly,
-      ownerPolicyError,
       refetchManagedAgents,
-      refetchOwnerProfiles,
-      refetchRelayAgents,
       sharedChannelIds,
     ],
   );

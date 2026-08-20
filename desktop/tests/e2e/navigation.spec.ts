@@ -24,10 +24,22 @@ async function createWorkflow(
   name: string,
 ) {
   await page.getByRole("button", { name: "Create Workflow" }).click();
-  const dialog = page.getByRole("dialog");
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel("Workflow name").fill(name);
-  await dialog.getByRole("button", { name: "Add step" }).click();
+
+  const channelList = page.getByTestId("channel-combobox-list");
+  await expect(channelList).toBeVisible();
+  await channelList
+    .getByRole("option", { name: "agents", exact: true })
+    .click();
+
+  await dialog.getByRole("button", { name: "Edit workflow name" }).click();
+  await dialog.getByRole("textbox", { name: "Workflow name" }).fill(name);
+  await dialog.getByRole("button", { name: "Save workflow name" }).click();
+
+  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Send Message" }).click();
+  await dialog.getByLabel("Message text").fill("Workflow notification");
   await dialog.getByRole("button", { name: "Create" }).click();
   await expect(dialog).not.toBeVisible();
 }
@@ -124,8 +136,15 @@ test("direct workflow detail links close back to workflows", async ({
 
   await page.goto(`/#/workflows/${workflowId}`);
 
-  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
-  await page.getByRole("button", { name: "Close detail panel" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit workflow" });
+  await expect(dialog.getByText(workflowName, { exact: true })).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Trigger: Message Posted" }),
+  ).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Run history" })).toHaveCount(
+    0,
+  );
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
   await expect(page).toHaveURL(/#\/workflows$/);
   await expect(page.getByTestId("workflows-view")).toBeVisible();

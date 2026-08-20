@@ -68,6 +68,19 @@ def test_mint_user_is_attested_and_not_an_agent():
     assert tag[:3] == ["auth", owner_pubkey.format().hex(), ""]
 
 
+def test_user_mention_task_gets_stable_three_word_user_identity():
+    provisioner = BuzzTrialProvisioner(config(user_secret_key="7" * 64))
+
+    first = provisioner._mint_user("user-mention")
+    second = provisioner._mint_user("user-mention")
+
+    assert first.agent_id == "John Vincent Doe"
+    assert len(first.agent_id.split()) == 3
+    assert first.nostr_secret_key == second.nostr_secret_key
+    assert first.nostr_secret_key != "7" * 64
+    assert first.role == "user"
+
+
 def test_pinned_user_secret_reuses_one_identity():
     pinned = "7" * 64
     provisioner = BuzzTrialProvisioner(config(user_secret_key=pinned))
@@ -94,6 +107,44 @@ def test_mint_credentials_missing_api_key_is_explicit(manifest):
     provisioner = BuzzTrialProvisioner(config(llm_api_keys={}))
     with pytest.raises(ProvisioningError, match="databricks/"):
         provisioner._mint_credentials(manifest)
+
+
+def test_directory_credentials_are_stable_distinct_and_attested():
+    provisioner = BuzzTrialProvisioner(config())
+
+    first = provisioner._directory_credential("benchmark-user-01", "user")
+    again = provisioner._directory_credential("benchmark-user-01", "user")
+    other = provisioner._directory_credential("benchmark-bot-01", "bot")
+
+    assert first.nostr_secret_key == again.nostr_secret_key
+    assert first.nostr_pubkey == again.nostr_pubkey
+    assert first.nostr_pubkey != other.nostr_pubkey
+    assert first.role == "user" and other.role == "bot"
+    assert json.loads(first.nostr_auth_tag)[2] == ""
+
+
+def test_seed_directory_has_50_users_10_bots_and_skips_existing(monkeypatch):
+    provisioner = BuzzTrialProvisioner(config())
+
+    class Observer:
+        def profiles(self, pubkeys):
+            return [{"pubkey": pubkeys[0]}]
+
+    published = []
+
+    class Publisher:
+        def set_profile(self, name):
+            published.append(name)
+
+    monkeypatch.setattr(provisioner, "_cli_for", lambda _credential: Publisher())
+
+    directory = provisioner._seed_directory("create-channel-invite-users", Observer())
+
+    assert len(directory) == 60
+    assert sum(identity.role == "user" for identity in directory) == 50
+    assert sum(identity.role == "bot" for identity in directory) == 10
+    assert len(published) == 59
+    assert directory[0].name not in published
 
 
 def test_lock_key_is_deterministic_and_distinct():

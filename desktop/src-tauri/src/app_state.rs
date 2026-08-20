@@ -2,14 +2,13 @@ use std::{
     collections::HashMap,
     io::Write,
     sync::{
-        atomic::{AtomicBool, AtomicU16, AtomicU8},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8},
         Arc, Mutex,
     },
 };
 
 use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, Manager};
-#[cfg(feature = "mesh-llm")]
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
@@ -32,16 +31,12 @@ pub struct AppState {
     /// response (surfaced as an error) so the auth token never leaves the
     /// validated relay origin.
     pub media_fetch_client: reqwest::Client,
-    /// Workspace-provided relay URL override. Set by `apply_workspace` on app
-    /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
-    /// Set during backend setup when managed agents are eligible for launch
-    /// restore. `apply_workspace` consumes it after installing the workspace
-    /// relay and identity, so agents never start against the fallback relay.
+    pub workspace_apply_lock: Arc<AsyncMutex<()>>,
+    pub workspace_apply_generation: AtomicU64,
+    /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
     pub managed_agent_restore_pending: AtomicBool,
-    /// Whether desktop may repair managed-agent kind:0 profiles from its local
-    /// records. Disabled by the agent-managed profiles experiment so an agent's
-    /// own profile updates are not overwritten on start or restore.
+    /// Disabled by agent-managed profiles so agent profile updates survive start/restore.
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
@@ -52,6 +47,7 @@ pub struct AppState {
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
+    pub provider_deploy_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     pub huddle_state: Mutex<HuddleState>,
     pub huddle_audio: crate::huddle::tts_settings::HuddleAudioSettingsState,
     /// Tauri app handle — stored after setup so huddle commands can emit
@@ -207,6 +203,8 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
+        workspace_apply_lock: Arc::new(AsyncMutex::new(())),
+        workspace_apply_generation: AtomicU64::new(0),
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
@@ -215,6 +213,7 @@ pub fn build_app_state() -> AppState {
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
+        provider_deploy_locks: Mutex::new(HashMap::new()),
         session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         huddle_audio: Default::default(),
@@ -265,33 +264,6 @@ impl AppState {
     pub fn clear_agent_session_caches(&self, pubkey: &str) {
         if let Ok(mut map) = self.session_config_cache.lock() {
             map.retain(|key, _| key.pubkey != pubkey);
-        }
-    }
-
-    /// Record that `channel_id` was just created by `creator_pubkey` and its
-    /// kind:39002 owner membership has not yet been observed.
-    pub fn mark_pending_owned_channel(&self, creator_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.insert((creator_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
-    /// Whether `channel_id` is still awaiting `my_pubkey`'s kind:39002 entry.
-    /// Bound to `my_pubkey` so an in-process identity swap never inherits
-    /// another identity's pending-owner entry for the same channel id.
-    pub fn is_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) -> bool {
-        self.pending_owned_channels
-            .lock()
-            .map(|set| set.contains(&(my_pubkey.to_string(), channel_id.to_string())))
-            .unwrap_or(false)
-    }
-
-    /// Drop the `(my_pubkey, channel_id)` entry from the pending-owner
-    /// overlay once that identity's real kind:39002 membership has been
-    /// observed.
-    pub fn clear_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.remove(&(my_pubkey.to_string(), channel_id.to_string()));
         }
     }
 
@@ -391,6 +363,9 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
 #[path = "app_state_keyring.rs"]
 mod keyring_config;
 pub(crate) use keyring_config::keyring_service;
+
+#[path = "app_state_pending_channels.rs"]
+mod pending_channels;
 
 /// Keyring key name for the human identity nsec.
 const IDENTITY_KEY_NAME: &str = "identity";
