@@ -166,7 +166,7 @@ function ReminderRow({
   return (
     <div
       className={cn(
-        "flex items-start gap-3 transition-colors",
+        "group/reminder-row flex items-start gap-3 transition-colors",
         isInboxList
           ? "border-b border-border/45 px-4 py-4 hover:bg-muted/40 focus-within:bg-muted/40"
           : "rounded-md border p-3",
@@ -224,8 +224,19 @@ function ReminderRow({
           </p>
         ) : null}
       </button>
-      {isDone || isInboxList ? null : (
-        <div className="flex shrink-0 items-center gap-1">
+      {isDone ? null : (
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-1",
+            // In the inbox list the actions stay out of the way until the row
+            // is hovered, focused, or selected — without this the only way to
+            // complete a reminder is to open the detail pane, which reads as
+            // "reminders can't be cleared".
+            isInboxList &&
+              "opacity-0 transition-opacity group-hover/reminder-row:opacity-100 group-focus-within/reminder-row:opacity-100",
+            isInboxList && isSelected && "opacity-100",
+          )}
+        >
           <Button
             className="h-7 w-7 p-0"
             disabled={isActing}
