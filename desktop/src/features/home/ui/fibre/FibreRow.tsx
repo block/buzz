@@ -1,4 +1,3 @@
-import type { Fibre } from "@/features/triage/api";
 import {
   fibreArtifactCountLabel,
   fibrePeopleLabel,
@@ -6,20 +5,26 @@ import {
   formatFibreAge,
 } from "@/features/home/ui/fibre/fibreFormat";
 import { fibreKindMeta } from "@/features/home/ui/fibre/fibreKinds";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { Fibre } from "@/features/triage/api";
 import { cn } from "@/shared/lib/cn";
 
 type FibreRowProps = {
+  currentPubkey?: string;
   fibre: Fibre;
   isSelected: boolean;
   nowMs: number;
   onSelect: (id: string) => void;
+  profiles?: UserProfileLookup;
 };
 
 export function FibreRow({
+  currentPubkey,
   fibre,
   isSelected,
   nowMs,
   onSelect,
+  profiles,
 }: FibreRowProps) {
   const kind = fibreKindMeta(fibre.kind);
   const age = formatFibreAge(
@@ -73,7 +78,9 @@ export function FibreRow({
         <span className="mt-1.5 flex items-center gap-2 text-2xs text-muted-foreground">
           <span>{fibreArtifactCountLabel(fibre.artifacts.length)}</span>
           <span className="h-0.5 w-0.5 rounded-full bg-muted-foreground/50" />
-          <span className="truncate">{fibrePeopleLabel(fibre.people)}</span>
+          <span className="truncate">
+            {fibrePeopleLabel(fibre.people, { currentPubkey, profiles })}
+          </span>
         </span>
       </span>
     </button>

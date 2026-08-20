@@ -1,23 +1,28 @@
 import { Ellipsis } from "lucide-react";
 
-import type { Fibre } from "@/features/triage/api";
 import { FibreRow } from "@/features/home/ui/fibre/FibreRow";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { Fibre } from "@/features/triage/api";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 
 type FibreListPaneProps = {
   clearedCount: number;
+  currentPubkey?: string;
   fibres: readonly Fibre[];
   nowMs: number;
+  profiles?: UserProfileLookup;
   selectedId: string | null;
   onSelect: (id: string) => void;
 };
 
 export function FibreListPane({
   clearedCount,
+  currentPubkey,
   fibres,
   nowMs,
+  profiles,
   selectedId,
   onSelect,
 }: FibreListPaneProps) {
@@ -54,11 +59,13 @@ export function FibreListPane({
         ) : (
           fibres.map((fibre) => (
             <FibreRow
+              currentPubkey={currentPubkey}
               fibre={fibre}
               isSelected={fibre.id === selectedId}
               key={fibre.id}
               nowMs={nowMs}
               onSelect={onSelect}
+              profiles={profiles}
             />
           ))
         )}

@@ -3,16 +3,20 @@ import { toast } from "sonner";
 
 import { FibreDetailPane } from "@/features/home/ui/fibre/FibreDetailPane";
 import { FibreListPane } from "@/features/home/ui/fibre/FibreListPane";
-import { primaryThreadTarget } from "@/features/home/ui/fibre/fibreFormat";
+import {
+  collectFibrePubkeys,
+  primaryThreadTarget,
+} from "@/features/home/ui/fibre/fibreFormat";
+import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import type { Fibre } from "@/features/triage/api";
 import {
   useFibreFeedbackMutation,
   useFibresQuery,
   usePatchFibreMutation,
   useRestoreFibresMutation,
 } from "@/features/triage/hooks";
-import type { Fibre } from "@/features/triage/api";
 import { useNow } from "@/shared/lib/useNow";
-import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 
 type FibreInboxViewProps = {
   currentPubkey?: string;
@@ -47,6 +51,15 @@ export function FibreInboxView({
 
   const fibres = fibresQuery.data?.fibres ?? [];
   const clearedCount = fibresQuery.data?.clearedCount ?? 0;
+  const profilePubkeys = React.useMemo(() => {
+    const pubkeys = collectFibrePubkeys(fibres);
+    if (currentPubkey) pubkeys.push(currentPubkey);
+    return pubkeys;
+  }, [currentPubkey, fibres]);
+  const profilesQuery = useUsersBatchQuery(profilePubkeys, {
+    enabled: profilePubkeys.length > 0,
+  });
+  const profiles = profilesQuery.data?.profiles;
   const selected =
     fibres.find((fibre) => fibre.id === selectedId) ?? fibres[0] ?? null;
 
@@ -164,9 +177,11 @@ export function FibreInboxView({
     >
       <FibreListPane
         clearedCount={clearedCount}
+        currentPubkey={currentPubkey}
         fibres={fibres}
         nowMs={nowMs}
         onSelect={setSelectedId}
+        profiles={profiles}
         selectedId={selected?.id ?? null}
       />
       <FibreDetailPane
@@ -174,6 +189,7 @@ export function FibreInboxView({
         fibre={selected}
         isZero={fibres.length === 0}
         nowMs={nowMs}
+        profiles={profiles}
         onDismiss={(fibre) =>
           mark(
             fibre,

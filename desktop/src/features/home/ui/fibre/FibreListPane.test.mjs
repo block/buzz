@@ -152,3 +152,40 @@ test("empty list shows Fibre Zero copy", () => {
   );
   assert.equal(screen.queryAllByTestId("fibre-row").length, 0);
 });
+
+const ALICE = "a".repeat(64);
+
+test("people line uses profile display names instead of stored pubkeys", () => {
+  render(
+    createElement(FibreListPane, {
+      clearedCount: 0,
+      fibres: [
+        fibre({
+          people: [
+            {
+              pubkey: ALICE,
+              label: `${ALICE.slice(0, 8)}…${ALICE.slice(-4)}`,
+            },
+          ],
+        }),
+      ],
+      nowMs: NOW,
+      onSelect: () => {},
+      profiles: {
+        [ALICE]: {
+          displayName: "Alice",
+          avatarUrl: null,
+          nip05Handle: null,
+          ownerPubkey: null,
+        },
+      },
+      selectedId: "f1",
+    }),
+  );
+
+  assert.match(screen.getByTestId("fibre-row").textContent, /Alice/);
+  assert.equal(
+    screen.getByTestId("fibre-row").textContent.includes(ALICE.slice(0, 8)),
+    false,
+  );
+});

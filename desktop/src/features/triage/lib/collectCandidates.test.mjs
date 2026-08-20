@@ -68,6 +68,22 @@ test("candidateFromEvent marks the current user's own messages", () => {
   assert.equal(candidate.authorPubkey, SELF);
 });
 
+test("candidateFromEvent uses profile display names for authorLabel", () => {
+  const candidate = candidateFromEvent(event(), channel(), {
+    currentPubkey: SELF,
+    profiles: {
+      [OTHER]: {
+        displayName: "Blake",
+        avatarUrl: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+    },
+  });
+
+  assert.equal(candidate.authorLabel, "Blake");
+});
+
 test("candidateFromEvent does not flag a mention of somebody else", () => {
   const candidate = candidateFromEvent(
     event({

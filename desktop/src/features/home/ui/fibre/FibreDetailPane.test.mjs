@@ -93,3 +93,38 @@ test("Fibre Zero offers restore", () => {
   fireEvent.click(screen.getByTestId("fibre-restore"));
   assert.equal(restored.length, 1);
 });
+
+test("Done shortcut inherits button color", () => {
+  const fibre = {
+    id: "f1",
+    kind: "ask",
+    status: "open",
+    score: 90,
+    title: "Threadception Inquiry",
+    summary: "A question about the thread.",
+    why: "Unanswered ask.",
+    whyShort: "Unanswered ask.",
+    signals: [],
+    channelId: "c1",
+    channelName: "general",
+    isDm: false,
+    people: [],
+    createdAt: 1_700_000_000,
+    updatedAt: 1_700_000_000,
+    artifacts: [],
+  };
+
+  renderPane({
+    fibre,
+    isZero: false,
+  });
+
+  const kbd = screen.getByTestId("fibre-done-kbd");
+  assert.equal(kbd.className.includes("text-muted-foreground"), false);
+  assert.equal(kbd.className.includes("text-current"), true);
+  assert.ok(screen.getByTestId("fibre-artifacts"));
+  assert.equal(
+    screen.getByTestId("fibre-artifacts").className.includes("max-h-"),
+    false,
+  );
+});

@@ -2,13 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectFibrePubkeys,
   fibreArtifactCountLabel,
   fibrePeopleLabel,
   fibreSourceLabel,
   formatFibreAge,
   latestArtifact,
   primaryThreadTarget,
+  resolveFibrePersonLabel,
+  usefulStoredPersonLabel,
 } from "./fibreFormat.ts";
+
+const ALICE = "a".repeat(64);
+const BOB = "b".repeat(64);
 
 test("formatFibreAge uses compact units", () => {
   const now = 1_700_000_000_000;
@@ -40,6 +46,97 @@ test("fibrePeopleLabel joins labels", () => {
       { pubkey: "b", label: "jacob" },
     ]),
     "Vlad, jacob",
+  );
+});
+
+test("usefulStoredPersonLabel drops truncated and raw pubkeys", () => {
+  assert.equal(usefulStoredPersonLabel("Vlad", ALICE), "Vlad");
+  assert.equal(usefulStoredPersonLabel(ALICE, ALICE), null);
+  assert.equal(
+    usefulStoredPersonLabel(`${ALICE.slice(0, 8)}…${ALICE.slice(-4)}`, ALICE),
+    null,
+  );
+  assert.equal(usefulStoredPersonLabel("b87ca532…d98e", BOB), null);
+});
+
+test("resolveFibrePersonLabel prefers live profiles over stored hex", () => {
+  assert.equal(
+    resolveFibrePersonLabel(
+      { pubkey: ALICE, label: `${ALICE.slice(0, 8)}…${ALICE.slice(-4)}` },
+      {
+        profiles: {
+          [ALICE]: {
+            displayName: "Alice",
+            avatarUrl: null,
+            nip05Handle: null,
+            ownerPubkey: null,
+          },
+        },
+      },
+    ),
+    "Alice",
+  );
+});
+
+test("fibrePeopleLabel resolves names from profiles", () => {
+  assert.equal(
+    fibrePeopleLabel(
+      [
+        {
+          pubkey: ALICE,
+          label: `${ALICE.slice(0, 8)}…${ALICE.slice(-4)}`,
+        },
+        { pubkey: BOB, label: "Bob" },
+      ],
+      {
+        profiles: {
+          [ALICE]: {
+            displayName: "Alice",
+            avatarUrl: null,
+            nip05Handle: null,
+            ownerPubkey: null,
+          },
+        },
+      },
+    ),
+    "Alice, Bob",
+  );
+});
+
+test("collectFibrePubkeys walks people and artifact authors", () => {
+  assert.deepEqual(
+    collectFibrePubkeys([
+      {
+        id: "f1",
+        kind: "ask",
+        status: "open",
+        score: 1,
+        title: "x",
+        summary: "",
+        why: "",
+        whyShort: "",
+        signals: [],
+        channelId: "c1",
+        channelName: "general",
+        isDm: false,
+        people: [{ pubkey: ALICE, label: "a" }],
+        createdAt: 1,
+        updatedAt: 2,
+        artifacts: [
+          {
+            eventId: "e1",
+            channelId: "c1",
+            channelName: "general",
+            threadRootId: null,
+            authorPubkey: BOB,
+            authorLabel: "b",
+            content: "hi",
+            createdAt: 1,
+          },
+        ],
+      },
+    ]),
+    [ALICE, BOB],
   );
 });
 

@@ -13,7 +13,36 @@ const COMMITMENT_PATTERN =
 const LOW_VALUE_PATTERN =
   /^(?:\+1|ty|thx|thanks|thank you|nice|cool|lol|haha|ok|okay|k|got it|sounds good|congrats|welcome|gm|good morning|morning|hi|hey|hello|yep|yes|no|done|same|this|ditto|👍|🎉|✅)[\s!.?]*$/i;
 
+const EMPTY_LESSONS = {
+  events: new Map(),
+  authors: new Map(),
+  channels: new Map(),
+  threads: new Map(),
+  examples: [],
+};
+
 export { FIBRE_KINDS };
+
+function fibreChannelId(fibre) {
+  return fibre?.channelId ?? fibre?.artifacts?.[0]?.channelId ?? null;
+}
+
+function fibreThreadIds(fibre) {
+  const ids = new Set();
+  for (const artifact of fibre?.artifacts ?? []) {
+    if (artifact.threadRootId) ids.add(artifact.threadRootId);
+    if (artifact.eventId) ids.add(artifact.eventId);
+  }
+  return ids;
+}
+
+function sameChannelId(left, right) {
+  return Boolean(left) && left === right;
+}
+
+function mustCover(message) {
+  return Boolean(message?.isMention || message?.isDm);
+}
 
 export function summarizeFibre(fibre) {
   return {
@@ -25,6 +54,7 @@ export function summarizeFibre(fibre) {
     people: (fibre.people ?? []).map((person) => person.label),
     eventIds: (fibre.artifacts ?? []).map((artifact) => artifact.eventId),
     threadRootId: fibre.artifacts?.[0]?.threadRootId ?? null,
+    channelId: fibreChannelId(fibre),
     channelName: fibre.channelName,
   };
 }
@@ -69,8 +99,12 @@ export function buildLessons(feedback) {
 }
 
 function matchingOpenFibre(message, openFibres) {
+  const sameChannel = openFibres.filter((fibre) =>
+    sameChannelId(fibreChannelId(fibre), message.channelId),
+  );
+
   if (message.threadRootId) {
-    const byThread = openFibres.find((fibre) =>
+    const byThread = sameChannel.find((fibre) =>
       (fibre.artifacts ?? []).some(
         (artifact) =>
           artifact.threadRootId === message.threadRootId ||
@@ -80,10 +114,17 @@ function matchingOpenFibre(message, openFibres) {
     if (byThread) return byThread;
   }
 
-  return openFibres.find((fibre) =>
-    (fibre.artifacts ?? []).some(
-      (artifact) => artifact.eventId === message.eventId,
-    ),
+  if (message.isDm) {
+    const byDm = sameChannel.find((fibre) => fibre.isDm);
+    if (byDm) return byDm;
+  }
+
+  return (
+    sameChannel.find((fibre) =>
+      (fibre.artifacts ?? []).some(
+        (artifact) => artifact.eventId === message.eventId,
+      ),
+    ) ?? null
   );
 }
 
@@ -107,7 +148,27 @@ function pickKind(message, content) {
   }
   if (content.includes("?")) return "question";
   if (message.isSelf && content.length > 40) return "idea";
+  if (message.isMention) return content.includes("?") ? "question" : "ask";
+  if (message.isDm) return "fyi";
   return null;
+}
+
+function shouldAttachToFibre(message, fibre) {
+  if (!fibre) return false;
+  if (!sameChannelId(fibreChannelId(fibre), message.channelId)) return false;
+  const sameThread = Boolean(
+    message.threadRootId &&
+      (fibre.artifacts ?? []).some(
+        (artifact) =>
+          artifact.threadRootId === message.threadRootId ||
+          artifact.eventId === message.threadRootId,
+      ),
+  );
+  const sameDm = Boolean(
+    message.isDm && fibre.isDm && sameChannelId(fibreChannelId(fibre), message.channelId),
+  );
+  if (!sameThread && !sameDm) return false;
+  return mustCover(message);
 }
 
 function scoreFor(kind, message, lessons) {
@@ -166,16 +227,208 @@ function headline(content) {
   return `${line.slice(0, 87).trimEnd()}…`;
 }
 
+const SUMMARY_MAX_CHARS = 600;
+const SUMMARY_MAX_SENTENCES = 3;
+
+const KIND_LEAD = {
+  ask: "asked",
+  question: "asked",
+  blocker: "flagged a blocker",
+  decision: "raised a decision",
+  commitment: "committed",
+  idea: "shared an idea",
+  fyi: "shared",
+};
+
 /**
- * One fibre per qualifying message. Same-thread messages update an open fibre
- * instead of creating a second one. Never merges.
+ * Keep a summary as long as it needs to be, but never more than a few
+ * sentences. Collapses whitespace so LLM output stays readable in the pane.
+ */
+export function limitSummary(text) {
+  const trimmed = String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!trimmed) return "";
+  const sentences =
+    trimmed.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g) ?? [trimmed];
+  let out = "";
+  let count = 0;
+  for (const raw of sentences) {
+    const sentence = raw.trim();
+    if (!sentence) continue;
+    const next = out ? `${out} ${sentence}` : sentence;
+    if (
+      count > 0 &&
+      (count >= SUMMARY_MAX_SENTENCES || next.length > SUMMARY_MAX_CHARS)
+    ) {
+      break;
+    }
+    out =
+      next.length > SUMMARY_MAX_CHARS
+        ? `${next.slice(0, SUMMARY_MAX_CHARS - 1).trimEnd()}…`
+        : next;
+    count += 1;
+    if (out.endsWith("…")) break;
+  }
+  return out;
+}
+
+export function narrativeSummary(kind, message, content) {
+  const who = (message.authorLabel || "Someone").trim();
+  const where = message.isDm
+    ? " in a DM"
+    : message.channelName
+      ? ` in #${message.channelName}`
+      : "";
+  const excerpt = limitSummary(content);
+  const lead = KIND_LEAD[kind] ?? "wrote";
+  if (!excerpt) return limitSummary(`${who} ${lead}${where}.`);
+  return limitSummary(`${who} ${lead}${where}: ${excerpt}`);
+}
+
+function createAction(message, lessons) {
+  const content = (message.content ?? "").trim();
+  const kind = pickKind(message, content) ?? "fyi";
+  const { score, signals } = scoreFor(kind, message, lessons);
+  const where = message.channelName ? ` in #${message.channelName}` : "";
+  const why =
+    signals[0]?.label
+      ? `${signals[0].label}${where}.`
+      : `Looks like a ${kind}${where}.`;
+
+  return {
+    type: "create",
+    kind,
+    title: headline(content) || `New ${kind}`,
+    summary: narrativeSummary(kind, message, content),
+    why,
+    whyShort: signals[0]?.label ?? why,
+    score,
+    signals,
+    eventIds: [message.eventId],
+  };
+}
+
+function coveredEventIds(actions) {
+  const ids = new Set();
+  for (const action of actions) {
+    if (!action || action.type === "skip") continue;
+    for (const eventId of action.eventIds ?? []) ids.add(eventId);
+  }
+  return ids;
+}
+
+function groupEventIdsByChannel(eventIds, messagesById) {
+  const groups = new Map();
+  for (const eventId of eventIds ?? []) {
+    const message = messagesById.get(eventId);
+    if (!message) continue;
+    const key = message.channelId ?? "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(eventId);
+  }
+  return [...groups.values()];
+}
+
+function mergeSharesThread(left, right) {
+  const rightIds = fibreThreadIds(right);
+  if (rightIds.size === 0) return false;
+  for (const id of fibreThreadIds(left)) {
+    if (rightIds.has(id)) return true;
+  }
+  return false;
+}
+
+/**
+ * Hard clustering rules the LLM cannot bypass: mentions/DMs must become a
+ * fibre, and fibres stay on one channel.
+ */
+export function constrainActions(actions, messages, openFibres, lessons = EMPTY_LESSONS) {
+  const messagesById = new Map(
+    messages.map((message) => [message.eventId, message]),
+  );
+  const openById = new Map(openFibres.map((fibre) => [fibre.id, fibre]));
+  const constrained = [];
+
+  for (const action of actions ?? []) {
+    if (!action || typeof action !== "object") continue;
+
+    if (action.type === "skip") {
+      const message = messagesById.get(action.eventId);
+      if (
+        message &&
+        mustCover(message) &&
+        !alreadyAttached(message, openFibres)
+      ) {
+        continue;
+      }
+      constrained.push(action);
+      continue;
+    }
+
+    if (action.type === "create") {
+      const groups = groupEventIdsByChannel(action.eventIds, messagesById);
+      for (const eventIds of groups) {
+        constrained.push({ ...action, eventIds });
+      }
+      continue;
+    }
+
+    if (action.type === "update") {
+      const fibre = openById.get(action.fibreId);
+      if (!fibre) continue;
+      const channelId = fibreChannelId(fibre);
+      const eventIds = (action.eventIds ?? []).filter((eventId) => {
+        const message = messagesById.get(eventId);
+        return message && sameChannelId(message.channelId, channelId);
+      });
+      if (eventIds.length === 0) continue;
+      constrained.push({ ...action, eventIds });
+      continue;
+    }
+
+    if (action.type === "merge") {
+      const fibreIds = Array.isArray(action.fibreIds) ? action.fibreIds : [];
+      const fibres = fibreIds
+        .map((id) => openById.get(id))
+        .filter(Boolean);
+      if (fibres.length < 2) continue;
+      const channelId = fibreChannelId(fibres[0]);
+      if (!fibres.every((fibre) => sameChannelId(fibreChannelId(fibre), channelId))) {
+        continue;
+      }
+      const [first, ...rest] = fibres;
+      if (!rest.every((fibre) => mergeSharesThread(first, fibre))) continue;
+      constrained.push(action);
+      continue;
+    }
+
+    constrained.push(action);
+  }
+
+  const covered = coveredEventIds(constrained);
+  for (const message of messages) {
+    if (!mustCover(message)) continue;
+    if (alreadyAttached(message, openFibres)) continue;
+    if (covered.has(message.eventId)) continue;
+    constrained.push(createAction(message, lessons));
+    covered.add(message.eventId);
+  }
+
+  return constrained;
+}
+
+/**
+ * Mentions of you and DMs always become (or join) a fibre. Same-thread
+ * chatter is skipped. A fibre-worthy reply in a thread that already has a
+ * fibre becomes its own fibre.
  */
 export function heuristicActions(messages, openFibres, lessons) {
   const actions = [];
 
   for (const message of messages) {
     const content = (message.content ?? "").trim();
-    if (!content || LOW_VALUE_PATTERN.test(content) || content.length < 8) {
+    if (!content) {
       actions.push({ type: "skip", eventId: message.eventId });
       continue;
     }
@@ -185,8 +438,17 @@ export function heuristicActions(messages, openFibres, lessons) {
       continue;
     }
 
+    const cover = mustCover(message);
+    if (
+      !cover &&
+      (LOW_VALUE_PATTERN.test(content) || content.length < 8)
+    ) {
+      actions.push({ type: "skip", eventId: message.eventId });
+      continue;
+    }
+
     const existing = matchingOpenFibre(message, openFibres);
-    if (existing) {
+    if (shouldAttachToFibre(message, existing)) {
       actions.push({
         type: "update",
         fibreId: existing.id,
@@ -195,7 +457,7 @@ export function heuristicActions(messages, openFibres, lessons) {
       continue;
     }
 
-    if ((lessons.events.get(message.eventId) ?? 0) < 0) {
+    if (!cover && (lessons.events.get(message.eventId) ?? 0) < 0) {
       actions.push({ type: "skip", eventId: message.eventId });
       continue;
     }
@@ -206,24 +468,7 @@ export function heuristicActions(messages, openFibres, lessons) {
       continue;
     }
 
-    const { score, signals } = scoreFor(kind, message, lessons);
-    const where = message.channelName ? ` in #${message.channelName}` : "";
-    const why =
-      signals[0]?.label
-        ? `${signals[0].label}${where}.`
-        : `Looks like a ${kind}${where}.`;
-
-    actions.push({
-      type: "create",
-      kind,
-      title: headline(content) || `New ${kind}`,
-      summary: content.slice(0, 280),
-      why,
-      whyShort: signals[0]?.label ?? why,
-      score,
-      signals,
-      eventIds: [message.eventId],
-    });
+    actions.push(createAction(message, lessons));
   }
 
   return actions;
@@ -245,7 +490,7 @@ export function parseLlmActions(payload, openFibres) {
         type: "create",
         kind: isFibreKind(row.kind) ? row.kind : "fyi",
         title: row.title,
-        summary: row.summary,
+        summary: limitSummary(row.summary),
         why: row.why,
         whyShort: row.whyShort,
         score: clampScore(row.score),
@@ -260,7 +505,7 @@ export function parseLlmActions(payload, openFibres) {
         fibreId: row.fibreId,
         kind: isFibreKind(row.kind) ? row.kind : undefined,
         title: row.title,
-        summary: row.summary,
+        summary: limitSummary(row.summary),
         why: row.why,
         whyShort: row.whyShort,
         score: row.score,
@@ -280,7 +525,7 @@ export function parseLlmActions(payload, openFibres) {
         fibreIds,
         into,
         title: row.title,
-        summary: row.summary,
+        summary: limitSummary(row.summary),
         why: row.why,
         score: row.score,
         eventIds: Array.isArray(row.eventIds) ? row.eventIds : [],
@@ -301,20 +546,21 @@ export function buildPrompt(messages, openFibres, lessons) {
   const fibreJson = openFibres.map(summarizeFibre);
   const messageJson = messages.map((message) => ({
     eventId: message.eventId,
+    channelId: message.channelId,
     channel: message.channelName,
     author: message.authorLabel,
     isDm: message.isDm,
     isMention: message.isMention,
     isSelf: message.isSelf,
     threadRootId: message.threadRootId,
-    content: (message.content ?? "").slice(0, 500),
+    content: (message.content ?? "").slice(0, 800),
   }));
 
-  return `You extract fibres from a team chat. A fibre is an idea, ask, decision, commitment, question, blocker, or FYI — not a raw message. One fibre groups one or more messages (N >= 1). A message may belong to more than one fibre.
+  return `You extract fibres from a team chat. A fibre is an idea, ask, decision, commitment, question, blocker, or FYI — not a raw message. It may be a single message, a mention, a DM, or a relevant thread (N >= 1). It is not "everyone who said hello this week."
 
 Kinds: ${FIBRE_KINDS.join(", ")}.
 
-Open (incomplete) fibres — consolidate into these when the new message belongs to the same work:
+Open fibres (incomplete). Attach a new message only when it is the same work in the same channel, usually the same threadRootId:
 ${JSON.stringify(fibreJson)}
 ${corrections}
 New messages:
@@ -329,11 +575,15 @@ Reply with JSON only:
 ]}
 
 Rules:
-- skip acknowledgements, empty, and messages that are not a fibre.
-- update an open fibre when the message continues it.
-- merge when two open fibres are the same thread of work.
-- a message may produce more than one action (create AND update).
-- score is 0-100. why explains ranking in one or two sentences.`;
+- Default action is skip. Most workspace messages are not fibres (greetings, +1s, offhand replies).
+- Every isMention: true and every isDm: true MUST create or update. 1:1 fibres are expected and correct.
+- update only when the message is in the same channelId as the fibre and is actually the same work (usually the same threadRootId).
+- merge almost never, and never across channels. Prefer two fibres over one bloated fibre.
+- A fibre-worthy reply in a thread that already has a fibre should usually create a new fibre, not be swallowed.
+- Never attach a message from a different channelId to an open fibre.
+- score is 0-100. why explains ranking in one or two sentences.
+- title is a short headline (a few words), not a restatement of the summary.
+- summary names the people and states what happened, e.g. "Vlad asked jacob to run the two triage scripts in #hack-project-mesh before the next build." Write one to three sentences — as long as a reader needs to understand the fibre, never a fourth. Do not write a nameless one-liner like "Request for a status update."`;
 }
 
 async function llmActions(messages, openFibres, lessons) {
@@ -369,16 +619,16 @@ async function llmActions(messages, openFibres, lessons) {
  */
 export async function classifyMessages(messages, openFibres, feedback) {
   const lessons = buildLessons(feedback);
-  const fallback = heuristicActions(messages, openFibres, lessons);
+  let actions = heuristicActions(messages, openFibres, lessons);
 
   if (process.env.TRIAGE_LLM === "1") {
     try {
       const llm = await llmActions(messages, openFibres, lessons);
-      if (llm.length > 0) return llm;
+      if (llm.length > 0) actions = llm;
     } catch (error) {
       console.warn(`[triage] LLM classification failed: ${error.message}`);
     }
   }
 
-  return fallback;
+  return constrainActions(actions, messages, openFibres, lessons);
 }

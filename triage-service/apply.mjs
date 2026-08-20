@@ -61,10 +61,18 @@ function uniqueIds(ids) {
 }
 
 function attachArtifacts(fibre, incoming, now) {
+  const fibreChannel = fibre.channelId ?? fibre.artifacts[0]?.channelId ?? null;
   const existing = new Set(fibre.artifacts.map((artifact) => artifact.eventId));
   let added = 0;
   for (const artifact of incoming) {
     if (existing.has(artifact.eventId)) continue;
+    if (
+      fibreChannel &&
+      artifact.channelId &&
+      artifact.channelId !== fibreChannel
+    ) {
+      continue;
+    }
     fibre.artifacts.push(artifact);
     existing.add(artifact.eventId);
     added += 1;
@@ -131,10 +139,15 @@ export function applyFibreActions({ fibres, messages, actions, now }) {
     if (action.type === "create") {
       const artifacts = artifactsForEventIds(action.eventIds, messagesById);
       if (artifacts.length === 0) continue;
+      const channelId = artifacts[0].channelId;
+      const sameChannel = artifacts.filter(
+        (artifact) =>
+          !channelId || !artifact.channelId || artifact.channelId === channelId,
+      );
       const kind = isFibreKind(action.kind) ? action.kind : "fyi";
       const title =
         (typeof action.title === "string" && action.title.trim()) ||
-        artifacts[0].content.trim().split("\n")[0] ||
+        sameChannel[0].content.trim().split("\n")[0] ||
         "Untitled fibre";
       const fibre = {
         id: randomUUID(),
@@ -144,17 +157,17 @@ export function applyFibreActions({ fibres, messages, actions, now }) {
         title,
         summary:
           (typeof action.summary === "string" && action.summary.trim()) ||
-          artifacts[0].content.slice(0, 280),
+          sameChannel[0].content.slice(0, 280),
         why: typeof action.why === "string" ? action.why.trim() : "",
         whyShort:
           (typeof action.whyShort === "string" && action.whyShort.trim()) ||
           (typeof action.why === "string" ? action.why.trim().slice(0, 120) : ""),
         signals: Array.isArray(action.signals) ? action.signals : [],
-        channelId: artifacts[0].channelId,
-        channelName: artifacts[0].channelName,
-        isDm: artifacts[0].isDm,
-        people: peopleFromArtifacts(artifacts),
-        artifacts,
+        channelId: sameChannel[0].channelId,
+        channelName: sameChannel[0].channelName,
+        isDm: sameChannel[0].isDm,
+        people: peopleFromArtifacts(sameChannel),
+        artifacts: sameChannel,
         createdAt: clock,
         updatedAt: clock,
       };

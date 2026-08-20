@@ -2,21 +2,56 @@ import * as React from "react";
 
 import { channelCatchUpEventKinds } from "@/features/channels/useUnreadChannels";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { usefulStoredPersonLabel } from "@/features/home/ui/fibre/fibreFormat";
 import { getChannelIdFromTags } from "@/features/messages/lib/threading";
-import { useIdentityQuery } from "@/shared/api/hooks";
-import { relayClient } from "@/shared/api/relayClient";
-import type { Channel, RelayEvent } from "@/shared/api/types";
-import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
 import {
   candidateFromEvent,
   collectChannelCandidates,
   sortOldestFirst,
   type TriageCandidate,
 } from "@/features/triage/lib/collectCandidates";
+import {
+  useFibresQuery,
+  useIngestMessagesMutation,
+} from "@/features/triage/hooks";
 import { useTriageAutoScan } from "@/features/triage/useTriageAutoScan";
-import { useIngestMessagesMutation } from "@/features/triage/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { relayClient } from "@/shared/api/relayClient";
+import { getUsersBatch } from "@/shared/api/tauriProfiles";
+import type { Channel, RelayEvent } from "@/shared/api/types";
+import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
 
 const MESSAGE_KIND_SET = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
+
+async function withResolvedAuthorLabels(
+  candidates: TriageCandidate[],
+  currentPubkey?: string,
+): Promise<TriageCandidate[]> {
+  const pubkeys = [
+    ...new Set(candidates.map((candidate) => candidate.authorPubkey)),
+  ].filter((pubkey) => pubkey.length > 0);
+  if (pubkeys.length === 0) return candidates;
+  try {
+    const { profiles } = await getUsersBatch(pubkeys);
+    return candidates.map((candidate) => ({
+      ...candidate,
+      authorLabel: resolveUserLabel({
+        pubkey: candidate.authorPubkey,
+        currentPubkey,
+        profiles,
+        preferResolvedSelfLabel: true,
+        fallbackName: usefulStoredPersonLabel(
+          candidate.authorLabel,
+          candidate.authorPubkey,
+        ),
+      }),
+    }));
+  } catch (error) {
+    console.warn("[fibre] profile lookup failed", error);
+    return candidates;
+  }
+}
 
 export function useFibreIngest() {
   const identityQuery = useIdentityQuery();
@@ -24,11 +59,14 @@ export function useFibreIngest() {
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
   const ingestMutation = useIngestMessagesMutation(currentPubkey);
+  const fibresQuery = useFibresQuery(currentPubkey);
   const mutateAsync = ingestMutation.mutateAsync;
 
   const pendingRef = React.useRef<Map<string, TriageCandidate>>(new Map());
   const [pendingCount, setPendingCount] = React.useState(0);
   const backfilledForRef = React.useRef<string | null>(null);
+  const backfillInFlightRef = React.useRef(false);
+  const hadFibresRef = React.useRef(false);
 
   const context = React.useMemo(() => ({ currentPubkey }), [currentPubkey]);
 
@@ -38,11 +76,13 @@ export function useFibreIngest() {
     setPendingCount(0);
     if (batch.length === 0) return;
     try {
-      await mutateAsync(sortOldestFirst(batch));
+      await mutateAsync(
+        sortOldestFirst(await withResolvedAuthorLabels(batch, currentPubkey)),
+      );
     } catch (error) {
       console.warn("[fibre] ingest failed", error);
     }
-  }, [mutateAsync]);
+  }, [currentPubkey, mutateAsync]);
 
   const enqueue = React.useCallback(
     (event: RelayEvent, channel?: Channel) => {
@@ -77,6 +117,30 @@ export function useFibreIngest() {
     [channels, enqueue],
   );
 
+  const runBackfill = React.useCallback(async () => {
+    if (!currentPubkey || backfillInFlightRef.current) return;
+    backfillInFlightRef.current = true;
+    try {
+      const collected = await collectChannelCandidates({
+        channels,
+        context,
+        fetchEvents: (filter) => relayClient.fetchEvents(filter),
+        kindsForChannel: channelCatchUpEventKinds,
+      });
+      if (collected.length === 0) return;
+      await mutateAsync(
+        sortOldestFirst(
+          await withResolvedAuthorLabels(collected, currentPubkey),
+        ),
+      );
+      backfilledForRef.current = currentPubkey;
+    } catch (error) {
+      console.warn("[fibre] backfill failed", error);
+    } finally {
+      backfillInFlightRef.current = false;
+    }
+  }, [channels, context, currentPubkey, mutateAsync]);
+
   useTriageAutoScan({
     enabled: Boolean(currentPubkey),
     isScanning: ingestMutation.isPending,
@@ -86,6 +150,23 @@ export function useFibreIngest() {
     },
   });
 
+  // After the engine store is purged, open+cleared both drop to zero. Re-run
+  // catch-up once so fibres regenerate with the current classifier.
+  React.useEffect(() => {
+    const data = fibresQuery.data;
+    if (!data) return;
+    const empty = data.fibres.length === 0 && data.clearedCount === 0;
+    if (!empty) {
+      hadFibresRef.current = true;
+      return;
+    }
+    if (hadFibresRef.current && backfilledForRef.current) {
+      hadFibresRef.current = false;
+      backfilledForRef.current = null;
+      void runBackfill();
+    }
+  }, [fibresQuery.data, runBackfill]);
+
   React.useEffect(() => {
     if (!currentPubkey) {
       backfilledForRef.current = null;
@@ -93,28 +174,8 @@ export function useFibreIngest() {
     }
     if (channelsQuery.isLoading) return;
     if (backfilledForRef.current === currentPubkey) return;
-
-    let cancelled = false;
-    void (async () => {
-      try {
-        const collected = await collectChannelCandidates({
-          channels,
-          context,
-          fetchEvents: (filter) => relayClient.fetchEvents(filter),
-          kindsForChannel: channelCatchUpEventKinds,
-        });
-        if (cancelled || collected.length === 0) return;
-        await mutateAsync(sortOldestFirst(collected));
-        if (!cancelled) backfilledForRef.current = currentPubkey;
-      } catch (error) {
-        console.warn("[fibre] backfill failed", error);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [channels, channelsQuery.isLoading, context, currentPubkey, mutateAsync]);
+    void runBackfill();
+  }, [channelsQuery.isLoading, currentPubkey, runBackfill]);
 
   return {
     currentPubkey,

@@ -1,4 +1,9 @@
 import type { Fibre, FibreArtifact, FibrePerson } from "@/features/triage/api";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
+import { truncatePubkey } from "@/shared/lib/pubkey";
 
 export function formatFibreAge(createdAt: number, nowMs = Date.now()): string {
   const seconds = Math.max(0, Math.floor(nowMs / 1000) - createdAt);
@@ -17,8 +22,60 @@ export function fibreSourceLabel(fibre: Pick<Fibre, "channelName" | "isDm">) {
   return fibre.channelName ? `#${fibre.channelName}` : "Unknown channel";
 }
 
-export function fibrePeopleLabel(people: readonly FibrePerson[]) {
-  return people.map((person) => person.label).join(", ");
+/** Drop truncated/raw pubkeys so profile lookup can replace them. */
+export function usefulStoredPersonLabel(
+  label: string | null | undefined,
+  pubkey: string | null | undefined,
+): string | null {
+  const trimmed = label?.trim();
+  if (!trimmed) return null;
+  if (pubkey) {
+    const normalized = pubkey.trim().toLowerCase();
+    if (trimmed.toLowerCase() === normalized) return null;
+    if (trimmed === truncatePubkey(pubkey)) return null;
+  }
+  if (/^[0-9a-f]{6,}[.…].+$/i.test(trimmed)) return null;
+  if (/^[0-9a-f]{16,}$/i.test(trimmed)) return null;
+  return trimmed;
+}
+
+export function collectFibrePubkeys(fibres: readonly Fibre[]): string[] {
+  const pubkeys = new Set<string>();
+  for (const fibre of fibres) {
+    for (const person of fibre.people) {
+      if (person.pubkey) pubkeys.add(person.pubkey);
+    }
+    for (const artifact of fibre.artifacts) {
+      if (artifact.authorPubkey) pubkeys.add(artifact.authorPubkey);
+    }
+  }
+  return [...pubkeys];
+}
+
+export function resolveFibrePersonLabel(
+  person: { pubkey: string | null | undefined; label?: string | null },
+  input: { profiles?: UserProfileLookup; currentPubkey?: string },
+): string {
+  const pubkey = person.pubkey?.trim();
+  if (!pubkey) {
+    return usefulStoredPersonLabel(person.label, null) ?? "Unknown";
+  }
+  return resolveUserLabel({
+    pubkey,
+    currentPubkey: input.currentPubkey,
+    profiles: input.profiles,
+    preferResolvedSelfLabel: true,
+    fallbackName: usefulStoredPersonLabel(person.label, pubkey),
+  });
+}
+
+export function fibrePeopleLabel(
+  people: readonly FibrePerson[],
+  input?: { profiles?: UserProfileLookup; currentPubkey?: string },
+) {
+  return people
+    .map((person) => resolveFibrePersonLabel(person, input ?? {}))
+    .join(", ");
 }
 
 export function fibreArtifactCountLabel(count: number) {

@@ -155,3 +155,40 @@ test("messageToArtifact snapshots the body", () => {
   assert.equal(artifact.channelName, "war-room");
   assert.equal(artifact.content, "please run the scripts");
 });
+
+const MSG_OTHER_CHANNEL = {
+  ...MSG_B,
+  eventId: "c",
+  channelId: "c2",
+  channelName: "general",
+};
+
+test("update refuses artifacts from a different channel", () => {
+  const created = applyFibreActions({
+    fibres: [],
+    messages: [MSG_A],
+    actions: [{ type: "create", kind: "ask", title: "Scripts", eventIds: ["a"] }],
+    now: 10,
+  });
+  const fibreId = created.fibres[0].id;
+  const updated = applyFibreActions({
+    fibres: created.fibres,
+    messages: [MSG_OTHER_CHANNEL],
+    actions: [{ type: "update", fibreId, eventIds: ["c"] }],
+    now: 20,
+  });
+  assert.equal(updated.fibres[0].artifacts.length, 1);
+  assert.equal(updated.fibres[0].artifacts[0].eventId, "a");
+  assert.equal(updated.fibres[0].channelId, "c1");
+});
+
+test("create keeps only the first channel when event ids mix channels", () => {
+  const { fibres } = applyFibreActions({
+    fibres: [],
+    messages: [MSG_A, MSG_OTHER_CHANNEL],
+    actions: [{ type: "create", kind: "ask", eventIds: ["a", "c"] }],
+    now: 10,
+  });
+  assert.equal(fibres[0].artifacts.length, 1);
+  assert.equal(fibres[0].channelId, "c1");
+});

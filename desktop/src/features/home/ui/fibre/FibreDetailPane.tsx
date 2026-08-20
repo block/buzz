@@ -9,23 +9,27 @@ import {
   formatFibreAge,
   latestArtifact,
   primaryThreadTarget,
+  resolveFibrePersonLabel,
 } from "@/features/home/ui/fibre/fibreFormat";
 import { fibreKindMeta } from "@/features/home/ui/fibre/fibreKinds";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Fibre } from "@/features/triage/api";
 import { sendChannelMessage } from "@/shared/api/tauri";
+import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
 
 const SHORTCUT_KBD =
-  "rounded bg-foreground/10 px-1 py-px text-2xs text-muted-foreground";
+  "rounded bg-current/20 px-1 py-px text-2xs font-medium text-current opacity-80";
 
 type FibreDetailPaneProps = {
   currentPubkey?: string;
   fibre: Fibre | null;
   isZero: boolean;
   nowMs: number;
+  profiles?: UserProfileLookup;
   onDone: (fibre: Fibre) => void;
   onDismiss: (fibre: Fibre) => void;
   onOpenContext: (
@@ -63,6 +67,7 @@ export function FibreDetailPane({
   onDismiss,
   onOpenContext,
   onRestore,
+  profiles,
 }: FibreDetailPaneProps) {
   const [artifactsOpen, setArtifactsOpen] = React.useState(true);
   const [delegateOpen, setDelegateOpen] = React.useState(false);
@@ -129,7 +134,11 @@ export function FibreDetailPane({
       );
       const greeting =
         others.length > 0
-          ? `Hey ${others.map((person) => person.label).join(", ")}`
+          ? `Hey ${others
+              .map((person) =>
+                resolveFibrePersonLabel(person, { currentPubkey, profiles }),
+              )
+              .join(", ")}`
           : "Hey";
       const content = `${greeting}, I'm going to ask @${agent.name} to take a crack at this.`;
       const mentionPubkeys = [
@@ -153,7 +162,7 @@ export function FibreDetailPane({
         );
       }
     },
-    [currentPubkey, fibre, onDone],
+    [currentPubkey, fibre, onDone, profiles],
   );
 
   if (isZero || !fibre) {
@@ -194,7 +203,7 @@ export function FibreDetailPane({
 
   return (
     <div
-      className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       data-testid="fibre-detail"
     >
       <div className="flex h-[3.25rem] shrink-0 items-center gap-3 border-b border-border/60 px-5">
@@ -268,7 +277,7 @@ export function FibreDetailPane({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-col border-t border-border/60 bg-muted/20">
+      <div className="flex min-h-0 max-h-[min(36rem,58%)] shrink-0 flex-col overflow-hidden border-t border-border/60 bg-muted/20">
         <button
           className="flex h-11 shrink-0 items-center gap-2.5 px-5 text-left"
           onClick={() => setArtifactsOpen((open) => !open)}
@@ -287,62 +296,80 @@ export function FibreDetailPane({
           <span className="ml-auto text-xs text-muted-foreground">A</span>
         </button>
         {artifactsOpen ? (
-          <div className="min-h-0 max-h-[38%] overflow-y-auto px-3.5 pb-3.5">
-            {fibre.artifacts.map((artifact) => (
-              <div
-                className="grid grid-cols-[2.125rem_minmax(0,1fr)] gap-x-3 rounded-lg px-2 py-2.5"
-                key={artifact.eventId}
-              >
-                <UserAvatar
-                  avatarUrl={null}
-                  className="h-[2.125rem] w-[2.125rem]"
-                  displayName={artifact.authorLabel ?? "?"}
-                  size="md"
-                />
-                <div className="min-w-0">
-                  <div className="mb-0.5 flex items-center gap-2">
-                    <span className="text-sm font-medium">
-                      {artifact.authorLabel ?? "Unknown"}
-                    </span>
-                    <span className="text-2xs text-muted-foreground">
-                      {artifact.createdAt
-                        ? new Date(
-                            artifact.createdAt * 1000,
-                          ).toLocaleTimeString("en-US", {
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })
-                        : ""}
-                    </span>
-                    <span className="rounded-md bg-muted px-1.5 py-px text-2xs text-muted-foreground">
-                      {artifact.isDm
-                        ? "DM"
-                        : artifact.channelName
-                          ? `#${artifact.channelName}`
-                          : source}
-                    </span>
-                    {artifact.channelId ? (
-                      <button
-                        className="ml-auto text-2xs text-primary hover:underline"
-                        onClick={() =>
-                          onOpenContext(
-                            artifact.channelId as string,
-                            artifact.eventId,
-                            artifact.threadRootId,
-                          )
-                        }
-                        type="button"
-                      >
-                        Jump to thread
-                      </button>
-                    ) : null}
-                  </div>
-                  <div className="text-sm leading-relaxed text-muted-foreground">
-                    <Markdown content={artifact.content} />
+          <div
+            className="min-h-0 overflow-y-auto px-3.5 pb-2"
+            data-testid="fibre-artifacts"
+          >
+            {fibre.artifacts.map((artifact) => {
+              const authorLabel = resolveFibrePersonLabel(
+                {
+                  pubkey: artifact.authorPubkey,
+                  label: artifact.authorLabel,
+                },
+                { currentPubkey, profiles },
+              );
+              const authorProfile = artifact.authorPubkey
+                ? profiles?.[normalizePubkey(artifact.authorPubkey)]
+                : undefined;
+              return (
+                <div
+                  className="grid grid-cols-[2.125rem_minmax(0,1fr)] gap-x-3 rounded-lg px-2 py-2"
+                  key={artifact.eventId}
+                >
+                  <UserAvatar
+                    avatarUrl={authorProfile?.avatarUrl ?? null}
+                    className="h-[2.125rem] w-[2.125rem]"
+                    displayName={authorLabel}
+                    size="md"
+                  />
+                  <div className="min-w-0">
+                    <div className="mb-0.5 flex items-center gap-2">
+                      <span className="text-sm font-medium">{authorLabel}</span>
+                      <span className="text-2xs text-muted-foreground">
+                        {artifact.createdAt
+                          ? new Date(
+                              artifact.createdAt * 1000,
+                            ).toLocaleTimeString("en-US", {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })
+                          : ""}
+                      </span>
+                      <span className="rounded-md bg-muted px-1.5 py-px text-2xs text-muted-foreground">
+                        {artifact.isDm
+                          ? "DM"
+                          : artifact.channelName
+                            ? `#${artifact.channelName}`
+                            : source}
+                      </span>
+                      {artifact.channelId ? (
+                        <button
+                          className="ml-auto text-2xs text-primary hover:underline"
+                          onClick={() =>
+                            onOpenContext(
+                              artifact.channelId as string,
+                              artifact.eventId,
+                              artifact.threadRootId,
+                            )
+                          }
+                          type="button"
+                        >
+                          Jump to thread
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="text-sm leading-relaxed text-muted-foreground">
+                      <Markdown
+                        className="[&>*+*]:mt-1.5"
+                        content={artifact.content}
+                        interactive={false}
+                        linkPreviewsSuppressed
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : null}
       </div>
@@ -355,7 +382,9 @@ export function FibreDetailPane({
           type="button"
         >
           Done
-          <kbd className={SHORTCUT_KBD}>E</kbd>
+          <kbd className={SHORTCUT_KBD} data-testid="fibre-done-kbd">
+            E
+          </kbd>
         </Button>
         <Button
           onClick={() => toast.message("Snooze isn't wired yet")}

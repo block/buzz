@@ -125,3 +125,8 @@ export function fibresPayload(pubkey) {
     clearedCount: clearedCount(pubkey),
   };
 }
+
+export function resetStore() {
+  state = structuredClone(EMPTY);
+  persist();
+}

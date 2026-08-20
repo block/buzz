@@ -24,7 +24,8 @@ export function useFibresQuery(pubkey: string | undefined) {
     enabled: Boolean(pubkey),
     queryKey: fibreQueryKeys.fibres(pubkey),
     queryFn: async () => fetchFibres(pubkey as string),
-    staleTime: 15_000,
+    staleTime: 5_000,
+    refetchInterval: 15_000,
     retry: 1,
   });
 }

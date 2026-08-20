@@ -12,6 +12,7 @@ import {
   patchFibre,
   putFibres,
   recordFeedback,
+  resetStore,
   restoreFibres,
 } from "./store.mjs";
 
@@ -137,6 +138,12 @@ async function route(req, url) {
     }
     const feedback = recordFeedback(body.pubkey, body);
     return [201, { feedback }];
+  }
+
+  if (method === "POST" && pathname === "/reset") {
+    resetStore();
+    console.log("[triage] store purged");
+    return [200, { status: "ok" }];
   }
 
   return [404, { error: `no route for ${method} ${pathname}` }];
