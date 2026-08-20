@@ -180,6 +180,14 @@ type MockHuddleSeed = {
   isCreator?: boolean;
 };
 
+type MockWorkstreamBoardFixture = {
+  channelId: string;
+  channelName: string;
+  canvas: string;
+  rootEventId: string;
+  targetEventId: string;
+};
+
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
@@ -339,6 +347,8 @@ type E2eConfig = {
     deepHistoryMessageCount?: number;
     feedReadError?: string;
     canvasReadError?: string;
+    /** Optional deterministic Workstream Board blocker/thread fixture. */
+    workstreamBoardFixture?: MockWorkstreamBoardFixture;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
      *  community-switch gate. 0/undefined = instant. */
     applyCommunityDelayMs?: number;
@@ -3076,6 +3086,40 @@ const mockChannels: MockChannel[] = [
   }),
 ];
 
+function ensureMockWorkstreamBoardFixture(config?: E2eConfig | null) {
+  const fixture = config?.mock?.workstreamBoardFixture;
+  if (!fixture) return;
+
+  if (!mockChannels.some((channel) => channel.id === fixture.channelId)) {
+    mockChannels.push(
+      createMockChannel({
+        id: fixture.channelId,
+        name: fixture.channelName,
+        channel_type: "stream",
+        visibility: "open",
+        description: "Deterministic message-linked blocker fixture",
+        topic: null,
+        purpose: null,
+        last_message_at: isoMinutesAgo(1),
+        archived_at: null,
+        created_by: MOCK_IDENTITY_PUBKEY,
+        topic_set_by: null,
+        topic_set_at: null,
+        purpose_set_by: null,
+        purpose_set_at: null,
+        topic_required: false,
+        max_members: null,
+        nip29_group_id: null,
+        created_minutes_ago: 10,
+        updated_minutes_ago: 1,
+        members: [createMockMember(MOCK_IDENTITY_PUBKEY, "owner", 10)],
+      }),
+    );
+  }
+
+  getMockMessageStore(fixture.channelId);
+}
+
 const mockMessages = new Map<string, RelayEvent[]>();
 const deferredSendMessageLiveEchoes: Array<{
   channelId: string;
@@ -4326,6 +4370,38 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
   const existing = mockMessages.get(channelId);
   if (existing) {
     return existing;
+  }
+
+  const fixture = getConfig()?.mock?.workstreamBoardFixture;
+  if (fixture?.channelId === channelId) {
+    const seeded: RelayEvent[] = [
+      {
+        id: fixture.rootEventId,
+        pubkey: ALICE_PUBKEY,
+        created_at: Math.floor(Date.now() / 1000) - 120,
+        kind: 9,
+        tags: [["h", channelId]],
+        content: "Slice 7 blocker thread root",
+        sig: "mocksig".repeat(20).slice(0, 128),
+      },
+      {
+        id: fixture.targetEventId,
+        pubkey: ALICE_PUBKEY,
+        created_at: Math.floor(Date.now() / 1000) - 60,
+        kind: 9,
+        tags: buildReplyMessageTags(
+          channelId,
+          ALICE_PUBKEY,
+          fixture.rootEventId,
+          fixture.rootEventId,
+          undefined,
+        ),
+        content: "Slice 7 exact reply target",
+        sig: "mocksig".repeat(20).slice(0, 128),
+      },
+    ];
+    mockMessages.set(channelId, seeded);
+    return seeded;
   }
 
   const seeded: RelayEvent[] =
@@ -10645,6 +10721,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockPendingCommunityDeepLinks(config);
   resetMockPendingNavigationDeepLinks(config);
   resetMockPendingEntityDeepLinks(config);
+  ensureMockWorkstreamBoardFixture(config);
   initializeMockHuddle(config.mock?.huddle, config);
   mockWebsocketSendMutexWedged = false;
   if (config.mock?.windowLabel) {
@@ -13714,8 +13791,17 @@ export function maybeInstallE2eTauriMocks() {
         if (canvasReadError) {
           throw new Error(canvasReadError);
         }
+        const channelId = (payload as { channelId?: string }).channelId;
+        const fixture = activeConfig?.mock?.workstreamBoardFixture;
+        if (fixture && fixture.channelId === channelId) {
+          return {
+            content: fixture.canvas,
+            event_id: "slice7-workstream-fixture-canvas",
+            updated_at: Math.floor(Date.now() / 1000),
+            author: MOCK_IDENTITY_PUBKEY,
+          };
+        }
         if (isRelayMode(activeConfig)) {
-          const channelId = (payload as { channelId?: string }).channelId;
           if (!channelId) {
             throw new Error("get_canvas requires channelId");
           }

@@ -5,10 +5,48 @@ import {
   deriveReviewerWaits,
   mergeWorkstreamWaits,
   parseManualWorkstreamWaits,
+  parseWorkstreamWaitMessageLink,
   sortWorkstreamCards,
 } from "./workstreamWaits.ts";
 
 const LOGAN = "a".repeat(64);
+
+const CHANNEL = "123e4567-e89b-12d3-a456-426614174000";
+const MESSAGE = "a".repeat(64);
+const THREAD = "b".repeat(64);
+
+test("message-linked manual waits preserve valid exact destinations", () => {
+  const message = `buzz://message?channel=${CHANNEL}&id=${MESSAGE}&thread=${THREAD}`;
+  const [wait] = parseManualWorkstreamWaits([
+    {
+      key: "message",
+      actor: { kind: "person", name: "Logan" },
+      reason: "Need an answer",
+      message,
+    },
+  ]);
+  assert.equal(wait.message, message);
+  assert.deepEqual(parseWorkstreamWaitMessageLink(wait.message), {
+    channelId: CHANNEL,
+    messageId: MESSAGE,
+    threadRootId: THREAD,
+  });
+});
+
+test("message-linked waits fail closed for malformed or non-canonical destinations", () => {
+  const valid = `buzz://message?channel=${CHANNEL}&id=${MESSAGE}`;
+  for (const message of [
+    "not-a-link",
+    `buzz://message?channel=not-a-uuid&id=${MESSAGE}`,
+    `buzz://message?channel=${CHANNEL}&id=short`,
+    `buzz://message?channel=${CHANNEL}&id=${MESSAGE}&thread=short`,
+    `${valid}&extra=ignored`,
+    `buzz://message?id=${MESSAGE}&channel=${CHANNEL}`,
+  ]) {
+    assert.equal(parseWorkstreamWaitMessageLink(message), null, message);
+  }
+  assert.equal(parseWorkstreamWaitMessageLink(undefined), null);
+});
 
 test("manual waits retain simultaneous unique entries and ignore malformed or duplicate keys", () => {
   assert.deepEqual(

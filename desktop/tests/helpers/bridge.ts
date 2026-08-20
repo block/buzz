@@ -279,6 +279,14 @@ type MockBridgeOptions = {
   deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Optional deterministic Workstream Board blocker/thread fixture. */
+  workstreamBoardFixture?: {
+    channelId: string;
+    channelName: string;
+    canvas: string;
+    rootEventId: string;
+    targetEventId: string;
+  };
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
   /** Reject `clear_pending_navigation_deep_links` with this message. */

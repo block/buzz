@@ -1,5 +1,7 @@
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
+import { parseMessageLink } from "@/features/messages/lib/messageLink";
+import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { WorkstreamCardV1 } from "@/features/workstream-board/lib/workstreamCardParser";
 import type {
   WorkstreamPullRequestDisplayState,
@@ -17,8 +19,46 @@ export type WorkstreamWait = {
   actor: WorkstreamWaitActor;
   reason: string;
   since?: string;
+  /** Optional canonical `buzz://message?...` destination from the canvas. */
+  message?: string;
+  /** True when the canvas explicitly supplied a `message` field, even if malformed. */
+  messagePresent?: boolean;
   source: "manual" | "derived";
 };
+
+const CHANNEL_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * Parse and strictly validate a manual Workstream Board message destination.
+ *
+ * `parseMessageLink` intentionally accepts any non-empty route values for
+ * general markdown links. Canvas-authored blockers need the stronger wire
+ * contract: a canonical URL, a UUID channel ID, and 64-hex event IDs.
+ */
+export function parseWorkstreamWaitMessageLink(
+  value: unknown,
+): ParsedMessageLink | null {
+  if (typeof value !== "string") return null;
+  const parsed = parseMessageLink(value);
+  if (!parsed.ok) return null;
+  const { channelId, messageId, threadRootId } = parsed.value;
+  if (
+    !CHANNEL_ID_PATTERN.test(channelId) ||
+    !EVENT_ID_PATTERN.test(messageId) ||
+    (threadRootId !== null && !EVENT_ID_PATTERN.test(threadRootId))
+  ) {
+    return null;
+  }
+
+  // Reject encoded values, unknown query parameters, and non-canonical query
+  // ordering rather than silently navigating to a different destination.
+  const canonical = `buzz://message?channel=${channelId}&id=${messageId}${
+    threadRootId ? `&thread=${threadRootId}` : ""
+  }`;
+  return canonical === value ? parsed.value : null;
+}
 
 export type WorkstreamCardSortInput = {
   channelId: string;
@@ -60,6 +100,8 @@ export function isWorkstreamWait(
     (typeof wait.since !== "string" || !Number.isFinite(Date.parse(wait.since)))
   )
     return false;
+  // Keep malformed destinations attached to an otherwise valid blocker. The
+  // renderer validates the link before making the row interactive.
   return (
     actor.pubkey === undefined ||
     (typeof actor.pubkey === "string" && !!actor.pubkey.trim())
@@ -74,7 +116,17 @@ export function parseManualWorkstreamWaits(
   for (const value of values) {
     if (!isWorkstreamWait(value) || keys.has(value.key)) continue;
     keys.add(value.key);
-    waits.push({ ...value, actor: { ...value.actor }, source: "manual" });
+    const messagePresent = Object.hasOwn(value, "message");
+    const message =
+      typeof value.message === "string" ? value.message : undefined;
+    waits.push({
+      key: value.key,
+      actor: { ...value.actor },
+      reason: value.reason,
+      ...(value.since === undefined ? {} : { since: value.since }),
+      ...(messagePresent ? { message, messagePresent: true } : {}),
+      source: "manual",
+    });
   }
   return waits;
 }
