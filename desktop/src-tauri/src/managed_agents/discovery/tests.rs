@@ -95,6 +95,31 @@ fn normalizes_buzz_agent_args_to_empty() {
 }
 
 #[test]
+fn normalizes_grok_empty_args_to_agent_stdio() {
+    // Managed records intentionally store empty agent_args; spawn must still
+    // enter ACP mode (block/buzz#3457).
+    assert_eq!(
+        normalize_agent_args("grok", Vec::new()),
+        vec!["agent", "--always-approve", "stdio"]
+    );
+    assert_eq!(
+        normalize_agent_args("/Users/test/.local/bin/grok", Vec::new()),
+        vec!["agent", "--always-approve", "stdio"]
+    );
+    // Legacy clap/env default is a sole "acp" when args are omitted.
+    assert_eq!(
+        normalize_agent_args("grok", vec!["acp".into()]),
+        vec!["agent", "--always-approve", "stdio"]
+    );
+    // Explicit non-empty args are preserved.
+    assert_eq!(
+        normalize_agent_args("grok", vec!["agent".into(), "stdio".into()]),
+        vec!["agent", "stdio"]
+    );
+}
+
+
+#[test]
 fn login_shell_lookup_treats_command_as_data() {
     let marker =
         std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
