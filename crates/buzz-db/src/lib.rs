@@ -234,6 +234,25 @@ pub struct Db {
     /// not yet probed (or the probe hit a transient error and will retry).
     /// Shared across `Db` clones.
     pub(crate) reader_aurora_identity: std::sync::Arc<std::sync::OnceLock<bool>>,
+    /// Whether the configured reader endpoint is not a hot standby — probed
+    /// once at boot ([`Db::spawn_read_pool_boot_ping`]) and cached. Unset
+    /// means not yet probed (no replica configured, the boot ping could not
+    /// reach the reader, or identity could not be read).
+    ///
+    /// Named for the `replica_is_writer` route label it drives, which is the
+    /// overwhelmingly common cause (a reader URL that resolves to the writer,
+    /// including Aurora `cluster-ro` on a cluster with no readers). The gate
+    /// is strictly "not replaying WAL", so an unrelated primary lands in the
+    /// same bucket — also correctly, since it offloads the writer just as
+    /// little.
+    ///
+    /// `Some(true)` only relabels route telemetry
+    /// (`buzz_db_route_decision{decision="replica_is_writer"}`); it never
+    /// gates routing. A reader that is really the writer serves correct rows
+    /// with a trivially satisfied fence — the defect is that
+    /// `decision="replica"` would report offload that is not happening. See
+    /// [`Db::replica_decision`]. Shared across `Db` clones.
+    pub(crate) reader_is_writer: std::sync::Arc<std::sync::OnceLock<bool>>,
 }
 
 /// The session that served (or will serve) a routed read, so follow-up
@@ -692,6 +711,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            reader_is_writer: std::sync::Arc::new(std::sync::OnceLock::new()),
         })
     }
 
@@ -780,11 +800,16 @@ impl Db {
     /// [`Db::reader_aurora_capability_on`]. Prime failure is fine: the routed
     /// path re-probes on the connection it already holds, so a failed prime
     /// costs a round trip rather than a second acquire budget.
+    ///
+    /// It also settles [`Db::reader_is_writer`] on that same connection, so a
+    /// reader endpoint that is really the writer is called out in the boot log
+    /// and in route telemetry (see [`Db::prime_reader_is_writer`]).
     pub fn spawn_read_pool_boot_ping(&self) {
         let Some(read_pool) = self.read_pool.clone() else {
             return;
         };
         let aurora_identity = self.reader_aurora_identity.clone();
+        let db = self.clone();
         tokio::spawn(async move {
             match read_pool.acquire().await {
                 Ok(mut conn) => {
@@ -798,6 +823,7 @@ impl Db {
                             "aurora identity boot prime failed; first routed read will probe"
                         ),
                     }
+                    db.prime_reader_is_writer(&mut conn).await;
                 }
                 Err(e) => tracing::warn!(
                     "read replica unreachable at boot; serving all-writer until it recovers: {e}"
@@ -816,6 +842,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            reader_is_writer: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -835,6 +862,7 @@ impl Db {
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
             replica_read_max_age: None,
             reader_aurora_identity: std::sync::Arc::new(std::sync::OnceLock::new()),
+            reader_is_writer: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -1028,6 +1056,86 @@ impl Db {
                 tracing::debug!(error = %e, "aurora identity probe failed; will retry");
                 false
             }
+        }
+    }
+
+    /// Settle [`Db::reader_is_writer`] from the cluster identity of a reader
+    /// connection the caller already holds, and WARN when the reader endpoint
+    /// is not a hot standby.
+    ///
+    /// The gate is `pg_is_in_recovery()` on the reader, not an identifier
+    /// match: a reader that is not replaying WAL is not a replica, and that is
+    /// true whether it is the writer itself or an unrelated primary. The
+    /// identifier comparison only sharpens the log line, and is `None` for a
+    /// role without `EXECUTE` on `pg_control_system()` (see
+    /// [`replica_fence::ClusterIdentity`]).
+    ///
+    /// Deliberately warn-only. `READ_DATABASE_URL` pointing at the writer
+    /// serves correct rows — the freshness fence is trivially satisfied
+    /// because the "replica" *is* the writer — so refusing the reader pool
+    /// would trade a reporting defect for lost capacity. It would also latch
+    /// the wrong answer for Aurora, where `cluster-ro` legitimately resolves
+    /// to the writer while a cluster has no readers and starts resolving to a
+    /// real reader the moment one is added.
+    ///
+    /// Boot-only, and only on the boot ping's successful path: a reader that
+    /// is unreachable at boot leaves the verdict unset, and routes are
+    /// labeled `replica` as before. Re-probing per request would put a
+    /// privileged catalog call on the read path to serve a dashboard.
+    async fn prime_reader_is_writer(&self, conn: &mut sqlx::PgConnection) {
+        if self.reader_is_writer.get().is_some() {
+            return;
+        }
+        let reader = match replica_fence::cluster_identity(conn).await {
+            Ok(identity) => identity,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "reader cluster identity unreadable; route labels stay unqualified"
+                );
+                return;
+            }
+        };
+        if reader.in_recovery {
+            let _ = self.reader_is_writer.set(false);
+            return;
+        }
+        let writer = match self.pool.acquire().await {
+            Ok(mut writer_conn) => replica_fence::cluster_identity(&mut writer_conn).await.ok(),
+            Err(e) => {
+                tracing::debug!(error = %e, "writer cluster identity unreadable for comparison");
+                None
+            }
+        };
+        // Not in recovery ⇒ not a standby, whatever the identifiers say. The
+        // comparison distinguishes "the same node the writer uses" from "some
+        // other primary", which is the difference between a copy-pasted URL
+        // and a wrong host.
+        let same_cluster = writer.as_ref().and_then(|w| reader.same_cluster_as(w));
+        let _ = self.reader_is_writer.set(true);
+        tracing::warn!(
+            reader_system_identifier = ?reader.system_identifier,
+            writer_system_identifier = ?writer.as_ref().and_then(|w| w.system_identifier.clone()),
+            same_cluster = ?same_cluster,
+            "READ_DATABASE_URL is not a hot standby (pg_is_in_recovery() = false); \
+             reads routed to it are NOT offloading the writer. Route telemetry reports \
+             decision=\"replica_is_writer\" instead of \"replica\" until this is fixed."
+        );
+    }
+
+    /// The `decision` label for a page the reader pool actually served.
+    ///
+    /// `replica_is_writer` once the boot identity probe proved the reader
+    /// endpoint is not a standby ([`Db::prime_reader_is_writer`]), so
+    /// `decision="replica"` stays a truthful offload signal: the misleading
+    /// state this separates out is a "replica" whose every byte still comes
+    /// off the writer. The `reason` label is unchanged — the predicate verdict
+    /// (`fresh`/`covered`) is orthogonal to where the page came from.
+    fn replica_decision(&self) -> &'static str {
+        if self.reader_is_writer.get() == Some(&true) {
+            "replica_is_writer"
+        } else {
+            "replica"
         }
     }
 
@@ -1812,7 +1920,7 @@ impl Db {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match event::query_events_on(&mut tx, q).await {
                     Ok(events) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         Ok(events)
                     }
                     Err(e) => {
@@ -1846,7 +1954,7 @@ impl Db {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match event::query_events_on(&mut tx, q).await {
                     Ok(events) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         Ok(events)
                     }
                     Err(e) => {
@@ -1885,7 +1993,7 @@ impl Db {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match event::count_events_on(&mut tx, q).await {
                     Ok(count) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         Ok(count)
                     }
                     Err(e) => {
@@ -2057,7 +2165,7 @@ impl Db {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match event::get_events_by_ids_on(&mut tx, community_id, ids).await {
                     Ok(events) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         Ok(events)
                     }
                     Err(e) => {
@@ -2958,7 +3066,7 @@ impl Db {
                 Ok(replies) => {
                     if cursor.is_none() {
                         // Predicate A: bounded-stale head page, served as proved.
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         return Ok(replies);
                     }
                     let full = replies.len() >= limit as usize;
@@ -2966,7 +3074,7 @@ impl Db {
                         .last()
                         .is_some_and(|tail| tail.created_at <= entry.fence_wall);
                     if full && below_fence {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         return Ok(replies);
                     }
                     // Candidate terminal page, or page reaching above the
@@ -3084,7 +3192,7 @@ impl Db {
                 .await
                 {
                     Ok(window) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         return Ok((
                             window,
                             ReadSession {
@@ -3418,7 +3526,7 @@ impl Db {
                 .await
                 {
                     Ok(events) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         Ok(events)
                     }
                     Err(e) => {
@@ -3497,7 +3605,7 @@ impl Db {
                 .await
                 {
                     Ok(events) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         Ok(events)
                     }
                     Err(e) => {
@@ -3565,7 +3673,7 @@ impl Db {
                 .await
                 {
                     Ok(events) => {
-                        Self::record_route(path, "replica", reason);
+                        Self::record_route(path, self.replica_decision(), reason);
                         Ok(events)
                     }
                     Err(e) => {
@@ -8106,6 +8214,118 @@ mod tests {
         );
 
         drop(held);
+        drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+    }
+
+    /// A `READ_DATABASE_URL` that resolves to the writer must be labeled
+    /// `replica_is_writer`, never plain `replica`.
+    ///
+    /// This is the reporting defect the identity probe exists for: the reader
+    /// is the writer, so the freshness fence is trivially satisfied (zero lag
+    /// by construction) and every routed read reports as served-by-replica
+    /// while every byte still comes off the writer. Nothing serves wrong rows
+    /// — the damage is that `decision="replica"` is the offload percentage on
+    /// the rollout dashboards.
+    ///
+    /// Both URLs point at the SAME scratch database, which *is* the
+    /// misconfiguration rather than a stand-in for it. The probe is called
+    /// directly instead of through [`Db::spawn_read_pool_boot_ping`] so the
+    /// assertions cannot race a spawned task, and the label is asserted
+    /// BEFORE probing too: a test that only checked the post-probe label
+    /// would still pass if the constructor prejudged every reader.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres"]
+    async fn reader_pointing_at_the_writer_is_labeled_replica_is_writer() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed, wname) = create_scratch_db(&admin, "reader_is_writer").await;
+        seed.close().await;
+        let base = admin_url().await;
+        let scratch_url = {
+            let idx = base.rfind('/').expect("db url has a path segment");
+            format!("{}/{}", &base[..idx], wname)
+        };
+
+        let mut db = Db::new(&DbConfig {
+            database_url: scratch_url.clone(),
+            // The misconfiguration under test: the "replica" is the writer.
+            read_database_url: Some(scratch_url),
+            max_connections: 4,
+            read_max_connections: Some(4),
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect Db whose reader URL is the writer");
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(5)));
+
+        assert_eq!(
+            db.replica_decision(),
+            "replica",
+            "an unprobed reader must not be prejudged as the writer"
+        );
+
+        let read_pool = db.read_pool.clone().expect("reader pool configured");
+        let mut conn = read_pool.acquire().await.expect("reader connection");
+        db.prime_reader_is_writer(&mut conn).await;
+        drop(conn);
+
+        assert_eq!(
+            db.reader_is_writer.get(),
+            Some(&true),
+            "a reader that is not in recovery must settle the verdict as true"
+        );
+        assert_eq!(
+            db.replica_decision(),
+            "replica_is_writer",
+            "the probed verdict must reach the route label"
+        );
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+        let count = {
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            db.count_events_routed("reader_is_writer_probe", &query)
+                .await
+        }
+        .expect("the reader still answers the read");
+        assert_eq!(count, 0, "empty scratch database");
+
+        let labels: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_db_route_decision must be a counter");
+                };
+                let keyed: Vec<_> = key.key().labels().collect();
+                let get = |name: &str| {
+                    keyed
+                        .iter()
+                        .find(|l| l.key() == name)
+                        .map(|l| l.value().to_owned())
+                        .unwrap_or_default()
+                };
+                ((get("decision"), get("reason")), n)
+            })
+            .collect();
+
+        assert_eq!(
+            labels.get(&("replica_is_writer".to_owned(), "fresh".to_owned())),
+            Some(&1),
+            "a page served by a writer-backed reader must be labeled \
+             replica_is_writer/fresh; got {labels:?}"
+        );
+        assert!(
+            !labels.keys().any(|(decision, _)| decision == "replica"),
+            "no plain replica label may be emitted, or the offload percentage \
+             still counts writer-served pages; got {labels:?}"
+        );
+
         drop_scratch_db(&admin, db.pool.clone(), &wname).await;
     }
 
