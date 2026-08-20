@@ -222,7 +222,9 @@ Start with **N=2** for most deployments. Increase if queue depth grows under loa
 
 ## Forum Channels
 
-By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007). To receive forum events, opt in with `--kinds` and disable the mention filter (forum posts don't @mention agents):
+By default, the ACP harness subscribes to mentioned stream messages, workflow approval requests, reminders, forum posts, and forum comments (kinds 9, 46010, 40007, 45001, and 45003). The default mention filter still applies, so unmentioned forum events are ignored.
+
+To receive every forum post, comment, and vote—including events that do not mention the agent—opt in to kind 45002 and disable the mention filter:
 
 **CLI flags:**
 ```bash
@@ -246,7 +248,7 @@ Forum event kinds:
 - **45002** — Vote on a post or comment
 - **45003** — Comment reply on a forum post
 
-> **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
+> **Note:** `--no-mention-filter` (or `require_mention = false`) is only needed for unmentioned events. Without it, the default `subscribe=mentions` mode still receives forum posts and comments that mention the agent.
 
 ## How It Works
 

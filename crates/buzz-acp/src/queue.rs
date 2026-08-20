@@ -1011,6 +1011,8 @@ pub enum ConversationContext {
         messages: Vec<ContextMessage>,
         total: usize,
         truncated: bool,
+        /// Kind of the root event when it was returned by the context lookup.
+        root_kind: Option<u32>,
     },
     /// DM conversation history.
     Dm {
@@ -1315,14 +1317,20 @@ fn append_channel_description(s: &mut String, channel_info: Option<&PromptChanne
 /// replies; in the channel branch a `Some` anchor means a human-facing
 /// top-level mention whose reply should open a new thread rooted at the
 /// triggering event.
+#[derive(Clone, Copy)]
+struct ContextHintState<'a> {
+    is_dm: bool,
+    has_conversation_context: bool,
+    had_delivered_events: bool,
+    reply_anchor: Option<&'a str>,
+    thread_root_kind: Option<u32>,
+}
+
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
     thread_tags: &ThreadTags,
-    is_dm: bool,
-    has_conversation_context: bool,
-    conversation_context_had_delivered_events: bool,
-    reply_anchor: Option<&str>,
+    state: ContextHintState<'_>,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
@@ -1331,17 +1339,17 @@ fn format_context_hints(
 
     // DM check comes first — a DM reply has both thread tags AND is_dm=true,
     // and the scope should be "dm" (not "thread") because the agent is in a DM.
-    if is_dm {
+    if state.is_dm {
         let is_reply = thread_tags.root_event_id.is_some();
         // DM replies use thread command because /messages excludes thread replies.
         // DM non-replies use get for recent conversation.
-        let ctx_hint = if has_conversation_context && is_reply {
+        let ctx_hint = if state.has_conversation_context && is_reply {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
-        } else if has_conversation_context {
+        } else if state.has_conversation_context {
             "Conversation context included below. Use `buzz messages get --channel <UUID>` for full history if truncated."
-        } else if conversation_context_had_delivered_events && is_reply {
+        } else if state.had_delivered_events && is_reply {
             "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read the reply chain."
-        } else if conversation_context_had_delivered_events {
+        } else if state.had_delivered_events {
             "Earlier conversation context was already delivered in this session. Use `buzz messages get --channel <UUID>` to re-read it."
         } else if is_reply {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch the reply chain."
@@ -1357,20 +1365,23 @@ fn format_context_hints(
         // If this is a DM reply, include thread structural info as supplementary.
         if let Some(ref root) = thread_tags.root_event_id {
             s.push_str(&format!("\nThread root: {root}"));
+            if let Some(kind) = state.thread_root_kind {
+                s.push_str(&format!("\nThread root kind: {kind}"));
+            }
             if let Some(ref parent) = thread_tags.parent_event_id {
                 if parent != root {
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = reply_anchor {
+            if let Some(event_id) = state.reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
         }
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
-        let ctx_hint = if has_conversation_context {
+        let ctx_hint = if state.has_conversation_context {
             "Thread context included below. Use `buzz messages thread --channel <UUID> --event <ID>` for full history if truncated."
-        } else if conversation_context_had_delivered_events {
+        } else if state.had_delivered_events {
             "Earlier thread context was already delivered in this session. Use `buzz messages thread --channel <UUID> --event <ID>` to re-read it."
         } else {
             "Use `buzz messages thread --channel <UUID> --event <ID>` to fetch thread context."
@@ -1382,13 +1393,16 @@ fn format_context_hints(
         );
         append_channel_description(&mut s, channel_info);
         s.push_str(&format!("\nThread root: {root}"));
+        if let Some(kind) = state.thread_root_kind {
+            s.push_str(&format!("\nThread root kind: {kind}"));
+        }
         if let Some(ref parent) = thread_tags.parent_event_id {
             if parent != root {
                 s.push_str(&format!("\nParent: {parent}"));
             }
         }
         s.push_str(&format!("\n{ctx_hint}"));
-        if let Some(event_id) = reply_anchor {
+        if let Some(event_id) = state.reply_anchor {
             append_reply_instruction(&mut s, event_id);
         }
         s
@@ -1402,7 +1416,7 @@ fn format_context_hints(
         s.push_str(
             "\nHint: Use `buzz messages get --channel <UUID>` for recent messages if needed.",
         );
-        if let Some(event_id) = reply_anchor {
+        if let Some(event_id) = state.reply_anchor {
             append_new_thread_reply_instruction(&mut s, event_id);
         }
         s
@@ -1419,6 +1433,7 @@ fn format_conversation_context(
             messages,
             total,
             truncated,
+            ..
         } => ("Thread Context", messages, total, truncated),
         ConversationContext::Dm {
             messages,
@@ -1625,14 +1640,21 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             args.profile_lookup,
         )
     };
+    let thread_root_kind = match args.conversation_context {
+        Some(ConversationContext::Thread { root_kind, .. }) => *root_kind,
+        _ => None,
+    };
     sections.push(format_context_hints(
         batch.channel_id,
         args.channel_info,
         &thread_tags,
-        is_dm,
-        args.conversation_context.is_some(),
-        args.conversation_context_had_delivered_events,
-        reply_anchor.as_deref(),
+        ContextHintState {
+            is_dm,
+            has_conversation_context: args.conversation_context.is_some(),
+            had_delivered_events: args.conversation_context_had_delivered_events,
+            reply_anchor: reply_anchor.as_deref(),
+            thread_root_kind,
+        },
     ));
 
     // 3. Conversation context (thread or DM).
@@ -2748,6 +2770,7 @@ mod tests {
             }],
             total: 1,
             truncated: false,
+            root_kind: None,
         };
 
         let core = "[Agent Memory — core]\nbe helpful";
@@ -3372,6 +3395,7 @@ mod tests {
             ],
             total: 5,
             truncated: true,
+            root_kind: Some(45_001),
         };
 
         let prompt = format_prompt(
@@ -3385,6 +3409,7 @@ mod tests {
         assert!(prompt.contains("[Thread Context (2 of 5 messages, truncated)]"));
         assert!(prompt.contains("Let's refactor auth"));
         assert!(prompt.contains("Thread context included below"));
+        assert!(prompt.contains("Thread root kind: 45001"));
     }
 
     #[test]
@@ -3461,6 +3486,7 @@ mod tests {
             }],
             total: 1,
             truncated: false,
+            root_kind: None,
         };
         let profiles = HashMap::from([
             (
@@ -3675,6 +3701,7 @@ mod tests {
             }],
             total: 1,
             truncated: false,
+            root_kind: None,
         };
 
         let prompt = format_prompt(
