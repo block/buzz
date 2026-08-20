@@ -3349,7 +3349,7 @@ test("an upgraded install reuses the retired built-in Fizz instead of minting a 
           (entry.payload as { input?: { name?: string } })?.input?.name,
       ),
   );
-  expect(createdNames.sort()).toEqual(["Bumble", "Honey"]);
+  expect(createdNames.sort()).toEqual(["Honey", "Pollen"]);
 
   const agents = await invokeMockCommand<
     Array<{ pubkey: string; name: string; persona_id: string | null }>
