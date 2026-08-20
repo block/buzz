@@ -728,9 +728,26 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+const GROK_DEFAULT_MODEL: &str = "grok-4.6";
+
+fn grok_agent_args(model: &str) -> Vec<String> {
+    vec![
+        "agent".to_string(),
+        "--model".to_string(),
+        model.to_string(),
+        "stdio".to_string(),
+    ]
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        // Grok Build speaks ACP directly from its CLI:
+        // `grok agent --model <model> stdio`. The model defaults to the
+        // subscription-backed grok-4.6 release; an explicit model (from the
+        // managed-agent config) is substituted as a discrete argument by
+        // `effective_agent_args` below — never shell-interpolated.
+        "grok" => Some(grok_agent_args(GROK_DEFAULT_MODEL)),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -807,6 +824,43 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
         "CODEX_CONFIG".into(),
         "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
     ))
+}
+
+/// Build the effective agent argv for a managed agent launch.
+///
+/// For Grok Build the managed model is part of the ACP argv
+/// (`grok agent --model <model> stdio`), so it is substituted here as a
+/// discrete argument from the resolved model — never via a shell string.
+/// A non-empty model is required; an absent model falls back to the pinned
+/// subscription default `grok-4.6`. Explicitly supplied `agent_args` for
+/// Grok are normalized and used as-is (they win over the default).
+///
+/// Every other runtime keeps the existing [`normalize_agent_args`] behaviour.
+pub fn effective_agent_args(
+    command: &str,
+    agent_args: Vec<String>,
+    model: Option<&str>,
+) -> Result<Vec<String>, String> {
+    if normalize_agent_command_identity(command).as_str() != "grok" {
+        return Ok(normalize_agent_args(command, agent_args));
+    }
+    let normalized = agent_args
+        .into_iter()
+        .map(|arg| arg.trim().to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+    // Clap's historical cross-runtime default is a single `acp` argument.
+    // That is not a valid Grok launch override and must not shadow the managed
+    // model. Real operator overrides provide Grok's full argv and still win.
+    let is_legacy_acp_default = normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp");
+    if !normalized.is_empty() && !is_legacy_acp_default {
+        return Ok(normalized);
+    }
+    let resolved_model = model.unwrap_or(GROK_DEFAULT_MODEL);
+    if resolved_model.trim().is_empty() {
+        return Err("grok agent model must be a non-empty string".to_string());
+    }
+    Ok(grok_agent_args(resolved_model.trim()))
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -943,7 +997,9 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let agent_args =
+            effective_agent_args(&agent_command, args.agent_args, args.model.as_deref())
+                .map_err(ConfigError::ConfigFile)?;
 
         if let Some(ref channels) = args.channels {
             for ch in channels {
@@ -1608,6 +1664,103 @@ mod tests {
         );
         assert_eq!(
             normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn grok_default_args_are_the_subscription_acp_argv() {
+        // Pinned subscription-backed contract: `grok agent --model grok-4.6 stdio`.
+        assert_eq!(
+            normalize_agent_args("grok", Vec::new()),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_effective_args_substitute_the_managed_model_as_discrete_arg() {
+        assert_eq!(
+            effective_agent_args("grok", Vec::new(), Some("grok-4.6")).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+        // Absent model falls back to the pinned default.
+        assert_eq!(
+            effective_agent_args("grok", Vec::new(), None).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+        // Clap's legacy cross-runtime default must not shadow the Grok model.
+        assert_eq!(
+            effective_agent_args("grok", vec!["acp".into()], Some("grok-5")).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-5".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_fails_closed_on_empty_model_and_windows_stem_normalization() {
+        assert!(effective_agent_args("grok", Vec::new(), Some("   ")).is_err());
+        // `grok.exe` normalizes to the same identity as `grok`.
+        assert_eq!(
+            effective_agent_args("grok.exe", Vec::new(), Some("grok-4.6")).unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_explicit_agent_args_win_over_the_default_argv() {
+        assert_eq!(
+            effective_agent_args(
+                "grok",
+                vec![
+                    "agent".into(),
+                    "--model".into(),
+                    "grok-5".into(),
+                    "stdio".into()
+                ],
+                Some("grok-4.6")
+            )
+            .unwrap(),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-5".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn non_grok_runtimes_keep_existing_args_behavior() {
+        assert_eq!(
+            effective_agent_args("goose", Vec::new(), Some("whatever")).unwrap(),
+            vec!["acp".to_string()]
+        );
+        assert_eq!(
+            effective_agent_args("codex-acp", Vec::new(), None).unwrap(),
             Vec::<String>::new()
         );
     }
@@ -2876,6 +3029,113 @@ channels = "ALL"
         assert!(
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
+        );
+    }
+
+    // --- Grok managed-model bridge regression (PR #5742 fix) ---
+    //
+    // Desktop emits BUZZ_ACP_AGENT_COMMAND=grok, BUZZ_ACP_AGENT_ARGS (empty for
+    // the catalog default) and BUZZ_ACP_MODEL=<managed model>; clap maps those
+    // env vars onto the same CliArgs fields these flags drive, so Config::from_args
+    // here exercises the identical resolution chain: desktop env → clap →
+    // effective_agent_args → real child argv.
+
+    #[test]
+    fn grok_managed_model_reaches_child_argv_end_to_end() {
+        // Catalog default path: no --agent-args (desktop emits none for grok),
+        // managed model grok-4.6 → exact subscription argv.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "grok-4.6",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+        assert_eq!(
+            config.agent_args,
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-4.6".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_alternate_managed_model_is_not_shadowed() {
+        // A non-default managed model must reach the argv — the desktop emits no
+        // default agent_args, so the model drives the child command.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "grok-5",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+        assert_eq!(
+            config.agent_args,
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-5".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn grok_blank_model_fails_closed() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "   ",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+        assert!(
+            result.is_err(),
+            "from_args should reject a blank grok model: {result:?}"
+        );
+    }
+
+    #[test]
+    fn grok_explicit_agent_args_override_wins() {
+        // An operator-supplied explicit --agent-args is distinguishable from the
+        // generated catalog default (which the desktop now omits) and wins.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            "grok",
+            "--model",
+            "grok-5",
+            "--agent-args",
+            "agent,--model,grok-9,stdio",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+        assert_eq!(
+            config.agent_args,
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-9".to_string(),
+                "stdio".to_string()
+            ]
         );
     }
 

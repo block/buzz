@@ -123,4 +123,46 @@ mod tests {
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
     }
+
+    #[test]
+    fn grok_metadata_is_a_direct_acp_runtime_with_locked_provider() {
+        let grok = known_acp_runtime_exact("grok").unwrap();
+        assert_eq!(grok.commands, &["grok"]);
+        assert!(grok.provider_locked);
+        // The model travels in the argv (`grok agent --model <model> stdio`),
+        // not an env var — no model/provider env bridge for Grok.
+        assert_eq!(grok.model_env_var, None);
+        assert_eq!(grok.provider_env_var, None);
+        assert_eq!(grok.required_normalized_fields, &["model"]);
+        assert_eq!(grok.auth_probe_args, Some(&["grok", "models"][..]));
+    }
+
+    #[test]
+    fn grok_emits_no_default_args_and_passes_explicit_overrides() {
+        // The desktop must NOT emit a pinned default argv for Grok — that would
+        // shadow the managed model at the harness. Empty args mean buzz-acp
+        // builds `agent --model <model> stdio` from `BUZZ_ACP_MODEL`.
+        assert_eq!(
+            super::normalize_agent_args("grok", Vec::new()),
+            Vec::<String>::new()
+        );
+        // Explicit record agent_args remain an operator override that wins.
+        assert_eq!(
+            super::normalize_agent_args(
+                "grok",
+                vec![
+                    "agent".to_string(),
+                    "--model".to_string(),
+                    "grok-5".to_string(),
+                    "stdio".to_string()
+                ]
+            ),
+            vec![
+                "agent".to_string(),
+                "--model".to_string(),
+                "grok-5".to_string(),
+                "stdio".to_string()
+            ]
+        );
+    }
 }
