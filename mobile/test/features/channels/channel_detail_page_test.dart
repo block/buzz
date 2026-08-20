@@ -5226,7 +5226,14 @@ void main() {
             .widget<Text>(find.byKey(const ValueKey('channel-header-name')))
             .style
             ?.fontSize,
-        AppTheme.light().textTheme.titleMedium?.fontSize,
+        AppTheme.light().textTheme.titleSmall?.fontSize,
+      );
+      final channelHeaderAvatar = tester.widget<Container>(
+        find.byKey(const ValueKey('channel-header-avatar')),
+      );
+      expect(
+        (channelHeaderAvatar.decoration as BoxDecoration).color,
+        AppTheme.light().colorScheme.surface,
       );
       expect(
         tester

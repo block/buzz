@@ -23,9 +23,7 @@ double _twoLineAppBarTitleContentHeight(
   BuildContext context, {
   required bool isDm,
 }) {
-  final titleStyle = isDm
-      ? context.textTheme.titleSmall
-      : context.textTheme.titleMedium;
+  final titleStyle = context.textTheme.titleSmall;
   final subtitleStyle = isDm
       ? context.textTheme.bodyMedium
       : context.textTheme.bodySmall;
@@ -68,13 +66,13 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                 width: _channelHeaderAvatarSize,
                 height: _channelHeaderAvatarSize,
                 decoration: BoxDecoration(
-                  color: context.colors.primaryContainer,
+                  color: context.colors.surface,
                   shape: BoxShape.circle,
                 ),
                 child: Icon(
                   channelIcon(channel),
                   size: 20,
-                  color: context.colors.onPrimaryContainer,
+                  color: context.colors.onSurfaceVariant,
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -92,7 +90,7 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                             key: const ValueKey('channel-header-name'),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.titleMedium,
+                            style: context.textTheme.titleSmall,
                           ),
                         ),
                         if (channel.isEphemeral) ...[
