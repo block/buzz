@@ -284,8 +284,30 @@ pub fn run() {
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
             if let Err(e) = resolve_persisted_identity(&app_handle, &state) {
-                eprintln!("buzz-desktop: fatal: identity resolution failed: {e}");
+                let message = crate::secret_store::fatal_identity_message(&e);
+                eprintln!("buzz-desktop: fatal: {message}");
+                // On Windows this binary has no console, so stderr goes
+                // nowhere and the app looks like it died for no reason. Leave
+                // the reason on disk next to the data it failed to read.
+                if let Ok(data_dir) = app_handle.path().app_data_dir() {
+                    let _ = std::fs::create_dir_all(&data_dir);
+                    let _ = std::fs::write(
+                        data_dir.join(crate::secret_store::STARTUP_ERROR_LOG),
+                        format!("buzz-desktop: fatal: {message}\n"),
+                    );
+                }
                 std::process::exit(1);
+            }
+
+            // Identity resolved, so any record of an earlier failure is stale.
+            // Leaving it beside a working install misdiagnoses the next launch.
+            if let Ok(data_dir) = app_handle.path().app_data_dir() {
+                if let Err(error) = crate::secret_store::clear_startup_error_log(&data_dir) {
+                    eprintln!(
+                        "buzz-desktop: could not remove the stale {}: {error}",
+                        crate::secret_store::STARTUP_ERROR_LOG
+                    );
+                }
             }
 
             // When the identity is in recovery mode (lost = keyring empty after
