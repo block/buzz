@@ -178,11 +178,8 @@ export function ChannelManagementSheet({
   const [activeView, setActiveView] = React.useState<
     "summary" | "canvas" | "workflows"
   >("summary");
-  React.useEffect(() => {
-    if (!workflowsEnabled && activeView === "workflows") {
-      setActiveView("summary");
-    }
-  }, [activeView, workflowsEnabled]);
+  const visibleActiveView =
+    workflowsEnabled || activeView !== "workflows" ? activeView : "summary";
   const { cancelDeferredModalOpen, openNextFrame: openModalNextFrame } =
     useDeferredModalOpen();
 
@@ -384,7 +381,7 @@ export function ChannelManagementSheet({
           onPointerDownOutside={(event) => event.preventDefault()}
         >
           <ChannelManagementPanelContent
-            activeView={activeView}
+            activeView={visibleActiveView}
             archiveChannelMutation={archiveChannelMutation}
             canEditNarrative={canEditNarrative}
             canEditChannel={canEditChannel}
@@ -436,7 +433,7 @@ export function ChannelManagementSheet({
             data-testid="channel-management-sheet"
           >
             <ChannelManagementPanelContent
-              activeView={activeView}
+              activeView={visibleActiveView}
               archiveChannelMutation={archiveChannelMutation}
               canEditNarrative={canEditNarrative}
               canEditChannel={canEditChannel}
