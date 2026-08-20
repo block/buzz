@@ -19,20 +19,23 @@ import type { ProjectRepoCommit } from "@/shared/api/types";
 export function projectDetailSelectionItem({
   commit,
   issue,
+  projectChannelId,
   projectId,
   pullRequest,
   repository,
 }: {
   commit?: ProjectRepoCommit | null;
   issue?: ProjectIssue | null;
+  projectChannelId?: string | null;
   projectId: string;
   pullRequest?: ProjectPullRequest | null;
   repository: Repository;
 }): ProjectSelectionItem | null {
+  const channelId = repository.channelId ?? projectChannelId;
   if (issue) {
     return selectionItemFromTask({
       author: issue.author,
-      channelId: issue.channelId ?? repository.channelId,
+      channelId,
       id: issue.id,
       shareLink: issueShareLink(issue),
       title: issue.title,
@@ -41,7 +44,7 @@ export function projectDetailSelectionItem({
   if (pullRequest) {
     return selectionItemFromReview({
       author: pullRequest.author,
-      channelId: pullRequest.channelId ?? repository.channelId,
+      channelId,
       id: pullRequest.id,
       shareLink: pullRequestShareLink(pullRequest),
       title: pullRequest.title,
@@ -49,7 +52,7 @@ export function projectDetailSelectionItem({
   }
   if (commit) {
     return selectionItemFromCommit({
-      channelId: repository.channelId,
+      channelId,
       commitHash: commit.hash,
       projectId,
       shareLink: commitShareLink(repository, commit.hash),

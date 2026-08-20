@@ -733,6 +733,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const contextItem = projectDetailSelectionItem({
     commit: selectedCommit,
     issue: selectedIssue,
+    projectChannelId: project.projectChannelId,
     projectId: project.id,
     pullRequest: selectedPullRequest,
     repository,
