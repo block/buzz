@@ -713,6 +713,8 @@ pub struct AppState {
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
+    /// Last successful read-only partition catalog audit. `None` fails readiness.
+    pub partition_audit: Arc<std::sync::RwLock<Option<buzz_db::partition::PartitionAudit>>>,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -910,6 +912,7 @@ impl AppState {
             git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            partition_audit: Arc::new(std::sync::RwLock::new(None)),
             started_at: Instant::now(),
             nip98_replay,
             admission_rate_limiter,
@@ -954,6 +957,35 @@ impl AppState {
     /// must no-op to today's behavior. Set once by `main.rs` after boot.
     pub fn mesh(&self) -> Option<&crate::mesh_boot::MeshHandle> {
         self.mesh.get()
+    }
+
+    /// Publish a successful partition audit for cached readiness checks.
+    pub fn record_partition_audit(&self, audit: buzz_db::partition::PartitionAudit) {
+        match self.partition_audit.write() {
+            Ok(mut cached) => *cached = Some(audit),
+            Err(poisoned) => *poisoned.into_inner() = Some(audit),
+        }
+    }
+
+    /// Whether a successful cached audit proves every managed parent serves now.
+    ///
+    /// PR1 deliberately gates readiness on `now()` only. Ingestion accepts
+    /// timestamps within ±900 seconds, so a month boundary with no adjacent
+    /// partition remains a known accepted edge until PR2's bounded partition
+    /// advance closes it operationally.
+    /// Periodic refresh failures retain the last-known-good audit by design;
+    /// operators should alert on staleness of
+    /// `buzz_partition_audit_last_success_timestamp_seconds`.
+    /// This gates HTTP readiness only: catalog safety is cluster-global, so
+    /// removing every pod from mesh would not provide a safe reroute target.
+    pub fn partition_serving_safe(&self) -> bool {
+        let cached = match self.partition_audit.read() {
+            Ok(cached) => cached,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cached
+            .as_ref()
+            .is_some_and(|audit| audit.serving_safe_at(chrono::Utc::now()))
     }
 
     /// Record an event ID as locally-published for dedup, scoped to the

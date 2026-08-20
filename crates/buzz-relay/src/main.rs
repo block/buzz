@@ -83,6 +83,23 @@ impl EmissionScope {
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
+fn partition_audit_interval(period: std::time::Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
+async fn wait_for_partition_audit_tick(
+    interval: &mut tokio::time::Interval,
+    delay_first_audit: &mut bool,
+) {
+    if *delay_first_audit {
+        interval.tick().await;
+        *delay_first_audit = false;
+    }
+    interval.tick().await;
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install the ring CryptoProvider for rustls. Required before any rustls
@@ -154,12 +171,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let usage_interval_secs = usage_metrics_interval_secs();
-    let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
-    relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
+    let metrics_refresh_interval_secs =
+        usage_interval_secs.max(config.partition_audit_interval.as_secs());
+    let gauge_idle_timeout_secs = usage_metrics_idle_timeout_secs(metrics_refresh_interval_secs);
+    relay_metrics::install(config.metrics_port, gauge_idle_timeout_secs);
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     info!(
         port = config.metrics_port,
-        idle_timeout_secs = usage_idle_timeout_secs,
+        idle_timeout_secs = gauge_idle_timeout_secs,
         "Prometheus metrics exporter started"
     );
 
@@ -197,9 +216,22 @@ async fn main() -> anyhow::Result<()> {
         info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
     }
 
-    if let Err(e) = db.ensure_future_partitions(3).await {
-        error!("Failed to ensure partitions: {e}");
-    }
+    let startup_partition_audit = match db
+        .ensure_future_partitions(3, config.partition_manager_create_enabled)
+        .await
+    {
+        Ok(audit) => Some(audit),
+        Err(error) => {
+            error!(%error, "Failed to ensure partitions");
+            match db.audit_partitions(3).await {
+                Ok(audit) => Some(audit),
+                Err(error) => {
+                    error!(%error, "Initial partition catalog audit failed");
+                    None
+                }
+            }
+        }
+    };
 
     db.validate_deletion_serving_catalog().await.map_err(|e| {
         error!("Community deletion serving-fence validation failed: {e}");
@@ -466,6 +498,33 @@ async fn main() -> anyhow::Result<()> {
         media_storage,
     );
     let state = Arc::new(app_state);
+    let mut delay_first_partition_audit = startup_partition_audit.is_some();
+    if let Some(audit) = startup_partition_audit {
+        state.record_partition_audit(audit);
+    }
+
+    // The periodic path is deliberately read-only. PR2 owns any catch-all
+    // advance; this task only refreshes metrics and the cached readiness term.
+    // Refresh failures retain the last-known-good audit by design; operators
+    // should alert when buzz_partition_audit_last_success_timestamp_seconds is stale.
+    {
+        let partition_state = Arc::clone(&state);
+        let audit_interval = state.config.partition_audit_interval;
+        tokio::spawn(async move {
+            let mut interval = partition_audit_interval(audit_interval);
+            loop {
+                wait_for_partition_audit_tick(&mut interval, &mut delay_first_partition_audit)
+                    .await;
+                match partition_state.db.audit_partitions(3).await {
+                    Ok(audit) => partition_state.record_partition_audit(audit),
+                    Err(error) => {
+                        metrics::counter!("buzz_partition_audit_failures_total").increment(1);
+                        warn!(%error, "Periodic partition catalog audit failed")
+                    }
+                }
+            }
+        });
+    }
 
     // Inter-relay mesh (BUZZ_MESH seam). `boot_mesh` returns None when the
     // kill switch is off — nothing is bound, published, or spawned, so the
@@ -2037,7 +2096,8 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
+        partition_audit_interval, refresh_legacy_active_gauge_recency,
+        run_periodic_until_cancelled, wait_for_partition_audit_tick, EmissionScope,
         InMemoryMetricKey,
     };
     use metrics::GaugeFn;
@@ -2069,6 +2129,26 @@ mod tests {
             .expect("loop must not wait for the next interval")
             .expect("loop task");
         assert!(tick_count.load(std::sync::atomic::Ordering::Relaxed) <= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn partition_audit_first_tick_matches_startup_cache_state() {
+        let period = Duration::from_secs(60);
+
+        let immediate_start = tokio::time::Instant::now();
+        let mut immediate_interval = partition_audit_interval(period);
+        let mut delay_after_failed_startup = false;
+        wait_for_partition_audit_tick(&mut immediate_interval, &mut delay_after_failed_startup)
+            .await;
+        assert_eq!(tokio::time::Instant::now(), immediate_start);
+
+        let delayed_start = tokio::time::Instant::now();
+        let mut delayed_interval = partition_audit_interval(period);
+        let mut delay_after_successful_startup = true;
+        wait_for_partition_audit_tick(&mut delayed_interval, &mut delay_after_successful_startup)
+            .await;
+        assert_eq!(tokio::time::Instant::now() - delayed_start, period);
+        assert!(!delay_after_successful_startup);
     }
 
     #[test]
@@ -2154,8 +2234,9 @@ mod tests {
     }
 
     #[test]
-    fn test_idle_timeout_is_at_least_three_usage_intervals() {
+    fn test_idle_timeout_is_at_least_three_metric_refresh_intervals() {
         assert_eq!(idle_timeout_secs(None, 300), 900);
         assert_eq!(idle_timeout_secs(Some(10), 1_000), 3_000);
+        assert_eq!(idle_timeout_secs(None, 86_400), 259_200);
     }
 }

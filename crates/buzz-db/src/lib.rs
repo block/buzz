@@ -4232,10 +4232,20 @@ impl Db {
         .await
     }
 
-    /// Ensures monthly partitions exist for the next N months.
+    /// Audits the managed partition catalogs without making writes.
+    #[datastore_span(name = "audit_partitions", system = "postgresql")]
+    pub async fn audit_partitions(&self, months_ahead: u32) -> Result<partition::PartitionAudit> {
+        partition::audit_partition_catalog(&self.pool, months_ahead).await
+    }
+
+    /// Ensures monthly partitions exist for the next N months when creation is enabled.
     #[datastore_span(name = "ensure_future_partitions", system = "postgresql")]
-    pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
-        partition::ensure_future_partitions(&self.pool, months_ahead).await
+    pub async fn ensure_future_partitions(
+        &self,
+        months_ahead: u32,
+        create_enabled: bool,
+    ) -> Result<partition::PartitionAudit> {
+        partition::ensure_future_partitions(&self.pool, months_ahead, create_enabled).await
     }
 
     /// Backfill `d_tag` for existing NIP-33 events (kind 30000–39999) that have `d_tag IS NULL`.

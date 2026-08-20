@@ -462,8 +462,8 @@ pub async fn boot_mesh(
         .map_err(|e| anyhow::anyhow!("mesh ready-registry publish failed: {e}"))?;
     tracing::info!(runtime_id = %runtime_id, "mesh ready record published");
 
-    // Readiness-gated heartbeat: publishes while the relay would pass
-    // readiness, clears the record on ready→not-ready and on shutdown.
+    // The heartbeat is shutdown-gated only. Readiness terms deliberately do
+    // not gate mesh publication; shutdown clears the record.
     let hb_flag = Arc::clone(&shutting_down);
     buzz_relay_mesh::runtime::spawn_registry_heartbeat(
         registry.clone(),
@@ -539,7 +539,7 @@ mod tests {
         let db = buzz_db::Db::from_pool(
             sqlx::postgres::PgPoolOptions::new()
                 .max_connections(1)
-                .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+                .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused") // sadscan:disable np.postgres.1
                 .expect("lazy database pool"),
         );
         let handle = boot_mesh(&config, pool, db, &keys, Arc::new(AtomicBool::new(false)))
