@@ -14,6 +14,16 @@ const CLOSE_QUOTE = "”";
 
 export type ChannelTextField = "topic" | "purpose";
 
+export function describeChannelNameChange(
+  previousName: string | undefined,
+  name: string,
+): string {
+  if (previousName === undefined) {
+    return `renamed the channel to ${OPEN_QUOTE}${name}${CLOSE_QUOTE}`;
+  }
+  return `renamed the channel from ${OPEN_QUOTE}${previousName}${CLOSE_QUOTE} to ${OPEN_QUOTE}${name}${CLOSE_QUOTE}`;
+}
+
 /**
  * The reader is the recipient of an add, while every other member is the
  * subject of one. Keep that distinction in the caption: "You were added by"
