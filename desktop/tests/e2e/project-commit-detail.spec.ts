@@ -27,6 +27,8 @@ async function addProjectToSidebar(
   const browser = page.getByTestId("project-browser-dialog");
   await browser.getByRole("searchbox", { name: "Search projects" }).fill(dtag);
   await browser.getByTestId(`project-browser-result-${dtag}`).click();
+  await expect(browser).toBeHidden();
+  await expect(page.getByTestId(`sidebar-project-${dtag}`)).toBeVisible();
 }
 
 async function waitForMockLiveSubscription(
@@ -46,7 +48,7 @@ async function waitForMockLiveSubscription(
     .toBe(true);
 }
 
-test("top-level project lists align dates and overflow actions", async ({
+test("top-level project lists show metadata and overflow actions", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
@@ -57,7 +59,7 @@ test("top-level project lists align dates and overflow actions", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
   await expect(
-    page.getByRole("heading", { level: 2, name: "Projects", exact: true }),
+    page.getByRole("heading", { level: 2, name: "Projects Activity" }),
   ).toBeVisible();
 
   async function trailingPositions(
@@ -118,25 +120,38 @@ test("top-level project lists align dates and overflow actions", async ({
   const repositoryRow = page.getByTestId("repository-row-buzz");
   await expect(
     repositoryRow.getByTestId("repositories-row-project"),
-  ).toBeVisible();
-  await expect(
-    repositoryRow.getByTestId("repositories-row-description"),
-  ).toContainText(/Relay, desktop, and mobile|community platform/);
+  ).toHaveCount(0);
+  const repositoryTitle = repositoryRow.getByTestId("project-entity-title");
+  const repositoryDescription = repositoryRow.getByTestId(
+    "repositories-row-description",
+  );
+  await expect(repositoryDescription).toContainText(
+    /Relay, desktop, and mobile|community platform/,
+  );
+  const [repositoryTitleBox, repositoryDescriptionBox] = await Promise.all([
+    repositoryTitle.boundingBox(),
+    repositoryDescription.boundingBox(),
+  ]);
+  expect(repositoryTitleBox).not.toBeNull();
+  expect(repositoryDescriptionBox).not.toBeNull();
+  expect(repositoryDescriptionBox?.x ?? 0).toBeGreaterThanOrEqual(
+    (repositoryTitleBox?.x ?? 0) + (repositoryTitleBox?.width ?? 0),
+  );
+  await expect(repositoryDescription).toHaveCSS(
+    "font-size",
+    await repositoryTitle.evaluate(
+      (element) => getComputedStyle(element).fontSize,
+    ),
+  );
+  await expect(repositoryDescription).toHaveCSS("text-align", "left");
   const repositoryPositions = await trailingPositions(repositoryRow, {
     actionName: /More options for/,
     dateTestId: "repositories-row-date",
   });
-  // No summaryX comparison: repository rows carry text stats next to the bar
-  // while project rows show the bar alone, so the columns differ in width by
-  // design. The right-anchored date and menu still align across the lists.
+  // Repository and project rows use different middle columns but retain the
+  // same compact row height.
   expect(
     Math.abs(repositoryPositions.rowHeight - projectPositions.rowHeight),
-  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
-  expect(
-    Math.abs(repositoryPositions.dateX - projectPositions.dateX),
-  ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
-  expect(
-    Math.abs(repositoryPositions.menuX - projectPositions.menuX),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
   await waitForAnimations(page);
   await page.screenshot({
@@ -202,6 +217,13 @@ test("top-level project lists align dates and overflow actions", async ({
     Math.abs(pullRequestPositions.rowHeight - issuePositions.rowHeight),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
   await page.setViewportSize({ height: 720, width: 900 });
+  await expect(
+    page.getByTestId("projects-overview-layout"),
+  ).not.toHaveAttribute("data-project-context-detached", "true");
+  await expect(page.getByTestId("projects-overview-context-rail")).toHaveCSS(
+    "width",
+    "0px",
+  );
   await page.getByTestId("projects-section-projects").click();
   const responsiveRepositoryRow = page
     .locator('[data-testid^="project-row-"]')

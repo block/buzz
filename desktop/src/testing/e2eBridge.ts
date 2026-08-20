@@ -250,6 +250,10 @@ type E2eConfig = {
     acpAuthMethodsError?: string;
     /** When set, workflow updates fail with this message. */
     workflowUpdateError?: string;
+    /** When set, workflow deletion fails with this message. */
+    workflowDeleteError?: string;
+    /** Reject workflow run creation with this message. */
+    workflowTriggerError?: string;
     /** When set, the `delete_custom_harness` mock command throws with this message. */
     deleteCustomHarnessError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
@@ -3754,6 +3758,8 @@ function handleUpdateWorkflow(args: {
 }
 
 function handleDeleteWorkflow(args: { workflowId: string }) {
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowDeleteError;
+  if (configuredError) throw new Error(configuredError);
   const index = mockWorkflows.findIndex((w) => w.id === args.workflowId);
   if (index === -1) throw new Error(`Workflow ${args.workflowId} not found`);
   mockWorkflows.splice(index, 1);
@@ -3826,6 +3832,8 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
 function handleTriggerWorkflow(args: { workflowId: string }) {
   const workflow = mockWorkflows.find((w) => w.id === args.workflowId);
   if (!workflow) throw new Error(`Workflow ${args.workflowId} not found`);
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowTriggerError;
+  if (configuredError) throw new Error(configuredError);
   const run = buildMockWorkflowRun(workflow);
   mockWorkflowRuns = [run, ...mockWorkflowRuns];
   return {

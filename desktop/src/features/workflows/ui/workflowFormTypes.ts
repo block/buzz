@@ -1,5 +1,11 @@
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 
+import { cronExpressionError } from "./cronExpression";
+import {
+  formatDurationSeconds,
+  parseDurationSeconds,
+} from "./workflowDuration";
+
 export const TRIGGER_TYPES = [
   "message_posted",
   "reaction_added",
@@ -8,6 +14,20 @@ export const TRIGGER_TYPES = [
   "schedule",
 ] as const;
 export type TriggerType = (typeof TRIGGER_TYPES)[number];
+
+export function supportsMessageTextCondition(
+  triggerType: TriggerType,
+): boolean {
+  return triggerType === "message_posted" || triggerType === "diff_posted";
+}
+
+export const SELECTABLE_TRIGGER_TYPES = [
+  "message_posted",
+  "reaction_added",
+  "diff_posted",
+  "webhook",
+  "schedule",
+] as const satisfies readonly TriggerType[];
 
 export const ACTION_TYPES = [
   "delay",
@@ -19,6 +39,12 @@ export const ACTION_TYPES = [
   "set_channel_topic",
 ] as const;
 export type ActionType = (typeof ACTION_TYPES)[number];
+
+export const SELECTABLE_ACTION_TYPES = [
+  "send_message",
+  "delay",
+  "call_webhook",
+] as const satisfies readonly ActionType[];
 
 export type TriggerConfig = {
   on: TriggerType;
@@ -121,10 +147,8 @@ function headersToRecord(
 
 function parseTimeoutSecs(timeoutSecs: string | undefined): number | undefined {
   if (!timeoutSecs) return undefined;
-  const trimmed = timeoutSecs.trim();
-  if (!/^\d+$/.test(trimmed)) return undefined;
-  const parsed = Number(trimmed);
-  return parsed > 0 ? parsed : undefined;
+  const parsed = parseDurationSeconds(timeoutSecs);
+  return parsed !== null && parsed > 0 ? parsed : undefined;
 }
 
 function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
@@ -174,7 +198,8 @@ export function formStateToYaml(state: WorkflowFormState): string {
   const trigger: Record<string, unknown> = { on: state.trigger.on };
   if (
     (state.trigger.on === "message_posted" ||
-      state.trigger.on === "diff_posted") &&
+      state.trigger.on === "diff_posted" ||
+      state.trigger.on === "reaction_added") &&
     state.trigger.filter
   ) {
     trigger.filter = state.trigger.filter;
@@ -183,8 +208,11 @@ export function formStateToYaml(state: WorkflowFormState): string {
     trigger.emoji = state.trigger.emoji;
   }
   if (state.trigger.on === "schedule") {
-    if (state.trigger.cron) trigger.cron = state.trigger.cron;
-    if (state.trigger.interval) trigger.interval = state.trigger.interval;
+    if (state.trigger.cron) {
+      trigger.cron = state.trigger.cron;
+    } else if (state.trigger.interval) {
+      trigger.interval = state.trigger.interval;
+    }
   }
 
   const steps = state.steps.map((step) => ({
@@ -223,78 +251,352 @@ export function nextStepId(existingSteps: StepFormState[]): string {
   return `step_${n}`;
 }
 
+const TOP_LEVEL_KEYS = new Set([
+  "name",
+  "description",
+  "enabled",
+  "trigger",
+  "steps",
+]);
+const TRIGGER_KEYS: Record<TriggerType, ReadonlySet<string>> = {
+  message_posted: new Set(["on", "filter"]),
+  reaction_added: new Set(["on", "emoji", "filter"]),
+  diff_posted: new Set(["on", "filter"]),
+  webhook: new Set(["on"]),
+  schedule: new Set(["on", "cron", "interval"]),
+};
+const COMMON_STEP_KEYS = ["id", "name", "action", "if", "timeout_secs"];
+const ACTION_STEP_KEYS: Record<ActionType, ReadonlySet<string>> = {
+  delay: new Set([...COMMON_STEP_KEYS, "duration"]),
+  send_message: new Set([...COMMON_STEP_KEYS, "text", "channel"]),
+  send_dm: new Set([...COMMON_STEP_KEYS, "to", "text"]),
+  call_webhook: new Set([
+    ...COMMON_STEP_KEYS,
+    "url",
+    "method",
+    "headers",
+    "body",
+  ]),
+  request_approval: new Set([
+    ...COMMON_STEP_KEYS,
+    "from",
+    "message",
+    "timeout",
+  ]),
+  add_reaction: new Set([...COMMON_STEP_KEYS, "emoji"]),
+  set_channel_topic: new Set([...COMMON_STEP_KEYS, "topic"]),
+};
+const REQUIRED_ACTION_STRING_KEYS: Record<ActionType, readonly string[]> = {
+  delay: ["duration"],
+  send_message: ["text"],
+  send_dm: ["to", "text"],
+  call_webhook: ["url"],
+  request_approval: ["from", "message"],
+  add_reaction: ["emoji"],
+  set_channel_topic: ["topic"],
+};
+const OPTIONAL_ACTION_STRING_KEYS: Record<ActionType, readonly string[]> = {
+  delay: [],
+  send_message: ["channel"],
+  send_dm: [],
+  call_webhook: ["method", "body"],
+  request_approval: ["timeout"],
+  add_reaction: [],
+  set_channel_topic: [],
+};
+const WEBHOOK_METHODS = new Set(["POST", "GET", "PUT", "PATCH", "DELETE"]);
+const STEP_ID_PATTERN_STRICT = /^[A-Za-z0-9_]{1,64}$/;
+
+type UnknownRecord = Record<string, unknown>;
+
+function objectRecord(value: unknown): UnknownRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as UnknownRecord)
+    : null;
+}
+
+function unknownKey(
+  record: UnknownRecord,
+  allowed: ReadonlySet<string>,
+): string | null {
+  return Object.keys(record).find((key) => !allowed.has(key)) ?? null;
+}
+
+function requireNonEmptyString(
+  record: UnknownRecord,
+  key: string,
+  label: string,
+): string | { error: string } {
+  const value = record[key];
+  if (typeof value !== "string" || value.length === 0) {
+    return { error: `${label} must be a non-empty string` };
+  }
+  return value;
+}
+
+function optionalOwnedStringError(
+  record: UnknownRecord,
+  key: string,
+  label: string,
+): string | null {
+  const value = record[key];
+  if (value === undefined) return null;
+  if (typeof value !== "string") return `${label} must be a string`;
+  if (value.length === 0) {
+    return `${label} cannot be empty in Form mode — use the YAML editor`;
+  }
+  return null;
+}
+
 export function yamlToFormState(
   yaml: string,
 ): { ok: true; state: WorkflowFormState } | { ok: false; error: string } {
   try {
-    const parsed = yamlParse(yaml);
-    if (!parsed || typeof parsed !== "object") {
-      return { ok: false, error: "YAML must be an object" };
-    }
+    const parsed = objectRecord(yamlParse(yaml));
+    if (!parsed) return { ok: false, error: "YAML must be an object" };
 
-    const triggerOn = parsed.trigger?.on;
-    if (triggerOn && !TRIGGER_TYPES.includes(triggerOn as TriggerType)) {
+    const topUnknown = unknownKey(parsed, TOP_LEVEL_KEYS);
+    if (topUnknown) {
       return {
         ok: false,
-        error: `Unsupported trigger type "${triggerOn}" — use the YAML editor`,
+        error: `Unsupported workflow field "${topUnknown}" — use the YAML editor`,
       };
     }
-    const trigger: TriggerConfig = {
-      on: (triggerOn as TriggerType) ?? TRIGGER_TYPES[0],
-      filter: parsed.trigger?.filter ?? undefined,
-      emoji: parsed.trigger?.emoji ?? undefined,
-      cron: parsed.trigger?.cron ?? undefined,
-      interval: parsed.trigger?.interval ?? undefined,
-    };
-
-    const rawSteps = parsed.steps ?? [];
-    if (!Array.isArray(rawSteps)) {
-      return { ok: false, error: "steps must be a list" };
+    if (typeof parsed.name !== "string") {
+      return { ok: false, error: "name must be a string" };
     }
-
-    for (const step of rawSteps) {
-      if (step.action && !ACTION_TYPES.includes(step.action as ActionType)) {
+    if (parsed.description !== undefined) {
+      if (typeof parsed.description !== "string") {
+        return { ok: false, error: "description must be a string" };
+      }
+      if (
+        parsed.description.length === 0 ||
+        parsed.description.trim() !== parsed.description
+      ) {
         return {
           ok: false,
-          error: `Unsupported action type "${step.action}" — use the YAML editor`,
+          error:
+            "description cannot be empty or have surrounding whitespace in Form mode — use the YAML editor",
         };
       }
     }
+    if (parsed.enabled !== undefined && typeof parsed.enabled !== "boolean") {
+      return { ok: false, error: "enabled must be a boolean" };
+    }
 
-    const steps: StepFormState[] = rawSteps.map(
-      (step: Record<string, unknown>, index: number) => ({
-        id: (step.id as string) ?? `step_${index + 1}`,
+    const rawTrigger = objectRecord(parsed.trigger);
+    if (!rawTrigger || typeof rawTrigger.on !== "string") {
+      return { ok: false, error: "trigger.on is required" };
+    }
+    if (!TRIGGER_TYPES.includes(rawTrigger.on as TriggerType)) {
+      return {
+        ok: false,
+        error: `Unsupported trigger type "${rawTrigger.on}" — use the YAML editor`,
+      };
+    }
+    const triggerOn = rawTrigger.on as TriggerType;
+    const triggerUnknown = unknownKey(rawTrigger, TRIGGER_KEYS[triggerOn]);
+    if (triggerUnknown) {
+      return {
+        ok: false,
+        error: `Unsupported ${triggerOn} trigger field "${triggerUnknown}" — use the YAML editor`,
+      };
+    }
+    for (const key of ["filter", "emoji", "cron", "interval"] as const) {
+      const error = optionalOwnedStringError(rawTrigger, key, `trigger.${key}`);
+      if (error) {
+        return {
+          ok: false,
+          error:
+            triggerOn === "schedule" && !error.includes("YAML editor")
+              ? `${error} — use the YAML editor`
+              : error,
+        };
+      }
+    }
+    if (triggerOn === "schedule") {
+      const hasCron = rawTrigger.cron !== undefined;
+      const hasInterval = rawTrigger.interval !== undefined;
+      if (hasCron === hasInterval) {
+        return {
+          ok: false,
+          error: hasCron
+            ? "Schedule triggers cannot specify both cron and interval — use the YAML editor"
+            : "Schedule triggers require either cron or interval — use the YAML editor",
+        };
+      }
+      if (typeof rawTrigger.cron === "string") {
+        const error = cronExpressionError(rawTrigger.cron);
+        if (error) {
+          return {
+            ok: false,
+            error: `Unsupported cron expression: ${error} Use the YAML editor`,
+          };
+        }
+      }
+    }
+    const trigger: TriggerConfig = {
+      on: triggerOn,
+      filter: rawTrigger.filter as string | undefined,
+      emoji: rawTrigger.emoji as string | undefined,
+      cron: rawTrigger.cron as string | undefined,
+      interval: rawTrigger.interval as string | undefined,
+    };
+
+    if (!Array.isArray(parsed.steps)) {
+      return { ok: false, error: "steps must be a list" };
+    }
+    const ids = new Set<string>();
+    const steps: StepFormState[] = [];
+    for (const [index, value] of parsed.steps.entries()) {
+      const number = index + 1;
+      const step = objectRecord(value);
+      if (!step)
+        return { ok: false, error: `Step ${number} must be an object` };
+      if (
+        typeof step.id !== "string" ||
+        !STEP_ID_PATTERN_STRICT.test(step.id)
+      ) {
+        return {
+          ok: false,
+          error: `Step ${number} requires a unique 1–64 character alphanumeric or underscore ID`,
+        };
+      }
+      if (ids.has(step.id)) {
+        return {
+          ok: false,
+          error: `Duplicate step ID "${step.id}" — use the YAML editor`,
+        };
+      }
+      ids.add(step.id);
+
+      if (
+        typeof step.action !== "string" ||
+        !ACTION_TYPES.includes(step.action as ActionType)
+      ) {
+        return {
+          ok: false,
+          error: `Unsupported action type "${String(step.action)}" — use the YAML editor`,
+        };
+      }
+      const action = step.action as ActionType;
+      const stepUnknown = unknownKey(step, ACTION_STEP_KEYS[action]);
+      if (stepUnknown) {
+        return {
+          ok: false,
+          error: `Unsupported ${action} step field "${stepUnknown}" — use the YAML editor`,
+        };
+      }
+      if (step.if !== undefined) {
+        return {
+          ok: false,
+          error: "Step conditions are only available in the YAML editor",
+        };
+      }
+      const nameError = optionalOwnedStringError(
+        step,
+        "name",
+        `Step ${number} name`,
+      );
+      if (nameError) return { ok: false, error: nameError };
+      if (typeof step.name === "string" && step.name.trim() !== step.name) {
+        return {
+          ok: false,
+          error: `Step ${number} name has surrounding whitespace — use the YAML editor`,
+        };
+      }
+      if (
+        step.timeout_secs !== undefined &&
+        (!Number.isSafeInteger(step.timeout_secs) ||
+          (step.timeout_secs as number) <= 0)
+      ) {
+        return {
+          ok: false,
+          error: `Step ${number} timeout_secs must be a positive integer`,
+        };
+      }
+
+      for (const key of REQUIRED_ACTION_STRING_KEYS[action]) {
+        const required = requireNonEmptyString(
+          step,
+          key,
+          `Step ${number} ${key}`,
+        );
+        if (typeof required !== "string")
+          return { ok: false, error: required.error };
+      }
+      for (const key of OPTIONAL_ACTION_STRING_KEYS[action]) {
+        const error = optionalOwnedStringError(
+          step,
+          key,
+          `Step ${number} ${key}`,
+        );
+        if (error) return { ok: false, error };
+      }
+      if (
+        action === "call_webhook" &&
+        step.method !== undefined &&
+        !WEBHOOK_METHODS.has(step.method as string)
+      ) {
+        return {
+          ok: false,
+          error: `Unsupported webhook method "${String(step.method)}" — use the YAML editor`,
+        };
+      }
+      if (step.headers !== undefined) {
+        const headers = objectRecord(step.headers);
+        if (
+          !headers ||
+          Object.keys(headers).length === 0 ||
+          Object.values(headers).some((header) => typeof header !== "string")
+        ) {
+          return {
+            ok: false,
+            error:
+              "Webhook headers must be a non-empty object containing string values",
+          };
+        }
+        const unsafeHeader = Object.keys(headers).find(
+          (key) => key.length === 0 || key.trim() !== key,
+        );
+        if (unsafeHeader !== undefined) {
+          return {
+            ok: false,
+            error:
+              "Webhook header names cannot be empty or have surrounding whitespace in Form mode",
+          };
+        }
+      }
+
+      steps.push({
+        id: step.id,
         name: step.name as string | undefined,
-        action: (step.action as ActionType) ?? ACTION_TYPES[0],
-        condition: step.if as string | undefined,
+        action,
         timeoutSecs:
-          step.timeout_secs !== undefined
-            ? String(step.timeout_secs)
-            : undefined,
+          step.timeout_secs === undefined
+            ? undefined
+            : formatDurationSeconds(step.timeout_secs as number),
         duration: step.duration as string | undefined,
         text: step.text as string | undefined,
         channel: step.channel as string | undefined,
         to: step.to as string | undefined,
         url: step.url as string | undefined,
         method: step.method as string | undefined,
-        headers: toHeaderRows(
-          step.headers,
-          (step.id as string) ?? `step_${index + 1}`,
-        ),
+        headers: toHeaderRows(step.headers, step.id),
         body: step.body as string | undefined,
         emoji: step.emoji as string | undefined,
         topic: step.topic as string | undefined,
         from: step.from as string | undefined,
         message: step.message as string | undefined,
         timeout: step.timeout as string | undefined,
-      }),
-    );
+      });
+    }
 
     return {
       ok: true,
       state: {
-        name: (parsed.name as string) ?? "",
-        description: (parsed.description as string) ?? "",
+        name: parsed.name,
+        description: (parsed.description as string | undefined) ?? "",
         enabled: parsed.enabled !== false,
         trigger,
         steps,
