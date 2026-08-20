@@ -83,6 +83,44 @@ fn active_local_agent_cannot_migrate() {
 }
 
 #[test]
+fn live_legacy_scalar_pid_blocks_migration_before_sync_cleanup() {
+    let mut record = provider_record(false);
+    record.backend = crate::managed_agents::BackendKind::Local;
+    record.runtime_pid = Some(4242);
+    let runtime_active = legacy_runtime_pid_is_live_with(&record, |pid| pid == 4242, |_| true);
+    assert!(
+        runtime_active,
+        "owned live scalar PID must survive the pre-sync guard"
+    );
+
+    let requested = crate::managed_agents::BackendKind::Provider {
+        id: "kubernetes".to_string(),
+        config: serde_json::json!({}),
+    };
+    let error = apply_backend_update(
+        &mut record,
+        Some(&requested),
+        Some("/trusted/buzz-backend-kubernetes"),
+        runtime_active,
+    )
+    .expect_err("legacy live runtime must block migration");
+    assert!(error.contains("Stop this agent"));
+    assert_eq!(record.backend, crate::managed_agents::BackendKind::Local);
+}
+
+#[test]
+fn unrelated_reused_scalar_pid_does_not_block_migration() {
+    let mut record = provider_record(false);
+    record.backend = crate::managed_agents::BackendKind::Local;
+    record.runtime_pid = Some(4242);
+    assert!(!legacy_runtime_pid_is_live_with(
+        &record,
+        |_| true,
+        |_| false
+    ));
+}
+
+#[test]
 fn provider_backends_cannot_be_moved_by_generic_update() {
     let mut record = provider_record(false);
     let requested = crate::managed_agents::BackendKind::Local;

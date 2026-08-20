@@ -8,6 +8,22 @@ fn prepare_backend_update(requested: Option<&BackendKind>) -> Result<Option<Stri
     crate::managed_agents::resolve_provider_binary(id).map(|path| Some(path.display().to_string()))
 }
 
+fn legacy_runtime_pid_is_live_with(
+    record: &ManagedAgentRecord,
+    mut process_is_running: impl FnMut(u32) -> bool,
+    mut process_has_buzz_marker: impl FnMut(u32) -> bool,
+) -> bool {
+    record
+        .runtime_pid
+        .is_some_and(|pid| process_is_running(pid) && process_has_buzz_marker(pid))
+}
+
+fn legacy_runtime_pid_is_live(record: &ManagedAgentRecord, instance_id: &str) -> bool {
+    legacy_runtime_pid_is_live_with(record, crate::managed_agents::process_is_running, |pid| {
+        crate::managed_agents::process_has_buzz_marker(pid, instance_id)
+    })
+}
+
 fn apply_backend_update(
     record: &mut ManagedAgentRecord,
     requested: Option<&BackendKind>,
@@ -118,23 +134,39 @@ pub async fn update_managed_agent(
 
     // Phase 1: local save (synchronous, under lock)
     let (mut summary, sync_params, rollback, access_policy_changed, access_restart_relays) = {
+        // Runtime transitions always lock transition -> store -> processes.
+        // This prevents a manual start/stop or restore spawn from crossing the
+        // backend migration after its final restore-candidate revalidation.
+        let _transition_guard = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|e| e.to_string())?;
         let mut records = load_managed_agents(&app)?;
+        let instance_id = current_instance_id(&app);
+        // Capture an owned legacy scalar runtime before lifecycle sync clears
+        // that deprecated field. A live marked process is still a real local
+        // runtime and must block migration even when it has no pair-map entry.
+        let legacy_runtime_active = records
+            .iter()
+            .find(|record| record.pubkey == input.pubkey)
+            .is_some_and(|record| legacy_runtime_pid_is_live(record, &instance_id));
         let mut runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
         let (_, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+            sync_managed_agent_processes(&mut records, &mut runtimes, &instance_id);
         for pubkey in &exited_pubkeys {
             state.clear_agent_session_caches(pubkey);
         }
 
-        let runtime_active =
-            !crate::managed_agents::managed_agent_runtime_keys(&runtimes, &input.pubkey).is_empty();
+        let runtime_active = legacy_runtime_active
+            || !crate::managed_agents::managed_agent_runtime_keys(&runtimes, &input.pubkey)
+                .is_empty();
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
 
