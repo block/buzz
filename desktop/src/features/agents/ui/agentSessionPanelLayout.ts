@@ -35,7 +35,7 @@ export function mergeObserverEventWindows(
   if (archivedEvents.length === 0) return liveEvents as ObserverEvent[];
   if (liveEvents.length === 0) return archivedEvents as ObserverEvent[];
 
-  // Dedup key: same as appendAgentEvent / appendArchivedChannelEvent.
+  // Dedup key: same as appendAgentEvent / appendArchivedChannelEvents.
   const liveKeySet = new Set(liveEvents.map((e) => `${e.seq}:${e.timestamp}`));
   const uniqueArchived = archivedEvents.filter(
     (e) => !liveKeySet.has(`${e.seq}:${e.timestamp}`),
