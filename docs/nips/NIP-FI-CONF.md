@@ -275,6 +275,13 @@ oracle governs, together with that oracle's failing output (`FI-CONF-MUTATION`).
 Evidence is the exact patch identity, the oracle identifier, and the retained
 failure output at the claimed head.
 
+While `FI-CONF-INTEROP-EXIT` is validly deferred under **Interoperability exit
+test**, it remains in claim completeness but is excluded from the mutation and
+global-control obligations of this section: its failing output cannot exist
+without the run itself. Both obligations attach with the run and MUST be
+discharged before either implementation's interoperable conformance claim is
+accepted. No other oracle's obligation under this section is deferrable.
+
 Normative prose outside the oracle tables remains binding. It is not a second
 denominator. Prose that no listed oracle can detect is untestable text: add the
 oracle that detects it, or delete it.
@@ -338,11 +345,17 @@ produce equal bytes however correct both are, so the run is parameterized by a
 - the domain, target resource, operation, and enrollment policy for each case.
 
 The canonical shared exit fixture is authored by this document's editors, not
-by any claiming implementation, and is published as a single file in the same
-repository as these documents, at `docs/nips/fixtures/nip-fi-conf-exit.json`,
-together with its SHA-256 digest. Both sides MUST load that file, MUST verify
+by any claiming implementation, and MUST be published as a single file in the
+same repository as these documents, at `docs/nips/fixtures/nip-fi-conf-exit.json`,
+together with its SHA-256 digest, before any `FI-CONF-INTEROP-EXIT` run. Both
+sides MUST load that file, MUST verify
 the digest before the run, and MUST record the digest with the evidence. A run
 against any other fixture instance is not `FI-CONF-INTEROP-EXIT` evidence.
+While the canonical fixture file is not yet published, the exit fixture digest
+element of the claim tuple records the reserved value
+`pending-canonical-fixture`; that value is valid only in a claim whose
+`FI-CONF-INTEROP-EXIT` result is `deferred`. Publication of the fixture changes
+the element and therefore creates a new claim.
 
 **Request compared object.** A minted request cannot be compared as bytes. Two
 conforming implementations may produce different signature octets for the same
@@ -430,7 +443,8 @@ one deployed domain does not activate it.
 Before NIP-FI enforcement or discovery is enabled, reviewers verify that one
 immutable claim tuple passes every applicable oracle at one reviewed revision;
 that the protected-ingress inventory has no uncovered or competing authority;
-that every listed oracle has a killed, attributed, reachable mutant and every
+that every listed oracle, other than a validly deferred `FI-CONF-INTEROP-EXIT`
+under **Mutation adequacy**, has a killed, attributed, reachable mutant and every
 survivor is recorded; that the denial-fixture enumeration is complete for the
 claimed profiles and its negative control fails as required; that the
 interoperability exit test has passed against an independent implementation, or
@@ -446,9 +460,9 @@ They close no item in this gate.
 
 | ID | Required outcome |
 |---|---|
-| `FI-CONF-CLAIM-COMPLETE` | A report missing an applicable oracle, duplicating one, carrying a result from another claim tuple, or claiming a status other than `pass`/`not-applicable` — or `deferred` on any oracle other than `FI-CONF-INTEROP-EXIT` — is rejected. |
+| `FI-CONF-CLAIM-COMPLETE` | A report missing an applicable oracle, duplicating one, carrying a result from another claim tuple, claiming a status other than `pass`/`not-applicable` — or `deferred` on any oracle other than `FI-CONF-INTEROP-EXIT` — or omitting mutant evidence for any oracle other than a deferred `FI-CONF-INTEROP-EXIT`, is rejected. |
 | `FI-CONF-DENIAL-FIXTURES` | Every enumerated private condition has a fixture; core and each claimed profile pass exact identifier/class/owner enumeration agreement; anonymity-set responses compare byte-identical; the distinguishing negative control fails. |
-| `FI-CONF-MUTATION` | Every listed oracle has a singly-applied, attributed, reachability-witnessed mutant killed by that entry's own oracle; survivors are recorded, not waived. |
+| `FI-CONF-MUTATION` | Every listed oracle — except `FI-CONF-INTEROP-EXIT` while validly deferred, per **Mutation adequacy** — has a singly-applied, attributed, reachability-witnessed mutant killed by that entry's own oracle; survivors are recorded, not waived. |
 | `FI-CONF-INTEROP-EXIT` | Two independent implementations produce, from the documents alone, valid requests equal over the request compared object and per-class denials equal over the denial compared object, and accept each other's output. |
 
 ## Security considerations
