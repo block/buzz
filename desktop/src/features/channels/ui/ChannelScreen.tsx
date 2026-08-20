@@ -344,6 +344,7 @@ export function ChannelScreen({
     activeChannel,
     activeChannelId,
     channelMembers,
+    currentPubkey,
     managedAgents,
     openThreadHeadId: effectiveOpenThreadHeadId,
     relayAgents,
