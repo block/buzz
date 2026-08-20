@@ -796,7 +796,7 @@ test("pull request and issue feeds use compact work item rows", async ({
   ).toHaveText("0");
   await expect(
     prRows.first().getByTestId("project-pull-request-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   await expect(
     page.getByTestId("project-work-item-group-header").first(),
   ).toBeVisible();
@@ -852,7 +852,7 @@ test("pull request and issue feeds use compact work item rows", async ({
   ).toHaveText("0");
   await expect(
     issueRows.first().getByTestId("project-issue-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   const taskCategoryBoxes = await taskCategoryCells.evaluateAll((cells) =>
     cells.slice(0, 5).map((cell) => {
       const box = cell.getBoundingClientRect();
