@@ -174,7 +174,7 @@ const VAD_FRAME_SAMPLES: usize = 256;
 /// Earshot 1.1.0 onset operating point. Any Earshot model/version change
 /// invalidates this and `VAD_OFFSET_THRESHOLD`; re-run the matched-corpus
 /// threshold harness before updating either constant.
-const VAD_ONSET_THRESHOLD: f32 = 0.5;
+const VAD_ONSET_THRESHOLD: f32 = 0.55;
 
 /// Earshot 1.1.0 offset operating point. The lower threshold keeps borderline
 /// speech inside the active utterance without changing the onset sensitivity.
