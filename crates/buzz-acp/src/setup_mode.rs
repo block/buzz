@@ -115,6 +115,18 @@ pub(crate) enum RequirementPayload {
     },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
+    /// The configured harness command could not be resolved in the agent's PATH.
+    /// Buzz-managed, so Edit Agent can fix it — usually by giving an absolute path.
+    MissingBinary { command: String },
+    /// A surface this build doesn't know about.
+    ///
+    /// The desktop and `buzz-acp` ship in the same bundle but are versioned
+    /// independently in development, and a surface added on the desktop side
+    /// used to abort the harness at startup with a serde error — the agent
+    /// crash-looped instead of nudging. Unknown surfaces degrade to a generic
+    /// nudge so the agent still starts and still tells the user something.
+    #[serde(other)]
+    Unknown,
 }
 
 impl RequirementPayload {
@@ -188,6 +200,15 @@ impl RequirementPayload {
             }
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
+            }
+            RequirementPayload::MissingBinary { command } => {
+                format!(
+                    "`{}` was not found in PATH — install it, or set an absolute path in Edit Agent → Command",
+                    command
+                )
+            }
+            RequirementPayload::Unknown => {
+                "this agent reported a configuration problem this version can't describe — open Edit Agent to review its settings".to_string()
             }
         }
     }
@@ -685,6 +706,36 @@ mod tests {
         let payload: SetupPayload = serde_json::from_str(json).unwrap();
         assert_eq!(payload.agent_name, "Fizz");
         assert_eq!(payload.requirements.len(), 2);
+    }
+
+    #[test]
+    fn setup_payload_deserializes_missing_binary_requirement() {
+        // Regression: the desktop emits this surface for a harness command it
+        // can't resolve in PATH. `buzz-acp` had no matching variant, so the
+        // harness aborted with a serde error and the agent crash-looped.
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Kimi","agent_pubkey":"test","requirements":[{"surface":"missing_binary","command":"kimi"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::MissingBinary { command }] if command == "kimi"
+        ));
+        assert!(payload.requirements[0].instruction().contains("kimi"));
+    }
+
+    #[test]
+    fn setup_payload_tolerates_unknown_surface() {
+        // Forward compatibility: a surface this build has never heard of must
+        // degrade to a generic nudge, never abort the harness.
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Fizz","agent_pubkey":"test","requirements":[{"surface":"surface_from_the_future","detail":"whatever"}]}"#,
+        )
+        .expect("unknown surface must parse, not error");
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::Unknown]
+        ));
     }
 
     #[test]
