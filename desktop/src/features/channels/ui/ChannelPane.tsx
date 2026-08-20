@@ -714,6 +714,13 @@ export const ChannelPane = React.memo(function ChannelPane({
                   onSend={handleSendMessage}
                   profiles={profiles}
                   showBackgroundUploadProgress={false}
+                  toolbarExtraActions={
+                    activeChannel?.channelType === "stream" ? (
+                      <span className="whitespace-nowrap text-xs text-muted-foreground">
+                        New thread · new agent session
+                      </span>
+                    ) : undefined
+                  }
                   placeholder={
                     timeoutState.active
                       ? "You're timed out by community moderators."
@@ -727,7 +734,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                               ? activeChannel.channelType === "dm" &&
                                 directMessageIntro
                                 ? `Message ${directMessageIntro.displayName}`
-                                : `Message #${activeChannel.name}`
+                                : activeChannel.channelType === "stream"
+                                  ? `Start a new thread in #${activeChannel.name}`
+                                  : `Message #${activeChannel.name}`
                               : "Select a channel"
                   }
                   showTopBorder={false}
