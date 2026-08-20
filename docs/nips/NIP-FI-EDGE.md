@@ -45,7 +45,8 @@ Every trusted edge MUST:
    for the independent NIP-98 proof and MUST reach final admission unmodified;
 2. cryptographically authenticate the immediate edge to the accepting origin and
    isolate the origin from direct or alternate ingress;
-3. integrity-protect every request component used by authorization;
+3. integrity-protect every request component used by authorization other than
+   an independent Nostr proof, which is protected by its own signature;
 4. apply a positive finite provenance deadline that is included in final admission
    and every resulting lease;
 5. validate a closed upstream identity and authorization claim set and produce the
@@ -169,11 +170,12 @@ time.
 - **Client peer:** Serialize the exact canonical ASCII field value.
 
 No authorization decision, target, resource, capability, or effect selector
-derives from any request component outside the protected pre-MAC components,
-except the independent NIP-98 proof conveyed in the `Authorization` field,
-whose integrity is protected by its own signed event rather than by this MAC;
-body interpretation follows the server-resolved body semantics, never
-unprotected transport metadata such as `Content-Type` or `Content-Encoding`.
+derives from any request or connection component outside the protected pre-MAC
+components, except an independent Nostr proof validated on its own signature —
+the NIP-98 event in `Authorization` or the NIP-42 event after connect — which
+the MAC does not protect; body interpretation follows the server-resolved body
+semantics, never unprotected transport metadata such as `Content-Type` or
+`Content-Encoding`.
 
 ### Freshness, replay, and key rotation
 
@@ -361,7 +363,7 @@ Every implementation MUST run these normative negative cases:
 |---|---|
 | Envelope | Absent/repeated/comma-combined fields, `v1`, missing/extra component, padding, alternate alphabet, nonce below 16 octets or above configured max, and MAC lengths 31 or 33 all deny. |
 | Domain | Uppercase/nonhyphenated UUID config fails configuration; mixed-endian UUID bytes or any one-bit domain transplant fails the baseline MAC; duplicate active UUID fails startup. |
-| Request | Mutating assertion, method, authority, path/query, body, proof code, or peer while retaining Vector 1's MAC denies. |
+| Request | Mutating assertion, method, authority, path/query, body, proof code, or peer while retaining Vector 1's MAC denies; mutating the `Authorization` field between client and verifier on a `0x02` route denies. |
 | Metadata | Mutating `Content-Type` or `Content-Encoding` in flight changes no authorization decision, target, capability, or effect selector; a request whose server-resolved body semantics no longer hold denies. |
 | Path | `%2F`→`%2f`, decoding to `/`, reordering repeated query values, or adding/removing an empty `?` fails the baseline MAC. |
 | Authority | Unbracketed or non-RFC-5952 IPv6, uppercase host, trailing dot, or missing port denies before MAC comparison. |
@@ -389,7 +391,7 @@ and these profile traces:
 | `FI-TRACE-EDGE-VECTORS` | Reproduce all three normative vectors field-for-field, including each complete pre-MAC input, diagnostic input digest, raw MAC, and wire MAC; reproduce all five timestamp serialization rows; every listed serialization and negative-matrix case produces its required denial or configuration failure. |
 | `FI-TRACE-PROXY-SPOOF` | Direct ingress, unsigned/header-only identity, unauthenticated caller, or invalid provenance denies without fallback. |
 | `FI-TRACE-PROXY-REPLAY` | Two HMAC-v2 final admissions using one nonce commit at most one; preparation consumes neither. A private adapter proves its declared replay semantics. |
-| `FI-TRACE-PROXY-CROSS-REQUEST` | Each protected component mutation denies. HMAC-v2 covers assertion, domain, method, authority, path/query, complete body, proof transport, and peer. |
+| `FI-TRACE-PROXY-CROSS-REQUEST` | Each protected component mutation denies. HMAC-v2 covers assertion, domain, method, authority, path/query, complete body, proof transport, and peer. An `Authorization` field altered between client and verifier on a `0x02` route denies. |
 | `FI-TRACE-EDGE-BODY-BOUNDS` | Known and streamed boundary cases prove bounded work/storage, EOF completeness, cleanup, and no pre-authorization effect. |
 | `FI-TRACE-EDGE-KEY-ROTATION` | A finite active-key set accepts an intended overlap without allowing nonce reuse or an unknown key. |
 
