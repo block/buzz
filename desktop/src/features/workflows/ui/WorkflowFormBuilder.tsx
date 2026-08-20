@@ -858,6 +858,10 @@ export const WorkflowFormBuilder = React.forwardRef<
                                   onUpdate={(updated) =>
                                     updateStep(selectedStepIndex, updated)
                                   }
+                                  previousSteps={formState.steps.slice(
+                                    0,
+                                    selectedStepIndex,
+                                  )}
                                   showHeader={false}
                                   step={selectedStep}
                                   triggerType={formState.trigger.on}

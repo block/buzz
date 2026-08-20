@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { parse as parseYaml } from "yaml";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 test.beforeEach(async ({ page }) => {
@@ -68,6 +69,57 @@ async function reopenWorkflow(
   await page.getByRole("menuitem", { name: "Edit" }).click();
   return page.getByRole("dialog", { name: "Edit workflow" });
 }
+
+test("inserts template variables with keyboard control and restores the caret", async ({
+  page,
+}) => {
+  const dialog = await openCreateWorkflow(page, "template_variables_keyboard");
+  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Send Message" }).click();
+
+  const textarea = dialog.getByLabel("Message text");
+  const listbox = page.getByRole("listbox");
+  await textarea.fill("Hello {{trig");
+  await expect(listbox).toBeVisible();
+  await expect(listbox.getByRole("option")).toHaveCount(5);
+  await waitForAnimations(page);
+  expect(await page.locator("body").screenshot()).toMatchSnapshot(
+    "workflow-template-variable-autocomplete.png",
+  );
+
+  await textarea.press("ArrowUp");
+  await expect(textarea).toHaveAttribute(
+    "aria-activedescendant",
+    /-variables-option-4$/,
+  );
+  await textarea.press("ArrowDown");
+  await expect(textarea).toHaveAttribute(
+    "aria-activedescendant",
+    /-variables-option-0$/,
+  );
+  await textarea.press("Enter");
+  await expect(textarea).toHaveValue("Hello {{trigger.text}}");
+  await expect(textarea).toBeFocused();
+  await expect
+    .poll(() =>
+      textarea.evaluate((element) =>
+        element instanceof HTMLTextAreaElement ? element.selectionStart : -1,
+      ),
+    )
+    .toBe("Hello {{trigger.text}}".length);
+
+  await textarea.fill("Keep {{auth");
+  await expect(listbox).toBeVisible();
+  await textarea.press("Escape");
+  await expect(listbox).toBeHidden();
+  await expect(textarea).toBeFocused();
+  await expect(textarea).toHaveValue("Keep {{auth");
+
+  await textarea.fill("By {{auth");
+  await textarea.press("Tab");
+  await expect(textarea).toHaveValue("By {{trigger.author}}");
+  await expect(textarea).toBeFocused();
+});
 
 test("round-trips schedule presets and saves a custom UTC cron", async ({
   page,
