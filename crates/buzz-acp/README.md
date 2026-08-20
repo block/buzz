@@ -143,8 +143,8 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | Mode | Behavior |
 |------|----------|
 | `owner-only` | Forward only events from the agent's registered owner. If no owner is set, all events are dropped until the owner is resolved. |
-| `allowlist` | Forward events from the listed pubkeys plus the owner. |
-| `anyone` | Forward all events (no author filtering). |
+| `allowlist` | Forward events from the listed pubkeys plus the owner, including DMs. |
+| `anyone` | Forward all events in channels. In a DM, still only the owner (and same-owner siblings) — a stranger the agent messages cannot prompt it. |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
 
 The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
