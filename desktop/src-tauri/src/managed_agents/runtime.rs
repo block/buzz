@@ -807,7 +807,11 @@ pub fn spawn_agent_child(
     }
     command.env(
         "BUZZ_ACP_ALLOW_NON_OWNER_DM",
-        if record.allow_non_owner_dm { "true" } else { "false" },
+        if record.allow_non_owner_dm {
+            "true"
+        } else {
+            "false"
+        },
     );
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");

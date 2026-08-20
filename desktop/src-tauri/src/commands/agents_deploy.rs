@@ -78,6 +78,29 @@ pub(super) fn build_launch_block(
         "BUZZ_ACP_AGENTS".into(),
         crate::managed_agents::acp_agents_value(&descriptor.command, record.parallelism),
     );
+    let (respond_to, respond_to_allowlist) = crate::managed_agents::projected_access_with_policy(
+        record,
+        crate::managed_agents::owner_only_access_build(),
+    );
+    policy_env.insert(
+        "BUZZ_ACP_RESPOND_TO".into(),
+        respond_to.as_str().to_string(),
+    );
+    if respond_to == crate::managed_agents::RespondTo::Allowlist {
+        policy_env.insert(
+            "BUZZ_ACP_RESPOND_TO_ALLOWLIST".into(),
+            respond_to_allowlist.join(","),
+        );
+    }
+    policy_env.insert(
+        "BUZZ_ACP_ALLOW_NON_OWNER_DM".into(),
+        if record.allow_non_owner_dm {
+            "true"
+        } else {
+            "false"
+        }
+        .into(),
+    );
 
     if let Some(value) = effective_prompt {
         policy_env.insert("BUZZ_ACP_SYSTEM_PROMPT".into(), value.to_string());
