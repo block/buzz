@@ -267,33 +267,6 @@ impl AppState {
         }
     }
 
-    /// Record that `channel_id` was just created by `creator_pubkey` and its
-    /// kind:39002 owner membership has not yet been observed.
-    pub fn mark_pending_owned_channel(&self, creator_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.insert((creator_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
-    /// Whether `channel_id` is still awaiting `my_pubkey`'s kind:39002 entry.
-    /// Bound to `my_pubkey` so an in-process identity swap never inherits
-    /// another identity's pending-owner entry for the same channel id.
-    pub fn is_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) -> bool {
-        self.pending_owned_channels
-            .lock()
-            .map(|set| set.contains(&(my_pubkey.to_string(), channel_id.to_string())))
-            .unwrap_or(false)
-    }
-
-    /// Drop the `(my_pubkey, channel_id)` entry from the pending-owner
-    /// overlay once that identity's real kind:39002 membership has been
-    /// observed.
-    pub fn clear_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.remove(&(my_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
     /// Return the active identity keys if they are in a signable state.
     ///
     /// Returns `Err` when the identity is in a lost state (`identity_lost`
@@ -390,6 +363,9 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
 #[path = "app_state_keyring.rs"]
 mod keyring_config;
 pub(crate) use keyring_config::keyring_service;
+
+#[path = "app_state_pending_channels.rs"]
+mod pending_channels;
 
 /// Keyring key name for the human identity nsec.
 const IDENTITY_KEY_NAME: &str = "identity";

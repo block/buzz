@@ -21,7 +21,10 @@ export type ImetaEntry = {
 export type ImetaLookup = Map<string, ImetaEntry>;
 
 export type MessageLinkPillProps = {
-  channels: Channel[];
+  /** Member channels available synchronously from the caller's runtime. */
+  channels?: Channel[];
+  /** Resolve a missing channel id with a bounded detail query. */
+  resolveChannelReference?: boolean;
   /** Original permalink text, preserved for the context menu's Copy action. */
   href?: string;
   interactive: boolean;
@@ -48,6 +51,7 @@ export type MarkdownRuntime = {
    * validate that clone-URL rewrites point to the active relay only.
    */
   relayOrigin: string | null;
+  resolveChannelReferences?: boolean;
   /** Display name of the message author sharing an agent snapshot. */
   snapshotSharedBy?: string;
   /**

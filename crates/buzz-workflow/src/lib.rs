@@ -887,6 +887,7 @@ async fn should_fire_workflow(
 ) -> bool {
     if let TriggerDef::ReactionAdded {
         emoji: Some(ref expected),
+        ..
     } = def.trigger
     {
         if &trigger_ctx.emoji != expected {
@@ -900,33 +901,13 @@ async fn should_fire_workflow(
         }
     }
 
-    if let TriggerDef::MessagePosted {
-        filter: Some(ref expr),
-    } = def.trigger
-    {
-        match executor::evaluate_condition(expr, trigger_ctx, &HashMap::new()).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::debug!(
-                    workflow_id = %workflow_id,
-                    "Trigger filter evaluated false — skipping workflow"
-                );
-                return false;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    workflow_id = %workflow_id,
-                    "Trigger filter error: {e} — skipping workflow"
-                );
-                return false;
-            }
-        }
-    }
-
-    if let TriggerDef::DiffPosted {
-        filter: Some(ref expr),
-    } = def.trigger
-    {
+    let filter = match &def.trigger {
+        TriggerDef::MessagePosted { filter }
+        | TriggerDef::ReactionAdded { filter, .. }
+        | TriggerDef::DiffPosted { filter } => filter.as_ref(),
+        TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
+    };
+    if let Some(expr) = filter {
         match executor::evaluate_condition(expr, trigger_ctx, &HashMap::new()).await {
             Ok(true) => {}
             Ok(false) => {
@@ -1364,7 +1345,10 @@ steps:
 
     #[test]
     fn trigger_matches_reaction() {
-        let trigger = TriggerDef::ReactionAdded { emoji: None };
+        let trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
         assert!(trigger_matches_event(
             &trigger,
             buzz_core::kind::KIND_REACTION
@@ -1373,6 +1357,36 @@ steps:
             &trigger,
             buzz_core::kind::KIND_STREAM_MESSAGE
         ));
+    }
+
+    #[tokio::test]
+    async fn reaction_filter_matches_target_message() {
+        let yaml = r#"
+name: "React to one message"
+trigger:
+  on: reaction_added
+  filter: 'trigger_message_id == "target-message"'
+steps:
+  - id: wait
+    action: delay
+    duration: 1s
+"#;
+        let (def, _) = WorkflowEngine::parse_yaml(yaml).expect("parse failed");
+        let mut trigger_ctx = executor::TriggerContext {
+            message_id: "target-message".to_owned(),
+            ..Default::default()
+        };
+
+        assert!(
+            should_fire_workflow(&def, &trigger_ctx, Uuid::new_v4()).await,
+            "reaction to the selected message should fire"
+        );
+
+        trigger_ctx.message_id = "different-message".to_owned();
+        assert!(
+            !should_fire_workflow(&def, &trigger_ctx, Uuid::new_v4()).await,
+            "reaction to a different message should be filtered out"
+        );
     }
 
     #[test]
@@ -1421,7 +1435,10 @@ steps:
 
     #[test]
     fn reaction_added_matches_kind_7_only() {
-        let trigger = TriggerDef::ReactionAdded { emoji: None };
+        let trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
         // Must match KIND_REACTION = 7.
         assert!(trigger_matches_event(&trigger, 7));
         // Must NOT match stream message (kind 9).
@@ -1436,6 +1453,7 @@ steps:
         // trigger_matches_event only checks the kind number.
         let trigger = TriggerDef::ReactionAdded {
             emoji: Some("thumbsup".to_owned()),
+            filter: None,
         };
         assert!(trigger_matches_event(&trigger, 7));
         assert!(!trigger_matches_event(&trigger, 9));
@@ -1458,7 +1476,10 @@ steps:
         // before calling trigger_matches_event, but verify the function itself
         // also returns false for these kinds.
         let msg_trigger = TriggerDef::MessagePosted { filter: None };
-        let react_trigger = TriggerDef::ReactionAdded { emoji: None };
+        let react_trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
 
         for kind in buzz_core::kind::KIND_WORKFLOW_TRIGGERED
             ..=buzz_core::kind::KIND_WORKFLOW_APPROVAL_DENIED
@@ -1478,7 +1499,10 @@ steps:
     fn trigger_matches_event_kind_zero_matches_nothing() {
         // Kind 0 is a profile event — no trigger should match it.
         let msg_trigger = TriggerDef::MessagePosted { filter: None };
-        let react_trigger = TriggerDef::ReactionAdded { emoji: None };
+        let react_trigger = TriggerDef::ReactionAdded {
+            emoji: None,
+            filter: None,
+        };
         let sched_trigger = TriggerDef::Schedule {
             cron: None,
             interval: Some("1h".to_owned()),
@@ -1715,7 +1739,11 @@ steps:
     async fn setup_db() -> buzz_db::Db {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned());
+            // Local-only test default; this is not a production credential.
+            .unwrap_or_else(|_| {
+                let local_test_database = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+                local_test_database.to_owned()
+            });
         buzz_db::Db::new(&buzz_db::DbConfig {
             database_url,
             ..Default::default()

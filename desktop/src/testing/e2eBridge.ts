@@ -250,6 +250,10 @@ type E2eConfig = {
     acpAuthMethodsError?: string;
     /** When set, workflow updates fail with this message. */
     workflowUpdateError?: string;
+    /** When set, workflow deletion fails with this message. */
+    workflowDeleteError?: string;
+    /** Reject workflow run creation with this message. */
+    workflowTriggerError?: string;
     /** When set, the `delete_custom_harness` mock command throws with this message. */
     deleteCustomHarnessError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
@@ -3754,6 +3758,8 @@ function handleUpdateWorkflow(args: {
 }
 
 function handleDeleteWorkflow(args: { workflowId: string }) {
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowDeleteError;
+  if (configuredError) throw new Error(configuredError);
   const index = mockWorkflows.findIndex((w) => w.id === args.workflowId);
   if (index === -1) throw new Error(`Workflow ${args.workflowId} not found`);
   mockWorkflows.splice(index, 1);
@@ -3826,6 +3832,8 @@ function buildMockWorkflowRun(workflow: MockWorkflow): RawWorkflowRun {
 function handleTriggerWorkflow(args: { workflowId: string }) {
   const workflow = mockWorkflows.find((w) => w.id === args.workflowId);
   if (!workflow) throw new Error(`Workflow ${args.workflowId} not found`);
+  const configuredError = window.__BUZZ_E2E__?.mock?.workflowTriggerError;
+  if (configuredError) throw new Error(configuredError);
   const run = buildMockWorkflowRun(workflow);
   mockWorkflowRuns = [run, ...mockWorkflowRuns];
   return {
@@ -6138,9 +6146,25 @@ function buildLastMessages(
   return map;
 }
 
+/**
+ * Mirrors the real backend split: `get_channels` (member-only) drops
+ * non-member open channels, while `get_open_channel_directory` keeps the
+ * discovery superset. Filtering on `is_member` lets specs assert the poll no
+ * longer leaks the whole relay's open channels into the member list.
+ */
+function scopeChannelsForMembership<T extends { is_member: boolean }>(
+  channels: T[],
+  scope: "member-only" | "open-directory",
+): T[] {
+  return scope === "open-directory"
+    ? channels
+    : channels.filter((channel) => channel.is_member);
+}
+
 async function handleGetChannels(
   payload: unknown,
   config: E2eConfig | undefined,
+  scope: "member-only" | "open-directory" = "member-only",
 ) {
   const channelsReadDelayMs = config?.mock?.channelsReadDelayMs ?? 0;
   if (channelsReadDelayMs > 0) {
@@ -6161,7 +6185,10 @@ async function handleGetChannels(
     // The hash is constant ("mock-hash") and full lists remain the default:
     // mock channel data mutates during tests while the hash does not. Focused
     // snapshot specs can opt into the not-modified branch explicitly.
-    const channels = listMockChannels(config);
+    const channels = scopeChannelsForMembership(
+      listMockChannels(config),
+      scope,
+    );
     const hash = "mock-hash";
     const knownHash = (payload as { knownHash?: unknown } | null)?.knownHash;
     const forcedNotModified =
@@ -6268,10 +6295,12 @@ async function handleGetChannels(
     })
     .filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id));
 
+  const scopedChannels = scopeChannelsForMembership(channels, scope);
+
   return {
     hash: "mock-hash",
-    channels,
-    last_messages: buildLastMessages(channels),
+    channels: scopedChannels,
+    last_messages: buildLastMessages(scopedChannels),
   };
 }
 
@@ -12593,6 +12622,16 @@ export function maybeInstallE2eTauriMocks() {
           });
         }
         return channels;
+      }
+      case "get_open_channel_directory": {
+        // The real command returns a bare Channel[] (the discovery superset),
+        // not the hash-wrapped payload `get_channels` uses.
+        const directory = await handleGetChannels(
+          payload,
+          activeConfig,
+          "open-directory",
+        );
+        return directory.channels ?? [];
       }
       case "get_feed":
         return handleGetFeed(
