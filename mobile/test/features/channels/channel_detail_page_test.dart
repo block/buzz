@@ -5295,6 +5295,17 @@ void main() {
         (channelHeaderAvatar.decoration as BoxDecoration).color,
         AppTheme.light().colorScheme.surface,
       );
+      final channelHeaderAvatarBorder =
+          (channelHeaderAvatar.decoration as BoxDecoration).border! as Border;
+      expect(
+        channelHeaderAvatarBorder.top.color,
+        AppTheme.light().colorScheme.inverseSurface.withValues(alpha: 0.15),
+      );
+      expect(channelHeaderAvatarBorder.top.width, 1);
+      expect(
+        channelHeaderAvatarBorder.top.strokeAlign,
+        BorderSide.strokeAlignOutside,
+      );
       expect(
         tester
             .widget<Icon>(

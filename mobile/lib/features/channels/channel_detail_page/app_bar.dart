@@ -91,6 +91,14 @@ class _ChannelAppBarTitle extends ConsumerWidget {
                 decoration: BoxDecoration(
                   color: context.colors.surface,
                   shape: BoxShape.circle,
+                  border: Border.fromBorderSide(
+                    BorderSide(
+                      color: context.colors.inverseSurface.withValues(
+                        alpha: 0.15,
+                      ),
+                      strokeAlign: BorderSide.strokeAlignOutside,
+                    ),
+                  ),
                 ),
                 child: Icon(
                   channelIcon(channel),
