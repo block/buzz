@@ -1,5 +1,6 @@
 import * as React from "react";
-import { Bot, Pin, Users } from "lucide-react";
+import { Bot, ChevronRight, Pin, Users } from "lucide-react";
+import { motion } from "motion/react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
 import { Badge } from "@/shared/ui/badge";
@@ -10,6 +11,7 @@ import {
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { Switch } from "@/shared/ui/switch";
 import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { safeNpub } from "@/shared/lib/nostrUtils";
@@ -38,6 +40,8 @@ type MentionAutocompleteProps = {
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
   onToggleAlwaysAddressAgent?: (suggestion: MentionSuggestion) => void;
+  keepMentionedAgentsPinned?: boolean;
+  onKeepMentionedAgentsPinnedChange?: (value: boolean) => void;
   position?: "above" | "below";
 };
 
@@ -58,9 +62,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   onSelect,
   lockedAgentPubkeys,
   onToggleAlwaysAddressAgent,
+  keepMentionedAgentsPinned = true,
+  onKeepMentionedAgentsPinnedChange,
   position = "above",
 }: MentionAutocompleteProps) {
   const listRef = React.useRef<HTMLDivElement>(null);
+  const optionsId = React.useId();
+  const keepPinnedSwitchId = React.useId();
+  const [optionsOpen, setOptionsOpen] = React.useState(false);
   const alwaysAddressShortcut = getPlatformKeysById("always-address-agent");
 
   React.useEffect(() => {
@@ -99,205 +108,273 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
         position === "below" ? "top-full mt-1" : "bottom-full mb-1",
       )}
     >
-      <div
-        className={cn(
-          "max-h-48 w-full max-w-2xl overflow-y-auto rounded-xl p-1",
-          POPOVER_CUSTOM_ENTER_MOTION_CLASS,
-          position === "below"
-            ? "origin-top slide-in-from-top-1"
-            : "origin-bottom slide-in-from-bottom-1",
-          POPOVER_SURFACE_CLASS,
-        )}
-        data-testid="mention-autocomplete"
-        onScroll={handleScroll}
-        ref={listRef}
-        style={POPOVER_SHADOW_STYLE}
-      >
-        {suggestions.map((suggestion, index) => {
-          const suggestionKey =
-            suggestion.pubkey ??
-            (suggestion.personaId ? `persona-${suggestion.personaId}` : null) ??
-            (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
-            suggestion.displayName;
-          const hasNameCollision =
-            (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
-          const agentLabel = mentionAgentLabel(suggestion, hasNameCollision);
-          const collisionNpub =
-            hasNameCollision && suggestion.pubkey
-              ? safeNpub(suggestion.pubkey)
-              : null;
-          const hasMetadataBeforeNpub = Boolean(
-            suggestion.kind === "team" ||
-              suggestion.isAgent ||
-              suggestion.role ||
-              suggestion.ownerLabel ||
-              suggestion.notInChannel,
-          );
-          const canAlwaysAddress = Boolean(
-            onToggleAlwaysAddressAgent &&
-              suggestion.isAgent &&
-              suggestion.pubkey,
-          );
-          const isAlwaysAddressed = Boolean(
-            suggestion.pubkey &&
-              lockedAgentPubkeys?.has(suggestion.pubkey.toLowerCase()),
-          );
-
-          return (
+      <div className="w-full max-w-2xl">
+        {onKeepMentionedAgentsPinnedChange ? (
+          <div className="mb-2 flex justify-end">
             <div
               className={cn(
-                "relative flex w-full items-stretch rounded-lg text-left text-sm",
-                index === selectedIndex
-                  ? "bg-accent text-accent-foreground"
-                  : "text-popover-foreground hover:bg-accent/50",
+                "max-w-full overflow-hidden rounded-xl text-popover-foreground ring-1 ring-border/50 transition-[width] duration-200 ease-out",
+                POPOVER_SURFACE_CLASS,
+                optionsOpen ? "w-72" : "w-[5.75rem]",
               )}
-              data-testid={`mention-suggestion-${suggestionKey}`}
-              data-mention-suggestion-index={index}
-              key={suggestionKey}
+              style={POPOVER_SHADOW_STYLE}
             >
+              {optionsOpen ? (
+                <motion.div
+                  animate={{ opacity: 1, y: 0 }}
+                  className="w-72"
+                  id={optionsId}
+                  initial={{ opacity: 0, y: 4 }}
+                  transition={{ duration: 0.16, ease: "easeOut" }}
+                >
+                  <div className="flex min-h-12 items-center justify-between gap-3 px-3 py-2">
+                    <label
+                      className="flex min-w-0 flex-col"
+                      htmlFor={keepPinnedSwitchId}
+                    >
+                      <span className="text-sm font-medium">
+                        Keep agents pinned
+                      </span>
+                      <span className="text-2xs text-muted-foreground">
+                        When you mention them
+                      </span>
+                    </label>
+                    <Switch
+                      aria-label="Keep agents pinned"
+                      checked={keepMentionedAgentsPinned}
+                      className="shadow-none [&>span]:shadow-none"
+                      data-testid="mention-keep-agents-pinned-toggle"
+                      id={keepPinnedSwitchId}
+                      onCheckedChange={onKeepMentionedAgentsPinnedChange}
+                      onMouseDown={(event) => event.preventDefault()}
+                    />
+                  </div>
+                  <div className="mx-3 border-t border-border/50" />
+                </motion.div>
+              ) : null}
               <button
-                aria-label={`Mention ${suggestion.displayName}`}
-                className={cn(
-                  "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left",
-                  canAlwaysAddress && "pr-11",
-                )}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  onSelect(suggestion);
-                }}
-                tabIndex={-1}
+                aria-controls={optionsId}
+                aria-expanded={optionsOpen}
+                className="flex h-8 w-full items-center justify-between gap-1 px-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-popover-foreground"
+                data-testid="mention-options-trigger"
+                onClick={() => setOptionsOpen((open) => !open)}
+                onMouseDown={(event) => event.preventDefault()}
                 type="button"
               >
-                {suggestion.kind === "team" ? (
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-                    <Users aria-hidden="true" className="h-4 w-4" />
-                  </span>
-                ) : (
-                  <UserAvatar
-                    avatarUrl={suggestion.avatarUrl ?? null}
-                    displayName={suggestion.displayName}
-                    size="xs"
-                    testId="mention-suggestion-avatar"
-                  />
+                <span>Options</span>
+                <motion.span
+                  animate={{ rotate: optionsOpen ? -90 : 0 }}
+                  className="inline-flex"
+                  transition={{ duration: 0.16, ease: "easeOut" }}
+                >
+                  <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />
+                </motion.span>
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <div
+          className={cn(
+            "max-h-48 w-full overflow-y-auto rounded-xl p-1",
+            POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+            position === "below"
+              ? "origin-top slide-in-from-top-1"
+              : "origin-bottom slide-in-from-bottom-1",
+            POPOVER_SURFACE_CLASS,
+          )}
+          data-testid="mention-autocomplete"
+          onScroll={handleScroll}
+          ref={listRef}
+          style={POPOVER_SHADOW_STYLE}
+        >
+          {suggestions.map((suggestion, index) => {
+            const suggestionKey =
+              suggestion.pubkey ??
+              (suggestion.personaId
+                ? `persona-${suggestion.personaId}`
+                : null) ??
+              (suggestion.teamId ? `team-${suggestion.teamId}` : null) ??
+              suggestion.displayName;
+            const hasNameCollision =
+              (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
+            const agentLabel = mentionAgentLabel(suggestion, hasNameCollision);
+            const collisionNpub =
+              hasNameCollision && suggestion.pubkey
+                ? safeNpub(suggestion.pubkey)
+                : null;
+            const hasMetadataBeforeNpub = Boolean(
+              suggestion.kind === "team" ||
+                suggestion.isAgent ||
+                suggestion.role ||
+                suggestion.ownerLabel ||
+                suggestion.notInChannel,
+            );
+            const canAlwaysAddress = Boolean(
+              onToggleAlwaysAddressAgent &&
+                suggestion.isAgent &&
+                suggestion.pubkey,
+            );
+            const isAlwaysAddressed = Boolean(
+              suggestion.pubkey &&
+                lockedAgentPubkeys?.has(suggestion.pubkey.toLowerCase()),
+            );
+
+            return (
+              <div
+                className={cn(
+                  "relative flex w-full items-stretch rounded-lg text-left text-sm",
+                  index === selectedIndex
+                    ? "bg-accent text-accent-foreground"
+                    : "text-popover-foreground hover:bg-accent/50",
                 )}
-                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span
-                    className="min-w-0 break-words font-medium leading-snug"
-                    title={suggestion.displayName}
-                  >
-                    {suggestion.displayName}
-                  </span>
-                  {hasMetadataBeforeNpub || collisionNpub ? (
+                data-testid={`mention-suggestion-${suggestionKey}`}
+                data-mention-suggestion-index={index}
+                key={suggestionKey}
+              >
+                <button
+                  aria-label={`Mention ${suggestion.displayName}`}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-2 rounded-lg px-3 py-1.5 text-left",
+                    canAlwaysAddress && "pr-11",
+                  )}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    onSelect(suggestion);
+                  }}
+                  tabIndex={-1}
+                  type="button"
+                >
+                  {suggestion.kind === "team" ? (
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+                      <Users aria-hidden="true" className="h-4 w-4" />
+                    </span>
+                  ) : (
+                    <UserAvatar
+                      avatarUrl={suggestion.avatarUrl ?? null}
+                      displayName={suggestion.displayName}
+                      size="xs"
+                      testId="mention-suggestion-avatar"
+                    />
+                  )}
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                     <span
-                      className={cn(
-                        "flex min-h-3.5 min-w-0 items-center gap-1.5 text-2xs leading-none",
-                        index === selectedIndex
-                          ? "text-accent-foreground/60"
-                          : "text-muted-foreground",
-                      )}
+                      className="min-w-0 break-words font-medium leading-snug"
+                      title={suggestion.displayName}
                     >
-                      {suggestion.kind === "team" ? (
-                        <span className="inline-flex shrink-0 items-center gap-1">
-                          <Users aria-hidden="true" className="h-3.5 w-3.5" />
-                          team · {suggestion.teamMembers?.length ?? 0} agents
-                        </span>
-                      ) : suggestion.isAgent ? (
-                        <span className="inline-flex shrink-0 items-center gap-1">
-                          <Bot
-                            aria-hidden="true"
-                            className="h-3.5 w-3.5"
-                            data-testid="mention-agent-icon"
-                          />
-                          {agentLabel}
-                        </span>
-                      ) : suggestion.role ? (
-                        <Badge
-                          className="max-w-24 shrink-0 truncate"
-                          variant="secondary"
-                        >
-                          {suggestion.role}
-                        </Badge>
-                      ) : null}
-                      {suggestion.ownerLabel || suggestion.notInChannel ? (
-                        <span
-                          className="min-w-0 truncate"
-                          title={
-                            suggestion.ownerLabel && suggestion.notInChannel
+                      {suggestion.displayName}
+                    </span>
+                    {hasMetadataBeforeNpub || collisionNpub ? (
+                      <span
+                        className={cn(
+                          "flex min-h-3.5 min-w-0 items-center gap-1.5 text-2xs leading-none",
+                          index === selectedIndex
+                            ? "text-accent-foreground/60"
+                            : "text-muted-foreground",
+                        )}
+                      >
+                        {suggestion.kind === "team" ? (
+                          <span className="inline-flex shrink-0 items-center gap-1">
+                            <Users aria-hidden="true" className="h-3.5 w-3.5" />
+                            team · {suggestion.teamMembers?.length ?? 0} agents
+                          </span>
+                        ) : suggestion.isAgent ? (
+                          <span className="inline-flex shrink-0 items-center gap-1">
+                            <Bot
+                              aria-hidden="true"
+                              className="h-3.5 w-3.5"
+                              data-testid="mention-agent-icon"
+                            />
+                            {agentLabel}
+                          </span>
+                        ) : suggestion.role ? (
+                          <Badge
+                            className="max-w-24 shrink-0 truncate"
+                            variant="secondary"
+                          >
+                            {suggestion.role}
+                          </Badge>
+                        ) : null}
+                        {suggestion.ownerLabel || suggestion.notInChannel ? (
+                          <span
+                            className="min-w-0 truncate"
+                            title={
+                              suggestion.ownerLabel && suggestion.notInChannel
+                                ? `managed by ${suggestion.ownerLabel} · not in channel`
+                                : suggestion.ownerLabel
+                                  ? `managed by ${suggestion.ownerLabel}`
+                                  : "not in channel"
+                            }
+                          >
+                            {suggestion.ownerLabel && suggestion.notInChannel
                               ? `managed by ${suggestion.ownerLabel} · not in channel`
                               : suggestion.ownerLabel
                                 ? `managed by ${suggestion.ownerLabel}`
-                                : "not in channel"
-                          }
-                        >
-                          {suggestion.ownerLabel && suggestion.notInChannel
-                            ? `managed by ${suggestion.ownerLabel} · not in channel`
-                            : suggestion.ownerLabel
-                              ? `managed by ${suggestion.ownerLabel}`
-                              : "not in channel"}
-                        </span>
-                      ) : null}
-                      {collisionNpub ? (
-                        <span
-                          className="-translate-y-0.5 shrink-0 font-mono leading-none"
-                          data-testid="mention-collision-npub"
-                          title={collisionNpub}
-                        >
-                          {truncatePubkey(collisionNpub)}
-                        </span>
-                      ) : null}
-                    </span>
-                  ) : null}
-                </span>
-              </button>
-              {canAlwaysAddress ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="absolute right-3 top-1/2 inline-flex -translate-y-1/2">
-                      <Toggle
-                        aria-label={`Always address ${suggestion.displayName}`}
-                        className="h-6 w-6 p-0 data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
-                        data-always-address-pubkey={suggestion.pubkey?.toLowerCase()}
-                        data-testid={`mention-always-address-${suggestion.pubkey}`}
-                        onPressedChange={() =>
-                          onToggleAlwaysAddressAgent?.(suggestion)
-                        }
-                        onClick={(event) => event.stopPropagation()}
-                        onMouseDown={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                        }}
-                        pressed={isAlwaysAddressed}
-                        size="xs"
-                        type="button"
-                      >
-                        <Pin
-                          aria-hidden="true"
-                          fill={isAlwaysAddressed ? "currentColor" : "none"}
-                        />
-                      </Toggle>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent
-                    className="flex items-center gap-2"
-                    side="top"
-                  >
-                    <span>Always address</span>
-                    {alwaysAddressShortcut ? (
-                      <kbd className="flex items-center gap-0.5 rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0 font-mono text-sm text-primary-foreground/70">
-                        {(alwaysAddressShortcut.includes("+")
-                          ? alwaysAddressShortcut.split("+")
-                          : Array.from(alwaysAddressShortcut)
-                        ).map((key) => (
-                          <span key={key}>{key}</span>
-                        ))}
-                      </kbd>
+                                : "not in channel"}
+                          </span>
+                        ) : null}
+                        {collisionNpub ? (
+                          <span
+                            className="-translate-y-0.5 shrink-0 font-mono leading-none"
+                            data-testid="mention-collision-npub"
+                            title={collisionNpub}
+                          >
+                            {truncatePubkey(collisionNpub)}
+                          </span>
+                        ) : null}
+                      </span>
                     ) : null}
-                  </TooltipContent>
-                </Tooltip>
-              ) : null}
-            </div>
-          );
-        })}
+                  </span>
+                </button>
+                {canAlwaysAddress ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span className="absolute right-3 top-1/2 inline-flex -translate-y-1/2">
+                        <Toggle
+                          aria-label={`Always address ${suggestion.displayName}`}
+                          className="h-6 w-6 p-0 data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
+                          data-always-address-pubkey={suggestion.pubkey?.toLowerCase()}
+                          data-testid={`mention-always-address-${suggestion.pubkey}`}
+                          onPressedChange={() =>
+                            onToggleAlwaysAddressAgent?.(suggestion)
+                          }
+                          onClick={(event) => event.stopPropagation()}
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                          pressed={isAlwaysAddressed}
+                          size="xs"
+                          type="button"
+                        >
+                          <Pin
+                            aria-hidden="true"
+                            fill={isAlwaysAddressed ? "currentColor" : "none"}
+                          />
+                        </Toggle>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      className="flex items-center gap-2"
+                      side="top"
+                    >
+                      <span>Always address</span>
+                      {alwaysAddressShortcut ? (
+                        <kbd className="flex items-center gap-0.5 rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0 font-mono text-sm text-primary-foreground/70">
+                          {(alwaysAddressShortcut.includes("+")
+                            ? alwaysAddressShortcut.split("+")
+                            : Array.from(alwaysAddressShortcut)
+                          ).map((key) => (
+                            <span key={key}>{key}</span>
+                          ))}
+                        </kbd>
+                      ) : null}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

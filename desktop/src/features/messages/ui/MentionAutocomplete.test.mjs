@@ -101,6 +101,55 @@ test("agent rows offer an Always address pin", async () => {
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });
 
+test("options expand in place without replacing the people list", async () => {
+  const React = await import("react");
+  const { fireEvent, render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const changes = [];
+  const suggestion = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  const view = render(
+    React.createElement(MentionAutocomplete, {
+      suggestions: [suggestion],
+      selectedIndex: 0,
+      onSelect: () => {},
+      keepMentionedAgentsPinned: true,
+      onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
+    }),
+  );
+
+  const options = view.getByRole("button", { name: "Options" });
+  assert.equal(options.getAttribute("aria-expanded"), "false");
+  assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
+  assert.equal(
+    view.queryByRole("switch", { name: "Keep agents pinned" }),
+    null,
+  );
+
+  fireEvent.click(options);
+  assert.equal(options.getAttribute("aria-expanded"), "true");
+  const toggle = view.getByRole("switch", {
+    name: "Keep agents pinned",
+  });
+  assert.equal(toggle.getAttribute("data-state"), "checked");
+  assert.ok(view.getByText("When you mention them"));
+  assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
+
+  fireEvent.click(toggle);
+  assert.deepEqual(changes, [false]);
+
+  fireEvent.click(options);
+  assert.equal(options.getAttribute("aria-expanded"), "false");
+  assert.equal(
+    view.queryByRole("switch", { name: "Keep agents pinned" }),
+    null,
+  );
+  assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
+});
+
 test("collision npubs sit inline with agent metadata", async () => {
   const React = await import("react");
   const { render } = await import("@testing-library/react");

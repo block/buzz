@@ -28,6 +28,10 @@ import {
   getPersistentAgentAudienceScope,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
+import {
+  setKeepMentionedAgentsPinned,
+  useKeepMentionedAgentsPinned,
+} from "@/features/messages/lib/autoPinMentionedAgentsPreference";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   hasMentionClipboardHtml,
@@ -290,17 +294,23 @@ function MessageComposerImpl({
   onLinkShortcutRef.current = linkEditor.openFromShortcut;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
   const persistentAudience = usePersistentAgentAudience(audienceScope);
+  const keepMentionedAgentsPinned = useKeepMentionedAgentsPinned();
   const addressPulse = useAddressMentionPulse();
   const addressPrototype = useComposerAddressPrototype();
   const addInlineAgentMentionsToAudience = React.useCallback(
     (pubkeys: readonly string[]) => {
-      if (!audienceScope) return;
+      if (!audienceScope || !keepMentionedAgentsPinned) return;
       for (const pubkey of pubkeys) {
         persistentAudience.addPubkey(pubkey);
         addressPulse.pulseOne(pubkey);
       }
     },
-    [addressPulse.pulseOne, audienceScope, persistentAudience.addPubkey],
+    [
+      addressPulse.pulseOne,
+      audienceScope,
+      keepMentionedAgentsPinned,
+      persistentAudience.addPubkey,
+    ],
   );
   const mentionSendFlow = useMentionSendFlow({
     channelId,
@@ -901,7 +911,13 @@ function MessageComposerImpl({
               }
             />
             <MentionAutocomplete
+              keepMentionedAgentsPinned={keepMentionedAgentsPinned}
               lockedAgentPubkeys={lockedAgentPubkeys}
+              onKeepMentionedAgentsPinnedChange={
+                audienceScope && editTarget == null
+                  ? setKeepMentionedAgentsPinned
+                  : undefined
+              }
               onToggleAlwaysAddressAgent={
                 audienceScope && editTarget == null
                   ? toggleAlwaysAddressAgent
