@@ -1,4 +1,5 @@
 import { GitBranch, GitMerge, GitPullRequest, Tag } from "lucide-react";
+import * as React from "react";
 
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import type {
@@ -51,37 +52,61 @@ export function PullRequestMetaHeader({
     Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
   const StatusIcon =
     pullRequest.status === "Merged" ? GitMerge : GitPullRequest;
+  const diffStatsCache = React.useRef<{
+    pullRequestId: string;
+    stats: typeof diffStats;
+  }>({
+    pullRequestId: pullRequest.id,
+    stats: diffStats,
+  });
+  if (diffStatsCache.current.pullRequestId !== pullRequest.id) {
+    diffStatsCache.current = {
+      pullRequestId: pullRequest.id,
+      stats: diffStats,
+    };
+  } else if (diffStats) {
+    diffStatsCache.current.stats = diffStats;
+  }
+  const displayedDiffStats = diffStats ?? diffStatsCache.current.stats;
 
   return (
     <ProjectDetailMetaList>
       <ProjectDetailMetaRow icon={GitBranch} label="Branch">
-        <p className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <span className="truncate text-foreground">{sourceBranch}</span>
-          <span aria-hidden className="text-muted-foreground">
-            →
-          </span>
-          <span className="truncate text-foreground">{targetBranch}</span>
-          {diffStats ? (
-            <>
-              <span className="text-green-500">+{diffStats.additions}</span>
-              <span className="text-destructive">-{diffStats.deletions}</span>
-            </>
-          ) : null}
-          {pullRequest.commit ? (
-            <span className="inline-flex min-w-0 items-center gap-0.5 text-muted-foreground">
-              <code
-                className="truncate font-mono text-xs"
-                title={pullRequest.commit}
-              >
-                {pullRequest.commit.slice(0, 7)}
-              </code>
-              <CopyCommitHashButton
-                className="h-5 w-5 p-0"
-                hash={pullRequest.commit}
-              />
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <p className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+            <span className="truncate text-foreground">{sourceBranch}</span>
+            <span aria-hidden className="shrink-0 text-muted-foreground">
+              →
             </span>
-          ) : null}
-        </p>
+            <span className="truncate text-foreground">{targetBranch}</span>
+          </p>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            {displayedDiffStats ? (
+              <>
+                <span className="text-green-500">
+                  +{displayedDiffStats.additions}
+                </span>
+                <span className="text-destructive">
+                  -{displayedDiffStats.deletions}
+                </span>
+              </>
+            ) : null}
+            {pullRequest.commit ? (
+              <span className="inline-flex min-w-0 items-center gap-0.5 text-muted-foreground">
+                <code
+                  className="truncate font-mono text-xs"
+                  title={pullRequest.commit}
+                >
+                  {pullRequest.commit.slice(0, 7)}
+                </code>
+                <CopyCommitHashButton
+                  className="h-5 w-5 p-0"
+                  hash={pullRequest.commit}
+                />
+              </span>
+            ) : null}
+          </div>
+        </div>
       </ProjectDetailMetaRow>
       <PullRequestReviewersRow
         canRequest={canRequestReview}

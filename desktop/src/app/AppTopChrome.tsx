@@ -78,6 +78,29 @@ export function AppTopChrome({
     : "pl-3";
   const navRowAlignmentClass = macChrome ? "translate-y-[3px]" : null;
 
+  React.useLayoutEffect(() => {
+    const topChrome = topChromeRef.current;
+    const portalTarget = topChrome?.querySelector<HTMLElement>(
+      "#app-top-chrome-content",
+    );
+    if (!topChrome || !portalTarget) return;
+
+    const updateCenterOffset = () => {
+      const portalBounds = portalTarget.getBoundingClientRect();
+      const portalCenter = portalBounds.left + portalBounds.width / 2;
+      topChrome.style.setProperty(
+        "--app-top-chrome-center-offset",
+        `${window.innerWidth / 2 - portalCenter}px`,
+      );
+    };
+
+    updateCenterOffset();
+    const observer = new ResizeObserver(updateCenterOffset);
+    observer.observe(topChrome);
+    observer.observe(portalTarget);
+    return () => observer.disconnect();
+  }, []);
+
   React.useEffect(() => {
     const topChrome = topChromeRef.current;
     if (!topChrome) {
@@ -103,9 +126,7 @@ export function AppTopChrome({
       data-testid="app-top-chrome"
       style={
         {
-          "--app-top-chrome-center-offset": hasCommunityRail
-            ? "-1.75rem"
-            : "0rem",
+          "--app-top-chrome-center-offset": "0px",
         } as React.CSSProperties
       }
     >

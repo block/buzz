@@ -36,7 +36,7 @@ import {
   useRichTextEditor,
 } from "@/features/messages/lib/useRichTextEditor";
 import { FormattingToolbar } from "@/features/messages/ui/FormattingToolbar";
-import { TimelineMessageList } from "@/features/messages/ui/TimelineMessageList";
+import { MessageThreadTranscript } from "@/features/messages/ui/MessageThreadTranscript";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useThreadRepliesForRoots } from "@/features/messages/useThreadReplies";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
@@ -305,10 +305,6 @@ export function ConversationThread({
     threadReplies.events,
     opener,
   ]);
-  const conversationEntries = React.useMemo(
-    () => messages.map((message) => ({ message, summary: null })),
-    [messages],
-  );
   const lastMessageId = messages[messages.length - 1]?.id ?? null;
   const handleToggleReaction = React.useCallback(
     async (message: TimelineMessage, emoji: string, remove: boolean) => {
@@ -327,17 +323,12 @@ export function ConversationThread({
 
   return (
     <div data-project-agent-channel-id={channel.id}>
-      <TimelineMessageList
+      <MessageThreadTranscript
         channelId={channel.id}
-        channelName={agent.name}
-        channelType="dm"
         currentPubkey={currentPubkey ?? undefined}
-        hideDayDividers
-        mainEntries={conversationEntries}
         messages={messages}
         onToggleReaction={handleToggleReaction}
         profiles={profiles}
-        useVirtualizer={false}
       />
       {agentWorking.working ? (
         <div className="flex items-center gap-2 pl-11 text-sm text-muted-foreground">

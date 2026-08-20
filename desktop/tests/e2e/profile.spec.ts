@@ -2687,10 +2687,8 @@ test("shows agent runtimes in agent settings", async ({ page }) => {
     .evaluate((element) => getComputedStyle(element).color);
   await page.getByTestId("settings-nav-appearance").click();
   const appearanceSecondaryColor = await page
-    .getByTestId("link-preview-style-trigger")
-    .locator("..")
-    .locator("p")
-    .nth(1)
+    .getByTestId("link-preview-style-group")
+    .locator("[data-settings-subcopy]")
     .evaluate((element) => getComputedStyle(element).color);
   expect(agentsSecondaryColor).toBe(appearanceSecondaryColor);
 });

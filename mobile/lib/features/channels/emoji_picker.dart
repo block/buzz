@@ -183,11 +183,9 @@ class _EmojiPickerContent extends HookConsumerWidget {
       activeSection.value = index;
       if (!scrollController.hasClients) return;
       final max = scrollController.position.maxScrollExtent;
-      scrollController.animateTo(
-        offsets[index].clamp(0.0, max),
-        duration: const Duration(milliseconds: 240),
-        curve: Curves.easeOutCubic,
-      );
+      // The rail is a frequent navigation shortcut. An instant jump cannot
+      // remain active and pull against a drag that begins immediately after it.
+      scrollController.jumpTo(offsets[index].clamp(0.0, max));
     }
 
     // Recompute only when the query or the underlying sets change — scanning
