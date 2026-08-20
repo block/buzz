@@ -383,6 +383,14 @@ pub(crate) fn configure_runtime_cli(
     if runtime.id != "claude" {
         return;
     }
+    // Runtime discovery is a fallback. Preserve an explicit launcher supplied
+    // through the fully layered agent environment.
+    if command
+        .get_envs()
+        .any(|(key, value)| key == "CLAUDE_CODE_EXECUTABLE" && value.is_some())
+    {
+        return;
+    }
     if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
         // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
         // passed directly to `CreateProcess` and cause EINVAL when the Claude
