@@ -27,7 +27,7 @@ pub enum FilterError {
 pub struct FilterContext {
     /// Event content (message body).
     pub content: String,
-    /// Event author pubkey as hex string.
+    /// Verified attributed author pubkey as a hex string.
     pub author: String,
     /// Nostr event kind number.
     pub kind: u32,
@@ -38,11 +38,11 @@ pub struct FilterContext {
 }
 
 impl FilterContext {
-    /// Build a `FilterContext` from a Nostr event and its channel UUID.
-    pub fn from_event(event: &nostr::Event, channel_id: uuid::Uuid) -> Self {
+    /// Build a `FilterContext` using the verified author attributed upstream.
+    pub fn from_event(event: &nostr::Event, channel_id: uuid::Uuid, author: &str) -> Self {
         Self {
             content: event.content.clone(),
-            author: event.pubkey.to_hex(),
+            author: author.to_string(),
             kind: event.kind.as_u16() as u32,
             channel_id: channel_id.to_string(),
             timestamp: event.created_at.as_secs(),
@@ -253,7 +253,7 @@ pub async fn evaluate_filter(
 /// | Name         | Type   | Source                    |
 /// |--------------|--------|---------------------------|
 /// | `content`    | string | `event.content`           |
-/// | `author`     | string | `event.pubkey` (hex)      |
+/// | `author`     | string | verified author (hex)     |
 /// | `kind`       | int    | `event.kind`              |
 /// | `channel_id` | string | channel UUID              |
 /// | `timestamp`  | int    | `event.created_at`        |
@@ -370,8 +370,9 @@ pub async fn match_event(
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
+    author: &str,
 ) -> Option<MatchedRule> {
-    let filter_ctx = FilterContext::from_event(event, channel_id);
+    let filter_ctx = FilterContext::from_event(event, channel_id, author);
 
     for (index, rule) in rules.iter().enumerate() {
         // 1. Channel scope check.
@@ -488,6 +489,26 @@ mod tests {
         Uuid::new_v4()
     }
 
+    fn context_for(event: &nostr::Event, channel_id: Uuid) -> FilterContext {
+        FilterContext::from_event(event, channel_id, &event.pubkey.to_hex())
+    }
+
+    async fn match_signed_event(
+        event: &nostr::Event,
+        channel_id: Uuid,
+        rules: &[SubscriptionRule],
+        agent_pubkey_hex: &str,
+    ) -> Option<MatchedRule> {
+        match_event(
+            event,
+            channel_id,
+            rules,
+            agent_pubkey_hex,
+            &event.pubkey.to_hex(),
+        )
+        .await
+    }
+
     fn make_rule(
         name: &str,
         channels: ChannelScope,
@@ -512,7 +533,7 @@ mod tests {
     fn test_filter_context_from_event() {
         let event = make_event(9, "hello world");
         let channel_id = any_channel();
-        let ctx = FilterContext::from_event(&event, channel_id);
+        let ctx = context_for(&event, channel_id);
 
         assert_eq!(ctx.content, "hello world");
         assert_eq!(ctx.author, event.pubkey.to_hex());
@@ -524,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn test_evaluate_filter_str_contains() {
         let event = make_event(9, "P1 incident in production");
-        let ctx = FilterContext::from_event(&event, any_channel());
+        let ctx = context_for(&event, any_channel());
 
         let result = evaluate_filter(r#"str_contains(content, "P1")"#, &ctx, None)
             .await
@@ -540,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn test_evaluate_filter_kind_check() {
         let event = make_event(9, "some content");
-        let ctx = FilterContext::from_event(&event, any_channel());
+        let ctx = context_for(&event, any_channel());
 
         let result = evaluate_filter("kind == 9", &ctx, None).await.unwrap();
         assert!(result);
@@ -552,7 +573,7 @@ mod tests {
     #[tokio::test]
     async fn test_evaluate_filter_too_long() {
         let event = make_event(9, "content");
-        let ctx = FilterContext::from_event(&event, any_channel());
+        let ctx = context_for(&event, any_channel());
 
         let long_expr = "a".repeat(MAX_EXPR_LEN + 1);
         let err = evaluate_filter(&long_expr, &ctx, None).await.unwrap_err();
@@ -567,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn test_evaluate_filter_precompiled_node() {
         let event = make_event(9, "hello world");
-        let ctx = FilterContext::from_event(&event, any_channel());
+        let ctx = context_for(&event, any_channel());
 
         let node =
             Arc::new(evalexpr::build_operator_tree(r#"str_contains(content, "hello")"#).unwrap());
@@ -601,7 +622,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_signed_event(&event, channel_id, &rules, "")
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 0);
         assert_eq!(matched.prompt_tag, "tag-first");
     }
@@ -630,9 +653,33 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_signed_event(&event, channel_id, &rules, "")
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 1);
         assert_eq!(matched.prompt_tag, "matched");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_uses_attributed_author() {
+        let event = make_event(9, "scheduled wake");
+        let owner = Keys::generate().public_key().to_hex();
+        let rules = vec![make_rule(
+            "owner-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            false,
+            Some(&format!(r#"author == "{owner}""#)),
+            None,
+        )];
+
+        assert!(match_event(&event, any_channel(), &rules, "", &owner)
+            .await
+            .is_some());
+        let signer = event.pubkey.to_hex();
+        assert!(match_event(&event, any_channel(), &rules, "", &signer)
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -653,11 +700,11 @@ mod tests {
         )];
 
         // Without mention — no match.
-        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey).await;
+        let result = match_signed_event(&event_no_mention, channel_id, &rules, agent_pubkey).await;
         assert!(result.is_none());
 
         // With mention — matches.
-        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey)
+        let matched = match_signed_event(&event_with_mention, channel_id, &rules, agent_pubkey)
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
@@ -677,7 +724,7 @@ mod tests {
             None,
         )];
 
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_signed_event(&event, channel_id, &rules, "").await;
         assert!(result.is_none());
     }
 
@@ -725,7 +772,9 @@ mod tests {
             None, // no explicit tag
         )];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_signed_event(&event, channel_id, &rules, "")
+            .await
+            .unwrap();
         assert_eq!(matched.prompt_tag, "my-rule");
     }
 
@@ -755,7 +804,7 @@ mod tests {
         ];
 
         // Must return None — not "catch-all".
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_signed_event(&event, channel_id, &rules, "").await;
         assert!(
             result.is_none(),
             "filter error must fail closed, not fall through to next rule"
@@ -781,7 +830,7 @@ mod tests {
             .store(MAX_CONSECUTIVE_TIMEOUTS, Ordering::Relaxed);
 
         let rules = vec![rule];
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_signed_event(&event, channel_id, &rules, "").await;
         assert!(result.is_none(), "disabled rule must return None");
     }
 }
