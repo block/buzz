@@ -47,6 +47,13 @@ function threadComposer(page: Page) {
   return page.getByTestId("thread-composer-overlay");
 }
 
+async function pressPrimaryShift(page: Page, key: "Enter" | "M") {
+  const isMac = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform),
+  );
+  await page.keyboard.press(`${isMac ? "Meta" : "Control"}+Shift+${key}`);
+}
+
 async function readOutgoingMentionPubkeys(page: Page, content: string) {
   return page.evaluate((expectedContent) => {
     const signedEvent = window.__BUZZ_E2E_SIGNED_EVENTS__?.find(
@@ -148,10 +155,11 @@ test("always addresses multiple agents without closing the mention picker", asyn
   );
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
   await expect(
-    composer.getByRole("button", {
-      name: "Stop always mentioning Morgarita",
-    }),
-  ).toHaveCount(1);
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Manage mentioned agents" }),
+  ).toBeVisible();
 
   await input.fill("@Vog");
   const voguePin = menu.getByRole("button", {
@@ -165,8 +173,8 @@ test("always addresses multiple agents without closing the mention picker", asyn
     /(?:^|\s)bg-accent(?:\s|$)/,
   );
   await expect(
-    composer.getByRole("button", { name: "Stop always mentioning Vogue" }),
-  ).toHaveCount(1);
+    composer.getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
@@ -184,9 +192,7 @@ test("always addresses multiple agents without closing the mention picker", asyn
     .toEqual([AGENT_A, AGENT_B]);
 });
 
-test("Tab selects the highlighted agent as a one-shot mention", async ({
-  page,
-}) => {
+test("Tab auto-addresses the highlighted agent", async ({ page }) => {
   await installAudienceFixtures(page);
   await openGeneral(page);
 
@@ -197,13 +203,26 @@ test("Tab selects the highlighted agent as a one-shot mention", async ({
 
   await input.press("Tab");
 
-  await expect(input).toHaveText("@Morgarita ");
+  await expect(input).toHaveText("");
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
   await expect(
-    composer.getByRole("button", {
-      name: "Stop always mentioning Morgarita",
-    }),
-  ).toHaveCount(0);
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
+          );
+          return stored[scope] ?? [];
+        },
+        { scope: CHANNEL_SCOPE },
+      ),
+    )
+    .toEqual([AGENT_A]);
 });
 
 test("primary+Shift+Enter opens the picker, then pins the highlighted agent", async ({
@@ -215,7 +234,7 @@ test("primary+Shift+Enter opens the picker, then pins the highlighted agent", as
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
   await input.fill("draft text");
-  await input.press("Meta+Shift+Enter");
+  await pressPrimaryShift(page, "Enter");
 
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
@@ -225,18 +244,16 @@ test("primary+Shift+Enter opens the picker, then pins the highlighted agent", as
   await expect(menu.getByTestId(`mention-suggestion-${AGENT_A}`)).toHaveClass(
     /(?:^|\s)bg-accent(?:\s|$)/,
   );
-  await input.press("Meta+Shift+Enter");
+  await pressPrimaryShift(page, "Enter");
 
   await expect(menu).toBeVisible();
   await expect(input).toHaveText("");
   await expect(
-    composer.getByRole("button", {
-      name: "Stop always mentioning Morgarita",
-    }),
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toBeVisible();
 });
 
-test("the ingress opens the mention menu without editing the draft", async ({
+test("the mention button opens settings and can undo an address", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -246,16 +263,10 @@ test("the ingress opens the mention menu without editing the draft", async ({
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
   const ingress = composer.getByRole("button", {
-    name: "Open mention menu for Morgarita",
-  });
-  const remove = composer.getByRole("button", {
-    name: "Stop always mentioning Morgarita",
+    name: "Manage mentioned agents",
   });
 
   await input.fill("draft text");
-  await expect(remove).toHaveCSS("opacity", "0");
-  await ingress.hover();
-  await expect(remove).toHaveCSS("opacity", "1");
   await ingress.click();
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
@@ -280,8 +291,11 @@ test("the ingress opens the mention menu without editing the draft", async ({
     )
     .toEqual([AGENT_A]);
 
-  await ingress.hover();
-  await remove.click();
+  await menu.getByRole("button", { name: "Always address Morgarita" }).click();
+  await expect(input).toHaveText("draft text");
+  await expect(
+    composer.getByRole("button", { name: "Mention someone" }),
+  ).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(
@@ -299,7 +313,7 @@ test("the ingress opens the mention menu without editing the draft", async ({
     .toEqual([]);
 });
 
-test("reselecting an always-mentioned agent pulses its composer badge", async ({
+test("reselecting an always-mentioned agent pulses its composer avatar", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -308,10 +322,8 @@ test("reselecting an always-mentioned agent pulses its composer badge", async ({
 
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
-  const badge = composer.getByTestId(
-    `composer-address-lock-mention-badge-${AGENT_A}`,
-  );
-  await expect(badge).toHaveAttribute("data-pulse-version", "0");
+  const avatar = composer.getByTestId(`composer-address-lock-${AGENT_A}`);
+  await expect(avatar).toHaveAttribute("data-pulse-version", "0");
 
   await input.fill("@Mor");
   await composer
@@ -322,10 +334,10 @@ test("reselecting an always-mentioned agent pulses its composer badge", async ({
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
   await expect(input).toHaveText("");
   await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
-  await expect(badge).toHaveAttribute("data-pulse-version", "1");
+  await expect(avatar).toHaveAttribute("data-pulse-version", "1");
 });
 
-test("always-mentioned agents remain in the tray while Enter-send resolves", async ({
+test("always-mentioned agents remain in the mention button while Enter-send resolves", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -338,21 +350,17 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   const composer = threadComposer(page);
   const input = composer.getByTestId("message-input");
   const send = composer.getByTestId("send-message");
-  const badge = composer.getByTestId(
-    `composer-address-lock-mention-badge-${AGENT_A}`,
-  );
-  await expect(badge).toHaveAttribute("data-pulse-version", "0");
+  const avatar = composer.getByTestId(`composer-address-lock-${AGENT_A}`);
+  await expect(avatar).toHaveAttribute("data-pulse-version", "0");
   await input.fill("hello");
   await input.press("Enter");
 
   await expect(input).toHaveText("", { timeout: 500 });
-  await expect(badge).toHaveAttribute("data-pulse-version", "1", {
+  await expect(avatar).toHaveAttribute("data-pulse-version", "1", {
     timeout: 500,
   });
   await expect(
-    composer.getByRole("button", {
-      name: "Stop always mentioning Morgarita",
-    }),
+    composer.getByRole("button", { name: "Manage mentioned agents" }),
   ).toBeVisible();
   await expect(input).toBeFocused();
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
@@ -374,7 +382,7 @@ test("always-mentioned agents remain in the tray while Enter-send resolves", asy
   await expect(addressPrefix).toHaveText("Morgarita");
 });
 
-test("a failed always-mentioned send shakes the composer badge", async ({
+test("a failed always-mentioned send shakes the composer avatar", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_A]);
@@ -386,23 +394,21 @@ test("a failed always-mentioned send shakes the composer badge", async ({
 
   const composer = threadComposer(page);
   const input = composer.getByTestId("message-input");
-  const badge = composer.getByTestId(
-    `composer-address-lock-mention-badge-${AGENT_A}`,
-  );
-  await expect(badge).toHaveAttribute("data-pulse-version", "0");
-  await expect(badge).toHaveAttribute("data-shake-version", "0");
+  const avatar = composer.getByTestId(`composer-address-lock-${AGENT_A}`);
+  await expect(avatar).toHaveAttribute("data-pulse-version", "0");
+  await expect(avatar).toHaveAttribute("data-shake-version", "0");
 
   await input.fill("please retry");
   await input.press("Enter");
 
-  await expect(badge).toHaveAttribute("data-pulse-version", "1", {
+  await expect(avatar).toHaveAttribute("data-pulse-version", "1", {
     timeout: 500,
   });
   await expect(input).toHaveText("please retry");
-  await expect(badge).toHaveAttribute("data-shake-version", "1");
+  await expect(avatar).toHaveAttribute("data-shake-version", "1");
 });
 
-test("ordinary agent mentions remain one-shot and return to the placeholder", async ({
+test("selecting an agent auto-pins it for this and later messages", async ({
   page,
 }) => {
   await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
@@ -415,22 +421,12 @@ test("ordinary agent mentions remain one-shot and return to the placeholder", as
     .getByTestId("mention-autocomplete")
     .getByText("Morgarita", { exact: true })
     .click();
-  await expect
-    .poll(() =>
-      input.evaluate((element) => {
-        const selection = window.getSelection();
-        if (!selection?.focusNode || !element.contains(selection.focusNode)) {
-          return null;
-        }
-        const range = document.createRange();
-        range.selectNodeContents(element);
-        range.setEnd(selection.focusNode, selection.focusOffset);
-        return range.toString();
-      }),
-    )
-    .toBe("@Morgarita ");
-  await input.pressSequentially("hello");
-  await expect(input).toHaveText("@Morgarita hello");
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+
+  await input.fill("hello");
   await input.press("Enter");
 
   await expect(input).toHaveText("", { timeout: 500 });
@@ -440,22 +436,15 @@ test("ordinary agent mentions remain one-shot and return to the placeholder", as
     { timeout: 500 },
   );
   await expect(input).toBeFocused();
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
   await expect
-    .poll(() =>
-      input.evaluate((element) => {
-        const selection = window.getSelection();
-        return {
-          collapsed: selection?.isCollapsed ?? false,
-          inside: Boolean(
-            selection?.anchorNode && element.contains(selection.anchorNode),
-          ),
-        };
-      }),
-    )
-    .toEqual({ collapsed: true, inside: true });
+    .poll(() => readOutgoingMentionPubkeys(page, "hello"))
+    .toContain(AGENT_A);
 });
 
-test("always-mentioned agents restore and can be removed independently", async ({
+test("send-button avatars restore and can be removed independently", async ({
   page,
 }) => {
   await seedAudience(page, [AGENT_B, AGENT_A]);
@@ -467,6 +456,18 @@ test("always-mentioned agents restore and can be removed independently", async (
   await expect(input).toHaveText("");
   await expect(composer.getByTestId("composer-address-locks")).toBeVisible();
   await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toBeVisible();
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+
+  await pressPrimaryShift(page, "M");
+  await expect(composer.getByTestId("message-composer")).toHaveAttribute(
+    "data-address-prototype",
+    "send-button",
+  );
+  await expect(
     composer.getByRole("button", { name: "Stop always mentioning Vogue" }),
   ).toBeVisible();
   await expect(
@@ -475,12 +476,11 @@ test("always-mentioned agents restore and can be removed independently", async (
     }),
   ).toBeVisible();
 
-  await composer
-    .getByRole("button", { name: "Open mention menu for Vogue" })
-    .hover();
-  await composer
-    .getByRole("button", { name: "Stop always mentioning Vogue" })
-    .click();
+  const removeVogue = composer.getByRole("button", {
+    name: "Stop always mentioning Vogue",
+  });
+  await removeVogue.hover();
+  await removeVogue.click();
   await expect
     .poll(() =>
       page.evaluate(
@@ -521,25 +521,26 @@ test("channel always-mentions carry into threads and stay synchronized", async (
   await openGeneral(page);
 
   await expect(
-    channelComposer(page).getByRole("button", {
-      name: "Stop always mentioning Morgarita",
-    }),
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toBeVisible();
 
   await openThread(page);
-  const channelAlwaysMention = channelComposer(page).getByRole("button", {
-    name: "Stop always mentioning Morgarita",
-  });
-  const threadAlwaysMention = threadComposer(page).getByRole("button", {
-    name: "Stop always mentioning Morgarita",
-  });
+  const channelAlwaysMention = channelComposer(page).getByTestId(
+    `composer-address-lock-${AGENT_A}`,
+  );
+  const threadAlwaysMention = threadComposer(page).getByTestId(
+    `composer-address-lock-${AGENT_A}`,
+  );
   await expect(channelAlwaysMention).toBeVisible();
   await expect(threadAlwaysMention).toBeVisible();
 
   await threadComposer(page)
-    .getByRole("button", { name: "Open mention menu for Morgarita" })
-    .hover();
-  await threadAlwaysMention.click();
+    .getByRole("button", { name: "Manage mentioned agents" })
+    .click();
+  await threadComposer(page)
+    .getByTestId("mention-autocomplete")
+    .getByRole("button", { name: "Always address Morgarita" })
+    .click();
   await expect(threadAlwaysMention).toHaveCount(0);
   await expect(channelAlwaysMention).toHaveCount(0);
   await expect
@@ -560,23 +561,35 @@ test("channel always-mentions carry into threads and stay synchronized", async (
 });
 
 for (const theme of ["buzz", "buzz-dark"]) {
-  test(`captures the persistent-mention tray in ${theme}`, async ({ page }) => {
-    await seedAudience(page, [AGENT_A, AGENT_B], theme);
-    await installAudienceFixtures(page);
-    await openThread(page);
-    const overlay = threadComposer(page);
-    const composer = overlay.getByTestId("message-composer");
-    await overlay.getByTestId("message-input").focus();
-    await waitForAnimations(page);
-    await composer.screenshot({
-      path: `${SHOTS}/${theme}-persistent-mention-tray.png`,
+  for (const prototype of ["mention-button", "send-button"] as const) {
+    test(`captures the ${prototype} prototype in ${theme}`, async ({
+      page,
+    }) => {
+      await seedAudience(page, [AGENT_A, AGENT_B], theme);
+      await installAudienceFixtures(page);
+      await openThread(page);
+      const overlay = threadComposer(page);
+      const composer = overlay.getByTestId("message-composer");
+      await overlay.getByTestId("message-input").focus();
+      if (prototype === "send-button") {
+        await pressPrimaryShift(page, "M");
+        await overlay
+          .getByRole("button", { name: "Stop always mentioning Morgarita" })
+          .hover();
+      }
+      await expect(composer).toHaveAttribute(
+        "data-address-prototype",
+        prototype,
+      );
+      await waitForAnimations(page);
+      await composer.screenshot({
+        path: `${SHOTS}/${theme}-${prototype}.png`,
+      });
     });
-  });
+  }
 }
 
-test("the persistent-mention tray fits the narrow composer", async ({
-  page,
-}) => {
+test("both addressing prototypes fit the narrow composer", async ({ page }) => {
   await page.setViewportSize({ width: 700, height: 760 });
   await seedAudience(page, [AGENT_A, AGENT_B]);
   await installAudienceFixtures(page);
@@ -584,6 +597,19 @@ test("the persistent-mention tray fits the narrow composer", async ({
   const overlay = threadComposer(page);
   const composer = overlay.getByTestId("message-composer");
   await expect(overlay.getByTestId("composer-address-locks")).toBeVisible();
+  await expect(
+    overlay.getByRole("button", { name: "Manage mentioned agents" }),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await composer.screenshot({
+    path: `${SHOTS}/narrow-mention-button.png`,
+  });
+
+  await pressPrimaryShift(page, "M");
+  await expect(composer).toHaveAttribute(
+    "data-address-prototype",
+    "send-button",
+  );
   await expect(
     overlay.getByRole("button", {
       name: "Stop always mentioning Morgarita",
@@ -594,6 +620,6 @@ test("the persistent-mention tray fits the narrow composer", async ({
   ).toBeVisible();
   await waitForAnimations(page);
   await composer.screenshot({
-    path: `${SHOTS}/narrow-persistent-mention-tray.png`,
+    path: `${SHOTS}/narrow-send-button.png`,
   });
 });
