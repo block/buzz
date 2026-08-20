@@ -76,6 +76,7 @@ test("agent rows offer an Always address pin", async () => {
   });
   assert.equal(action.getAttribute("aria-pressed"), "false");
   assert.equal(action.getAttribute("data-state"), "off");
+  assert.equal(action.querySelector("svg")?.getAttribute("fill"), "none");
   fireEvent.click(action);
   assert.deepEqual(toggled, [suggestion]);
   assert.deepEqual(selected, [suggestion]);
@@ -91,6 +92,10 @@ test("agent rows offer an Always address pin", async () => {
   });
   assert.equal(selectedAction.getAttribute("aria-pressed"), "true");
   assert.equal(selectedAction.getAttribute("data-state"), "on");
+  assert.equal(
+    selectedAction.querySelector("svg")?.getAttribute("fill"),
+    "currentColor",
+  );
   fireEvent.click(selectedAction);
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });

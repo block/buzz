@@ -30,6 +30,16 @@ const agent = {
   displayName: "Agent Ada",
   pubkey: "agent-pubkey",
 };
+const secondAgent = {
+  avatarUrl: null,
+  displayName: "Agent Bea",
+  pubkey: "second-agent-pubkey",
+};
+const thirdAgent = {
+  avatarUrl: null,
+  displayName: "Agent Cia",
+  pubkey: "third-agent-pubkey",
+};
 
 test("mention-button prototype expands the mention control with addressed agents", async () => {
   const React = await import("react");
@@ -39,12 +49,12 @@ test("mention-button prototype expands the mention control with addressed agents
     "./ComposerAddressControls.tsx"
   );
   let opened = 0;
-  const view = render(
+  const renderButton = (agents) =>
     React.createElement(
       TooltipProvider,
       null,
       React.createElement(ComposerMentionButton, {
-        agents: [agent],
+        agents,
         disabled: false,
         onCaptureSelection: () => {},
         onOpen: () => {
@@ -52,11 +62,20 @@ test("mention-button prototype expands the mention control with addressed agents
         },
         showAgents: true,
       }),
-    ),
-  );
+    );
+  const view = render(renderButton([agent]));
+  view.rerender(renderButton([agent, secondAgent, thirdAgent]));
 
   assert.ok(view.getByTestId("composer-address-locks"));
-  assert.ok(view.getByTestId("composer-address-lock-agent-pubkey"));
+  const avatar = view.getByTestId("composer-address-lock-agent-pubkey");
+  assert.ok(avatar);
+  assert.doesNotMatch(
+    avatar.querySelector("span")?.className ?? "",
+    /(?:^|\s)ring(?:-|\s)/,
+  );
+  for (const addedAgent of [secondAgent, thirdAgent]) {
+    assert.ok(view.getByTestId(`composer-address-lock-${addedAgent.pubkey}`));
+  }
   assert.equal(
     view.queryByRole("button", { name: "Stop always mentioning Agent Ada" }),
     null,
@@ -73,21 +92,25 @@ test("send-button prototype exposes each addressed avatar as a remove control", 
   const { TooltipProvider } = await import("@/shared/ui/tooltip");
   const { ComposerSendButton } = await import("./ComposerAddressControls.tsx");
   const removed = [];
-  const view = render(
+  const renderButton = (agents) =>
     React.createElement(
       TooltipProvider,
       null,
       React.createElement(ComposerSendButton, {
-        agents: [agent],
+        agents,
         isSending: false,
         onRemove: (pubkey) => removed.push(pubkey),
         sendDisabled: true,
         showAgents: true,
       }),
-    ),
-  );
+    );
+  const view = render(renderButton([agent]));
+  view.rerender(renderButton([agent, secondAgent, thirdAgent]));
 
   assert.ok(view.getByTestId("composer-address-send"));
+  for (const addedAgent of [secondAgent, thirdAgent]) {
+    assert.ok(view.getByTestId(`composer-address-lock-${addedAgent.pubkey}`));
+  }
   const remove = view.getByRole("button", {
     name: "Stop always mentioning Agent Ada",
   });

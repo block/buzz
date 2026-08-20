@@ -12,13 +12,24 @@ export function useComposerMentionPicker({
   richText: UseRichTextEditorResult;
   setIsEmojiPickerOpen: (open: boolean) => void;
 }) {
-  const { openMentionPicker, updateMentionQuery } = mentions;
+  const {
+    cancelMentionAutocomplete,
+    isMentionOpen,
+    openMentionPicker,
+    updateMentionQuery,
+  } = mentions;
   const { editor, focus, getPlainTextAndCursor } = richText;
   return React.useCallback(
     (insertTrigger = true) => {
       if (!editor) return;
       const { text, cursor } = getPlainTextAndCursor();
       if (!insertTrigger) {
+        if (isMentionOpen) {
+          cancelMentionAutocomplete();
+          setIsEmojiPickerOpen(false);
+          focus();
+          return;
+        }
         openMentionPicker(cursor, "first-agent");
         setIsEmojiPickerOpen(false);
         focus();
@@ -39,9 +50,11 @@ export function useComposerMentionPicker({
       updateMentionQuery(updated.text, updated.cursor);
     },
     [
+      cancelMentionAutocomplete,
       editor,
       focus,
       getPlainTextAndCursor,
+      isMentionOpen,
       openMentionPicker,
       setIsEmojiPickerOpen,
       updateMentionQuery,

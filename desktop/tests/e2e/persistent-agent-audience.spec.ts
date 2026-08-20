@@ -175,6 +175,9 @@ test("always addresses multiple agents without closing the mention picker", asyn
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_B}`),
   ).toBeVisible();
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_B}`).locator(".."),
+  ).toHaveCSS("opacity", "1");
   await expect
     .poll(() =>
       page.evaluate(
@@ -271,6 +274,10 @@ test("the mention button opens settings and can undo an address", async ({
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
   await expect(input).toHaveText("draft text");
+  await ingress.click();
+  await expect(menu).toHaveCount(0);
+  await ingress.click();
+  await expect(menu).toBeVisible();
   await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);
   await expect(
     menu.getByRole("button", { name: "Always address Morgarita" }),

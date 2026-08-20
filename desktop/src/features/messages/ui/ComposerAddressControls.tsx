@@ -66,7 +66,7 @@ function AddressedAgentAvatar({
     >
       <UserAvatar
         avatarUrl={agent.avatarUrl}
-        className="h-5 w-5 ring-1 ring-border/70"
+        className="h-5 w-5"
         displayName={agent.displayName}
         size="xs"
         testId="composer-address-lock-avatar"
@@ -116,16 +116,14 @@ export function ComposerMentionButton({
   return (
     <Tooltip disableHoverableContent>
       <TooltipTrigger asChild>
-        <motion.button
+        <button
           aria-label={hasAgents ? "Manage mentioned agents" : "Mention someone"}
-          animate={{ width: "auto" }}
           className={cn(
             "flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
             hasAgents && "bg-accent/70 px-1.5",
           )}
           data-testid="message-insert-mention"
           disabled={disabled}
-          layout
           onClick={onOpen}
           onMouseDown={onCaptureSelection}
           type="button"
@@ -139,10 +137,12 @@ export function ComposerMentionButton({
               <AnimatePresence initial={false} mode="popLayout">
                 {visibleAgents.map((agent) => (
                   <motion.span
-                    exit={{ opacity: 0, scale: 0.75 }}
-                    initial={{ opacity: 0, scale: 0.75 }}
+                    animate={{ opacity: 1, scale: 1, x: 0 }}
+                    exit={{ opacity: 0, scale: 0.8, x: -4 }}
+                    initial={{ opacity: 0, scale: 0.8, x: -4 }}
                     key={agent.pubkey}
                     layout
+                    transition={{ type: "spring", stiffness: 550, damping: 34 }}
                   >
                     <AddressedAgentAvatar
                       agent={agent}
@@ -155,7 +155,7 @@ export function ComposerMentionButton({
               <RemainingAgentCount count={hiddenCount} />
             </span>
           ) : null}
-        </motion.button>
+        </button>
       </TooltipTrigger>
       <TooltipContent>
         {hasAgents ? "Manage mentioned agents" : "Mention someone"}
@@ -216,13 +216,15 @@ export function ComposerSendButton({
               <TooltipTrigger asChild>
                 <motion.button
                   aria-label={`Stop always mentioning ${agent.displayName}`}
+                  animate={{ opacity: 1, scale: 1, x: 0 }}
                   className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-primary-foreground"
                   data-testid={`composer-address-lock-remove-${agent.pubkey}`}
                   disabled={isSending}
-                  exit={{ opacity: 0, scale: 0.75 }}
-                  initial={{ opacity: 0, scale: 0.75 }}
+                  exit={{ opacity: 0, scale: 0.8, x: -4 }}
+                  initial={{ opacity: 0, scale: 0.8, x: -4 }}
                   layout
                   onClick={() => onRemove(agent.pubkey)}
+                  transition={{ type: "spring", stiffness: 550, damping: 34 }}
                   type="button"
                 >
                   <AddressedAgentAvatar

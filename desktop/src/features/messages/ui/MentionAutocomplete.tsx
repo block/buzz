@@ -259,7 +259,10 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                         size="xs"
                         type="button"
                       >
-                        <Pin aria-hidden="true" />
+                        <Pin
+                          aria-hidden="true"
+                          fill={isAlwaysAddressed ? "currentColor" : "none"}
+                        />
                       </Toggle>
                     </span>
                   </TooltipTrigger>
