@@ -10,6 +10,7 @@ type ViewLoadingFallbackKind =
   | "forum"
   | "projects"
   | "pulse"
+  | "triage"
   | "workflows";
 
 type ViewLoadingFallbackProps = {
@@ -412,6 +413,7 @@ export function ViewLoadingFallback({
       {kind === "pulse" ? (
         <ChannelLoadingBody hasHeader={shouldShowChannelHeader} />
       ) : null}
+      {kind === "triage" ? <CardListLoadingBody /> : null}
     </div>
   );
 }

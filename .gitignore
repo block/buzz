@@ -64,6 +64,9 @@ doc/
 identity.key
 **/identity.key
 
+# Triage PoC backend runtime state (suggestions, todos, learned feedback)
+/triage-service/data.json
+
 # Claude Code worktrees
 .claude/worktrees/
 

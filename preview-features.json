@@ -26,6 +26,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "triage",
+      "name": "Triage",
+      "description": "Agent-classified unread messages with adopted todos",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "agentManagedProfiles",
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",

@@ -31,6 +31,8 @@ ASSUME_YES=false
 RUN_BUILD=true
 INVOCATION="scripts/dev-up.sh"
 RELAY_PGID=""
+RUNTIME_LABEL=""
+RUNTIME_APP=""
 
 DOCKER_WAIT_SECS=120
 RELAY_READY_WAIT_SECS=600
@@ -165,28 +167,82 @@ container_exists() {
   docker inspect --format '{{.Id}}' "$1" >/dev/null 2>&1
 }
 
+app_installed() {
+  [[ -d "/Applications/$1.app" || -d "${HOME}/Applications/$1.app" ]]
+}
+
+use_runtime() {
+  RUNTIME_LABEL="$1"
+  RUNTIME_APP="$2"
+}
+
+# Docker Desktop is one of several runtimes behind the `docker` CLI, so the
+# active context decides what to launch. `docker context show` and `... inspect`
+# read local config only, so they still answer while the daemon is dead — which
+# is the only time this matters.
+resolve_container_runtime() {
+  local context endpoint
+  context="$(docker context show 2>/dev/null || true)"
+  endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+
+  case "${context}" in
+    orbstack) use_runtime "OrbStack" "OrbStack"; return 0 ;;
+    desktop-linux) use_runtime "Docker Desktop" "Docker"; return 0 ;;
+    colima*) use_runtime "Colima" ""; return 0 ;;
+  esac
+
+  # A DOCKER_HOST override reports the context as `default`, which hides the
+  # runtime's name; its socket path still identifies it.
+  case "${endpoint}" in
+    *orbstack*) use_runtime "OrbStack" "OrbStack"; return 0 ;;
+    *colima*) use_runtime "Colima" ""; return 0 ;;
+    */.docker/run/docker.sock) use_runtime "Docker Desktop" "Docker"; return 0 ;;
+  esac
+
+  if app_installed OrbStack; then
+    use_runtime "OrbStack" "OrbStack"
+  elif app_installed Docker; then
+    use_runtime "Docker Desktop" "Docker"
+  else
+    use_runtime "" ""
+  fi
+  if [[ -n "${RUNTIME_LABEL}" ]]; then
+    warn "Could not tell which runtime docker context '${context:-unknown}' points at; assuming ${RUNTIME_LABEL} because it is installed."
+  fi
+}
+
 ensure_docker() {
   if ! command -v docker >/dev/null 2>&1; then
-    error "Docker not found. Install Docker Desktop: https://docs.docker.com/get-docker/"
+    error "The docker CLI was not found. Install a container runtime:"
+    error "  Docker Desktop https://docs.docker.com/get-docker/ or OrbStack https://orbstack.dev"
     exit 1
   fi
   if docker info >/dev/null 2>&1; then
     return 0
   fi
-  if [[ ! -d "/Applications/Docker.app" && ! -d "${HOME}/Applications/Docker.app" ]]; then
-    error "The Docker daemon is not running and Docker Desktop is not installed."
-    error "Install it (https://docs.docker.com/get-docker/) or start your daemon, then re-run: ${INVOCATION}"
+
+  resolve_container_runtime
+  if [[ -z "${RUNTIME_APP}" ]]; then
+    error "The Docker daemon is not responding, and this script cannot start ${RUNTIME_LABEL:-the configured runtime} for you."
+    error "Start it yourself, or point docker at a runtime that is already up:"
+    error "  docker context ls    # then: docker context use <name>"
+    exit 1
+  fi
+  if ! app_installed "${RUNTIME_APP}"; then
+    error "The Docker daemon is not responding: docker is configured for ${RUNTIME_LABEL}, but ${RUNTIME_APP}.app is not installed."
+    error "Install ${RUNTIME_LABEL}, or point docker at a runtime that is already up:"
+    error "  docker context ls    # then: docker context use <name>"
     exit 1
   fi
 
-  log "Docker daemon is not running — starting Docker Desktop..."
-  if ! open -a Docker; then
-    error "Could not launch Docker Desktop. Start it manually, then re-run: ${INVOCATION}"
+  log "The ${RUNTIME_LABEL} daemon is not responding — starting ${RUNTIME_LABEL}..."
+  if ! open -a "${RUNTIME_APP}"; then
+    error "Could not launch ${RUNTIME_LABEL}. Start it manually, then re-run: ${INVOCATION}"
     exit 1
   fi
 
   local waited=0
-  echo -e -n "${BLUE}[dev-up]${NC} Waiting for the Docker daemon"
+  echo -e -n "${BLUE}[dev-up]${NC} Waiting for the ${RUNTIME_LABEL} daemon"
   while [[ ${waited} -lt ${DOCKER_WAIT_SECS} ]]; do
     if docker info >/dev/null 2>&1; then
       echo " ready"
@@ -197,8 +253,17 @@ ensure_docker() {
     waited=$((waited + 3))
   done
   echo " timed out"
-  error "The Docker daemon did not come up within ${DOCKER_WAIT_SECS}s."
-  error "Open Docker Desktop, wait for it to report Running, then re-run: ${INVOCATION}"
+  # `open` exits 0 once launchd accepts the request, even when the app crashes
+  # immediately after, so the poll above is the only evidence that counts.
+  error "${RUNTIME_LABEL} was launched successfully but served no daemon within ${DOCKER_WAIT_SECS}s."
+  error "A launch that reports success and leaves nothing running usually means a broken or"
+  error "half-finished install — an interrupted update can leave the app bundle quarantined"
+  error "and crashing on start. Options, cheapest first:"
+  error "  1. start ${RUNTIME_LABEL} by hand and watch for a crash report"
+  error "  2. switch to a runtime that works: docker context use <name>"
+  error "  3. reinstall it: https://docs.docker.com/get-docker/ (Docker Desktop), https://orbstack.dev (OrbStack)"
+  error "Configured contexts:"
+  docker context ls >&2 || true
   exit 1
 }
 
@@ -223,8 +288,10 @@ classify_listener() {
   local path base
   path="$(process_path "$1")"
   base="${path##*/}"
+  # Whichever runtime publishes container ports owns them; never a kill target.
+  # OrbStack publishes through "OrbStack Helper" inside its own app bundle.
   case "${path}" in
-    */Docker.app/*|*com.docker*|*vpnkit*) echo "docker"; return 0 ;;
+    */Docker.app/*|*com.docker*|*vpnkit*|*/OrbStack.app/*) echo "runtime"; return 0 ;;
   esac
   case "${base}" in
     buzz-relay) echo "buzz-relay"; return 0 ;;
@@ -323,7 +390,11 @@ ensure_port_available() {
   local pid
   for pid in ${pids}; do
     case "$(classify_listener "${pid}")" in
-      docker) ;;
+      runtime)
+        # Reached only when the owning container is absent, so some other
+        # container is publishing this port and compose will fail to bind it.
+        warn "Port ${port} (${label}) is published by the container runtime for a different container."
+        ;;
       homebrew-redis) stop_homebrew_redis "${pid}" ;;
       buzz-relay) stop_stale_relay "${pid}" "${port}" ;;
       *)

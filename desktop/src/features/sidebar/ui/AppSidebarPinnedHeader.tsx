@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  Inbox,
+  ListChecks,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -12,14 +19,15 @@ import {
 } from "@/shared/ui/sidebar";
 import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 
-type SidebarSelectedView =
+export type SidebarSelectedView =
   | "home"
   | "channel"
   | "messages"
   | "agents"
   | "workflows"
   | "pulse"
-  | "projects";
+  | "projects"
+  | "triage";
 
 type AppSidebarPinnedHeaderProps = {
   channelLabels: Record<string, string>;
@@ -43,6 +51,7 @@ type AppSidebarPrimaryMenuProps = {
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
+  onSelectTriage: () => void;
   onSelectWorkflows: () => void;
   selectedView: SidebarSelectedView;
 };
@@ -92,6 +101,7 @@ export function AppSidebarPrimaryMenu({
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
+  onSelectTriage,
   onSelectWorkflows,
   selectedView,
 }: AppSidebarPrimaryMenuProps) {
@@ -122,6 +132,20 @@ export function AppSidebarPrimaryMenu({
             </SidebarMenuBadge>
           ) : null}
         </SidebarMenuItem>
+        <FeatureGate feature="triage">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-triage-view"
+              isActive={selectedView === "triage"}
+              onClick={onSelectTriage}
+              tooltip="Triage"
+              type="button"
+            >
+              <ListChecks className="h-4 w-4" />
+              <SidebarMenuLabel>Triage</SidebarMenuLabel>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </FeatureGate>
         <FeatureGate feature="pulse">
           <SidebarMenuItem>
             <SidebarMenuButton
