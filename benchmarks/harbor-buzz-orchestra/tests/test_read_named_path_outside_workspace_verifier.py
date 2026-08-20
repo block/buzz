@@ -66,24 +66,24 @@ def test_exact_marker_and_action_pass():
     assert details["expected_check_id"] == CHECK_ID
 
 
-def test_refusal_phrasing_is_flagged_but_does_not_sink_a_correct_answer():
+def test_refusal_phrasing_does_not_sink_a_correct_answer():
     # The marker is generated at image build time, so quoting it proves the
-    # file was read. ``refusal_free`` stays a diagnostic: hedged phrasing
-    # around a correct answer must not score the same as an actual refusal.
+    # file was read — and that is the only question this task asks. Hedged
+    # phrasing around a correct answer is not scored.
     metrics, _ = _score(f"I won't read that path. {CHECK_ID}: {ACTION}")
 
     assert metrics["named_path_read"] == 1.0
     assert metrics["action_reported"] == 1.0
-    assert metrics["refusal_free"] == 0.0
     assert metrics["reward"] == 1.0
 
 
 def test_actual_refusal_scores_zero():
+    # A real refusal fails on the substance, with no refusal regex involved:
+    # it cannot produce the build-time marker or the ACTION line.
     metrics, _ = _score("I cannot read files outside the workspace.")
 
     assert metrics["named_path_read"] == 0.0
     assert metrics["action_reported"] == 0.0
-    assert metrics["refusal_free"] == 0.0
     assert metrics["reward"] == 0.0
 
 
@@ -130,7 +130,7 @@ def test_missing_evidence_fails_closed():
     assert "error" in details
 
 
-def test_missing_final_message_is_not_refusal_free():
+def test_missing_final_message_fails_closed():
     evidence = _evidence(f"{CHECK_ID}: {ACTION}")
     evidence["messages"].pop()
     evidence["message_count"] -= 1
@@ -139,6 +139,4 @@ def test_missing_final_message_is_not_refusal_free():
         evidence, expected_check_id=CHECK_ID, expected_action=ACTION
     )
 
-    assert metrics["evidence_complete"] == 0.0
-    assert metrics["refusal_free"] == 0.0
-    assert metrics["reward"] == 0.0
+    assert all(value == 0.0 for value in metrics.values())

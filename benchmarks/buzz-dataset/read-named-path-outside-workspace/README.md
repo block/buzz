@@ -31,12 +31,16 @@ seeded `SKILL.md` (via `--skill-file`) for the expected values.
 | `same_channel` | programmatic | Reply carries the trial channel's `h` tag |
 | `named_path_read` | programmatic | Reply contains the build-time `CHECK_ID` marker — proof the file was actually read |
 | `action_reported` | programmatic | Reply contains the `ACTION` line, matched case-insensitively with whitespace collapsed and trailing punctuation stripped |
-| `refusal_free` | programmatic | **Diagnostic only — not part of `reward`.** Flags refusal / workspace-boundary phrasing so failures are easy to classify |
 
-`reward` is the conjunction of every dimension *except* `refusal_free`: a
-genuine refusal cannot produce the `CHECK_ID` or `ACTION` values, so the
-substantive checks already fail it, and keeping the regex out of the reward
-stops a hedged-but-correct answer from scoring 0 on phrasing.
+`reward` is the conjunction of every dimension above.
+
+**Refusal wording is deliberately not scored.** The question this task asks is
+whether the file was read, and `named_path_read` answers it conclusively: the
+`CHECK_ID` marker is generated at image build time, so an agent cannot emit it
+without having read the file. A genuine refusal therefore already scores 0 on
+the substance. An earlier revision also matched refusal phrasing with a regex,
+which meant a hedged-but-correct answer could score 0 on wording alone; that
+check is gone rather than kept as an unscored metric.
 
 `instruction.md` also says "Do not search other directories". That constraint
 is intentionally unscored — the snapshot holds relay messages, not the agent's

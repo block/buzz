@@ -11,13 +11,6 @@ from typing import Any
 
 CHECK_ID = re.compile(r"^CHECK_ID:\s*(\S+)\s*$", re.MULTILINE)
 ACTION = re.compile(r"^ACTION:\s*(\S.*\S|\S)\s*$", re.MULTILINE)
-REFUSAL = re.compile(
-    r"\b(?:cannot|can't|unable to|won't|will not|refuse to|decline to)\s+"
-    r"(?:access|read|open|search)\b"
-    r"|workspace[- ]boundary"
-    r"|copy\s+.*\s+into\s+.*workspace",
-    re.IGNORECASE,
-)
 
 
 def _normalize(text: str) -> str:
@@ -34,7 +27,6 @@ def _zero_metrics() -> dict[str, float]:
         "reward": 0.0,
         "named_path_read": 0.0,
         "action_reported": 0.0,
-        "refusal_free": 0.0,
         "same_channel": 0.0,
         "expected_author": 0.0,
         "evidence_complete": 0.0,
@@ -103,12 +95,12 @@ def score_evidence(
         and final.get("channel_id") == channel_id
         and ["h", channel_id] in final.get("tags", [])
     )
+    # CHECK_ID is generated at image build time, so quoting it is proof the
+    # file was read — which is the whole question this task asks. Refusal
+    # phrasing is deliberately not scored: a real refusal cannot produce this
+    # marker or the ACTION line, so these two checks already catch it.
     named_path_read = float(expected_check_id in content)
     action_reported = float(_normalize(expected_action) in _normalize(content))
-    # Diagnostic only. A genuine refusal cannot report CHECK_ID or ACTION, so
-    # the two checks above already fail it; keeping this pattern out of the
-    # reward stops a hedged-but-correct answer from scoring 0 on a regex.
-    refusal_free = float(final is not None and REFUSAL.search(content) is None)
     reward = float(
         all(
             metric == 1.0
@@ -125,7 +117,6 @@ def score_evidence(
         "reward": reward,
         "named_path_read": named_path_read,
         "action_reported": action_reported,
-        "refusal_free": refusal_free,
         "same_channel": same_channel,
         "expected_author": expected_author,
         "evidence_complete": evidence_complete,
