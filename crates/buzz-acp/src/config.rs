@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use clap::builder::BoolishValueParser;
 use clap::Parser;
 use clap::ValueEnum;
 use nostr::Keys;
@@ -341,7 +342,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_CHANNELS", value_delimiter = ',')]
     pub channels: Option<Vec<String>>,
 
-    #[arg(long, env = "BUZZ_ACP_NO_MENTION_FILTER")]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_MENTION_FILTER",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub no_mention_filter: bool,
 
     #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./buzz-acp.toml")]
@@ -364,7 +372,14 @@ pub struct CliArgs {
     )]
     pub multiple_event_handling: MultipleEventHandling,
 
-    #[arg(long, env = "BUZZ_ACP_NO_IGNORE_SELF")]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_IGNORE_SELF",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub no_ignore_self: bool,
 
     /// Maximum number of context messages to include for thread replies and DMs.
@@ -380,11 +395,25 @@ pub struct CliArgs {
     pub max_turns_per_session: u32,
 
     /// Disable automatic presence (online/offline) status.
-    #[arg(long, env = "BUZZ_ACP_NO_PRESENCE")]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_PRESENCE",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub no_presence: bool,
 
     /// Disable typing indicators while agent is processing.
-    #[arg(long, env = "BUZZ_ACP_NO_TYPING")]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_TYPING",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub no_typing: bool,
 
     /// Enable NIP-AE agent core memory injection.
@@ -400,19 +429,37 @@ pub struct CliArgs {
         long,
         env = "BUZZ_ACP_MEMORY",
         conflicts_with = "no_memory",
-        default_value_t = true
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = true,
+        value_parser = BoolishValueParser::new(),
     )]
     pub memory: bool,
 
     /// Disable NIP-AE agent core memory injection.
     ///
     /// Memory injection is on by default; set this flag/env var to opt out.
-    #[arg(long, env = "BUZZ_ACP_NO_MEMORY", conflicts_with = "memory")]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_MEMORY",
+        conflicts_with = "memory",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub no_memory: bool,
 
     /// Disable the [Base] platform-context section prepended to every prompt.
     /// When set, agents receive only the persona [System] prompt with no Buzz orientation.
-    #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_BASE_PROMPT",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub no_base_prompt: bool,
 
     /// Path to a custom base prompt file. Overrides the compiled-in default.
@@ -485,7 +532,14 @@ pub struct CliArgs {
     pub team_instructions: Option<String>,
 
     /// Publish encrypted ACP observer frames over the relay.
-    #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_RELAY_OBSERVER",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub relay_observer: bool,
 
     /// Exit after this many seconds with no dispatched events and no turn in flight.
@@ -494,7 +548,14 @@ pub struct CliArgs {
     pub exit_after_inactivity: u64,
 
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
-    #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
+    #[arg(
+        long,
+        env = "BUZZ_ACP_LAZY_POOL",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        default_value_t = false,
+        value_parser = BoolishValueParser::new(),
+    )]
     pub lazy_pool: bool,
 
     /// Tear the woken pool back down to the lazy empty-slot state after this
@@ -2252,9 +2313,17 @@ channels = "ALL"
     #[test]
     fn lazy_pool_cli_flag_enables_deferred_startup() {
         let key = "0".repeat(64);
-        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
-        assert!(args.is_err(), "bool flags do not take an explicit value");
+        // Bare switch form — unchanged.
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+        // Since #4881 the boolean flags also take an explicit value, so that
+        // `BUZZ_ACP_LAZY_POOL=1` parses instead of aborting startup. This
+        // assertion previously required `--lazy-pool=true` to be an error.
+        assert!(
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]).lazy_pool
+        );
+        assert!(
+            !CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=0"]).lazy_pool
+        );
     }
 
     #[test]
@@ -2808,6 +2877,110 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    /// Every boolean flag that is also settable from the environment, paired
+    /// with an accessor. `BUZZ_ACP_*` values flow through the same
+    /// `value_parser` as `--flag=<value>`, so exercising the CLI form here
+    /// covers the env form without racing on process-global env state (see the
+    /// note above).
+    #[allow(clippy::type_complexity)]
+    fn boolish_env_flags() -> Vec<(&'static str, fn(&CliArgs) -> bool)> {
+        vec![
+            ("--no-mention-filter", |a| a.no_mention_filter),
+            ("--no-ignore-self", |a| a.no_ignore_self),
+            ("--no-presence", |a| a.no_presence),
+            ("--no-typing", |a| a.no_typing),
+            ("--memory", |a| a.memory),
+            ("--no-memory", |a| a.no_memory),
+            ("--no-base-prompt", |a| a.no_base_prompt),
+            ("--relay-observer", |a| a.relay_observer),
+            ("--lazy-pool", |a| a.lazy_pool),
+        ]
+    }
+
+    fn parse_with(extra: &[&str]) -> Result<CliArgs, clap::Error> {
+        let mut argv = vec!["buzz-acp", "--private-key", TEST_PRIVATE_KEY];
+        argv.extend_from_slice(extra);
+        CliArgs::try_parse_from(argv)
+    }
+
+    /// Regression test for issue #4881.
+    ///
+    /// `BUZZ_ACP_NO_MENTION_FILTER=1` used to abort argument parsing with exit
+    /// code 2, taking the managed agent permanently offline: the bare `bool`
+    /// flags accepted only the literal strings `true` and `false`, while
+    /// `1`/`0`/`yes`/`no`/`on`/`off` are the conventional spellings for boolean
+    /// environment variables. Every such flag now uses `BoolishValueParser`.
+    #[test]
+    fn boolish_flags_accept_conventional_boolean_spellings() {
+        let truthy = ["true", "1", "yes", "on"];
+        let falsy = ["false", "0", "no", "off"];
+
+        for (flag, get) in boolish_env_flags() {
+            for value in truthy {
+                let args = parse_with(&[&format!("{flag}={value}")])
+                    .unwrap_or_else(|e| panic!("{flag}={value} should parse: {e}"));
+                assert!(get(&args), "{flag}={value} should resolve to true");
+            }
+            for value in falsy {
+                let args = parse_with(&[&format!("{flag}={value}")])
+                    .unwrap_or_else(|e| panic!("{flag}={value} should parse: {e}"));
+                assert!(!get(&args), "{flag}={value} should resolve to false");
+            }
+        }
+    }
+
+    /// The boolish parser must not cost these flags their bare-switch form:
+    /// `--no-presence` on its own still means "true".
+    #[test]
+    fn boolish_flags_still_work_as_bare_switches() {
+        for (flag, get) in boolish_env_flags() {
+            let args =
+                parse_with(&[flag]).unwrap_or_else(|e| panic!("bare {flag} should parse: {e}"));
+            assert!(get(&args), "bare {flag} should resolve to true");
+        }
+    }
+
+    /// Omitting the flags leaves their documented defaults intact — in
+    /// particular `--memory` stays on by default.
+    #[test]
+    fn boolish_flags_keep_their_defaults_when_absent() {
+        let args = parse_with(&[]).expect("bare invocation should parse");
+        assert!(args.memory, "memory should default to true");
+        assert!(
+            !args.no_mention_filter,
+            "no_mention_filter defaults to false"
+        );
+        assert!(!args.no_ignore_self, "no_ignore_self defaults to false");
+        assert!(!args.no_presence, "no_presence defaults to false");
+        assert!(!args.no_typing, "no_typing defaults to false");
+        assert!(!args.no_memory, "no_memory defaults to false");
+        assert!(!args.no_base_prompt, "no_base_prompt defaults to false");
+        assert!(!args.relay_observer, "relay_observer defaults to false");
+        assert!(!args.lazy_pool, "lazy_pool defaults to false");
+    }
+
+    /// A genuinely unparseable value must still be rejected — this widens the
+    /// accepted spellings, it does not make the flags accept anything.
+    #[test]
+    fn boolish_flags_still_reject_nonsense_values() {
+        for (flag, _) in boolish_env_flags() {
+            assert!(
+                parse_with(&[&format!("{flag}=maybe")]).is_err(),
+                "{flag}=maybe should be rejected"
+            );
+        }
+    }
+
+    /// `--memory` and `--no-memory` are mutually exclusive; widening the value
+    /// parser must not have loosened that.
+    #[test]
+    fn memory_and_no_memory_still_conflict() {
+        assert!(
+            parse_with(&["--memory=true", "--no-memory=true"]).is_err(),
+            "--memory and --no-memory must still conflict"
+        );
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
