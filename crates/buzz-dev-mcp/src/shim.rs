@@ -8,7 +8,8 @@ use zeroize::Zeroize;
 /// On install:
 /// 1. Creates a 0700 tempdir with symlinks back to our binary (multicall)
 /// 2. If `NOSTR_PRIVATE_KEY` is set: writes a 0600 keyfile, derives the pubkey,
-///    builds ephemeral `GIT_CONFIG_*` env vars, then removes the env var
+///    builds ephemeral `GIT_CONFIG_*` env vars for auth + signing only (not
+///    `user.name` / `user.email`), then removes the env var
 /// 3. Prepends the shim dir to PATH
 ///
 /// Shell children receive `path_env`, `git_env`, and `BUZZ_PRIVATE_KEY` (for
@@ -55,7 +56,7 @@ impl Shim {
         std::env::remove_var("NOSTR_PRIVATE_KEY");
 
         // Ephemeral git config: write key to 0600 keyfile, derive pubkey, build
-        // GIT_CONFIG_* env vars for nostr auth + signing.
+        // GIT_CONFIG_* env vars for nostr auth + signing (not commit identity).
         let git_env = match nostr_key
             .as_deref()
             .and_then(|k| write_keyfile(dir.path(), k))
@@ -151,6 +152,10 @@ fn write_keyfile_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// Derive a NIP-05-style email from the pubkey and relay URL.
 /// Format: `<hex_pubkey>@<relay_host>` (e.g., `ab12...cd@relay.buzz.dev`).
 /// Falls back to `<hex_pubkey>@buzz` if no relay URL is configured.
+///
+/// Kept for presentation / matching helpers. Must not be injected into commit
+/// Author/Committer (see [`build_git_env`]).
+#[allow(dead_code)]
 fn derive_git_email(pubkey_hex: &str) -> String {
     let host = std::env::var("BUZZ_RELAY_URL")
         .ok()
@@ -178,8 +183,9 @@ fn derive_git_email(pubkey_hex: &str) -> String {
 /// chrome and may be composed (`Agent · #channel`) by consumers. Commits
 /// outlive sessions, so git attribution must not follow a mutable title.
 ///
-/// Nothing writes this yet — when unset, [`build_git_env`] falls back to the
-/// npub, which is byte-for-byte today's behavior.
+/// Optional presentation name for agents. Previously injected as `user.name`;
+/// no longer applied to commit Author/Committer (see [`build_git_env`]).
+#[allow(dead_code)]
 const DISPLAY_NAME_ENV_VAR: &str = "BUZZ_ACP_DISPLAY_NAME";
 
 /// Max characters in a git author name. Nostr display names are unbounded.
@@ -254,7 +260,11 @@ fn is_unicode_format(c: char) -> bool {
 /// Returns `None` unless at least one non-crud character survives. A bare
 /// emptiness check is not sufficient: git rejects a name built only of crud,
 /// so a display name of `;;` or `""` would abort **every commit** the agent
-/// makes. Falling back to the npub keeps the agent able to commit.
+/// makes.
+///
+/// Retained for safe presentation of display names; not applied to commit
+/// Author/Committer (see [`build_git_env`]).
+#[allow(dead_code)]
 fn sanitize_git_user_name(raw: &str) -> Option<String> {
     let collapsed = raw
         .split_whitespace()
@@ -279,19 +289,20 @@ fn sanitize_git_user_name(raw: &str) -> Option<String> {
 /// Composes with any existing GIT_CONFIG_COUNT in the environment. When launched
 /// via buzz-agent (which clears env), the base is always 0 — composition only
 /// matters when dev-mcp is run directly with pre-existing GIT_CONFIG vars.
+///
+/// **Does not set `user.name` / `user.email`.** Those would land at
+/// `command line:` scope and beat the human operator's `~/.gitconfig` and
+/// repo-local identity. Vercel (and similar GitHub-linked deploy hooks) refuse
+/// preview builds when Author/Committer is not a verifiable GitHub account on
+/// the project — agent npub/email always fails that check. Author/Committer
+/// therefore fall through to the human's configured identity. Nest prompts
+/// already require agents to read that identity for trailers.
+///
+/// Auth (NIP-98 credential helper + keyfile) and signing (NIP-GS via
+/// `git-sign-nostr` + `user.signingkey`) stay on the agent key; they do not
+/// need Author/Committer to match the agent.
 fn build_git_env(info: &KeyInfo) -> Vec<(String, String)> {
-    let email = derive_git_email(&info.pubkey_hex);
-    // Display name for humans reading `git log`; the pubkey stays in the email,
-    // which is what NIP-98 auth, NIP-GS signing, and contributor matching key on.
-    let user_name = std::env::var(DISPLAY_NAME_ENV_VAR)
-        .ok()
-        .as_deref()
-        .and_then(sanitize_git_user_name)
-        .unwrap_or_else(|| info.npub.clone());
     let entries: Vec<(&str, String)> = vec![
-        // Identity — Buzz display name (npub fallback), NIP-05-style email
-        ("user.name", user_name),
-        ("user.email", email),
         // Nostr credential helper is additive — it silently declines non-Buzz
         // remotes (exits 0, no credential), so git falls through to system
         // helpers (osxkeychain, store, etc.) for GitHub/GitLab/etc.
@@ -624,60 +635,79 @@ mod git_user_name_tests {
     }
 
     #[test]
-    fn test_build_git_env_uses_display_name_and_leaves_email_on_the_pubkey() {
+    fn test_build_git_env_does_not_inject_author_identity() {
         let _guard = ENV_LOCK.lock().unwrap();
+        // Even with a display name set, Author/Committer must fall through to
+        // the human operator's git config — not the agent.
         std::env::set_var("BUZZ_ACP_DISPLAY_NAME", "Duncan");
         std::env::remove_var("BUZZ_RELAY_URL");
         std::env::remove_var("GIT_CONFIG_COUNT");
         let env = build_git_env(&key_info());
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
 
-        assert_eq!(git_config(&env, "user.name").as_deref(), Some("Duncan"));
-        // The pubkey — the thing NIP-98 auth, NIP-GS signing, and contributor
-        // matching key on — must stay in the email untouched.
         assert_eq!(
-            git_config(&env, "user.email").as_deref(),
-            Some(format!("{PUBKEY_HEX}@buzz").as_str())
+            git_config(&env, "user.name"),
+            None,
+            "agent must not override git user.name"
         );
+        assert_eq!(
+            git_config(&env, "user.email"),
+            None,
+            "agent must not override git user.email"
+        );
+        // Signing still keys on the agent pubkey (NIP-GS).
         assert_eq!(
             git_config(&env, "user.signingkey").as_deref(),
             Some(PUBKEY_HEX)
         );
-    }
-
-    #[test]
-    fn test_build_git_env_falls_back_to_npub_when_display_name_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
-        std::env::remove_var("BUZZ_RELAY_URL");
-        std::env::remove_var("GIT_CONFIG_COUNT");
-        let env = build_git_env(&key_info());
-
-        // Today's behavior, and what every agent gets until a writer for
-        // BUZZ_ACP_DISPLAY_NAME lands on the Desktop side.
-        assert_eq!(git_config(&env, "user.name").as_deref(), Some(NPUB));
         assert_eq!(
-            git_config(&env, "user.email").as_deref(),
-            Some(format!("{PUBKEY_HEX}@buzz").as_str())
+            git_config(&env, "gpg.x509.program").as_deref(),
+            Some("git-sign-nostr")
+        );
+        assert_eq!(
+            git_config(&env, "credential.helper").as_deref(),
+            Some("nostr")
+        );
+        assert_eq!(
+            git_config(&env, "nostr.keyfile").as_deref(),
+            Some("/tmp/.nostr-key")
         );
     }
 
     #[test]
-    fn test_build_git_env_falls_back_to_npub_when_display_name_is_unusable() {
+    fn test_build_git_env_has_eight_auth_and_signing_entries_only() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("BUZZ_RELAY_URL");
+        std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
+        std::env::remove_var("GIT_CONFIG_COUNT");
+        let env = build_git_env(&key_info());
+
+        let count: usize = env
+            .iter()
+            .find(|(k, _)| k == "GIT_CONFIG_COUNT")
+            .map(|(_, v)| v.parse().unwrap())
+            .unwrap();
+        // credential.helper, useHttpPath, keyfile, gpg.format, x509.program,
+        // commit.gpgSign, tag.gpgSign, user.signingkey — no identity pair.
+        assert_eq!(count, 8);
+        assert_eq!(git_config(&env, "user.name"), None);
+        assert_eq!(git_config(&env, "user.email"), None);
+    }
+
+    #[test]
+    fn test_build_git_env_ignores_unusable_display_name_for_identity() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("GIT_CONFIG_COUNT");
 
-        // Crud-only and format-only names both reach git as the npub — one
-        // would abort every commit, the other would render as blank.
-        for raw in ["<>", "\u{200B}"] {
+        // Display-name edge cases must still never become Author/Committer.
+        for raw in ["<>", "\u{200B}", "Duncan"] {
             std::env::set_var("BUZZ_ACP_DISPLAY_NAME", raw);
             let env = build_git_env(&key_info());
             assert_eq!(
-                git_config(&env, "user.name").as_deref(),
-                Some(NPUB),
-                "unusable display name {raw:?} must reach git as the npub"
+                git_config(&env, "user.name"),
+                None,
+                "display name {raw:?} must not become user.name"
             );
+            assert_eq!(git_config(&env, "user.email"), None);
         }
         std::env::remove_var("BUZZ_ACP_DISPLAY_NAME");
     }
