@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getActivityHeadline,
+  getLatestActivityHeadline,
   isMeaningfulItem,
   isSpineItem,
   shouldShowTranscriptRowTimestamp,
@@ -311,4 +312,38 @@ test("shouldShowTranscriptRowTimestamp: compact preview stays dense", () => {
     }),
     false,
   );
+});
+
+
+test("getLatestActivityHeadline prefers latest spine work and scopes by channel", () => {
+  const items = [
+    makeMessage({
+      id: "msg:old",
+      text: "Old reply",
+      channelId: "chan-a",
+      timestamp: "2026-06-14T19:00:00.000Z",
+    }),
+    makeTool({
+      id: "tool:1",
+      channelId: "chan-a",
+      timestamp: "2026-06-14T19:00:10.000Z",
+      startedAt: "2026-06-14T19:00:10.000Z",
+    }),
+    makeMessage({
+      id: "msg:other",
+      text: "Other channel",
+      channelId: "chan-b",
+      timestamp: "2026-06-14T19:00:20.000Z",
+    }),
+  ];
+  assert.equal(
+    getLatestActivityHeadline(items, "chan-a"),
+    "Send Message · abc",
+  );
+  assert.equal(getLatestActivityHeadline(items, "chan-b"), "Other channel");
+  assert.equal(getLatestActivityHeadline(items, "chan-missing"), null);
+});
+
+test("getLatestActivityHeadline returns null for empty transcripts", () => {
+  assert.equal(getLatestActivityHeadline([]), null);
 });

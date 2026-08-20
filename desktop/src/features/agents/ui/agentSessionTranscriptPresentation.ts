@@ -98,3 +98,37 @@ export function isSpineItem(item: TranscriptItem): boolean {
   if (!isMeaningfulItem(item)) return false;
   return item.type !== "metadata";
 }
+
+/**
+ * Latest meaningful activity headline for a transcript, optionally scoped to
+ * one channel. Prefers spine work; falls back to any meaningful item so early
+ * session context can still surface. Returns null when nothing qualifies.
+ */
+export function getLatestActivityHeadline(
+  items: readonly TranscriptItem[],
+  channelId?: string | null,
+): string | null {
+  const scoped =
+    channelId && channelId.length > 0
+      ? items.filter((item) => item.channelId === channelId)
+      : items;
+  if (scoped.length === 0) {
+    return null;
+  }
+
+  const passFilter: (item: TranscriptItem) => boolean = scoped.some(isSpineItem)
+    ? isSpineItem
+    : isMeaningfulItem;
+
+  for (let i = scoped.length - 1; i >= 0; i--) {
+    const item = scoped[i];
+    if (!item || !passFilter(item)) {
+      continue;
+    }
+    const headline = getActivityHeadline(item);
+    if (headline) {
+      return headline;
+    }
+  }
+  return null;
+}

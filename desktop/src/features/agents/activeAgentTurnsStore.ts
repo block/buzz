@@ -67,9 +67,16 @@ export type ActiveTurnSummary = {
 /** One channel with active agent work, aggregated across agents. */
 export type ActiveChannelTurnSummary = {
   channelId: string;
+  /** Earliest live-turn anchor in the channel (channel-level badge age). */
   anchorAt: number;
   agentCount: number;
   agentPubkeys: string[];
+  /**
+   * Per-agent earliest desktop-clock anchor for turns in this channel.
+   * Keys are normalized pubkeys matching `agentPubkeys`. Used so multi-agent
+   * surfaces can show distinct elapsed ages instead of one shared channel age.
+   */
+  agentAnchorAts: Record<string, number>;
   agentNames?: string[];
 };
 
@@ -539,7 +546,11 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
 
   const summaries = new Map<
     string,
-    { anchorAt: number; agentPubkeys: Set<string> }
+    {
+      anchorAt: number;
+      agentPubkeys: Set<string>;
+      agentAnchorAts: Map<string, number>;
+    }
   >();
 
   for (const [agentKey, agentTurns] of activeTurnsByAgent) {
@@ -553,6 +564,7 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
         summaries.set(turn.channelId, {
           anchorAt,
           agentPubkeys: new Set([agentKey]),
+          agentAnchorAts: new Map([[agentKey, anchorAt]]),
         });
         continue;
       }
@@ -561,16 +573,31 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
       if (anchorAt < summary.anchorAt) {
         summary.anchorAt = anchorAt;
       }
+      const priorAgentAnchor = summary.agentAnchorAts.get(agentKey);
+      if (priorAgentAnchor === undefined || anchorAt < priorAgentAnchor) {
+        summary.agentAnchorAts.set(agentKey, anchorAt);
+      }
     }
   }
 
   const result = [...summaries.entries()]
-    .map(([channelId, summary]) => ({
-      channelId,
-      anchorAt: summary.anchorAt,
-      agentCount: summary.agentPubkeys.size,
-      agentPubkeys: [...summary.agentPubkeys].sort(),
-    }))
+    .map(([channelId, summary]) => {
+      const agentPubkeys = [...summary.agentPubkeys].sort();
+      const agentAnchorAts: Record<string, number> = {};
+      for (const pubkey of agentPubkeys) {
+        const agentAnchor = summary.agentAnchorAts.get(pubkey);
+        if (agentAnchor !== undefined) {
+          agentAnchorAts[pubkey] = agentAnchor;
+        }
+      }
+      return {
+        channelId,
+        anchorAt: summary.anchorAt,
+        agentCount: agentPubkeys.length,
+        agentPubkeys,
+        agentAnchorAts,
+      };
+    })
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedChannelTurnSummaries = result;
   return result;

@@ -4,7 +4,9 @@ import { Clock, Loader2, MailOpen } from "lucide-react";
 import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
+import { getLatestActivityHeadline } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import { useOpenAgentActivity } from "@/features/agents/useOpenAgentActivity";
 import { buildInboxItems, type InboxItem } from "@/features/home/lib/inbox";
 import { getGroupedInboxItemIds } from "@/features/home/useHomeInboxReadState";
@@ -145,18 +147,29 @@ function ThreadPreviewRow({
 }
 
 function WorkingAgentRow({
+  anchorAt,
   avatarUrl,
-  elapsed,
+  channelId,
   name,
   onOpen,
   pubkey,
 }: {
+  anchorAt: number;
   avatarUrl: string | null;
-  elapsed: string;
+  channelId: string;
   name: string;
   onOpen: () => void;
   pubkey: string;
 }) {
+  const now = useNow(1000);
+  const elapsed = formatElapsed(Math.max(0, now - anchorAt));
+  const transcript = useAgentTranscript(true, pubkey);
+  const headline = React.useMemo(
+    () => getLatestActivityHeadline(transcript, channelId),
+    [channelId, transcript],
+  );
+  const secondary = headline ? `Working · ${headline}` : "Working";
+
   return (
     <button
       className="flex w-full min-w-0 items-start gap-2.5 border-t border-border/50 px-3 py-3 text-left transition-colors first:border-t-0 hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-hidden"
@@ -179,9 +192,13 @@ function WorkingAgentRow({
             {elapsed}
           </span>
         </div>
-        <span className="mt-0.5 flex items-center gap-1.5 text-xs leading-4 text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary/70" />
-          Working
+        <span
+          className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs leading-4 text-muted-foreground"
+          data-testid={`channel-activity-agent-status-${pubkey}`}
+          title={secondary}
+        >
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary/70" />
+          <span className="min-w-0 truncate">{secondary}</span>
         </span>
       </div>
     </button>
@@ -199,8 +216,6 @@ function WorkingAgentRows({
   onOpen: (pubkey: string, channelId: string) => void;
   profiles?: UserProfileLookup;
 }) {
-  const now = useNow(1000);
-  const elapsed = formatElapsed(now - activeWorking.anchorAt);
   const alignedAgentNames =
     activeWorking.agentNames?.length === activeWorking.agentPubkeys.length
       ? activeWorking.agentNames
@@ -212,10 +227,16 @@ function WorkingAgentRows({
       profile?.displayName?.trim() ||
       alignedAgentNames?.[index] ||
       `Agent ${truncatePubkey(pubkey)}`;
+    const agentKey = normalizePubkey(pubkey);
+    const anchorAt =
+      activeWorking.agentAnchorAts?.[agentKey] ??
+      activeWorking.agentAnchorAts?.[pubkey] ??
+      activeWorking.anchorAt;
     return (
       <WorkingAgentRow
+        anchorAt={anchorAt}
         avatarUrl={profile?.avatarUrl ?? null}
-        elapsed={elapsed}
+        channelId={channelId}
         key={pubkey}
         name={name}
         onOpen={() => onOpen(pubkey, channelId)}

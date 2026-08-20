@@ -308,6 +308,18 @@ describe("activeAgentTurnsStore", () => {
         summaries[0].anchorAt,
         getActiveTurnsForAgent(AGENT)[0].anchorAt,
       );
+      assert.equal(
+        summaries[0].agentAnchorAts[AGENT],
+        getActiveTurnsForAgent(AGENT)[0].anchorAt,
+      );
+      assert.equal(
+        summaries[0].agentAnchorAts[AGENT_2],
+        getActiveTurnsForAgent(AGENT_2)[0].anchorAt,
+      );
+      assert.notEqual(
+        summaries[0].agentAnchorAts[AGENT],
+        summaries[0].agentAnchorAts[AGENT_2],
+      );
     });
 
     it("removes a channel summary when the last active turn ends", () => {

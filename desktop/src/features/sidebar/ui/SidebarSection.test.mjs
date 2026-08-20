@@ -12,6 +12,12 @@ function summary(agentNames, agentCount = agentNames.length) {
       { length: agentCount },
       (_, index) => `agent-${index}-pubkey`,
     ),
+    agentAnchorAts: Object.fromEntries(
+      Array.from({ length: agentCount }, (_, index) => [
+        `agent-${index}-pubkey`,
+        0,
+      ]),
+    ),
     agentNames,
   };
 }
