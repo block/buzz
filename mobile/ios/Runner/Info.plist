@@ -51,6 +51,8 @@
 	<string>Buzz needs photo library access so you can attach images to messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Buzz needs permission to save images to your photo library.</string>
+	<key>NSUserNotificationsUsageDescription</key>
+	<string>Buzz notifies you about inbox mentions, approvals, direct messages, and agent job results.</string>
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>
