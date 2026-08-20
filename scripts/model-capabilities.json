@@ -1037,7 +1037,7 @@
       "databricks_v2_wire_route": "mlflow-chat",
       "normalization_policy": "openai-standard",
       "_provenance": "databricks_v2_wire_route: provider fallback (databricks_v2/concrete_unknown); thinking_mode+supported_efforts: models.dev Moonshot Kimi K3 catalog; default_effort: no documented default",
-      "source": "models.dev Moonshot Kimi K3 reasoning_options: toggle + low|high|max",
+      "_source": "models.dev Moonshot Kimi K3 reasoning_options: toggle + low|high|max",
       "_reconciliation": "adopt",
       "_reconciliation_note": "models.dev advertises toggleable reasoning with [low, high, max], but no default. The Databricks endpoint is absent from its provider catalog, so retain the established MLflow Chat route, adopt the upstream capability set, and leave the effort unset rather than invent a Databricks default.",
       "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-20, SHA-256 7ccb5635f682e4248ad8d39f515fbe3f2bb10e67bbc7fa1b94e66dddb00779e5): providers.moonshotai.models[\"kimi-k3\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]; Databricks endpoint absent from providers.databricks.models"
