@@ -26,9 +26,13 @@ mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod native_relay_client;
 mod native_websocket;
+mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
+mod observed_unread;
+mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;
@@ -42,6 +46,7 @@ mod terminal_runtime;
 mod terminal_transport;
 #[cfg(target_os = "macos")]
 mod tray_menu;
+mod unread_catch_up;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
@@ -197,95 +202,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
 
-    // The global-shortcut plugin is omitted from test builds: linking it into
-    // the lib-test binary makes it fail to load on Windows (STATUS_ENTRYPOINT_NOT_FOUND) before any test runs.
-    #[cfg(not(test))]
-    let builder = builder.plugin({
-        use tauri_plugin_global_shortcut::ShortcutState;
-
-        // Generation counter for the release delay task. Incremented on
-        // every press — a delayed release only fires if the generation
-        // hasn't changed (i.e. no new press happened during the delay).
-        // This prevents press→release→press within 200 ms from having
-        // the first release clobber the second press.
-        let ptt_press_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-        tauri_plugin_global_shortcut::Builder::new()
-            .with_handler(move |app, _shortcut, event| {
-                let state = match app.try_state::<AppState>() {
-                    Some(s) => s,
-                    None => return,
-                };
-
-                // Only act if a huddle is active and mode is PTT.
-                let (is_ptt_mode, is_active) = match state.huddle_state.lock() {
-                    Ok(hs) => (
-                        hs.voice_input_mode == huddle::VoiceInputMode::PushToTalk,
-                        matches!(
-                            hs.phase,
-                            huddle::HuddlePhase::Connected | huddle::HuddlePhase::Active
-                        ),
-                    ),
-                    Err(_) => return,
-                };
-
-                if !is_ptt_mode || !is_active {
-                    return;
-                }
-
-                match event.state {
-                    ShortcutState::Pressed => {
-                        // Bump generation — invalidates any pending release delay.
-                        ptt_press_gen.fetch_add(1, std::sync::atomic::Ordering::Release);
-
-                        if let Ok(hs) = state.huddle_state.lock() {
-                            hs.ptt_active
-                                .store(true, std::sync::atomic::Ordering::Release);
-                            // Only cancel TTS if it's actually playing — avoids
-                            // a stale cancel flag that drops the next queued message.
-                            if hs.tts_active.load(std::sync::atomic::Ordering::Acquire) {
-                                hs.tts_cancel
-                                    .store(true, std::sync::atomic::Ordering::Release);
-                            }
-                        }
-                        // Emit ptt-state=true to the frontend.
-                        // The React side plays the press audio cue on this event
-                        // (Web Audio API via HuddleContext). Rust-side rodio audio
-                        // was considered but rejected: the rodio OutputStream must
-                        // outlive the handler and sharing it across the shortcut
-                        // closure adds lifecycle complexity for marginal gain.
-                        // The React implementation is sufficient and simpler.
-                        let _ = app.emit("ptt-state", true);
-                    }
-                    ShortcutState::Released => {
-                        // Capture generation at release time.
-                        let gen_at_release =
-                            ptt_press_gen.load(std::sync::atomic::Ordering::Acquire);
-                        let gen_arc = Arc::clone(&ptt_press_gen);
-                        let app_handle = app.clone();
-                        // 200 ms release delay — captures the tail of the utterance.
-                        // Only applies if no new press happened during the delay.
-                        tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                            // Check generation — if it changed, a new press arrived.
-                            if gen_arc.load(std::sync::atomic::Ordering::Acquire) != gen_at_release
-                            {
-                                return; // Superseded by a new press.
-                            }
-                            if let Some(state) = app_handle.try_state::<AppState>() {
-                                if let Ok(hs) = state.huddle_state.lock() {
-                                    hs.ptt_active
-                                        .store(false, std::sync::atomic::Ordering::Release);
-                                }
-                            }
-                            // Emit ptt-state=false — React plays the release audio cue.
-                            let _ = app_handle.emit("ptt-state", false);
-                        });
-                    }
-                }
-            })
-            .build()
-    });
+    // The push-to-talk global-shortcut plugin lives in `ptt_shortcut`, next to
+    // the registration lifecycle it drives. Installing it is a no-op in test
+    // builds; see that module for why.
+    let builder = ptt_shortcut::install(builder);
 
     // Register the updater only in configured release builds; omit it locally.
     #[cfg(buzz_updater_enabled)]
@@ -311,6 +231,9 @@ pub fn run() {
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .manage(terminal_runtime::TerminalSessions::default())
+        .manage(archive::sync::ArchiveSyncState::default())
+        .manage(native_relay_client::NativeRelayClient::default())
+        .manage(observed_unread::ObservedUnreadStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -646,9 +569,11 @@ pub fn run() {
             get_user_notes,
             get_git_identity,
             get_project_repo_snapshot,
+            get_project_repo_file_content,
             get_project_repo_diff,
             get_project_local_repo_diff,
             get_project_local_repo_snapshot,
+            get_project_local_repo_file_content,
             get_project_repo_sync_status,
             list_project_local_repositories,
             clone_project_repository,
@@ -797,6 +722,10 @@ pub fn run() {
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
+            persona_catalog::fetch_persona_catalog,
+            unread_catch_up::unread_catch_up,
+            observed_unread::observed_unread_open_scope,
+            observed_unread::observed_unread_ingest,
             list_personas,
             create_persona,
             update_persona,
@@ -911,6 +840,9 @@ pub fn run() {
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
             archive::get_agent_usage_series,
+            archive::sync::announce_archive_sync_epoch,
+            archive::sync::start_archive_sync,
+            archive::sync::stop_archive_sync,
             is_auto_update_supported,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]

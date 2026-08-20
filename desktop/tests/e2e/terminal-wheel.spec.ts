@@ -169,6 +169,33 @@ async function reveal(page: Page) {
     .toBeGreaterThanOrEqual(180);
 }
 
+test("project terminal button opens Buzz Term for the repository", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await installTerminalBackend(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-section-projects").click();
+  const projectEntry = page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first();
+  await expect(projectEntry).toBeVisible({ timeout: 10_000 });
+  await projectEntry.click();
+
+  const terminalButton = page.getByTestId("project-terminal-toggle");
+  await expect(terminalButton).toBeEnabled();
+  await terminalButton.click();
+  await expect(page.locator(TERM)).toHaveAttribute(
+    "data-terminal-mode",
+    "docked",
+  );
+  await expect(page.locator(TERM)).toBeVisible();
+});
+
 test("scrollback: wheel over Buzz Term reaches terminal_scroll", async ({
   page,
 }) => {

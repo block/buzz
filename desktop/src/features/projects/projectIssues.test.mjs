@@ -125,8 +125,26 @@ test("tag helpers drop malformed value-less tags", () => {
 
   const issue = eventToProjectIssue(event);
   assert.deepEqual(issue.labels, ["bug"]);
+  assert.equal(issue.category, "issue");
   assert.equal(issue.status, PROJECT_ISSUE_STATUS.BACKLOG);
   assert.equal(issue.title, "Something is broken");
+});
+
+test("derives task categories from labels while defaulting legacy tasks to issue", () => {
+  const changeRequest = eventToProjectIssue(
+    issueEvent({
+      tags: [
+        ["a", REPO_ADDRESS],
+        ["subject", "Update the release workflow"],
+        ["t", "change-request"],
+        ["t", "release"],
+      ],
+    }),
+  );
+
+  assert.equal(changeRequest.category, "change-request");
+  assert.deepEqual(changeRequest.labels, ["change-request", "release"]);
+  assert.equal(eventToProjectIssue(issueEvent()).category, "issue");
 });
 
 test("preserves root and comment tags for rich content rendering", () => {

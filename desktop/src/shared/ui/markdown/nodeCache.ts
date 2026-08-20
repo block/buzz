@@ -68,6 +68,8 @@ export type MarkdownParseInputs = {
   components: Components;
   content: string;
   customEmoji?: CustomEmoji[];
+  /** Omit or true for chat-style `<br>` on every newline. */
+  hardLineBreaks?: boolean;
   /** Inserts the runtime-provided leading content marker during parsing. */
   leadingInlineContent?: boolean;
   mentionNames?: string[];
@@ -104,7 +106,7 @@ function buildMarkdownElement(input: MarkdownParseInputs): React.ReactElement {
     components: input.components,
     remarkPlugins: [
       remarkGfm,
-      remarkBreaks,
+      ...(input.hardLineBreaks === false ? [] : [remarkBreaks]),
       remarkSpoilers,
       remarkChannelDeepLinks,
       remarkMessageLinks,
@@ -140,6 +142,7 @@ export function renderCachedMarkdown(
   // distinct input tuples. Content is last and needs no prefix: everything
   // before it is self-delimiting.
   const key =
+    segment(input.hardLineBreaks === false ? "soft" : "hard") +
     segment(input.variant) +
     segment(input.leadingInlineContent ? "leading" : "") +
     listSegment(input.mentionNames) +
