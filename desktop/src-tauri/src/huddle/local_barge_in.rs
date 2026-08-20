@@ -63,9 +63,71 @@ impl LocalBargeIn {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct WorkerLocalBargeIn {
+    state: LocalBargeIn,
+    human_floor: HumanFloor,
+}
+
+impl WorkerLocalBargeIn {
+    pub(super) fn new(human_floor: HumanFloor) -> Self {
+        Self {
+            state: LocalBargeIn::default(),
+            human_floor,
+        }
+    }
+}
+
+impl std::ops::Deref for WorkerLocalBargeIn {
+    type Target = LocalBargeIn;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for WorkerLocalBargeIn {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl Drop for WorkerLocalBargeIn {
+    fn drop(&mut self) {
+        self.state.release(&self.human_floor);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_shutdown_releases_local_floor_for_replacement() {
+        let human_floor = HumanFloor::new();
+        {
+            let mut worker_barge_in = WorkerLocalBargeIn::new(human_floor.clone());
+            worker_barge_in.acquire(&human_floor, true, false);
+            assert!(human_floor.is_blocked());
+        }
+
+        let mut replacement = WorkerLocalBargeIn::new(human_floor.clone());
+        replacement.acquire(&human_floor, true, false);
+        assert!(replacement.acquired_floor);
+    }
+
+    #[test]
+    fn worker_channel_disconnect_releases_local_floor_for_replacement() {
+        let human_floor = HumanFloor::new();
+        let mut worker_barge_in = WorkerLocalBargeIn::new(human_floor.clone());
+        worker_barge_in.acquire(&human_floor, true, false);
+        assert!(human_floor.is_blocked());
+        drop(worker_barge_in);
+
+        let mut replacement = WorkerLocalBargeIn::new(human_floor.clone());
+        replacement.acquire(&human_floor, true, false);
+        assert!(replacement.acquired_floor);
+    }
 
     #[test]
     fn manual_open_mic_enables_vad_barge_in_in_ptt_mode() {

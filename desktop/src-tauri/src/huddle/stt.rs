@@ -426,7 +426,7 @@ fn stt_worker(
     // computed at. Valid only while no new voiced frame has arrived since.
     let speculative_enabled = stt_speculative_decode();
     let mut speculative: Option<(String, usize)> = None;
-    let mut local_barge_in_state = local_barge_in::LocalBargeIn::default();
+    let mut local_barge_in_state = local_barge_in::WorkerLocalBargeIn::new(human_floor.clone());
 
     // ── 5. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
