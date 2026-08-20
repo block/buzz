@@ -63,17 +63,13 @@ function mergeRecency(start, displayed, refreshed) {
   )[0];
 }
 
-test("mergeConcurrentChannelRecency preserves live recency for both refresh response shapes", () => {
-  // A full-list response and a not-modified response both reduce to the same
-  // refreshed/displayed/start inputs before settlement.
-  for (const responseShape of ["full-list", "not-modified"]) {
-    const result = mergeRecency(
-      "2026-01-01T00:00:00Z",
-      "2026-01-01T00:02:00Z",
-      "2026-01-01T00:01:00Z",
-    );
-    assert.equal(result.lastMessageAt, "2026-01-01T00:02:00Z", responseShape);
-  }
+test("mergeConcurrentChannelRecency preserves a newer live timestamp", () => {
+  const result = mergeRecency(
+    "2026-01-01T00:00:00Z",
+    "2026-01-01T00:02:00Z",
+    "2026-01-01T00:01:00Z",
+  );
+  assert.equal(result.lastMessageAt, "2026-01-01T00:02:00Z");
 });
 
 test("mergeConcurrentChannelRecency preserves monotonic and absence semantics", () => {
