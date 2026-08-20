@@ -32,7 +32,7 @@ use nostr::{Event, EventBuilder, Kind, PublicKey, Tag, Timestamp, ToBech32};
 
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use crate::validate::validate_hex64;
+use crate::validate::{fold_name, validate_hex64};
 
 /// NIP-23 long-form content kind.
 pub const KIND_LONG_FORM: u16 = 30023;
@@ -217,7 +217,7 @@ pub async fn resolve_author(client: &BuzzClient, author_flag: &str) -> Result<Pu
     });
     let raw = client.query(&filter).await?;
     let events = parse_events(&raw)?;
-    let lower = author_flag.to_ascii_lowercase();
+    let lower = fold_name(author_flag);
     let matches: Vec<&Event> = events
         .iter()
         .filter(|e| {
@@ -229,7 +229,7 @@ pub async fn resolve_author(client: &BuzzClient, author_flag: &str) -> Result<Pu
                 .or_else(|| meta.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            name.to_ascii_lowercase() == lower
+            fold_name(name) == lower
         })
         .collect();
     match matches.len() {

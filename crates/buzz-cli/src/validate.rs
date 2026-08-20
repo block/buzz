@@ -35,6 +35,13 @@ pub fn validate_hex64(s: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Case-fold a user-facing name for matching.
+///
+/// Re-exported from buzz-sdk, which owns the rule: `extract_at_mentions_with_known`
+/// returns keys folded with it, so the CLI's `name → pubkey` maps have to be
+/// built with the very same function, not a second copy of it.
+pub use buzz_sdk::mentions::fold_name;
+
 /// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
 pub fn validate_repo_id(s: &str) -> Result<(), CliError> {
     if s.is_empty() || s.len() > 64 {
@@ -502,5 +509,35 @@ mod tests {
         // verbatim as if it were the patch content.
         let err = super::read_file_or_stdin("0001-does-not-exist.patch").unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+}
+
+#[cfg(test)]
+mod fold_name_tests {
+    use super::fold_name;
+
+    /// Every expectation is JavaScript's `toLowerCase` output for the same
+    /// input, taken from node, because Desktop is the other implementation of
+    /// this rule and the two have to agree about what a query finds.
+    #[test]
+    fn folds_the_same_way_javascript_does() {
+        for (input, expected) in [
+            ("ÉQUIPE", "équipe"),
+            ("ОБЩИЙ", "общий"),
+            ("Ünnepek", "ünnepek"),
+            ("JOSÉ", "josé"),
+            ("Straße", "straße"),
+            ("ǅungla", "ǆungla"),
+            ("İstanbul", "i̇stanbul"),
+            ("ÅNGSTRÖM", "ångström"),
+        ] {
+            assert_eq!(fold_name(input), expected, "folding {input}");
+        }
+    }
+
+    #[test]
+    fn leaves_ascii_alone_as_before() {
+        assert_eq!(fold_name("Buzz-Chat-Composer"), "buzz-chat-composer");
+        assert_eq!(fold_name(""), "");
     }
 }
