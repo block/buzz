@@ -83,7 +83,7 @@ impl MeshPeer {
         self.counters.streams_opened.fetch_add(1, Ordering::Relaxed);
         Ok(MeshStream::new(
             Box::new(IrohSendHalf(send)),
-            Box::new(IrohRecvHalf(recv)),
+            Box::new(IrohRecvHalf::new(recv)),
         ))
     }
 
@@ -98,7 +98,7 @@ impl MeshPeer {
             .fetch_add(1, Ordering::Relaxed);
         Ok(MeshStream::new(
             Box::new(IrohSendHalf(send)),
-            Box::new(IrohRecvHalf(recv)),
+            Box::new(IrohRecvHalf::new(recv)),
         ))
     }
 
@@ -130,7 +130,49 @@ impl MeshPeer {
 }
 
 struct IrohSendHalf(iroh::endpoint::SendStream);
-struct IrohRecvHalf(iroh::endpoint::RecvStream);
+
+/// Receiving half with resumable framing state.
+///
+/// `recv_frame` futures get raced against drain ticks and shutdown signals
+/// (e.g. `run_demo_echo`), so a dropped future must not lose stream position.
+/// Partially-read frame bytes accumulate in `buf` across cancellations; each
+/// `RecvStream::read` await is itself cancel-safe, so the only state that
+/// matters lives here rather than in the future.
+struct IrohRecvHalf {
+    stream: iroh::endpoint::RecvStream,
+    /// Bytes of the in-progress frame (length prefix + body) read so far.
+    buf: Vec<u8>,
+}
+
+impl IrohRecvHalf {
+    fn new(stream: iroh::endpoint::RecvStream) -> Self {
+        Self {
+            stream,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Grow `self.buf` to `target` bytes, returning `false` on clean EOF
+    /// before any byte of the current frame arrived.
+    async fn fill(&mut self, target: usize) -> Result<bool, MeshError> {
+        while self.buf.len() < target {
+            let mut chunk = vec![0u8; target - self.buf.len()];
+            match self.stream.read(&mut chunk).await {
+                Ok(Some(n)) => self.buf.extend_from_slice(&chunk[..n]),
+                Ok(None) => {
+                    if self.buf.is_empty() {
+                        return Ok(false);
+                    }
+                    return Err(MeshError::Transport(
+                        "stream finished mid-frame".to_string(),
+                    ));
+                }
+                Err(err) => return Err(MeshError::Transport(err.to_string())),
+            }
+        }
+        Ok(true)
+    }
+}
 
 impl StreamSendHalf for IrohSendHalf {
     fn send_frame(
@@ -167,14 +209,12 @@ impl StreamSendHalf for IrohSendHalf {
 impl StreamRecvHalf for IrohRecvHalf {
     fn recv_frame(&mut self) -> crate::BoxFuture<'_, Result<Option<MeshStreamFrame>, MeshError>> {
         Box::pin(async move {
-            let mut len = [0u8; 4];
-            match self.0.read_exact(&mut len).await {
-                Ok(_) => {}
-                Err(iroh::endpoint::ReadExactError::FinishedEarly(0)) => return Ok(None),
-                Err(err) => return Err(MeshError::Transport(err.to_string())),
+            // Length prefix. `fill` resumes from `self.buf` if a previous
+            // `recv_frame` future was dropped mid-read.
+            if !self.fill(4).await? {
+                return Ok(None);
             }
-
-            let len = u32::from_le_bytes(len);
+            let len = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
             if len > wire::MAX_STREAM_FRAME {
                 return Err(MeshError::FrameTooLarge {
                     size: len as usize,
@@ -182,12 +222,15 @@ impl StreamRecvHalf for IrohRecvHalf {
                 });
             }
 
-            let mut bytes = vec![0u8; len as usize];
-            self.0
-                .read_exact(&mut bytes)
-                .await
-                .map_err(|err| MeshError::Transport(err.to_string()))?;
-            wire::decode::<MeshStreamFrame>(&bytes).map(Some)
+            let total = 4 + len as usize;
+            if !self.fill(total).await? {
+                return Err(MeshError::Transport(
+                    "stream finished mid-frame".to_string(),
+                ));
+            }
+            let frame = wire::decode::<MeshStreamFrame>(&self.buf[4..total]).map(Some);
+            self.buf.clear();
+            frame
         })
     }
 }
