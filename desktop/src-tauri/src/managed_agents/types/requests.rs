@@ -200,6 +200,11 @@ pub struct CreateManagedAgentRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateManagedAgentRequest {
     pub pubkey: String,
+    /// Absent = don't touch. A stopped local agent may migrate to a provider.
+    /// Provider-to-local and provider-to-provider moves require an explicit
+    /// lifecycle protocol and are rejected by the update command.
+    #[serde(default)]
+    pub backend: Option<BackendKind>,
     /// Absent = don't touch. Present = rename the agent.
     #[serde(default)]
     pub name: Option<String>,

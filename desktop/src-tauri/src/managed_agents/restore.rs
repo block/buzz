@@ -26,6 +26,16 @@ enum SpawnOutcome {
 }
 type AgentSpawnResult = (String, SpawnOutcome);
 
+fn restore_snapshot_is_current(
+    snapshot: &super::ManagedAgentRecord,
+    current: &super::ManagedAgentRecord,
+) -> bool {
+    current.pubkey == snapshot.pubkey
+        && current.backend == BackendKind::Local
+        && current.start_on_app_launch
+        && current.updated_at == snapshot.updated_at
+}
+
 /// Backfill the pinned persona snapshot for pre-existing agents created before
 /// the record became the spawn source of truth. Runs once at launch, before
 /// `restore_managed_agents_on_launch` spawns anything, so no agent boots from an
@@ -89,7 +99,7 @@ pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> 
 ///
 /// Split into three phases to minimise lock contention with the frontend:
 ///   A (under lock): sync process state, cleanup, collect agents to start
-///   B (no locks):   resolve commands and spawn processes in parallel
+///   B (transition lock): revalidate, resolve commands, and spawn in parallel
 ///   C (re-lock):    write back PIDs and status to records on disk
 pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
@@ -241,7 +251,7 @@ pub async fn restore_managed_agents_on_launch(
         .map(|k| k.public_key().to_hex());
 
     #[cfg(feature = "mesh-llm")]
-    let agents_to_start = {
+    let mut agents_to_start = {
         // Preflight against the same resolution spawn uses — `resolve_effective_config`
         // (definition → global fallback). A linked instance's own `provider`/`model`/
         // `relay_mesh` bytes never contribute. See `start_local_agent_with_preflight`
@@ -285,6 +295,28 @@ pub async fn restore_managed_agents_on_launch(
         .lock()
         .map_err(|error| error.to_string())?;
     if shutdown_started.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // Phase A deliberately releases the store lock before the transition lock
+    // is acquired. Revalidate every snapshot after entering the transition
+    // protocol so an edit in that window (especially Local -> Provider) cannot
+    // be followed by a stale local spawn. The transition lock now prevents any
+    // later backend update until registration finishes.
+    {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let current_records = load_managed_agents(app)?;
+        agents_to_start.retain(|snapshot| {
+            current_records
+                .iter()
+                .find(|current| current.pubkey == snapshot.pubkey)
+                .is_some_and(|current| restore_snapshot_is_current(snapshot, current))
+        });
+    }
+    if agents_to_start.is_empty() {
         return Ok(());
     }
 
@@ -536,8 +568,23 @@ pub(crate) fn spawn_pending_profile_reconciliations(app: &tauri::AppHandle, work
 
 #[cfg(test)]
 mod profile_reconcile_tests {
-    use super::profile_reconcile_completed;
+    use super::{profile_reconcile_completed, restore_snapshot_is_current};
     use crate::commands::ProfileReconcileOutcome;
+
+    fn local_restore_record() -> super::super::ManagedAgentRecord {
+        let mut record: super::super::ManagedAgentRecord =
+            serde_json::from_value(serde_json::json!({
+                "pubkey": "agent", "name": "Agent", "relay_url": "", "acp_command": "",
+                "agent_command": "", "agent_args": [], "mcp_command": "",
+                "turn_timeout_seconds": 0, "system_prompt": null, "created_at": "",
+                "updated_at": "generation-a", "last_started_at": null,
+                "last_stopped_at": null, "last_exit_code": null, "last_error": null
+            }))
+            .unwrap();
+        record.backend = super::super::BackendKind::Local;
+        record.start_on_app_launch = true;
+        record
+    }
 
     #[test]
     fn skipped_reconciliation_never_retires_pending_work() {
@@ -547,6 +594,29 @@ mod profile_reconcile_tests {
         assert!(!profile_reconcile_completed(
             ProfileReconcileOutcome::SkippedDisabled
         ));
+    }
+
+    #[test]
+    fn migration_between_restore_snapshot_and_transition_fails_revalidation() {
+        let snapshot = local_restore_record();
+        let mut current = snapshot.clone();
+        assert!(restore_snapshot_is_current(&snapshot, &current));
+
+        current.backend = super::super::BackendKind::Provider {
+            id: "kubernetes".to_string(),
+            config: serde_json::json!({}),
+        };
+        current.start_on_app_launch = false;
+        current.updated_at = "generation-b".to_string();
+        assert!(!restore_snapshot_is_current(&snapshot, &current));
+    }
+
+    #[test]
+    fn edited_restore_generation_fails_revalidation() {
+        let snapshot = local_restore_record();
+        let mut current = snapshot.clone();
+        current.updated_at = "generation-b".to_string();
+        assert!(!restore_snapshot_is_current(&snapshot, &current));
     }
 }
 

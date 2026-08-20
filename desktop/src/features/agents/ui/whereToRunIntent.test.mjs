@@ -61,6 +61,20 @@ test("provider draft resolves with coerced config values", () => {
   });
 });
 
+test("provider intent preserves the edit agent's provider configuration shape", () => {
+  const intent = resolveBackendIntent(
+    providerDraft({
+      runOn: "kubernetes",
+      providerConfig: { namespace: "pilot", size: "5" },
+    }),
+  );
+  assert.deepEqual(intent, {
+    type: "provider",
+    id: "kubernetes",
+    config: { namespace: "pilot", size: 5 },
+  });
+});
+
 // ── applyProbeResult: probe resolution must merge, not overwrite ─────────────
 //
 // Pins the seam that fixed the "Typewriter Eraser" (agent-create dialog's

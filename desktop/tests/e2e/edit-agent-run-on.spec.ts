@@ -24,6 +24,26 @@ const KUBERNETES_CONFIG = {
   namespace: "buzz-agents-gfq7aq",
 };
 
+const KUBERNETES_PROVIDER = {
+  id: "kubernetes",
+  binaryPath: "/mock/buzz-backend-kubernetes",
+};
+
+const KUBERNETES_PROBE = {
+  ok: true,
+  config_schema: {
+    type: "object",
+    properties: {
+      namespace: {
+        type: "string",
+        title: "Namespace",
+        default: "buzz-agents-migration",
+      },
+    },
+    required: ["namespace"],
+  },
+};
+
 async function openEditDialog(
   page: import("@playwright/test").Page,
   agentName: string,
@@ -87,8 +107,9 @@ test("editing a kubernetes agent shows its saved run-on settings", async ({
     runOn.getByTestId("edit-agent-run-on-service_account"),
   ).toHaveCount(0);
 
-  // The section explains immutability instead of pretending to be a form.
-  await expect(runOn).toContainText("can't be changed afterwards");
+  await expect(runOn).toContainText(
+    "Provider-backed agents cannot change run location yet.",
+  );
 
   await runOn.scrollIntoViewIfNeeded();
   await waitForAnimations(page);
@@ -97,11 +118,13 @@ test("editing a kubernetes agent shows its saved run-on settings", async ({
     .screenshot({ path: `${SHOTS}/kubernetes-run-on.png` });
 });
 
-test("editing a local agent names this computer, with no config rows", async ({
+test("a stopped local agent migrates to a provider and keeps its profile", async ({
   page,
 }) => {
   const agent = TEST_IDENTITIES.tyler;
   await installMockBridge(page, {
+    backendProviders: [KUBERNETES_PROVIDER],
+    backendProviderProbeResult: KUBERNETES_PROBE,
     managedAgents: [
       {
         pubkey: agent.pubkey,
@@ -115,17 +138,67 @@ test("editing a local agent names this computer, with no config rows", async ({
   });
   await openEditDialog(page, "Local Helper");
 
+  const dialog = page.getByTestId("edit-agent-dialog");
+  const runOn = dialog.getByTestId("edit-agent-run-on-migration");
+  const trigger = runOn.locator("#agent-run-on");
+  await expect(trigger).toBeVisible();
+  await trigger.press("Enter");
+  await page
+    .getByRole("menuitemradio", { exact: true, name: "kubernetes" })
+    .press("Enter");
+  await expect(runOn.locator("#provider-cfg-namespace")).toHaveValue(
+    "buzz-agents-migration",
+  );
+  await expect(runOn).toContainText("preserves this agent's identity");
+  await dialog.getByTestId("edit-agent-dialog-submit").click();
+  await expect(dialog).toBeHidden();
+
+  await page.getByTestId("user-profile-edit-agent").click();
+  const savedRunOn = page.getByTestId("edit-agent-run-on");
+  await expect(savedRunOn.getByTestId("edit-agent-run-on-location")).toHaveText(
+    "kubernetes",
+  );
+  await expect(
+    savedRunOn.getByTestId("edit-agent-run-on-namespace"),
+  ).toContainText("buzz-agents-migration");
+  await expect(page.getByTestId("edit-agent-dialog")).toContainText(
+    "Edit Local Helper",
+  );
+
+  await savedRunOn.scrollIntoViewIfNeeded();
+  await waitForAnimations(page);
+  await page
+    .getByTestId("edit-agent-dialog")
+    .screenshot({ path: `${SHOTS}/migrated-run-on.png` });
+});
+
+test("an active local agent must be stopped before migration", async ({
+  page,
+}) => {
+  const agent = TEST_IDENTITIES.tyler;
+  await installMockBridge(page, {
+    backendProviders: [KUBERNETES_PROVIDER],
+    managedAgents: [
+      {
+        pubkey: agent.pubkey,
+        name: "Busy Local Helper",
+        status: "running",
+        channelNames: ["general"],
+        respondTo: "owner-only",
+        backend: { type: "local" },
+      },
+    ],
+  });
+  await openEditDialog(page, "Busy Local Helper");
+
   const runOn = page.getByTestId("edit-agent-run-on");
   await expect(runOn.getByTestId("edit-agent-run-on-location")).toHaveText(
     "This computer",
   );
-  await expect(runOn.getByTestId("edit-agent-run-on-namespace")).toHaveCount(0);
-
-  await runOn.scrollIntoViewIfNeeded();
-  await waitForAnimations(page);
-  await page
-    .getByTestId("edit-agent-dialog")
-    .screenshot({ path: `${SHOTS}/local-run-on.png` });
+  await expect(runOn).toContainText(
+    "Stop this agent before changing where it runs.",
+  );
+  await expect(page.locator("#agent-run-on")).toHaveCount(0);
 });
 
 test("a blox agent's single saved field renders with a humanized label", async ({

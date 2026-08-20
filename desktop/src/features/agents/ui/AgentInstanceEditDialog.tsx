@@ -65,10 +65,9 @@ import {
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
-import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
-import { RunOnSummarySection } from "./RunOnSummarySection";
+import { EditAgentRunOn, INITIAL_RUN_ON } from "./EditAgentRunOn";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -161,20 +160,18 @@ export function AgentInstanceEditDialog({
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     agent.respondToAllowlist,
   );
+  const [runOnState, setRunOnState] = React.useState(INITIAL_RUN_ON);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [avatarUrl, setAvatarUrl] = React.useState(agent.avatarUrl ?? "");
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [isAddHarnessOpen, setIsAddHarnessOpen] = React.useState(false);
   const shouldReduceMotion = useReducedMotion();
-
   // Runtime selector: defaults to "custom" until the dialog opens and the
   // catalog loads. The open-effect re-derives the correct id from the catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
-
   // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
-
   // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
@@ -197,6 +194,7 @@ export function AgentInstanceEditDialog({
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
+      setRunOnState(INITIAL_RUN_ON);
       setAvatarUrl(agent.avatarUrl ?? "");
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
@@ -209,7 +207,6 @@ export function AgentInstanceEditDialog({
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
-
   // Re-derive the runtime id when the catalog loads.
   React.useEffect(() => {
     if (!open || runtimeTouched.current || runtimes.length === 0) {
@@ -222,7 +219,6 @@ export function AgentInstanceEditDialog({
       setSelectedRuntimeId(matched.id);
     }
   }, [open, runtimes, agent.agentCommand]);
-
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
@@ -613,6 +609,7 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    runOnState.valid &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -658,6 +655,7 @@ export function AgentInstanceEditDialog({
       const submitEnvVars = inheritedSubmission.envVars;
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
+        backend: runOnState.backend,
         name: name.trim() !== agent.name ? name.trim() : undefined,
         // relayUrl deliberately never submitted: the legacy per-record pin is
         // ignored (#2122) and the stored value is preserved as-is.
@@ -934,15 +932,17 @@ export function AgentInstanceEditDialog({
                 />
               </div>
             </div>
-            <OwnerOnlyAccessField
+            <EditAgentRunOn
               accessLocked={agentAccessOwnerOnly === true}
+              agent={agent}
               allowlist={respondToAllowlist}
               disabled={updateMutation.isPending}
+              key={`${agent.pubkey}:${open}`}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
+              onRunOnStateChange={setRunOnState}
             />
-            <RunOnSummarySection backend={agent.backend} />
 
             {/* Provider (runtime) */}
             <div className="space-y-1.5">
