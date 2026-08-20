@@ -853,13 +853,14 @@ pub async fn cmd_edit_message(
     content: &str,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
-    validate_content_size(content)?;
+    let content = read_or_stdin(content)?;
+    validate_content_size(&content)?;
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
     let target_eid = parse_event_id(event_id)?;
 
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
+    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, &content)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
