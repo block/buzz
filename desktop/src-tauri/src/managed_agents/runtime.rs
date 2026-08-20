@@ -500,7 +500,21 @@ pub fn spawn_agent_child(
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
-    let effective_relay_url = runtime_key.relay_url.clone();
+    // `normalize_relay_url` canonicalizes every loopback host to 127.0.0.1, and
+    // its own doc says the canonical form is "for identity, receipts, status and
+    // deduplication" while "connection code may retain the configured URL". The
+    // runtime key is that canonical form, so using it here handed agents
+    // ws://127.0.0.1:3000 while the desktop itself spoke to ws://localhost:3000.
+    // Relay tenants bind on the literal HTTP authority, so the agent landed in a
+    // different community, discovered 0 channels, and sat idle without an error.
+    // Identity stays canonical (runtime_key is untouched); the child connects
+    // with the workspace URL verbatim. Same invariant as the
+    // `loopback_ws_localhost_preserves_authority` test in src/relay.rs.
+    let effective_relay_url = {
+        use tauri::Manager as _;
+        let state = app.state::<crate::app_state::AppState>();
+        crate::relay::relay_ws_url_with_override(&state)
+    };
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
