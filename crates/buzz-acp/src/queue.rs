@@ -1504,8 +1504,15 @@ pub(crate) struct StandingContext<'a> {
 
 impl StandingContext<'_> {
     /// Render the sections in the order legacy agents have always seen them.
+    ///
+    /// Always leads with the `[Defaults]` interaction norms — platform
+    /// defaults with no off switch, present even when `--no-base-prompt`
+    /// removes the base prompt, and placed before author-controlled content
+    /// so the persona reads as the override. Mirrors the `session/new` path
+    /// (`framed_system_prompt` in pool.rs); see `interaction_norms.rs`.
     pub(crate) fn sections(&self) -> Vec<String> {
-        let mut sections = Vec::with_capacity(6);
+        let mut sections = Vec::with_capacity(7);
+        sections.push(crate::interaction_norms::INTERACTION_NORMS_PREAMBLE.to_string());
         if let Some(bp) = self.base_prompt {
             sections.push(base_section(bp));
         }
@@ -2456,10 +2463,12 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         // system_prompt and base_prompt are delivered via session/new system role,
-        // so they must NOT appear in the user message.
+        // so they must NOT appear in the user message. The [Defaults] norms
+        // still lead: a legacy first message always carries them.
         assert!(!prompt.contains("[System]"));
         assert!(!prompt.contains("[Base]"));
-        assert!(prompt.starts_with("[Context]"));
+        assert!(prompt.starts_with("[Defaults]\n"));
+        assert!(prompt.contains("\n\n[Context]"));
     }
 
     #[test]
@@ -2486,8 +2495,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"),
-            "expected core block first, then [Context]; got: {prompt}"
+            prompt.contains("[Agent Memory — core]\nbe helpful\n\n[Context]"),
+            "expected core block right before [Context]; got: {prompt}"
+        );
+        assert!(
+            prompt.starts_with("[Defaults]\n"),
+            "the interaction norms lead the standing context; got: {prompt}"
         );
     }
 
@@ -2547,7 +2560,8 @@ mod tests {
             },
         )
         .join("\n\n");
-        assert!(prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"));
+        assert!(prompt.starts_with("[Defaults]\n"));
+        assert!(prompt.contains("[Agent Memory — core]\nbe helpful\n\n[Context]"));
     }
 
     #[test]
@@ -2567,11 +2581,13 @@ mod tests {
         };
 
         // format_prompt no longer accepts or emits base_prompt/system_prompt.
-        // They are delivered via session/new system role instead.
+        // They are delivered via session/new system role instead. The
+        // [Defaults] norms still ride the legacy first message.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(!prompt.contains("[Base]"));
         assert!(!prompt.contains("[System]"));
-        assert!(prompt.starts_with("[Context]"));
+        assert!(prompt.starts_with("[Defaults]\n"));
+        assert!(prompt.contains("\n\n[Context]"));
     }
 
     #[test]
@@ -2665,6 +2681,7 @@ mod tests {
         let later = format_prompt(&batch, &args(true)).join("\n\n");
 
         for section in [
+            "[Defaults]",
             "[Base]",
             "[System]",
             "[Team Instructions]",
@@ -2674,6 +2691,12 @@ mod tests {
             assert!(first.contains(section), "first message missing {section}");
             assert!(!later.contains(section), "turn 2 repeated {section}");
         }
+        // `[Defaults]` dropping out here is a known cost, not a goal: the
+        // interaction norms are only as durable as this gate on the legacy
+        // path, where modern agents keep them in the persistent system role.
+        // Re-sending them alone is not possible without also re-sending the
+        // rest of the block — `StandingContext::sections()` renders them
+        // together. See the durability note in `interaction_norms`.
         // What the turn is actually about survives, and now leads.
         assert!(later.starts_with("[Context]"), "got: {later}");
         assert!(later.contains("hello"));

@@ -56,17 +56,17 @@ export function parsePromptText(text: string): {
 }
 
 /**
- * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
- * `Team Instructions`/`Core Memory`/`Channel Canvas` sub-sections
+ * Split the framed `session/new` `systemPrompt` into its `Defaults`/`Base`/
+ * `System`/`Team Instructions`/`Core Memory`/`Channel Canvas` sub-sections
  * deterministically.
  *
  * The harness composes the value in order:
- *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
- * with any section omitted when absent. Extraction runs in reverse producer
- * order so that each `lastIndexOf` search operates on the full input and each
- * extraction boundary is unambiguous.
+ *   `[Defaults]\n{norms}\n\n[Base]\n{base}\n\n[System]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
+ * with any section other than `Defaults` omitted when absent. Extraction runs
+ * in reverse producer order so that each `lastIndexOf` search operates on the
+ * full input and each extraction boundary is unambiguous.
  *
- * Five extraction passes:
+ * Six extraction passes:
  *
  * 1. **Canvas** (`[Channel Canvas]`): appended last by `with_canvas()`.
  *    - Start-of-string: canvas-only input.
@@ -82,11 +82,17 @@ export function parsePromptText(text: string): {
  *    or `\n\n[Team Instructions]\n` inline), same last-occurrence guard. Output
  *    position: after System, before Core Memory.
  *
- * 4. **Base/System**: remainder after the three top-level section extractions.
- *    Split on the first `\n[System]\n` boundary; no embedded `[...]` line
- *    inside a body can start a new section.
+ * 4. **Defaults** (`[Defaults]`): prepended first by `framed_system_prompt()`
+ *    in `buzz-acp/src/pool.rs` — the platform interaction norms. Always at
+ *    start-of-string when present; the body is platform-authored (no embedded
+ *    user content), so the FIRST following producer boundary
+ *    (`\n\n[Workspace]\n`, `\n\n[Base]\n`, or `\n\n[System]\n`) ends it.
  *
- * 5. **Legacy Team Instructions** (backward compat): if the `System` body
+ * 5. **Base/System**: remainder after the section extractions. Split on the
+ *    first `\n[System]\n` boundary; no embedded `[...]` line inside a body
+ *    can start a new section.
+ *
+ * 6. **Legacy Team Instructions** (backward compat): if the `System` body
  *    contains the exact canonical delimiter `\n\n---\n# Team Instructions\n`
  *    (produced by the now-removed `compose_prompt()` in buzz-persona), the body
  *    is split at the **last** occurrence of that boundary. The text before
@@ -157,7 +163,32 @@ export function parseSystemPromptSections(
     }
   }
 
-  // ── 4. Parse Base/System from the remaining prefix ────────────────────────
+  // ── 4. Extract [Defaults] (platform interaction norms) ───────────────────
+  // framed_system_prompt() in buzz-acp/src/pool.rs prepends
+  // "[Defaults]\n{norms}\n\n" ahead of everything else. The body is
+  // platform-authored, so the FIRST following producer boundary ends it —
+  // there is no embedded-user-content risk that would require a
+  // last-occurrence guard here.
+  const DEFAULTS_HEADER = "[Defaults]";
+  let defaultsBody: string | null = null;
+
+  if (remainder.startsWith(`${DEFAULTS_HEADER}\n`)) {
+    const afterHeader = remainder.slice(`${DEFAULTS_HEADER}\n`.length);
+    const boundary = ["\n\n[Workspace]\n", "\n\n[Base]\n", "\n\n[System]\n"]
+      .map((marker) => afterHeader.indexOf(marker))
+      .filter((at) => at !== -1)
+      .reduce((min, at) => Math.min(min, at), Number.POSITIVE_INFINITY);
+    if (boundary === Number.POSITIVE_INFINITY) {
+      defaultsBody = afterHeader.trim();
+      remainder = "";
+    } else {
+      defaultsBody = afterHeader.slice(0, boundary).trim();
+      // Skip the blank-line separator; keep the next section's [Header].
+      remainder = afterHeader.slice(boundary + "\n\n".length);
+    }
+  }
+
+  // ── 5. Parse Base/System from the remaining prefix ────────────────────────
   // The canonical team-instructions delimiter produced by compose_prompt() in
   // buzz-persona/src/resolve.rs:
   //   format!("{persona_prompt}\n\n---\n# Team Instructions\n{instructions}")
@@ -179,6 +210,8 @@ export function parseSystemPromptSections(
       teamBody: raw.slice(at + TEAM_DELIMITER.length).trim() || null,
     };
   }
+
+  if (defaultsBody) sections.push({ title: "Defaults", body: defaultsBody });
 
   const baseAndSystem = remainder;
   if (baseAndSystem) {
@@ -205,7 +238,7 @@ export function parseSystemPromptSections(
     }
   }
 
-  // ── 5. Append team (modern), core, and canvas sections in producer order ──
+  // ── 6. Append team (modern), core, and canvas sections in producer order ──
   if (modernTeamBody)
     sections.push({ title: "Team Instructions", body: modernTeamBody });
   if (coreBody) sections.push({ title: "Core Memory", body: coreBody });

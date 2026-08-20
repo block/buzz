@@ -226,6 +226,11 @@ Everything after the closing `---` is the persona prompt text. Pack-level `instr
 appended after it. Embed the prompt directly — do not reference external files or `.mdc` rule
 files (agent runtimes typically do not read them).
 
+Do not give a persona a gender or gendered pronouns unless its creator asked — use it/its or
+they/them, or state the neutral case outright ("no gender — refer to me by name, or as they/it"),
+because the persona layer overrides Buzz's gender-neutral `[Defaults]` norm and silence leaves a gap
+other agents fill from the persona's name or theme.
+
 ---
 
 ## 5. Two-Layer Prompt Architecture

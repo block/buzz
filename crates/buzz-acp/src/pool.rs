@@ -1586,9 +1586,13 @@ async fn apply_permission_mode(
 /// Legacy agents (`protocol_version < 2`) don't receive standing context via
 /// the system role in `session/new`, so it must ride along in the user message
 /// — in the session's *first* one, and never again. Agents with
-/// `protocol_version >= 2`, or an empty [`StandingContext`], get `body`
-/// unchanged. Both legacy dispatch paths (initial message, heartbeat) go
-/// through this one gate so they can't drift apart again.
+/// `protocol_version >= 2` get `body` unchanged. Both legacy dispatch paths
+/// (initial message, heartbeat) go through this one gate so they can't drift
+/// apart again.
+///
+/// The standing context is never empty for legacy agents: its `[Defaults]`
+/// interaction norms are unconditional (see `interaction_norms.rs`), so even
+/// a bare configuration prepends that one section.
 ///
 /// A heartbeat passes base only: it has no channel, so there is no core or
 /// canvas to carry, and it has never been given the persona.
@@ -1616,6 +1620,12 @@ pub(crate) fn prepend_standing_for_legacy(
 /// only when present, so a persona-only agent yields `[System]\n{persona}`
 /// rather than an unlabeled blob that would be mislabeled as `[Base]`.
 ///
+/// Always leads with the `[Defaults]` interaction norms (and therefore always
+/// returns `Some`): they are platform defaults with no off switch — present
+/// even when `--no-base-prompt` removes the base prompt — and they precede
+/// author-controlled content so the persona reads as the override. See
+/// `interaction_norms.rs`.
+///
 /// Prepends a `[Workspace]` section naming the agent's absolute working
 /// directory. The base prompt describes the workspace layout but never its
 /// absolute root, so without this anchor a model fills the gap by searching
@@ -1628,6 +1638,7 @@ fn framed_system_prompt(
     base_prompt: Option<&str>,
     system_prompt: Option<&str>,
 ) -> Option<String> {
+    let norms = crate::interaction_norms::INTERACTION_NORMS_PREAMBLE;
     let body = match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
             "{}\n\n[System]\n{sp}",
@@ -1636,14 +1647,16 @@ fn framed_system_prompt(
         (Some(bp), None) => Some(crate::queue::base_section(bp)),
         (None, Some(sp)) => Some(format!("[System]\n{sp}")),
         (None, None) => None,
-    }?;
+    };
     // Anchor the workspace only when a base prompt is present — the workspace
     // section grounds the base prompt's layout description, so it is meaningless
     // for a persona-only (`[System]`-only) agent that never received that layout.
-    match (base_prompt, workspace_section(cwd)) {
-        (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
-        _ => Some(body),
-    }
+    let framed = match (base_prompt, workspace_section(cwd), body) {
+        (Some(_), Some(workspace), Some(body)) => format!("{workspace}\n\n{body}"),
+        (_, _, Some(body)) => body,
+        (_, _, None) => return Some(norms.to_string()),
+    };
+    Some(format!("{norms}\n\n{framed}"))
 }
 
 /// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
@@ -4791,14 +4804,21 @@ mod tests {
 
     #[test]
     fn test_initial_message_legacy_agent_gets_base_prepended() {
-        // protocol_version 1 + Some(base_prompt): [Base] rides along in the
-        // user message, composed as `[Base]\n{bp}\n\n{initial_msg}`.
+        // protocol_version 1 + Some(base_prompt): [Defaults] and [Base] ride
+        // along in the user message, composed as
+        // `[Defaults]\n{norms}\n\n[Base]\n{bp}\n\n{initial_msg}`.
         let composed = prepend_standing_for_legacy(
             1,
             &base_only(Some("you are a helpful agent")),
             "hello channel",
         );
-        assert_eq!(composed, "[Base]\nyou are a helpful agent\n\nhello channel");
+        assert_eq!(
+            composed,
+            format!(
+                "{}\n\n[Base]\nyou are a helpful agent\n\nhello channel",
+                crate::interaction_norms::INTERACTION_NORMS_PREAMBLE
+            )
+        );
     }
 
     #[test]
@@ -4814,12 +4834,18 @@ mod tests {
     }
 
     #[test]
-    fn test_heartbeat_standing_block_is_base_only() {
+    fn test_heartbeat_standing_block_is_defaults_and_base_only() {
         // A heartbeat has no channel, so core and canvas are absent by
         // construction — and it has never carried the persona. Pin that the
         // shared helper does not start handing heartbeats [System].
         let composed = prepend_standing_for_legacy(1, &base_only(Some("be helpful")), "tick");
-        assert_eq!(composed, "[Base]\nbe helpful\n\ntick");
+        assert_eq!(
+            composed,
+            format!(
+                "{}\n\n[Base]\nbe helpful\n\ntick",
+                crate::interaction_norms::INTERACTION_NORMS_PREAMBLE
+            )
+        );
     }
 
     #[test]
@@ -4874,10 +4900,18 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_message_legacy_agent_without_base_is_unchanged() {
-        // No base_prompt configured: nothing to prepend regardless of version.
+    fn test_initial_message_legacy_agent_without_base_still_gets_defaults() {
+        // No base_prompt configured (e.g. --no-base-prompt): the [Defaults]
+        // norms still ride along — they are platform defaults with no off
+        // switch — but nothing else is prepended.
         let composed = prepend_standing_for_legacy(1, &base_only(None), "hello channel");
-        assert_eq!(composed, "hello channel");
+        assert_eq!(
+            composed,
+            format!(
+                "{}\n\nhello channel",
+                crate::interaction_norms::INTERACTION_NORMS_PREAMBLE
+            )
+        );
     }
 
     // ── prepend_standing_for_legacy ───────────────────────────────────────────
@@ -4900,6 +4934,7 @@ mod tests {
         // left the agent acting on its first turn with no persona and no memory.
         let composed = prepend_standing_for_legacy(1, &full_standing(), "do the thing");
         let positions: Vec<usize> = [
+            "[Defaults]",
             "[Base]",
             "[System]",
             "[Team Instructions]",
@@ -4942,15 +4977,31 @@ mod tests {
     }
 
     #[test]
-    fn test_initial_message_legacy_agent_without_standing_is_unchanged() {
-        // Nothing configured: body passes through with no stray blank lines.
+    fn test_initial_message_legacy_agent_without_standing_still_gets_defaults() {
+        // Nothing configured: the [Defaults] norms are the standing context's
+        // one unconditional section, so they still lead the first message.
         let composed =
             prepend_standing_for_legacy(1, &crate::queue::StandingContext::default(), "do it");
-        assert_eq!(composed, "do it");
+        assert_eq!(
+            composed,
+            format!(
+                "{}\n\ndo it",
+                crate::interaction_norms::INTERACTION_NORMS_PREAMBLE
+            )
+        );
     }
 
     // Pin the session/new systemPrompt framing: each present prompt carries its
-    // own header so the desktop observer can split into labeled sub-sections.
+    // own header so the desktop observer can split into labeled sub-sections,
+    // and the [Defaults] interaction norms always lead.
+
+    /// The exact `[Defaults]` prefix `framed_system_prompt` prepends.
+    fn norms_prefix() -> String {
+        format!(
+            "{}\n\n",
+            crate::interaction_norms::INTERACTION_NORMS_PREAMBLE
+        )
+    }
 
     #[test]
     fn test_framed_system_prompt_both_present_carries_both_headers() {
@@ -4959,13 +5010,19 @@ mod tests {
         // what pins the framing against a `[Session]` section reappearing here.
         let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
             .expect("both present yields Some");
-        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+        assert_eq!(
+            framed,
+            format!(
+                "{}[Base]\nbase text\n\n[System]\npersona text",
+                norms_prefix()
+            )
+        );
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
         let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        assert_eq!(framed, format!("{}[Base]\nbase text", norms_prefix()));
     }
 
     #[test]
@@ -4974,12 +5031,33 @@ mod tests {
         // its own [System] header even when no base prompt exists.
         let framed =
             framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+        assert_eq!(framed, format!("{}[System]\npersona text", norms_prefix()));
     }
 
     #[test]
-    fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt("/", None, None).is_none());
+    fn test_framed_system_prompt_neither_is_norms_only() {
+        // Even with --no-base-prompt and no persona, the platform defaults
+        // still ship — they have no off switch.
+        let framed = framed_system_prompt("/", None, None).expect("norms always yield Some");
+        assert_eq!(framed, crate::interaction_norms::INTERACTION_NORMS_PREAMBLE);
+    }
+
+    #[test]
+    fn test_framed_system_prompt_defaults_lead_every_shape() {
+        // The norms are platform defaults: user-authored content must come
+        // after them so it reads as the override.
+        for (base, persona) in [
+            (Some("base text"), Some("persona text")),
+            (Some("base text"), None),
+            (None, Some("persona text")),
+        ] {
+            let framed = framed_system_prompt("/Users/me/.buzz", base, persona)
+                .expect("present content yields Some");
+            assert!(
+                framed.starts_with("[Defaults]\n"),
+                "norms must lead: {framed}"
+            );
+        }
     }
 
     #[test]
@@ -4987,14 +5065,17 @@ mod tests {
         let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
             .expect("base yields Some");
         assert!(
-            framed.starts_with("[Workspace]\n"),
-            "workspace section must lead: {framed}"
+            framed.contains("\n\n[Workspace]\n"),
+            "workspace section must follow the norms: {framed}"
         );
         assert!(framed.contains("`/Users/me/.buzz`"));
         assert!(
             framed.contains("\n\n[Base]\nbase text"),
             "base must follow the workspace section: {framed}"
         );
+        let workspace_pos = framed.find("[Workspace]").unwrap();
+        let base_pos = framed.find("[Base]").unwrap();
+        assert!(workspace_pos < base_pos, "workspace precedes base");
     }
 
     #[test]
@@ -5003,14 +5084,14 @@ mod tests {
         // agent never received that layout, so no [Workspace] anchor is emitted.
         let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
             .expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+        assert_eq!(framed, format!("{}[System]\npersona text", norms_prefix()));
     }
 
     #[test]
     fn test_framed_system_prompt_root_cwd_omits_workspace() {
         // The "/" fallback must never be named — it would invite a $HOME scan.
         let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        assert_eq!(framed, format!("{}[Base]\nbase text", norms_prefix()));
     }
 
     #[test]
@@ -6037,10 +6118,14 @@ done"#
                 .as_str()
                 .expect("text prompt")
         };
-        assert_eq!(prompt_text(0), "[Base]\nstanding-once\n\nheartbeat-1");
+        let standing_prefix = format!(
+            "{}\n\n[Base]\nstanding-once\n\n",
+            crate::interaction_norms::INTERACTION_NORMS_PREAMBLE
+        );
+        assert_eq!(prompt_text(0), format!("{standing_prefix}heartbeat-1"));
         assert_eq!(
             prompt_text(1),
-            "[Base]\nstanding-once\n\nheartbeat-2",
+            format!("{standing_prefix}heartbeat-2"),
             "retry after ACP failure must resend standing context"
         );
         assert_eq!(
@@ -6155,12 +6240,22 @@ done"#
             .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
             .collect();
         std::fs::remove_file(&capture).expect("remove ACP capture");
+        // Sections travel as separate content blocks; join them so the
+        // assertions survive the [Defaults] norms taking block 0.
         let prompt_text = |index: usize| {
-            requests[index]["params"]["prompt"][0]["text"]
-                .as_str()
-                .expect("text prompt")
+            requests[index]["params"]["prompt"]
+                .as_array()
+                .expect("prompt blocks")
+                .iter()
+                .map(|block| block["text"].as_str().expect("text prompt"))
+                .collect::<Vec<_>>()
+                .join("\n")
         };
         assert!(prompt_text(0).contains("[Base]\nstanding-once"));
+        assert!(
+            prompt_text(0).contains("[Defaults]"),
+            "first channel message must carry the interaction norms"
+        );
         assert!(
             prompt_text(1).contains("[Base]\nstanding-once"),
             "retry after channel ACP failure must resend standing context"
@@ -6168,6 +6263,10 @@ done"#
         assert!(
             !prompt_text(2).contains("[Base]\nstanding-once"),
             "turn after channel ACP success must omit standing context"
+        );
+        assert!(
+            !prompt_text(2).contains("[Defaults]"),
+            "later turns must not repeat the interaction norms"
         );
     }
 

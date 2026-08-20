@@ -356,6 +356,62 @@ test("parseSystemPromptSections pins the realistic Workspace+Base+System+Core ha
   ]);
 });
 
+// ── [Defaults] interaction norms extraction ───────────────────────────────────
+
+test("parseSystemPromptSections extracts the leading Defaults norms as their own section", () => {
+  // framed_system_prompt() in buzz-acp prepends "[Defaults]\n{norms}\n\n"
+  // before everything else. The observer must show it as a distinct section,
+  // not fold it into Base.
+  const framed = [
+    "[Defaults]",
+    "- Never assume anyone's gender.",
+    "",
+    "[Workspace]",
+    "You are operating inside the Buzz platform.",
+    "",
+    "[Base]",
+    "You are an assistant.",
+    "",
+    "[System]",
+    "Custom persona instructions.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Defaults", body: "- Never assume anyone's gender." },
+    {
+      title: "Base",
+      body: "[Workspace]\nYou are operating inside the Buzz platform.\n\n[Base]\nYou are an assistant.",
+    },
+    { title: "System", body: "Custom persona instructions." },
+  ]);
+});
+
+test("parseSystemPromptSections handles Defaults directly before System (persona-only agent)", () => {
+  // A persona-only agent gets no [Workspace] or [Base]; the norms still lead.
+  const framed = [
+    "[Defaults]",
+    "- Never assume anyone's gender.",
+    "",
+    "[System]",
+    "Custom persona instructions.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Defaults", body: "- Never assume anyone's gender." },
+    { title: "System", body: "Custom persona instructions." },
+  ]);
+});
+
+test("parseSystemPromptSections handles a Defaults-only prompt (--no-base-prompt, no persona)", () => {
+  // The norms have no off switch, so this shape is reachable when the base
+  // prompt is disabled and no persona is configured.
+  const framed = "[Defaults]\n- Never assume anyone's gender.";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Defaults", body: "- Never assume anyone's gender." },
+  ]);
+});
+
 // ── Channel Canvas extraction ─────────────────────────────────────────────────
 
 test("parseSystemPromptSections pins the full Base+System+Core+Canvas harness shape", () => {
