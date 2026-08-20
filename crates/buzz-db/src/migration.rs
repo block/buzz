@@ -625,7 +625,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 31);
+        assert_eq!(migrations.len(), 32);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1057,6 +1057,25 @@ mod tests {
             .as_str()
             .contains("error_code"));
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+
+        // Thread subtree pagination uses the full tenant/root/keyset tuple. Keep
+        // the covering index additive so brownfield migration checksums remain
+        // stable.
+        assert_eq!(migrations[31].version, 32);
+        assert!(migrations[31]
+            .sql
+            .as_str()
+            .contains("CREATE INDEX IF NOT EXISTS idx_thread_metadata_root_keyset"));
+        assert!(migrations[31]
+            .sql
+            .as_str()
+            .contains("(community_id, root_event_id, event_created_at, event_id)"));
+        assert!(!migrations[0]
+            .sql
+            .as_str()
+            .contains("idx_thread_metadata_root_keyset"));
+        assert!(include_str!("../../../schema/schema.sql")
+            .contains("CREATE INDEX idx_thread_metadata_root_keyset"));
     }
 
     #[test]
