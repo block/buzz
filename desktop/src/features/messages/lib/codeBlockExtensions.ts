@@ -67,6 +67,70 @@ export function insertNewlineInCodeBlock(ed: Editor): boolean {
     .run();
 }
 
+export function exitListIfEmptyLast(ed: Editor): boolean {
+  if (!ed.isActive("listItem")) return false;
+  const { $from } = ed.state.selection;
+
+  let listItemDepth = -1;
+  for (let depth = $from.depth; depth >= 1; depth--) {
+    if ($from.node(depth).type.name === "listItem") {
+      listItemDepth = depth;
+      break;
+    }
+  }
+  if (listItemDepth < 1) return false;
+
+  const listItem = $from.node(listItemDepth);
+  const isEmpty =
+    listItem.childCount === 1 && listItem.firstChild?.textContent === "";
+  if (!isEmpty) return false;
+
+  const listDepth = listItemDepth - 1;
+  const list = $from.node(listDepth);
+  if ($from.index(listDepth) !== list.childCount - 1) return false;
+
+  const { tr, schema } = ed.state;
+  if (list.childCount === 1) {
+    const listStart = $from.before(listDepth);
+    tr.replaceWith(
+      listStart,
+      $from.after(listDepth),
+      schema.nodes.paragraph.create(),
+    );
+    tr.setSelection(TextSelection.near(tr.doc.resolve(listStart + 1)));
+  } else {
+    tr.delete($from.before(listItemDepth), $from.after(listItemDepth));
+    const listEnd = tr.mapping.map($from.after(listDepth));
+    tr.insert(listEnd, schema.nodes.paragraph.create());
+    tr.setSelection(TextSelection.near(tr.doc.resolve(listEnd + 1)));
+  }
+  ed.view.dispatch(tr);
+  return true;
+}
+
+export function insertComposerSoftNewline(
+  ed: Editor,
+  { handleCodeFence }: { handleCodeFence: boolean },
+): boolean {
+  if (handleCodeFence) {
+    const fenceResult = handleCodeFenceEnter(ed);
+    if (fenceResult !== undefined) return fenceResult;
+  }
+  if (ed.isActive("codeBlock")) return insertNewlineInCodeBlock(ed);
+  if (exitListIfEmptyLast(ed)) return true;
+  if (ed.isActive("listItem")) {
+    return ed.commands.splitListItem("listItem");
+  }
+  if (ed.isActive("blockquote")) {
+    const { $from } = ed.state.selection;
+    if ($from.parent.textContent === "") {
+      return ed.commands.lift("blockquote");
+    }
+    return ed.chain().splitBlock().focus().run();
+  }
+  return ed.commands.setHardBreak();
+}
+
 export const CodeBlockAfterHardBreak = Extension.create({
   name: "codeBlockAfterHardBreak",
   addInputRules() {

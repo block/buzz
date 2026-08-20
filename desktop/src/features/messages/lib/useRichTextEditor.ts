@@ -34,8 +34,9 @@ import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
   CodeBlockAfterHardBreak,
+  exitListIfEmptyLast,
   handleCodeFenceEnter,
-  insertNewlineInCodeBlock,
+  insertComposerSoftNewline,
 } from "./codeBlockExtensions";
 import type { ComposerSubmitShortcut } from "./composerSubmitShortcut";
 import { SpoilerMark } from "./spoilerMark";
@@ -93,10 +94,7 @@ export type RichTextEditorOptions = {
   /** Called by the active submit shortcut. Handled inside Tiptap's extension
    *  system so it fires *before* ProseMirror's default splitBlock behaviour. */
   onSubmit?: () => void;
-  /**
-   * Which keyboard shortcut submits the composer. Defaults to Enter; when set
-   * to Mod+Enter, plain Enter inserts a soft newline.
-   */
+  /** Which keyboard shortcut submits the composer. Defaults to Enter. */
   submitShortcut?: ComposerSubmitShortcut;
   /**
    * Called on ArrowUp in an empty composer (Slack parity: edit your last
@@ -140,83 +138,6 @@ export type RichTextEditorOptions = {
 
 const PASTED_LINK_AT_END_RE =
   /(?:^|\s)((?:https?:\/\/|www\.)[^\s]+|(?:github\.com|linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s]+)$/i;
-
-function exitListIfEmptyLast(ed: Editor): boolean {
-  if (!ed.isActive("listItem")) return false;
-  const { $from } = ed.state.selection;
-
-  // Walk up to find the listItem node (handles nested structures).
-  let listItemDepth = -1;
-  for (let d = $from.depth; d >= 1; d--) {
-    if ($from.node(d).type.name === "listItem") {
-      listItemDepth = d;
-      break;
-    }
-  }
-  if (listItemDepth < 1) return false;
-
-  const listItem = $from.node(listItemDepth);
-  const isEmpty =
-    listItem.childCount === 1 && listItem.firstChild?.textContent === "";
-  if (!isEmpty) return false;
-
-  // Only trigger on the last item in the list.
-  const listDepth = listItemDepth - 1;
-  const list = $from.node(listDepth);
-  const itemIndex = $from.index(listDepth);
-  if (itemIndex !== list.childCount - 1) return false;
-
-  const { tr, schema } = ed.state;
-  if (list.childCount === 1) {
-    // Only item → replace the entire list with an empty paragraph.
-    const listStart = $from.before(listDepth);
-    const listEnd = $from.after(listDepth);
-    const para = schema.nodes.paragraph.create();
-    tr.replaceWith(listStart, listEnd, para);
-    tr.setSelection(TextSelection.near(tr.doc.resolve(listStart + 1)));
-  } else {
-    // Multiple items → delete the empty item, insert paragraph after the list,
-    // and move cursor there.
-    const itemStart = $from.before(listItemDepth);
-    const itemEnd = $from.after(listItemDepth);
-    tr.delete(itemStart, itemEnd);
-    const listEnd = tr.mapping.map($from.after(listDepth));
-    const para = schema.nodes.paragraph.create();
-    tr.insert(listEnd, para);
-    tr.setSelection(TextSelection.near(tr.doc.resolve(listEnd + 1)));
-  }
-  ed.view.dispatch(tr);
-  return true;
-}
-
-function insertComposerSoftNewline(
-  ed: Editor,
-  { handleCodeFence }: { handleCodeFence: boolean },
-): boolean {
-  if (handleCodeFence) {
-    const fenceResult = handleCodeFenceEnter(ed);
-    if (fenceResult !== undefined) return fenceResult;
-  }
-  if (ed.isActive("codeBlock")) {
-    return insertNewlineInCodeBlock(ed);
-  }
-  // Empty last list item → exit list to paragraph below.
-  if (exitListIfEmptyLast(ed)) return true;
-  // Non-empty or non-last list item → split.
-  if (ed.isActive("listItem")) {
-    return ed.commands.splitListItem("listItem");
-  }
-  if (ed.isActive("blockquote")) {
-    // Empty blockquote paragraph → exit the blockquote.
-    const { $from } = ed.state.selection;
-    if ($from.parent.textContent === "") {
-      return ed.commands.lift("blockquote");
-    }
-    // Non-empty → split the paragraph within the blockquote.
-    return ed.chain().splitBlock().focus().run();
-  }
-  return ed.commands.setHardBreak();
-}
 
 function shouldAppendSpaceAfterPaste(text: string): boolean {
   const trimmedEnd = text.trimEnd();
@@ -296,17 +217,16 @@ export function useRichTextEditor({
   onEditLink,
   onLinkSelectionChange,
   onLinkShortcut,
-  submitShortcut,
+  submitShortcut = "enter",
 }: RichTextEditorOptions) {
-  const effectiveSubmitShortcut = submitShortcut ?? "enter";
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
 
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
 
-  const submitShortcutRef = React.useRef(effectiveSubmitShortcut);
-  submitShortcutRef.current = effectiveSubmitShortcut;
+  const submitShortcutRef = React.useRef(submitShortcut);
+  submitShortcutRef.current = submitShortcut;
 
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
