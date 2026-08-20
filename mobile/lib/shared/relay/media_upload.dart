@@ -731,9 +731,10 @@ bool _hasCalendarExtension(String filename) {
 String _safeCalendarAttachmentFilename(String filename) {
   final segments = filename.split(RegExp(r'[/\\]'));
   final basename = segments.isEmpty ? '' : segments.last;
-  final stem = basename.length >= 4
-      ? basename.substring(0, basename.length - 4)
-      : '';
+  final extensionIndex = basename.lastIndexOf('.');
+  final stem = extensionIndex >= 0
+      ? basename.substring(0, extensionIndex)
+      : basename;
   final sanitized = StringBuffer();
   var byteLength = 0;
 

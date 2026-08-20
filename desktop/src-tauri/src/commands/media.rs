@@ -146,9 +146,7 @@ fn calendar_upload_metadata(filename: Option<&str>) -> Option<(&'static str, &'s
 
 fn sanitize_calendar_filename(name: &str) -> String {
     let basename = name.rsplit(['/', '\\']).next().unwrap_or_default();
-    let stem = basename
-        .get(..basename.len().saturating_sub(4))
-        .unwrap_or_default();
+    let stem = basename.rsplit_once('.').map_or(basename, |(stem, _)| stem);
     let mut sanitized = String::new();
     for character in stem.chars().filter(|character| !character.is_control()) {
         if sanitized.len() + character.len_utf8() > 255 - ".ics".len() {
@@ -178,6 +176,14 @@ fn attachment_filename(name: &str, descriptor_mime: &str) -> String {
 fn set_attachment_filename(descriptor: &mut BlobDescriptor, name: Option<&str>) {
     let filename = name.map(|name| attachment_filename(name, &descriptor.mime_type));
     descriptor.filename = filename;
+}
+
+fn upload_media_filename(name: Option<&str>, descriptor_mime: &str) -> Option<String> {
+    if descriptor_mime == "text/calendar" {
+        name.map(sanitize_calendar_filename)
+    } else {
+        None
+    }
 }
 
 /// Sanitize a filename for use as a display label in the imeta `filename` field.
@@ -589,9 +595,9 @@ pub async fn upload_media(
     };
     let body = sanitize_image_for_upload(body, &mime)?;
     let mut descriptor = do_upload(body, &mime, &state, None, None, file_extension).await?;
-    set_attachment_filename(
-        &mut descriptor,
+    descriptor.filename = upload_media_filename(
         path.file_name().and_then(|name| name.to_str()),
+        &descriptor.mime_type,
     );
     Ok(descriptor)
 }
@@ -911,8 +917,28 @@ mod tests {
             "Planning.ics"
         );
         assert_eq!(
+            attachment_filename("Agenda.markdown", "text/calendar"),
+            "Agenda.ics"
+        );
+        assert_eq!(
+            attachment_filename("Agenda", "text/calendar"),
+            "Agenda.ics"
+        );
+        assert_eq!(
             attachment_filename("Planning.txt", "application/octet-stream"),
             "Planning.txt"
+        );
+    }
+
+    #[test]
+    fn legacy_upload_media_adds_filenames_only_for_authoritative_calendars() {
+        assert_eq!(
+            upload_media_filename(Some("Planning.txt"), "text/calendar"),
+            Some("Planning.ics".to_string())
+        );
+        assert_eq!(
+            upload_media_filename(Some("report.pdf"), "application/pdf"),
+            None
         );
     }
 

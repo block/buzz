@@ -1229,40 +1229,52 @@ void main() {
     );
 
     test(
-      'uses the returned calendar type to normalize a generic filename',
+      'uses the returned calendar type to normalize generic filenames',
       () async {
         final bytes = Uint8List.fromList(
           utf8.encode('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'),
         );
-        http.Request? capturedRequest;
-        final service = MediaUploadService(
-          baseUrl: 'https://relay.example',
-          nsec: nostr.Keys.generate().nsec,
-          httpClient: http_testing.MockClient((request) async {
-            capturedRequest = request;
-            return http.Response(
-              jsonEncode({
-                'url': 'https://relay.example/media/calendar.ics',
-                'sha256':
-                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                'size': request.bodyBytes.length,
-                'type': 'text/calendar',
-                'uploaded': 1,
-              }),
-              HttpStatus.ok,
-            );
-          }),
-          pickGalleryVideo: () async => null,
-          pickGalleryImage: () async => null,
-          pickAttachmentFile: () async => _NamedXFile(bytes, 'Planning.txt'),
-        );
+        for (final testCase in const [
+          ['Planning.txt', 'Planning.ics'],
+          ['Agenda.markdown', 'Agenda.ics'],
+          ['Agenda', 'Agenda.ics'],
+        ]) {
+          http.Request? capturedRequest;
+          final service = MediaUploadService(
+            baseUrl: 'https://relay.example',
+            nsec: nostr.Keys.generate().nsec,
+            httpClient: http_testing.MockClient((request) async {
+              capturedRequest = request;
+              return http.Response(
+                jsonEncode({
+                  'url': 'https://relay.example/media/calendar.ics',
+                  'sha256':
+                      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                  'size': request.bodyBytes.length,
+                  'type': 'text/calendar',
+                  'uploaded': 1,
+                }),
+                HttpStatus.ok,
+              );
+            }),
+            pickGalleryVideo: () async => null,
+            pickGalleryImage: () async => null,
+            pickAttachmentFile: () async => _NamedXFile(bytes, testCase[0]),
+          );
 
-        final descriptor = await service.pickAndUploadFile();
+          final descriptor = await service.pickAndUploadFile();
 
-        expect(capturedRequest?.headers['Content-Type'], 'application/octet-stream');
-        expect(capturedRequest?.headers, isNot(contains('X-Buzz-File-Extension')));
-        expect(descriptor?.filename, 'Planning.ics');
-        expect(descriptor?.toImetaTag(), contains('filename Planning.ics'));
+          expect(
+            capturedRequest?.headers['Content-Type'],
+            'application/octet-stream',
+          );
+          expect(
+            capturedRequest?.headers,
+            isNot(contains('X-Buzz-File-Extension')),
+          );
+          expect(descriptor?.filename, testCase[1]);
+          expect(descriptor?.toImetaTag(), contains('filename ${testCase[1]}'));
+        }
       },
     );
 

@@ -88,9 +88,7 @@ fn calendar_upload_metadata(file_path: &str) -> Option<(&'static str, &'static s
 
 pub(crate) fn sanitize_calendar_filename(file_path: &str) -> String {
     let basename = file_path.rsplit(['/', '\\']).next().unwrap_or_default();
-    let stem = basename
-        .get(..basename.len().saturating_sub(4))
-        .unwrap_or_default();
+    let stem = basename.rsplit_once('.').map_or(basename, |(stem, _)| stem);
     let mut sanitized = String::new();
     for character in stem.chars().filter(|character| !character.is_control()) {
         if sanitized.len() + character.len_utf8() > 255 - ".ics".len() {
@@ -545,6 +543,8 @@ mod media_download_tests {
         assert!(sanitized.ends_with(".ics"));
         assert!(!sanitized.contains(['/', '\\', '\0']));
         assert!(sanitized.len() <= 255);
+        assert_eq!(sanitize_calendar_filename("Agenda.markdown"), "Agenda.ics");
+        assert_eq!(sanitize_calendar_filename("Agenda"), "Agenda.ics");
     }
 }
 
