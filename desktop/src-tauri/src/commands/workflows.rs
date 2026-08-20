@@ -387,8 +387,7 @@ fn trigger_wire_from_message(
 }
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    Ok(keys.public_key().to_hex())
+    Ok(state.current_pubkey()?.to_hex())
 }
 
 fn now_secs() -> i64 {

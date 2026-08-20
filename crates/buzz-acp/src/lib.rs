@@ -2207,6 +2207,7 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
+        start_nonce: runtime_start_nonce.clone(),
     });
 
     if !config.memory_enabled {

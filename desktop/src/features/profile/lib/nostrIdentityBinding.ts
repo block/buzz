@@ -1,4 +1,4 @@
-import { invokeTauri } from "@/shared/api/tauri";
+import { invokeTauri, type StampedArtifact } from "@/shared/api/tauri";
 
 export type NostrIdentityBindingInput = {
   challengeId: string;
@@ -8,8 +8,13 @@ export type NostrIdentityBindingInput = {
   expiresAt: string;
 };
 
-export function signNostrIdentityBinding(
+export async function signNostrIdentityBinding(
   input: NostrIdentityBindingInput,
 ): Promise<string> {
-  return invokeTauri<string>("sign_nostr_identity_binding", input);
+  // C6/C7: thread {value, artifact} to application sites — unwrap is temporary.
+  const { value } = await invokeTauri<StampedArtifact<string>>(
+    "sign_nostr_identity_binding",
+    input,
+  );
+  return value;
 }

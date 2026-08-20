@@ -4,7 +4,7 @@
 //! shape so clients can parse them with one code path.
 
 use super::project_git_workflow::{
-    normalize_event_id, project_owner_identity, validate_repo_address,
+    admit_project_egress, normalize_event_id, project_owner_identity, validate_repo_address,
 };
 use crate::app_state::AppState;
 use crate::relay::submit_signed_event_with_keys;
@@ -232,6 +232,8 @@ pub async fn sign_project_pull_request_review_request(
         return Err("Invalid target repository owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
+    // P29-C1 condition 1: admit before signing.
+    let lease = admit_project_egress(&identity).await?;
     let event = Event::from_json(build_review_request_event(
         &identity.keys,
         &input.repo_address,
@@ -240,8 +242,14 @@ pub async fn sign_project_pull_request_review_request(
         &input.reviewer_label,
     )?)
     .map_err(|error| format!("parse signed review request: {error}"))?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    submit_signed_event_with_keys(
+        &event,
+        &state,
+        &identity.keys,
+        identity.auth_tag.as_deref(),
+        &lease,
+    )
+    .await?;
     Ok(())
 }
 
@@ -274,6 +282,8 @@ async fn sign_project_issue_assignee_operation(
         return Err("Invalid target repository owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
+    // P29-C1 condition 1: admit before signing.
+    let lease = admit_project_egress(&identity).await?;
     let event = Event::from_json(build_issue_assignee_operation_event(
         &identity.keys,
         &input.repo_address,
@@ -284,8 +294,14 @@ async fn sign_project_issue_assignee_operation(
         operation,
     )?)
     .map_err(|error| format!("parse signed issue {}: {error}", operation.label()))?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    submit_signed_event_with_keys(
+        &event,
+        &state,
+        &identity.keys,
+        identity.auth_tag.as_deref(),
+        &lease,
+    )
+    .await?;
     Ok(())
 }
 

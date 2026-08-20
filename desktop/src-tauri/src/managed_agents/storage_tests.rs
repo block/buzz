@@ -118,6 +118,14 @@ impl KeyStore for FakeKeyStore {
         }
         Ok(())
     }
+    fn delete(&self, name: &str) -> Result<(), String> {
+        if !self.reachable {
+            return Err("keyring backend unreachable".to_string());
+        }
+        // Deleting an absent entry is a no-op success, matching SecretStore.
+        self.stored.borrow_mut().remove(name);
+        Ok(())
+    }
 }
 
 fn record_with_key(nsec: &str) -> ManagedAgentRecord {
@@ -517,7 +525,8 @@ fn copy_agent_keys_copies_keys_present_in_src_to_dst() {
         &["agent-alpha".to_string(), "agent-beta".to_string()],
         &src,
         &dst,
-    );
+    )
+    .expect("copy_agent_keys_between_stores failed");
 
     assert_eq!(
         dst.stored
@@ -564,9 +573,8 @@ fn copy_agent_keys_skips_keys_already_in_dst() {
     let src = FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1old");
     let dst = FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1new");
 
-    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
-
-    // dst value must remain unchanged — src must not overwrite it.
+    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst)
+        .expect("copy should succeed");
     assert_eq!(
         dst.stored
             .borrow()
@@ -594,7 +602,8 @@ fn copy_agent_keys_skips_keys_absent_from_src() {
     let src = FakeKeyStore::reachable(); // empty
     let dst = FakeKeyStore::reachable();
 
-    super::copy_agent_keys_between_stores(&["new-agent".to_string()], &src, &dst);
+    super::copy_agent_keys_between_stores(&["new-agent".to_string()], &src, &dst)
+        .expect("copy with absent src key should succeed");
 
     assert!(
         dst.stored
@@ -622,7 +631,8 @@ fn copy_agent_keys_skips_all_when_dst_unreachable() {
     let src = FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-alpha"), "nsec1alpha");
     let dst = FakeKeyStore::unreachable();
 
-    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
+    let result = super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
+    assert!(result.is_err(), "unreachable dst must produce Err");
 
     // No writes attempted to an unreachable dst.
     assert_eq!(*dst.write_count.borrow(), 0);
@@ -643,9 +653,8 @@ fn copy_agent_keys_skips_entirely_when_marker_present() {
         .with_key(super::DEV_MIGRATION_MARKER, "done")
         .with_key(&agent_keyring_name("agent-alpha"), "nsec1dev");
 
-    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst);
-
-    // Src must not have been accessed at all.
+    super::copy_agent_keys_between_stores(&["agent-alpha".to_string()], &src, &dst)
+        .expect("copy with marker present should succeed (early return Ok)");
     assert_eq!(
         *src.read_count.borrow(),
         0,
@@ -675,7 +684,8 @@ fn copy_agent_keys_writes_marker_even_with_empty_agent_list() {
     let src = FakeKeyStore::reachable();
     let dst = FakeKeyStore::reachable();
 
-    super::copy_agent_keys_between_stores(&[], &src, &dst);
+    super::copy_agent_keys_between_stores(&[], &src, &dst)
+        .expect("copy with empty pubkeys should succeed");
 
     assert_eq!(
         dst.stored
@@ -829,4 +839,63 @@ fn install_log_filename_accepts_ordinary_runtime_ids() {
             format!("install-{id}.log")
         );
     }
+}
+
+// ── write_and_verify: durable OS read-back, not a cache read (P3A-I1) ─────────
+
+/// The library mint (`mint_bound_identity`) commits an identity binding only
+/// after `KeyStore::write_and_verify` confirms the nsec. That confirmation must
+/// prove DURABLE retrievability from the OS keyring, not merely that the write
+/// advanced the in-process cache — otherwise a backend that acknowledges a write
+/// without persisting it could let a binding commit against a secret that dies
+/// with the process, violating §2.5 ("no state in which a binding exists but its
+/// key is unverified").
+///
+/// `write_and_verify` calls `store` first, and `store` durably persists before
+/// returning, so on an honest backend cache and durable always agree the instant
+/// it verifies — the cache-vs-durable divergence that the defect would expose is
+/// only observable against an adverse backend (covered by the live keyring
+/// probe). What this test guards deterministically is the delegated primitive
+/// the fix now depends on: `verify_stored_raw` reads the OS backend and ignores a
+/// stale in-process cache. Reverting it to a cache read (the original `load`
+/// path) flips these assertions RED. Requires a real OS keychain.
+#[ignore = "requires real OS keychain (run locally)"]
+#[test]
+fn write_and_verify_confirms_durable_state_and_verify_raw_ignores_stale_cache() {
+    use crate::secret_store::SecretStore;
+
+    let svc = "buzz-test-write-verify-durable";
+    let name = agent_keyring_name("wv-agent");
+
+    // Clean slate, then exercise the fixed production seam positively: the write
+    // is confirmed durably retrievable, so it returns Ok.
+    let writer = SecretStore::keyring(svc);
+    let _ = KeyStore::delete(&writer, &name);
+    KeyStore::write_and_verify(&writer, &name, "nsec1durable").expect("durable write verifies");
+
+    // A second "process": its own cache, warmed to a value the backend no longer
+    // holds. `stale` stores v_old (warming its cache to v_old), then `writer`
+    // overwrites the durable blob with v_new — `stale`'s cache is now behind.
+    let stale = SecretStore::keyring(svc);
+    KeyStore::write_and_verify(&stale, &name, "nsec1old").expect("stale warms its cache to old");
+    KeyStore::write_and_verify(&writer, &name, "nsec1new").expect("durable advances to new");
+
+    // A cache read from `stale` returns the stale value it last wrote…
+    assert_eq!(
+        KeyStore::load(&stale, &name).unwrap(),
+        Some("nsec1old".to_string()),
+        "stale instance's cache still holds the old value"
+    );
+    // …but raw verification reflects DURABLE storage, bypassing that cache:
+    assert!(
+        stale.verify_stored_raw(&name, "nsec1new").unwrap(),
+        "verify_stored_raw must see the durable value, not the stale cache"
+    );
+    assert!(
+        !stale.verify_stored_raw(&name, "nsec1old").unwrap(),
+        "verify_stored_raw must reject a stale-cache value absent from the backend"
+    );
+
+    // Cleanup.
+    let _ = KeyStore::delete(&writer, &name);
 }

@@ -18,6 +18,7 @@ import {
 import {
   meshStartNode,
   meshStopNode,
+  meshStopClient,
   meshInstalledModels,
   meshModelCatalog,
 } from "@/shared/api/tauriMesh";
@@ -224,6 +225,20 @@ export function MeshComputeSettingsCard() {
     }
   }
 
+  async function handleStopClient() {
+    setActionError(null);
+    setPendingAction("stop");
+    setActionInFlight(true);
+    try {
+      await meshStopClient();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActionInFlight(false);
+      setPendingAction(null);
+    }
+  }
+
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
       <SettingsSectionHeader
@@ -281,6 +296,19 @@ export function MeshComputeSettingsCard() {
               onCheckedChange={handleToggle}
             />
           </div>
+
+          {isConsuming && !actionInFlight ? (
+            <div className="px-4 pb-2">
+              <button
+                className="text-sm text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                data-testid="mesh-stop-client-button"
+                onClick={handleStopClient}
+                type="button"
+              >
+                Stop using shared compute
+              </button>
+            </div>
+          ) : null}
 
           <MeshModelPicker
             catalog={catalog}

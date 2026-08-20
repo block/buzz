@@ -137,10 +137,7 @@ pub async fn resolve_oa_owner(
         return Ok(None);
     };
 
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = state.current_pubkey()?.to_hex();
 
     Ok(Some(OwnerOfAgent {
         is_me: my_pubkey.eq_ignore_ascii_case(&owner_hex),
@@ -294,10 +291,7 @@ async fn maybe_owner_auth_tag(
     state: &AppState,
     target_pubkey: &str,
 ) -> Result<Option<[String; 4]>, String> {
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = state.current_pubkey()?.to_hex();
 
     // Self path: never attach auth (spec §Self Requests: if actor==target and
     // an `auth` tag is also present, relay MUST treat it as self).
@@ -655,12 +649,22 @@ mod tests {
     /// RED-on-revert: restore `fetch_archived_pubkeys` to read the override for
     /// each leg (`fetch_relay_self` + `query_relay`) and this returns B's pubkey.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // EGRESS_REGISTRY_TEST_LOCK serialises parallel tests
     async fn archived_fetch_never_crosses_relays_mid_flight() {
         use crate::app_state::build_app_state;
         use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
         use axum::{routing::get, routing::post, Json, Router};
 
         let _serial = TEST_SERIAL.lock().await;
+        // The archive fetch signs through `signing_keys`, gated by the
+        // process-global egress registry, so serialise against it too — not
+        // just the rate-limit `TEST_SERIAL`. Without this a concurrent egress
+        // test's `Draining`/`Indeterminate` window leaks in and refuses the
+        // signer. Order matches the egress admission tests: TEST_SERIAL first.
+        let _egress_guard = crate::owner_identity_egress::EGRESS_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::owner_identity_egress::reset_registry_for_test();
         reset_rate_limit_gate();
 
         // Build a loopback relay that advertises `relay_keys` as its NIP-11
@@ -770,11 +774,21 @@ mod tests {
     /// this pins the archive command's callback independently of unarchive.
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // EGRESS_REGISTRY_TEST_LOCK serialises parallel tests
     async fn archive_core_fires_regen_only_on_accepted_submit() {
         use crate::app_state::build_app_state;
         use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
 
         let _serial = TEST_SERIAL.lock().await;
+        // The submit path admits an owner-identity egress lease, gated by the
+        // process-global egress registry, so serialise against it too — not
+        // just the rate-limit `TEST_SERIAL`. Without this a concurrent egress
+        // test's `Draining`/`Indeterminate` window leaks in and refuses the
+        // submit. Order matches the egress admission tests: TEST_SERIAL first.
+        let _egress_guard = crate::owner_identity_egress::EGRESS_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::owner_identity_egress::reset_registry_for_test();
         reset_rate_limit_gate();
 
         let state = build_app_state();
@@ -820,11 +834,21 @@ mod tests {
     /// independently, not just the shared `submit_then_regenerate`.
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // EGRESS_REGISTRY_TEST_LOCK serialises parallel tests
     async fn unarchive_core_fires_regen_only_on_accepted_submit() {
         use crate::app_state::build_app_state;
         use crate::relay_admission::{reset_rate_limit_gate, TEST_SERIAL};
 
         let _serial = TEST_SERIAL.lock().await;
+        // The submit path admits an owner-identity egress lease, gated by the
+        // process-global egress registry, so serialise against it too — not
+        // just the rate-limit `TEST_SERIAL`. Without this a concurrent egress
+        // test's `Draining`/`Indeterminate` window leaks in and refuses the
+        // submit. Order matches the egress admission tests: TEST_SERIAL first.
+        let _egress_guard = crate::owner_identity_egress::EGRESS_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::owner_identity_egress::reset_registry_for_test();
         reset_rate_limit_gate();
 
         let state = build_app_state();

@@ -3,10 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    clear_pairing_session_if_current, commit_recovery_if_current, invalidate_pairing_generation,
-    recovery_result_after_completion, validate_recovery_payload_type, PairingHandle,
-    PairingSession, PayloadType,
+    clear_pairing_session_if_current, ensure_pairing_task_is_current,
+    invalidate_pairing_generation, recovery_result_after_completion,
+    validate_recovery_payload_type, PairingHandle, PairingSession, PayloadType,
 };
+use crate::commands::identity::commit_under_fence;
 
 #[tokio::test]
 async fn overlapping_starts_are_serialized() {
@@ -40,10 +41,14 @@ fn superseded_recovery_cannot_commit_identity() {
     let committed = std::sync::atomic::AtomicBool::new(false);
 
     let generation_fence = std::sync::Mutex::new(());
-    let result = commit_recovery_if_current(&generation, &generation_fence, 1, || {
-        committed.store(true, Ordering::SeqCst);
-        Ok(())
-    });
+    let result = commit_under_fence(
+        Some(&generation_fence),
+        || ensure_pairing_task_is_current(&generation, 1),
+        || {
+            committed.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+    );
 
     assert_eq!(
         result.unwrap_err(),
@@ -64,12 +69,16 @@ fn invalidation_after_check_waits_for_identity_commit() {
     let recovery_fence = Arc::clone(&generation_fence);
     let recovery_committed = Arc::clone(&committed);
     let recovery = std::thread::spawn(move || {
-        commit_recovery_if_current(&recovery_generation, &recovery_fence, 7, || {
-            checked_tx.send(()).expect("signal generation checked");
-            finish_rx.recv().expect("release identity commit");
-            recovery_committed.store(true, Ordering::SeqCst);
-            Ok(())
-        })
+        commit_under_fence(
+            Some(&recovery_fence),
+            || ensure_pairing_task_is_current(&recovery_generation, 7),
+            || {
+                checked_tx.send(()).expect("signal generation checked");
+                finish_rx.recv().expect("release identity commit");
+                recovery_committed.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
     });
 
     checked_rx.recv().expect("generation checked");

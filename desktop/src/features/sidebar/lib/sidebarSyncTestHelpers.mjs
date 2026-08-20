@@ -46,6 +46,10 @@ export function installFakeWindow(fw) {
 }
 
 export function installTauriMock(goodCipherPayload) {
+  // Owner-identity artifact producers (NIP-AP) return `{ value, artifact }`
+  // across the Tauri boundary; the adapters unwrap `.value`. Wrap each bare
+  // value in the stamped shape (inert stamp in C3).
+  const stamped = (value) => ({ value, artifact: { id: 0, generation: 0 } });
   const orig = globalThis.window?.__TAURI_INTERNALS__;
   if (typeof globalThis.window === "undefined") globalThis.window = {};
   let captured = null;
@@ -54,23 +58,25 @@ export function installTauriMock(goodCipherPayload) {
       if (cmd === "nip44_decrypt_from_self") {
         if (args?.ciphertext === "bad-cipher")
           return Promise.reject(new Error("decrypt failed"));
-        return Promise.resolve(goodCipherPayload);
+        return Promise.resolve(stamped(goodCipherPayload));
       }
       if (cmd === "nip44_encrypt_to_self") {
         captured = args?.plaintext ?? null;
-        return Promise.resolve("ct");
+        return Promise.resolve(stamped("ct"));
       }
       if (cmd === "sign_event")
         return Promise.resolve(
-          JSON.stringify({
-            id: "eid",
-            pubkey: "pk-lww",
-            content: "ct",
-            created_at: args?.createdAt ?? 0,
-            kind: args?.kind ?? 0,
-            tags: args?.tags ?? [],
-            sig: "s",
-          }),
+          stamped(
+            JSON.stringify({
+              id: "eid",
+              pubkey: "pk-lww",
+              content: "ct",
+              created_at: args?.createdAt ?? 0,
+              kind: args?.kind ?? 0,
+              tags: args?.tags ?? [],
+              sig: "s",
+            }),
+          ),
         );
       return Promise.reject(new Error(`unmocked: ${cmd}`));
     },

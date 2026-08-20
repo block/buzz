@@ -68,6 +68,9 @@ fn minimal_record() -> ManagedAgentRecord {
         shared: false,
         source_team: Some("team-id-123".to_string()), // MUST NOT appear
         source_team_persona_slug: Some("lep".to_string()), // MUST NOT appear
+        library_ref: None,
+        library_applied_revision: None,
+        last_completed_deploy_attempt_id: None,
         definition_respond_to: Some("allowlist".to_string()),
         catalog_source: None,
         definition_respond_to_allowlist: vec!["abc123def".to_string()],

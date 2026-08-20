@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
+use super::config_bridge::SessionConfigCache;
 use super::ManagedAgentProcess;
 
 /// Canonical identity of one managed-agent harness on one relay.
@@ -50,6 +51,23 @@ pub struct ManagedAgentPairRuntime {
     /// Unpredictable identity for this exact harness generation. Lifecycle
     /// frames from prior processes are rejected even when the pair is live.
     pub start_nonce: String,
+    /// Scope ID of the workspace this runtime was spawned into. Used by drain
+    /// filtering and `list_managed_agent_runtimes` to detect cross-scope
+    /// entries, and by the runtime-capability commands (`put_agent_session_config`
+    /// / `get_agent_config_surface` / `put_managed_agent_runtime_lifecycle`) to
+    /// require that a session-config frame, config read, or lifecycle frame
+    /// matches the CURRENT active scope — the seam that keeps a delayed
+    /// frame from a drained workspace from surfacing under a rotated identity.
+    pub scope_id: Option<String>,
+    /// ACP session config captured from this exact harness generation. Set by
+    /// `put_agent_session_config` only after the frame validates against this
+    /// tracked runtime (`{pubkey, relay_url, start_nonce}` + live + current
+    /// scope); read by `get_agent_config_surface` through the same still-current
+    /// runtime. Living here — rather than in a process-global map — makes an
+    /// ownerless cache entry unrepresentable: the cache is destroyed atomically
+    /// with the runtime entry on drain/removal/exit-pruning, so no separate
+    /// cache-cleanup step can drift from runtime teardown.
+    pub session_config: Option<SessionConfigCache>,
 }
 
 impl std::ops::Deref for ManagedAgentPairRuntime {
@@ -67,13 +85,15 @@ impl std::ops::DerefMut for ManagedAgentPairRuntime {
 }
 
 impl ManagedAgentPairRuntime {
-    pub fn starting(process: ManagedAgentProcess) -> Self {
+    pub fn starting(process: ManagedAgentProcess, scope_id: Option<String>) -> Self {
         let start_nonce = process.start_nonce.clone();
         Self {
             process,
             lifecycle: ManagedAgentRuntimeLifecycle::Starting,
             error: None,
             start_nonce,
+            scope_id,
+            session_config: None,
         }
     }
 }
@@ -102,12 +122,6 @@ pub struct ManagedAgentRuntimeLifecycleObserverPayload {
     pub start_nonce: String,
     pub lifecycle: ManagedAgentRuntimeLifecycle,
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManagedAgentCommunityTarget {
-    pub relay_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -6,9 +6,10 @@
 //! registered in `lib.rs` through the same `personas::` path as the export
 //! commands.
 
+use futures_util::future::BoxFuture;
 use nostr::ToBech32;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     app_state::AppState,
@@ -18,12 +19,34 @@ use crate::{
             decrypt_envelope, parse_chunk_payload, resolve_unlock_secret, ChunkPayload,
             LOCKED_CARD_REFUSAL,
         },
-        load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
-        ManagedAgentRecord, RespondTo,
+        load_managed_agents, AgentDefinition, ManagedAgentRecord, RespondTo,
     },
-    relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
+    relay::{effective_agent_relay_url, sync_managed_agent_profile},
     util::now_iso,
 };
+
+// ── Outbound adapter arg structs ──────────────────────────────────────────────
+
+/// Arguments passed to an injected profile-publish callback.
+///
+/// Borrows all fields to avoid cloning `nostr::Keys` across closures.
+pub(crate) struct ProfilePublish<'a> {
+    pub relay_url: &'a str,
+    pub agent_keys: &'a nostr::Keys,
+    pub display_name: &'a str,
+    pub avatar_url: Option<&'a str>,
+    pub auth_tag: Option<&'a str>,
+}
+
+/// Arguments passed to an injected engram-submit callback.
+///
+/// Borrows all fields to avoid cloning `nostr::Keys` across closures.
+pub(crate) struct MemoryPublish<'a> {
+    pub relay_url: &'a str,
+    pub event_json: &'a [u8],
+    pub agent_keys: &'a nostr::Keys,
+    pub auth_tag: Option<&'a str>,
+}
 
 /// Maximum snapshot file size accepted before decode (5 MiB for JSON,
 /// 10 MiB for PNG). Mirrors the established persona-import limits.
@@ -124,33 +147,12 @@ pub struct AgentSnapshotImportResult {
 
 /// Resolve the behavioral defaults for an incoming agent snapshot.
 ///
-/// This is the single authoritative selection path for all import-time
-/// allowlist and behavioral decisions. It is extracted as a pure, testable
-/// function so that unit tests exercise the exact production logic rather
-/// than a reconstruction of it.
+/// Single authoritative selection path for all import-time allowlist and
+/// behavioral decisions. Extracted as a pure function for testability.
 ///
-/// # UI contract
-///
-/// The Keep/Clear toggle is shown whenever `has_source_allowlist` is true
-/// (i.e. the raw allowlist is non-empty), regardless of the source mode.
-/// The mode (`respond_to` wire string) and the list are independent axes.
-///
-/// # Decision table
-///
-/// | Source mode  | Non-empty list | keep=true            | keep=false              |
-/// |--------------|----------------|----------------------|-------------------------|
-/// | allowlist    | yes            | preserve mode + list | owner-only + empty      |
-/// | allowlist    | no             | **Err** (reject)     | **Err** (reject)        |
-/// | non-allowlist| yes            | preserve mode + list | preserve mode + empty   |
-/// | non-allowlist| no             | preserve mode        | preserve mode           |
-///
-/// Allowlist-mode + empty list is always rejected: the UI showed no choice
-/// and there is no coherent value to write.
-///
-/// Non-allowlist + non-empty + Clear: preserve the source mode but empty the
-/// list.  Only allowlist-mode requires a mode downgrade on Clear, because
-/// `allowlist` without entries is an invalid state.  Non-allowlist modes
-/// remain valid with an empty list.
+/// Decision: `allowlist` mode + empty list is rejected (invalid state).
+/// On `keep_allowlist=false` with `allowlist` mode, downgrades to owner-only.
+/// On `keep_allowlist=false` with other modes, preserves mode, clears list.
 pub(crate) fn resolve_snapshot_import_behavior(
     raw_respond_to: Option<&str>,
     raw_allowlist: &[String],
@@ -214,21 +216,11 @@ const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4e, 0x47];
 
 /// Decode a `buzz-agent-snapshot v1` manifest from raw bytes.
 ///
-/// Sniffs by magic bytes (PNG signature) first, then falls back to JSON.
-/// Fails closed on malformed content, wrong format, or unsupported version.
-/// Never trusts the file extension — only the bytes.
-///
-/// **Memory consistency:** any manifest whose `memory.entries` is non-empty
-/// despite `memory.level == None` is rejected before any write, regardless of
-/// the enclosing format.
-///
-/// **Size cap:** PNG inputs over 10 MiB and JSON inputs over 5 MiB are rejected
-/// before allocation to avoid avoidable large-input work.
-///
-/// **Locked cards:** a structurally valid locked envelope parses successfully
-/// as `ChunkPayload::Locked` — no decryption happens here. Callers that can
-/// unlock go through [`decode_snapshot_for_import`]; callers that only need
-/// transit validation (e.g. `fetch_snapshot_bytes`) accept `Locked` as-is.
+/// Sniffs by magic bytes (PNG) first, then falls back to JSON. Fails closed on
+/// malformed content, wrong format, or unsupported version. Never trusts the
+/// file extension — only the bytes. Size caps: PNG ≤ 10 MiB, JSON ≤ 5 MiB.
+/// A manifest with non-empty `memory.entries` but `memory.level == None` is
+/// rejected. Locked envelopes parse as `ChunkPayload::Locked` without decryption.
 pub(crate) fn parse_snapshot_payload_from_bytes(file_bytes: &[u8]) -> Result<ChunkPayload, String> {
     let payload: ChunkPayload = if file_bytes.len() >= 4 && file_bytes[..4] == PNG_MAGIC {
         if file_bytes.len() > MAX_SNAPSHOT_PNG_BYTES {
@@ -294,10 +286,7 @@ fn enforce_memory_consistency(
 }
 
 /// Decode a plain snapshot from raw bytes, refusing locked cards.
-///
-/// Test-only convenience: production call sites either unlock through
-/// [`decode_snapshot_for_import`] or validate structurally through
-/// [`parse_snapshot_payload_from_bytes`].
+/// Test-only: production paths use `decode_snapshot_for_import` or `parse_snapshot_payload_from_bytes`.
 #[cfg(test)]
 pub(crate) fn decode_snapshot_from_bytes(
     file_bytes: &[u8],
@@ -433,44 +422,58 @@ pub(crate) fn build_agent_snapshot_import_preview(
     })
 }
 
+// ── `confirm_agent_snapshot_import` entry guards ─────────────────────────────
+//
+// Extracted to `import_entry.rs` to keep this file within the size ratchet.
+#[path = "import_entry.rs"]
+mod import_entry;
+pub(crate) use import_entry::capture_agent_snapshot_import_entry;
+
 // ── `confirm_agent_snapshot_import` ──────────────────────────────────────────
 
-/// Import a `buzz-agent-snapshot v1` file as a brand-new agent.
+/// Testable core of [`confirm_agent_snapshot_import`].
 ///
-/// Phase sequence:
-///   1. Validate — decode the manifest and reject early on any error.
-///   2. Mint — generate a new keypair + NIP-OA auth tag; create a
-///      `AgentDefinition` + `ManagedAgentRecord` through the same primitives
-///      used by the normal create flow.
-///   3. Publish — kind:30175 definition via retention path; kind:0 profile
-///      via `sync_managed_agent_profile`.
-///   4. Memory — for each opted-in entry, build a fresh `kind:30174` event
-///      with `engram::build_event` under the new agent↔owner conversation
-///      key and POST it to the relay. Failures are collected and returned as
-///      `memory_errors`; the agent itself is already created.
+/// `before_store` — called after entry capture, immediately before Phase 3a
+/// acquires `managed_agents_store_lock`. Used in tests to inject a concurrent
+/// workspace switch; no-op in production.
 ///
-/// Importing the same file twice yields two distinct agents with different
-/// keypairs. No source identity material (pubkey, nsec, auth_tag, relay_url,
-/// env_vars, backend, lineage) is consumed.
-#[tauri::command]
-pub async fn confirm_agent_snapshot_import(
+/// `after_store` — called after Phase 3a releases `managed_agents_store_lock`,
+/// immediately before Phase 3b's first outbound call. Used in tests to prove
+/// Phase 3b reads captured variables, not live state; no-op in production.
+///
+/// `profile_sync` and `submit_memory` are the outbound adapters; production
+/// passes real relay calls while tests inject assertions over captured fields.
+pub(crate) async fn confirm_agent_snapshot_import_core<R, Before, After, Profile, Memory>(
     input: AgentSnapshotImportConfirm,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<AgentSnapshotImportResult, String> {
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+    before_store: Before,
+    after_store: After,
+    profile_sync: Profile,
+    submit_memory: Memory,
+) -> Result<AgentSnapshotImportResult, String>
+where
+    R: tauri::Runtime,
+    Before: Fn() + Send + Sync,
+    After: Fn() + Send + Sync,
+    Profile: for<'a> Fn(ProfilePublish<'a>) -> BoxFuture<'a, Result<(), String>>,
+    Memory: for<'a> Fn(MemoryPublish<'a>) -> BoxFuture<'a, Result<(), String>>,
+{
+    let entry = capture_agent_snapshot_import_entry(state)?;
+    let captured_scope = entry.captured_scope;
+    let captured_owner_keys = entry.captured_owner_keys;
+    let definitions_dir = captured_scope.definitions_dir.clone();
+
     // ── Phase 1: validate (no writes) ────────────────────────────────────────
-    // Locked cards unlock only via this machine's exact key endpoints;
-    // anything else fails closed here, before key generation.
     let snapshot = {
-        let owner_keys = state.signing_keys().ok();
         let records = {
             let _store_guard = state
                 .managed_agents_store_lock
                 .lock()
                 .map_err(|e| e.to_string())?;
-            load_managed_agents(&app)?
+            crate::managed_agents::storage::load_managed_agents_at(&definitions_dir)?
         };
-        decode_snapshot_for_import(&input.file_bytes, owner_keys.as_ref(), &records)?.0
+        decode_snapshot_for_import(&input.file_bytes, Some(&captured_owner_keys), &records)?.0
     };
 
     let display_name = snapshot.profile.display_name.trim().to_string();
@@ -478,7 +481,6 @@ pub async fn confirm_agent_snapshot_import(
         return Err("Snapshot display name is empty.".to_string());
     }
 
-    // ── Resolve behavioral defaults ──────────────────────────────────────────
     let minted = resolve_snapshot_import_behavior(
         snapshot.definition.respond_to.as_deref(),
         &snapshot.definition.respond_to_allowlist,
@@ -487,15 +489,11 @@ pub async fn confirm_agent_snapshot_import(
     )?;
     let minted_parallelism = minted.parallelism;
 
-    // Profile metadata must contain a hosted URL. Inline avatar data can be far
-    // larger than the relay's kind:0 content limit, so upload imported pixels
-    // before minting or persisting the new agent. Failing here keeps import
-    // atomic instead of creating an agent whose profile can never publish.
     let effective_avatar = materialize_import_avatar(
         snapshot.profile.avatar_data_url.as_deref(),
         snapshot.profile.avatar_url.as_deref(),
         |avatar_bytes| async {
-            crate::commands::media::upload_image_bytes(avatar_bytes, &state)
+            crate::commands::media::upload_image_bytes(avatar_bytes, state)
                 .await
                 .map(|descriptor| descriptor.url)
                 .map_err(|error| format!("Could not upload the imported avatar: {error}"))
@@ -503,26 +501,21 @@ pub async fn confirm_agent_snapshot_import(
     )
     .await?;
 
-    // Wire-format string for the persona definition's respond_to field.
-    // Omit when it is the default (owner-only) to keep definitions clean.
     let respond_to_wire: Option<String> = if minted.respond_to != RespondTo::default() {
         Some(minted.respond_to.as_str().to_string())
     } else {
         None
     };
 
-    // ── Phase 2: mint keys + auth tag (sync, outside lock) ───────────────────
+    // ── Phase 2: mint keys + auth tag ────────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, auth_tag, owner_pubkey_hex) = {
-        let owner_keys = state.signing_keys()?;
         let agent_keys = nostr::Keys::generate();
         let pubkey = agent_keys.public_key().to_hex();
         let private_key_nsec = agent_keys
             .secret_key()
             .to_bech32()
             .map_err(|e| format!("failed to encode agent private key: {e}"))?;
-
-        // NIP-OA auth tag: bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
-        let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
+        let compat_owner = nostr::Keys::parse(&captured_owner_keys.secret_key().to_secret_hex())
             .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
         let compat_agent = nostr::PublicKey::from_hex(&pubkey)
             .map_err(|e| format!("failed to bridge agent pubkey: {e}"))?;
@@ -530,7 +523,7 @@ pub async fn confirm_agent_snapshot_import(
             buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
                 .map_err(|e| format!("failed to compute NIP-OA auth tag: {e}"))?,
         );
-        let owner_pubkey_hex = owner_keys.public_key().to_hex();
+        let owner_pubkey_hex = captured_owner_keys.public_key().to_hex();
         (
             agent_keys,
             private_key_nsec,
@@ -540,17 +533,31 @@ pub async fn confirm_agent_snapshot_import(
         )
     };
 
-    // ── Phase 3a: create AgentDefinition + ManagedAgentRecord (sync lock) ──────
+    // ── Phase 3a: create AgentDefinition + ManagedAgentRecord (sync lock) ────
+    // `before_store` fires after entry capture and before lock acquisition so
+    // a test-injected workspace switch arrives here — not via stale entry setup.
+    before_store();
     let (persona, record) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|e| e.to_string())?;
 
-        let mut personas = load_personas(&app)?;
-        let mut records = load_managed_agents(&app)?;
+        crate::managed_agents::scope::validate_scope_generation(&captured_scope)
+            .map_err(|e| format!("confirm_agent_snapshot_import: {e}"))?;
 
-        // Guard against duplicate pubkey (astronomically unlikely but safe).
+        if captured_owner_keys.public_key().to_hex() != captured_scope.owner_pubkey {
+            return Err("confirm_agent_snapshot_import: owner key mismatch under lock".to_string());
+        }
+
+        let retention_scope = crate::managed_agents::retention::retention_scope_from_captured(
+            &captured_scope,
+            captured_owner_keys.clone(),
+        )?;
+
+        let mut personas = crate::managed_agents::load_personas_at(&definitions_dir)?;
+        let mut records = crate::managed_agents::storage::load_managed_agents_at(&definitions_dir)?;
+
         if records.iter().any(|r| r.pubkey == pubkey) {
             return Err(format!("generated pubkey {pubkey} already exists — retry"));
         }
@@ -558,7 +565,17 @@ pub async fn confirm_agent_snapshot_import(
         let now = now_iso();
         let persona_id = uuid::Uuid::new_v4().to_string();
 
-        // Build persona from snapshot definition.
+        // Library-projection guard rail (§2.7): the import mints a fresh UUID
+        // slug (`persona_id` above), so it can never target an existing projected
+        // record — but the route is consulted before any store write to keep the
+        // §2.7 invariant uniform across every command boundary. If a future
+        // change ever reused a slug, this refuses before `save_personas_at` and
+        // before any key is persisted. Reads the RAW keyless definitions (where
+        // `library_ref` lives — it is not view-carried), loaded under this lock.
+        let raw_definitions =
+            crate::managed_agents::storage::load_agent_definitions_at(&definitions_dir)?;
+        crate::managed_agents::MutationRoute::reject_projected_slug(&raw_definitions, &persona_id)?;
+
         let persona = AgentDefinition {
             id: persona_id.clone(),
             display_name: display_name.clone(),
@@ -587,13 +604,9 @@ pub async fn confirm_agent_snapshot_import(
         };
 
         personas.push(persona.clone());
-        save_personas(&app, &personas)?;
+        crate::managed_agents::save_personas_at(&definitions_dir, &personas)?;
+        super::super::pending::retain_persona_pending_in_scope(&retention_scope, &persona);
 
-        // Enqueue the kind:30175 persona event via the retention path.
-        super::super::pending::retain_persona_pending(&app, &state, &persona);
-
-        // Build the managed agent record — no machine-local commands, no
-        // secrets, no lineage from the snapshot.
         let record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: display_name.clone(),
@@ -602,10 +615,8 @@ pub async fn confirm_agent_snapshot_import(
             persona_id: Some(persona_id.clone()),
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
-            relay_url: String::new(), // resolves to workspace relay at runtime
+            relay_url: String::new(),
             avatar_url: effective_avatar.clone(),
-            // Machine-local commands: derive from the runtime catalog at
-            // spawn time — never manufacture from snapshot data.
             acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
             agent_command_override: None,
@@ -638,9 +649,6 @@ pub async fn confirm_agent_snapshot_import(
             last_exit_code: None,
             last_error: None,
             last_error_code: None,
-            // Instance-level behavioral defaults agree with the resolved
-            // definition: both come from the single minted struct so they
-            // are always consistent at mint time.
             respond_to: minted.respond_to,
             respond_to_allowlist: minted.respond_to_allowlist.clone(),
             is_builtin: false,
@@ -649,6 +657,9 @@ pub async fn confirm_agent_snapshot_import(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            library_ref: None,
+            library_applied_revision: None,
+            last_completed_deploy_attempt_id: None,
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: minted.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
@@ -659,33 +670,26 @@ pub async fn confirm_agent_snapshot_import(
         };
 
         records.push(record.clone());
-        save_managed_agents(&app, &records)?;
-
-        // Enqueue the kind:30177 managed-agent event via retention.
-        // (Uses the same pattern as agents.rs::retain_managed_agent_pending
-        // inlined here to avoid cross-module private-fn access.)
-        retain_agent_pending(&app, &state, &record);
-
-        crate::managed_agents::try_regenerate_nest(&app);
-
-        // Notify other mounted clients of local persona+managed-agent writes,
-        // matching the contract used by other local managed-agent mutations.
+        crate::managed_agents::storage::save_managed_agents_at(&definitions_dir, &records)?;
+        retain_agent_pending(&retention_scope, &record);
+        crate::managed_agents::try_regenerate_nest(app);
         let _ = app.emit("agents-data-changed", ());
 
         (persona, record)
     };
+    // Phase 3a lock released. `after_store` fires before Phase 3b so a test
+    // can advance scope generation and verify Phase 3b still reads captured vars.
+    after_store();
 
     // ── Phase 3b: publish kind:0 profile (async, outside lock) ───────────────
-    let relay_url =
-        effective_agent_relay_url(&record.relay_url, &relay_ws_url_with_override(&state));
-    let profile_sync_error = sync_managed_agent_profile(
-        &state,
-        &relay_url,
-        &agent_keys,
-        &display_name,
-        effective_avatar.as_deref(),
-        auth_tag.as_deref(),
-    )
+    let relay_url = effective_agent_relay_url(&record.relay_url, &captured_scope.relay_url);
+    let profile_sync_error = profile_sync(ProfilePublish {
+        relay_url: &relay_url,
+        agent_keys: &agent_keys,
+        display_name: &display_name,
+        avatar_url: effective_avatar.as_deref(),
+        auth_tag: auth_tag.as_deref(),
+    })
     .await
     .err();
 
@@ -697,9 +701,6 @@ pub async fn confirm_agent_snapshot_import(
     if memory_total > 0 {
         let owner_pubkey = nostr::PublicKey::from_hex(&owner_pubkey_hex)
             .map_err(|e| format!("failed to parse owner pubkey: {e}"))?;
-
-        // Monotonic timestamp seed: use current time, bumped by 1 per entry
-        // so no two events land at the same second.
         let base_ts = nostr::Timestamp::now().as_secs();
 
         for (idx, entry) in snapshot.memory.entries.iter().enumerate() {
@@ -720,13 +721,12 @@ pub async fn confirm_agent_snapshot_import(
                 Ok(event) => {
                     let event_json = nostr::JsonUtil::as_json(&event).into_bytes();
                     let url = format!("{}/events", crate::relay::relay_http_base_url(&relay_url));
-                    match submit_engram_event(
-                        &state,
-                        &agent_keys,
-                        &event_json,
-                        &url,
-                        auth_tag.as_deref(),
-                    )
+                    match submit_memory(MemoryPublish {
+                        relay_url: &url,
+                        event_json: &event_json,
+                        agent_keys: &agent_keys,
+                        auth_tag: auth_tag.as_deref(),
+                    })
                     .await
                     {
                         Ok(()) => memory_written += 1,
@@ -751,10 +751,69 @@ pub async fn confirm_agent_snapshot_import(
     })
 }
 
+/// Import a `buzz-agent-snapshot v1` file as a brand-new agent.
+///
+/// Thin Tauri command: no-op boundary hooks, real outbound adapters.
+/// See [`confirm_agent_snapshot_import_core`] for the testable logic.
+#[tauri::command]
+pub async fn confirm_agent_snapshot_import(
+    input: AgentSnapshotImportConfirm,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AgentSnapshotImportResult, String> {
+    // Clone `app` for the closures so they can obtain a `'static` state handle
+    // via `app_clone.state::<AppState>()` without borrowing the command's
+    // local `State<'_, AppState>`.
+    let app_for_profile = app.clone();
+    let app_for_memory = app.clone();
+    confirm_agent_snapshot_import_core(
+        input,
+        &app,
+        &state,
+        || {},
+        || {},
+        move |p| {
+            let app = app_for_profile.clone();
+            let relay = p.relay_url.to_string();
+            let keys = p.agent_keys.clone();
+            let name = p.display_name.to_string();
+            let avatar = p.avatar_url.map(str::to_string);
+            let auth = p.auth_tag.map(str::to_string);
+            Box::pin(async move {
+                let s = app.state::<AppState>();
+                sync_managed_agent_profile(
+                    &s,
+                    &relay,
+                    &keys,
+                    &name,
+                    avatar.as_deref(),
+                    auth.as_deref(),
+                )
+                .await
+            })
+        },
+        move |m| {
+            let app = app_for_memory.clone();
+            let url = m.relay_url.to_string();
+            let json = m.event_json.to_vec();
+            let keys = m.agent_keys.clone();
+            let auth = m.auth_tag.map(str::to_string);
+            Box::pin(async move {
+                let s = app.state::<AppState>();
+                submit_engram_event(&s, &keys, &json, &url, auth.as_deref()).await
+            })
+        },
+    )
+    .await
+}
+
 /// Inline retention for the managed-agent kind:30177 event — mirrors
 /// `agents::retain_managed_agent_pending` without requiring cross-module
 /// private function access.
-fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgentRecord) {
+fn retain_agent_pending(
+    scope: &crate::managed_agents::retention::RetentionScope,
+    record: &ManagedAgentRecord,
+) {
     use crate::managed_agents::{
         agent_events::{agent_event_content, build_agent_event},
         persona_events::monotonic_created_at,
@@ -764,7 +823,6 @@ fn retain_agent_pending(app: &AppHandle, state: &AppState, record: &ManagedAgent
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
-        let scope = crate::managed_agents::retention::active_retention_scope(app, state)?;
         let conn = open_retention_db(&scope.db_path)?;
         let content = serde_json::to_string(&agent_event_content(record))
             .map_err(|e| format!("failed to serialize agent content: {e}"))?;
@@ -814,11 +872,16 @@ pub(crate) async fn submit_engram_event(
 
     crate::egress_guard::assert_no_key_backup_bytes(event_json, "persona snapshot engram submit")?;
 
-    // Wait before signing: the relay enforces NIP-98 freshness (±60s) and the
-    // gate may hold for up to MAX_HINT_SECONDS (300s). Building auth before the
-    // wait produces a stale `created_at` that the relay will reject.
-    crate::relay_admission::wait_for_rate_limit().await;
-    let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, url, event_json)?;
+    // Managed-agent egress construction site (P29-C1 closed-world sink). Admit
+    // the interim keyed-egress lease, which waits out the rate-limit gate then
+    // refuses under the identity-persistence latch/drain. The event is
+    // pre-signed by the caller (freshness is caller-determined), so this is
+    // admit-before-submit.
+    let lease = crate::owner_identity_egress::EgressLease::ManagedAgentKeyed(
+        crate::owner_identity_egress::admit_managed_agent_egress().await?,
+    );
+    let auth =
+        build_nip98_auth_header_for_keys(agent_keys, &Method::POST, url, event_json, &lease)?;
     let mut request = state
         .http_client
         .post(url)
@@ -861,139 +924,5 @@ pub(crate) async fn submit_engram_event(
 // ── NIP-49 egress guard: boundary 7 (persona snapshot engram submit) ─────────
 
 #[cfg(test)]
-mod egress_guard_tests {
-    use super::submit_engram_event;
-
-    const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
-
-    /// An engram body carrying an ncryptsec must be rejected by the guard
-    /// before any network I/O (the target port is a discard address; a guard
-    /// error — not a connection error — proves the abort ordering).
-    #[tokio::test]
-    async fn blocks_ncryptsec_before_network() {
-        let state = crate::app_state::build_app_state();
-        let keys = nostr::Keys::generate();
-        let body = format!("{{\"content\":\"{NCRYPTSEC}\"}}");
-        let err = submit_engram_event(
-            &state,
-            &keys,
-            body.as_bytes(),
-            "http://127.0.0.1:9/events",
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.contains("key-backup material"), "{err}");
-    }
-}
-
-#[cfg(test)]
-mod import_avatar_tests {
-    use super::materialize_import_avatar;
-    use std::cell::Cell;
-
-    #[tokio::test]
-    async fn inline_avatar_is_uploaded_and_replaced_with_hosted_url() {
-        let uploaded = Cell::new(false);
-        let result = materialize_import_avatar(
-            Some("data:image/png;base64,iVBORw0KGgo="),
-            Some("https://sender.invalid/avatar.png"),
-            |bytes| {
-                uploaded.set(true);
-                async move {
-                    assert_eq!(bytes, b"\x89PNG\r\n\x1a\n");
-                    Ok("https://relay.example/media/avatar.png".to_string())
-                }
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(uploaded.get());
-        assert_eq!(
-            result.as_deref(),
-            Some("https://relay.example/media/avatar.png")
-        );
-    }
-
-    #[tokio::test]
-    async fn hosted_avatar_skips_upload() {
-        let result =
-            materialize_import_avatar(None, Some("https://sender.example/avatar.png"), |_| async {
-                panic!("hosted avatars must not be uploaded")
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.as_deref(), Some("https://sender.example/avatar.png"));
-    }
-
-    #[tokio::test]
-    async fn relay_sized_inline_avatar_becomes_bounded_signed_profile() {
-        use base64::{engine::general_purpose::STANDARD, Engine};
-        use image::ImageEncoder;
-        use nostr::JsonUtil;
-
-        let mut pixels = vec![0_u8; 512 * 512 * 4];
-        let mut seed = 0x1234_5678_u32;
-        for byte in &mut pixels {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            *byte = seed as u8;
-        }
-        let mut source = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut source)
-            .write_image(&pixels, 512, 512, image::ExtendedColorType::Rgba8)
-            .unwrap();
-        assert!(source.len() > 256 * 1024);
-        let data_url = format!("data:image/png;base64,{}", STANDARD.encode(&source));
-        assert!(data_url.len() > 256 * 1024);
-
-        let avatar = materialize_import_avatar(Some(&data_url), None, |bytes| async move {
-            let mime = crate::commands::media::detect_and_validate_mime(&bytes)?;
-            assert_eq!(mime, "image/png");
-            let sanitized = crate::commands::media::sanitize_image_for_upload(bytes, &mime)?;
-            image::load_from_memory(&sanitized).map_err(|error| error.to_string())?;
-            Ok("https://relay.example/media/avatar.png".to_string())
-        })
-        .await
-        .unwrap()
-        .unwrap();
-
-        let event =
-            crate::events::build_profile(Some("Imported agent"), None, Some(&avatar), None, None)
-                .unwrap()
-                .sign_with_keys(&nostr::Keys::generate())
-                .unwrap();
-        assert!(event.content.len() < 64 * 1024);
-        assert!(!event.content.contains("data:image/"));
-        assert!(event
-            .content
-            .contains("https://relay.example/media/avatar.png"));
-        assert!(event.as_json().len() < 256 * 1024);
-    }
-
-    #[tokio::test]
-    async fn upload_failure_aborts_avatar_materialization() {
-        let result = materialize_import_avatar(
-            Some("data:image/png;base64,iVBORw0KGgo="),
-            None,
-            |_| async { Err("relay upload failed".to_string()) },
-        )
-        .await;
-
-        assert_eq!(result.unwrap_err(), "relay upload failed");
-    }
-
-    #[tokio::test]
-    async fn malformed_inline_avatar_fails_before_upload() {
-        let result =
-            materialize_import_avatar(Some("data:image/png;base64,not-base64!"), None, |_| async {
-                panic!("malformed avatars must not be uploaded")
-            })
-            .await;
-
-        assert_eq!(result.unwrap_err(), "Snapshot avatar data is malformed.");
-    }
-}
+#[path = "import_tests.rs"]
+mod tests;

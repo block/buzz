@@ -111,6 +111,11 @@ pub(crate) fn normalize_event_id(value: &str) -> Option<String> {
 pub(crate) struct ProjectOwnerIdentity {
     pub(crate) keys: Keys,
     pub(crate) auth_tag: Option<String>,
+    /// Whether the resolved identity is a managed agent's key (non-viewer
+    /// branch) rather than the human owner's (viewer branch). Set explicitly at
+    /// the branch that knows it — the P29-C1 egress lease variant is chosen from
+    /// this, never inferred from `auth_tag`.
+    pub(crate) is_managed_agent: bool,
 }
 
 pub(crate) fn project_owner_identity(
@@ -123,6 +128,7 @@ pub(crate) fn project_owner_identity(
         return Ok(ProjectOwnerIdentity {
             keys: viewer_keys,
             auth_tag: None,
+            is_managed_agent: false,
         });
     }
 
@@ -149,7 +155,28 @@ pub(crate) fn project_owner_identity(
     Ok(ProjectOwnerIdentity {
         keys,
         auth_tag: record.auth_tag.clone(),
+        is_managed_agent: true,
     })
+}
+
+/// Admit the P29-C1 egress lease for a resolved [`ProjectOwnerIdentity`]:
+/// the managed-agent keyed lease for the non-viewer branch, the owner-identity
+/// lease for the viewer branch. Both wait out the rate-limit gate internally,
+/// so callers must admit BEFORE building/signing the event they publish.
+pub(crate) async fn admit_project_egress(
+    identity: &ProjectOwnerIdentity,
+) -> Result<crate::owner_identity_egress::EgressLease, String> {
+    if identity.is_managed_agent {
+        Ok(
+            crate::owner_identity_egress::EgressLease::ManagedAgentKeyed(
+                crate::owner_identity_egress::admit_managed_agent_egress().await?,
+            ),
+        )
+    } else {
+        Ok(crate::owner_identity_egress::EgressLease::OwnerIdentity(
+            crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+        ))
+    }
 }
 
 pub(crate) fn validate_repo_address(repo_address: &str, owner: &str) -> Result<(), String> {
@@ -198,6 +225,9 @@ pub async fn publish_project_owner_announcement(
         return Err("Invalid project owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
+    // P29-C1 egress lease: admit BEFORE signing/publishing this owner-identity
+    // event, exactly as the other project publish sites do.
+    let lease = admit_project_egress(&identity).await?;
     let nostr_tags = input
         .tags
         .into_iter()
@@ -210,10 +240,15 @@ pub async fn publish_project_owner_announcement(
     let event = builder
         .sign_with_keys(&identity.keys)
         .map_err(|error| format!("sign failed: {error}"))?;
-    let publication_error =
-        submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-            .await
-            .err();
+    let publication_error = submit_signed_event_with_keys(
+        &event,
+        &state,
+        &identity.keys,
+        identity.auth_tag.as_deref(),
+        &lease,
+    )
+    .await
+    .err();
 
     Ok(ProjectOwnerAnnouncementResult {
         event: event.as_json(),
@@ -451,6 +486,9 @@ pub async fn sign_project_pull_request_status(
         return Err("Invalid target repository owner.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
+    // P29-C1 condition 1: admit BEFORE signing so the NIP-98 freshness window
+    // opens after the rate-limit wait, not between sign and submit.
+    let lease = admit_project_egress(&identity).await?;
     let event = Event::from_json(build_pull_request_status_event(
         &identity.keys,
         &input.repo_address,
@@ -460,8 +498,14 @@ pub async fn sign_project_pull_request_status(
         input.created_at,
     )?)
     .map_err(|error| format!("parse signed pull request status: {error}"))?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    submit_signed_event_with_keys(
+        &event,
+        &state,
+        &identity.keys,
+        identity.auth_tag.as_deref(),
+        &lease,
+    )
+    .await?;
     Ok(())
 }
 
@@ -484,8 +528,22 @@ pub async fn publish_project_pull_request_merged_status(
         return Err("Invalid merged pull request status event.".to_string());
     }
     let identity = project_owner_identity(&app, &state, &target_owner)?;
-    submit_signed_event_with_keys(&event, &state, &identity.keys, identity.auth_tag.as_deref())
-        .await?;
+    // P29-C1 condition 2 (documented pre-signed exception): this command
+    // receives an ALREADY-SIGNED kind-1631 event from input (verified above:
+    // kind, pubkey == target_owner, signature). Admission-before-signing is
+    // impossible here — the signature is fixed and its freshness is
+    // input-determined by `status_created_at` — so admit-before-submit is all
+    // this site can do. Chosen, not missed; noted in the C8 closed-world
+    // evidence so the exception is auditable.
+    let lease = admit_project_egress(&identity).await?;
+    submit_signed_event_with_keys(
+        &event,
+        &state,
+        &identity.keys,
+        identity.auth_tag.as_deref(),
+        &lease,
+    )
+    .await?;
     Ok(())
 }
 
@@ -652,11 +710,17 @@ pub async fn merge_project_pull_request(
     )?;
     let signed_status = Event::from_json(&status_event)
         .map_err(|error| format!("parse signed merged status: {error}"))?;
+    // P29-C1 condition 1: the git clone→merge→push above ran in spawn_blocking
+    // for seconds to minutes; admit only now, after it completes and before the
+    // status event is built/signed, so the lease spans sign→auth→transmit and
+    // never the blocking git op.
+    let lease = admit_project_egress(&owner_identity).await?;
     let status_publication_error = submit_signed_event_with_keys(
         &signed_status,
         &state,
         &owner_identity.keys,
         owner_identity.auth_tag.as_deref(),
+        &lease,
     )
     .await
     .err();

@@ -244,6 +244,55 @@ pub(super) fn retain_team_pending(app: &AppHandle, state: &AppState, team: &Team
     }
 }
 
+/// Captured-scope sibling of [`retain_team_pending`].
+///
+/// Accepts a pre-built [`RetentionScope`] instead of resolving the live active
+/// scope. Used by Phase 3a of `confirm_team_snapshot_import` where the
+/// retention scope has already been built from the captured entry; calling the
+/// live `retain_team_pending` there would re-resolve the active scope, which
+/// may have diverged after a workspace switch that occurred after Phase-2.
+///
+/// Like its live counterpart, this function is best-effort: errors are logged
+/// and swallowed so a retention failure never blocks the calling phase.
+pub(crate) fn retain_team_pending_in_scope(
+    scope: &crate::managed_agents::retention::RetentionScope,
+    team: &TeamRecord,
+) {
+    use crate::managed_agents::{
+        persona_events::monotonic_created_at,
+        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
+        team_events::build_team_event,
+    };
+    use buzz_core_pkg::kind::KIND_TEAM;
+    use nostr::JsonUtil;
+
+    let result = (|| -> Result<(), String> {
+        let conn = open_retention_db(&scope.db_path)?;
+        let pubkey = scope.owner_keys.public_key().to_hex();
+        let prior =
+            get_retained_event(&conn, KIND_TEAM, &pubkey, &team.id)?.map(|row| row.created_at);
+        let event = build_team_event(team)?
+            .custom_created_at(monotonic_created_at(prior))
+            .sign_with_keys(&scope.owner_keys)
+            .map_err(|e| format!("failed to sign team event: {e}"))?;
+        retain_event(
+            &conn,
+            &RetainedEvent {
+                kind: KIND_TEAM,
+                pubkey,
+                d_tag: team.id.clone(),
+                content: event.content.to_string(),
+                created_at: event.created_at.as_secs() as i64,
+                raw_event: event.as_json(),
+                pending_sync: true,
+            },
+        )
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: team-retain-in-scope: {e}");
+    }
+}
+
 /// Purge a deleted team's pending row and enqueue a NIP-09 tombstone, both
 /// inside the `managed_agents_store_lock`-held delete body.
 ///

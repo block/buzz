@@ -15,6 +15,13 @@ const preference = {
   followSystem: false,
 };
 
+// Owner-identity artifact producers (NIP-AP) return `{ value, artifact }` across
+// the Tauri boundary; the adapters unwrap `.value`. Wrap a mock's bare value in
+// the stamped shape (inert stamp in C3 — the generation-compare lands in C6/C7).
+function stampedArtifact(value) {
+  return { value, artifact: { id: 0, generation: 0 } };
+}
+
 function installFakeTimer() {
   globalThis.window ??= {};
   let callback = null;
@@ -113,7 +120,9 @@ test("live replacement delivered during empty onboarding fetch prevents default 
   globalThis.window.__TAURI_INTERNALS__ = {
     invoke(command) {
       if (command === "nip44_decrypt_from_self") {
-        return Promise.resolve(JSON.stringify(remotePreference));
+        return Promise.resolve(
+          stampedArtifact(JSON.stringify(remotePreference)),
+        );
       }
       throw new Error(`unexpected command: ${command}`);
     },
@@ -304,15 +313,18 @@ test("new remote invalidates no-op suppression for A to B to A", async () => {
   let signedEventId = "published-z";
   globalThis.window.__TAURI_INTERNALS__ = {
     invoke(command, args) {
-      if (command === "nip44_encrypt_to_self") return Promise.resolve("cipher");
+      if (command === "nip44_encrypt_to_self")
+        return Promise.resolve(stampedArtifact("cipher"));
       if (command === "sign_event") {
         return Promise.resolve(
-          JSON.stringify(
-            relayEvent({
-              id: signedEventId,
-              content: args.content,
-              created_at: args.createdAt,
-            }),
+          stampedArtifact(
+            JSON.stringify(
+              relayEvent({
+                id: signedEventId,
+                content: args.content,
+                created_at: args.createdAt,
+              }),
+            ),
           ),
         );
       }
@@ -358,16 +370,19 @@ test("serializes an in-flight publish before sending the latest edit", async () 
   let signed = 0;
   globalThis.window.__TAURI_INTERNALS__ = {
     invoke(command, args) {
-      if (command === "nip44_encrypt_to_self") return Promise.resolve("cipher");
+      if (command === "nip44_encrypt_to_self")
+        return Promise.resolve(stampedArtifact("cipher"));
       if (command === "sign_event") {
         signed += 1;
         return Promise.resolve(
-          JSON.stringify(
-            relayEvent({
-              id: `event-${signed}`,
-              content: args.content,
-              created_at: args.createdAt,
-            }),
+          stampedArtifact(
+            JSON.stringify(
+              relayEvent({
+                id: `event-${signed}`,
+                content: args.content,
+                created_at: args.createdAt,
+              }),
+            ),
           ),
         );
       }
@@ -413,16 +428,19 @@ test("republishes above a newer remote observed while publish is in flight", asy
   let signed = 0;
   globalThis.window.__TAURI_INTERNALS__ = {
     invoke(command, args) {
-      if (command === "nip44_encrypt_to_self") return Promise.resolve("cipher");
+      if (command === "nip44_encrypt_to_self")
+        return Promise.resolve(stampedArtifact("cipher"));
       if (command === "sign_event") {
         signed += 1;
         return Promise.resolve(
-          JSON.stringify(
-            relayEvent({
-              id: `event-${signed}`,
-              content: args.content,
-              created_at: args.createdAt,
-            }),
+          stampedArtifact(
+            JSON.stringify(
+              relayEvent({
+                id: `event-${signed}`,
+                content: args.content,
+                created_at: args.createdAt,
+              }),
+            ),
           ),
         );
       }
@@ -473,17 +491,21 @@ test("delayed live decryption fences publish acknowledgement and preserves local
   let signed = 0;
   globalThis.window.__TAURI_INTERNALS__ = {
     invoke(command, args) {
-      if (command === "nip44_encrypt_to_self") return Promise.resolve("cipher");
-      if (command === "nip44_decrypt_from_self") return remotePlaintext.promise;
+      if (command === "nip44_encrypt_to_self")
+        return Promise.resolve(stampedArtifact("cipher"));
+      if (command === "nip44_decrypt_from_self")
+        return remotePlaintext.promise.then(stampedArtifact);
       if (command === "sign_event") {
         signed += 1;
         return Promise.resolve(
-          JSON.stringify(
-            relayEvent({
-              id: `event-${signed}`,
-              content: args.content,
-              created_at: args.createdAt,
-            }),
+          stampedArtifact(
+            JSON.stringify(
+              relayEvent({
+                id: `event-${signed}`,
+                content: args.content,
+                created_at: args.createdAt,
+              }),
+            ),
           ),
         );
       }
@@ -545,15 +567,18 @@ test("transient publish failure retries and acknowledges exact event", async () 
   let attempts = 0;
   globalThis.window.__TAURI_INTERNALS__ = {
     invoke(command, args) {
-      if (command === "nip44_encrypt_to_self") return Promise.resolve("cipher");
+      if (command === "nip44_encrypt_to_self")
+        return Promise.resolve(stampedArtifact("cipher"));
       if (command === "sign_event") {
         return Promise.resolve(
-          JSON.stringify(
-            relayEvent({
-              id: "published-event",
-              content: args.content,
-              created_at: args.createdAt,
-            }),
+          stampedArtifact(
+            JSON.stringify(
+              relayEvent({
+                id: "published-event",
+                content: args.content,
+                created_at: args.createdAt,
+              }),
+            ),
           ),
         );
       }

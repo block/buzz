@@ -26,8 +26,7 @@ fn truncated_display_name(pubkey: &PublicKey) -> Result<String, String> {
 
 #[tauri::command]
 pub fn get_identity(state: State<'_, AppState>) -> Result<IdentityInfo, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
-    let pubkey = keys.public_key();
+    let pubkey = state.current_pubkey()?;
     let pubkey_hex = pubkey.to_hex();
     let display_name = truncated_display_name(&pubkey)?;
     let lost = state
@@ -111,7 +110,14 @@ pub async fn sign_event(
     created_at: Option<u64>,
     tags: Vec<Vec<String>>,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    // Admit BEFORE reading the owner key (the F1 lesson): the admitted lease
+    // pins the identity generation, and `begin_egress_drain` cannot proceed
+    // while it is in flight — so the key clone below cannot observe a
+    // mid-transition swap, and the artifact is stamped with the lease's
+    // generation so a signature produced across a transition fails closed at
+    // its frontend application site (C6/C7).
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -129,7 +135,10 @@ pub async fn sign_event(
             .sign_with_keys(&keys)
             .map_err(|error| format!("sign failed: {error}"))?;
 
-        Ok(event.as_json())
+        // Stamp the issuing lease's generation, then wrap the value; the
+        // frontend threads {value, artifact} opaque — validated in C6/C7.
+        let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+        Ok(artifact.stamp_value(event.as_json()))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -139,7 +148,11 @@ pub async fn sign_event(
 pub async fn decrypt_observer_event(
     event_json: String,
     state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<serde_json::Value>, String> {
+    // Admit BEFORE reading the owner key: the admitted lease pins the identity
+    // generation for the key clone below, and the decrypted payload is a
+    // stamped artifact — see `sign_event`.
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -154,19 +167,26 @@ pub async fn decrypt_observer_event(
             return Err("observer event has invalid signature".into());
         }
 
-        buzz_core_pkg::observer::decrypt_observer_payload(&keys, &event)
-            .map_err(|error| format!("decrypt observer event failed: {error}"))
+        let payload = buzz_core_pkg::observer::decrypt_observer_payload(&keys, &event)
+            .map_err(|error| format!("decrypt observer event failed: {error}"))?;
+        // Stamp the decrypted payload; frontend validates in C6/C7.
+        let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+        Ok(artifact.stamp_value(payload))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn build_observer_control_event(
+pub async fn build_observer_control_event(
     agent_pubkey: String,
     payload: serde_json::Value,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    // Admit BEFORE reading the owner key: the admitted lease pins the identity
+    // generation for the key clone below, and the owner-signed observer control
+    // frame is a stamped artifact — see `sign_event`.
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let keys = state.signing_keys()?;
     let agent_pubkey = PublicKey::from_hex(agent_pubkey.trim())
         .map_err(|error| format!("invalid agent pubkey: {error}"))?;
@@ -184,15 +204,29 @@ pub fn build_observer_control_event(
     let event = builder
         .sign_with_keys(&keys)
         .map_err(|error| format!("sign observer control failed: {error}"))?;
-    Ok(event.as_json())
+    // Stamp the issuing lease's generation; frontend validates in C6/C7.
+    let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+    Ok(artifact.stamp_value(event.as_json()))
 }
 
 #[tauri::command]
-pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn get_nsec(
+    state: State<'_, AppState>,
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    // Admit BEFORE reading the secret key (the F1 lesson): the admitted lease
+    // pins the identity generation, and `begin_egress_drain` cannot proceed
+    // while it is in flight — so the secret-key read below cannot observe a
+    // mid-transition swap. The value is a P33 identity-export artifact stamped
+    // with the issuing lease's generation, so an nsec revealed across a
+    // transition fails closed at its frontend reveal/copy boundary (C6/C7).
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let keys = state.signing_keys()?;
-    keys.secret_key()
+    let nsec = keys
+        .secret_key()
         .to_bech32()
-        .map_err(|error| format!("encode nsec: {error}"))
+        .map_err(|error| format!("encode nsec: {error}"))?;
+    let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+    Ok(artifact.stamp_value(nsec))
 }
 
 /// Generate a passphrase for a new encrypted backup (EFF short wordlist, OS
@@ -211,6 +245,17 @@ pub fn generate_backup_passphrase(
 
 /// Core of [`create_ncryptsec_backup`], factored so tests can drive it with a
 /// bare `AppState` + temp dir (and a fast scrypt tier) without an `AppHandle`.
+///
+/// **Caller precondition:** the caller MUST hold `state.identity_mutation`
+/// across this call. The backup blob must be derived from — and the KDF
+/// concurrency capped over — one stable identity, and the guard must be taken
+/// BEFORE the egress lease so the lock order matches the identity-transition
+/// coordinator (`identity_mutation` → egress lease). Reacquiring the guard here
+/// would invert that order and deadlock the coordinator (it holds
+/// `identity_mutation` and then blocks awaiting in-flight egress leases). The
+/// guard reference cannot cross the command's `spawn_blocking` boundary, so the
+/// precondition is held on the caller's async stack rather than passed as a
+/// param — the same shape `run_identity_transition` relies on.
 pub(crate) fn create_backup_with_log_n(
     state: &AppState,
     password: &str,
@@ -223,11 +268,6 @@ pub(crate) fn create_backup_with_log_n(
         ));
     }
 
-    // Serialize against import_identity/persist_current_identity: the blob
-    // must be derived from — and persisted for — one stable identity. Also
-    // caps KDF concurrency at one.
-    let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
-
     // Recovery mode (lost/locked) → Err, same gate as signing.
     let keys = state.signing_keys()?;
 
@@ -237,17 +277,54 @@ pub(crate) fn create_backup_with_log_n(
 /// Create a NIP-49 backup of the live identity in memory.
 ///
 /// Encrypts under `password`, decrypt-verifies the fresh blob against the live
-/// pubkey, and returns the `ncryptsec1…` string for the native save flow. The
-/// body runs under `identity_mutation`, so identity changes cannot race the KDF.
+/// pubkey, and returns the `ncryptsec1…` string for the native save flow.
+///
+/// Lock order (uniform with `run_identity_transition`): `identity_mutation` is
+/// acquired FIRST and held across the blocking KDF, THEN the egress lease is
+/// admitted under that stable epoch. Because the transition coordinator holds
+/// `identity_mutation` for its whole drain, a backup can never hold a lease
+/// while the coordinator awaits the drain — the earlier inverse order
+/// (lease-then-`identity_mutation`) deadlocked the transition.
 #[tauri::command]
 pub async fn create_ncryptsec_backup(
     password: String,
     app_handle: tauri::AppHandle,
-) -> Result<String, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    create_ncryptsec_backup_inner(password, app_handle).await
+}
+
+/// Runtime-generic core for [`create_ncryptsec_backup`]. Keeping the lock and
+/// admission order here lets the mock-runtime concurrency schedule exercise the
+/// exact command body rather than a parallel test-only implementation.
+async fn create_ncryptsec_backup_inner<R: tauri::Runtime>(
+    password: String,
+    app_handle: tauri::AppHandle<R>,
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    // ── identity_mutation FIRST (uniform lock order) ─────────────────────────
+    // Held on this async stack across the blocking body below (never moved into
+    // the closure — a guard cannot cross the `'static` `spawn_blocking`
+    // boundary), so the KDF derives from one stable identity and no concurrent
+    // swap can race it. A cloned handle keeps `app_handle` free for the body.
+    let lock_handle = app_handle.clone();
+    let lock_state = lock_handle.state::<AppState>();
+    let _mutation_guard = lock_state.identity_mutation.lock().await;
+
+    // Admit BEFORE deriving the backup, UNDER the held `identity_mutation`: the
+    // NIP-49 blob recovers the owner identity itself (the strongest P33
+    // identity-export artifact), so it is stamped with the issuing lease's
+    // generation. Admitting under the guard pins a stable Live epoch — a
+    // transition draining toward B holds `identity_mutation`, so it cannot be
+    // in flight here. The witness survives reducer/provider retention (settings
+    // + onboarding); every save boundary validates current admission +
+    // generation in C6/C7, and a transition invalidates the retained backup
+    // with zero write.
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     tokio::task::spawn_blocking(move || {
         let password = zeroize::Zeroizing::new(password);
         let state = app_handle.state::<AppState>();
-        create_backup_with_log_n(&state, &password, crate::key_backup::BACKUP_LOG_N)
+        let blob = create_backup_with_log_n(&state, &password, crate::key_backup::BACKUP_LOG_N)?;
+        let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+        Ok(artifact.stamp_value(blob))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -333,94 +410,71 @@ pub async fn save_ncryptsec_copy(
     Ok(Some(dest.display().to_string()))
 }
 
+#[path = "identity_transition.rs"]
+mod transition;
+#[cfg(test)]
+pub(crate) use transition::commit_under_fence;
+pub(crate) use transition::run_identity_transition;
+
 #[tauri::command]
 pub async fn import_identity(
     nsec: String,
     password: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
-    tokio::task::spawn_blocking(move || {
-        // NIP-49 backups require a passphrase and decrypt entirely in Rust.
-        // Raw nsec/hex input follows the existing parser path unchanged.
-        let password = password.map(zeroize::Zeroizing::new);
-        let keys = crate::key_backup::recover_keys_from_input(
-            &nsec,
-            password.as_ref().map(|value| value.as_str()),
-        )?;
-
-        // Serialize against persist_current_identity: hold this guard for the
-        // full function body so a concurrent stale persist can't overwrite
-        // this import.
-        let state = app_handle.state::<AppState>();
-        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
-
-        let data_dir = app_handle
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("app data dir: {e}"))?;
-        std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
-        let key_path = data_dir.join("identity.key");
-
-        let (pubkey, storage) = commit_imported_identity(&state, &data_dir, keys, |keys| {
-            // Persist into the OS keyring first (store → read-back verify →
-            // marker → delete file). Falls back to the 0o600 file when the
-            // keyring is unavailable; returns Err only when both backends fail.
-            let store =
-                crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-            crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
-        })?;
-
-        let pubkey_hex = pubkey.to_hex();
-        let display_name = truncated_display_name(&pubkey)?;
-
-        eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
-
-        Ok(IdentityInfo {
-            pubkey: pubkey_hex,
-            display_name,
-            storage: storage.as_str().to_string(),
-            lost: false,
-            locked: false,
-            reset_failed: false,
-        })
-    })
+    let data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
+    // Normal import: no supersession fence, both validity gates always pass —
+    // there is no queued-task currency to check.
+    run_identity_transition(
+        app_handle,
+        nsec,
+        password,
+        None,
+        store,
+        data_dir,
+        || Ok(()),
+        || Ok(()),
+    )
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-/// Commit an imported identity: durably persist, swap in-memory keys, clear
-/// recovery flags, then remove the previous identity's stale app-managed
-/// backup. Caller must hold `state.identity_mutation`.
+/// Finish an imported identity commit whose durable persist already succeeded
+/// (`PersistenceOutcome::Committed`): swap in-memory keys, clear recovery flags,
+/// then remove the previous identity's stale app-managed backup. Caller must
+/// hold `state.identity_mutation` and have proven B durably canonical via
+/// [`persist_imported_identity_classified`](crate::identity_persistence::persist_imported_identity_classified).
 ///
-/// Ordering is the contract:
-///
-/// 1. `persist` runs FIRST. If it fails (`Err` from both keyring and file
-///    fallback), nothing has changed — the previous identity stays live in
-///    memory AND its valid canonical `identity.ncryptsec` stays on disk.
-/// 2. Only after durable persistence do we swap `state.keys` and clear the
-///    recovery flags.
-/// 3. Stale-backup cleanup runs LAST and is deliberately best-effort: at that
-///    point the import is durably committed, so reporting a cleanup failure
-///    as a command `Err` would claim a half-applied import that actually
-///    succeeded. The leftover blob is still passphrase-encrypted and is
-///    replaced by the next backup creation; we log and move on.
+/// `storage` records where B durably landed (reported on the success result).
+/// Splitting the durable persist (now the classifier's, run under the egress
+/// barrier) from this in-memory swap is the P27-C1 shape: this function runs
+/// ONLY on the `Committed` arm, so it never restores live A beside durable B.
+/// Stale-backup cleanup runs LAST and is best-effort: B is already durable, so
+/// a cleanup failure must not be reported as a failed commit. The leftover blob
+/// is still passphrase-encrypted and is replaced by the next backup creation.
 pub(crate) fn commit_imported_identity(
     state: &AppState,
     data_dir: &std::path::Path,
     keys: nostr::Keys,
-    persist: impl FnOnce(&nostr::Keys) -> Result<crate::app_state::IdentityStorage, String>,
+    storage: crate::app_state::IdentityStorage,
 ) -> Result<(nostr::PublicKey, crate::app_state::IdentityStorage), String> {
     // Capture the previous pubkey up front for post-commit cleanup.
-    let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
-
-    let storage = persist(&keys)?;
+    let previous_pubkey = state
+        .identity_lifecycle_keys_guard()
+        .map_err(|e| e.to_string())?
+        .public_key();
 
     // Update in-memory keys BEFORE clearing recovery flags. The Release
     // stores below pair with Acquire loads in get_identity: a reader
     // observing false is guaranteed to see the updated keys.
     let pubkey = keys.public_key();
     {
-        let mut active_keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let mut active_keys = state
+            .identity_lifecycle_keys_guard()
+            .map_err(|e| e.to_string())?;
         *active_keys = keys;
         state.set_identity_storage(storage);
     }
@@ -474,7 +528,7 @@ pub async fn persist_current_identity(
         // concurrent import_identity cannot complete between our check and
         // our persist, which would let the stale ephemeral key overwrite the
         // imported one.
-        let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
+        let _mutation_guard = state.identity_mutation.blocking_lock();
 
         if !state
             .identity_lost
@@ -484,7 +538,13 @@ pub async fn persist_current_identity(
         }
 
         // Clone current keys without holding the mutex across keyring I/O.
-        let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+        // Lost-state path: `signing_keys()` would refuse here, but this command
+        // exists to make the ephemeral lost-state key durable, so it reads the
+        // raw guard directly.
+        let keys = state
+            .identity_lifecycle_keys_guard()
+            .map_err(|e| e.to_string())?
+            .clone();
 
         let data_dir = app_handle
             .path()
@@ -607,7 +667,7 @@ pub async fn sign_nostr_identity_binding(
     origin: String,
     expires_at: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
     nostr_bind::validate_signing_request(
         &challenge_id,
         &nonce,
@@ -616,11 +676,10 @@ pub async fn sign_nostr_identity_binding(
         &expires_at,
     )?;
 
-    let keys = state
-        .keys
-        .lock()
-        .map_err(|error| error.to_string())?
-        .clone();
+    // Admission precedes the key clone: the lease pins the identity generation
+    // for the signed artifact — see `sign_event`.
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
+    let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
         let event = build_nostr_identity_binding_event(
@@ -632,7 +691,8 @@ pub async fn sign_nostr_identity_binding(
             &expires_at,
         )?;
 
-        Ok(event.as_json())
+        let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+        Ok(artifact.stamp_value(event.as_json()))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -643,7 +703,16 @@ pub async fn create_auth_event(
     challenge: String,
     relay_url: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    // The relay-WS reconnection handshake signs a NIP-42 auth event under a
+    // per-send bounded egress lease: reconnection cannot re-authenticate
+    // mid-transition because the drain refuses new admission (spec — the
+    // frontend session's authority is gated the same as every other owner
+    // sign). The signed auth event is an owner-signed relay-event ARTIFACT
+    // (stamped and threaded to the frontend, validated in C6/C7); frontend
+    // session REGISTRATION (native-WS teardown handle) defers to C6/C7 with the
+    // frontend identity store.
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -658,8 +727,10 @@ pub async fn create_auth_event(
             .tags(tags)
             .sign_with_keys(&keys)
             .map_err(|error| format!("sign failed: {error}"))?;
-
-        Ok(event.as_json())
+        // Stamp the issuing lease's generation, consuming the lease as the
+        // sign→return window closes; frontend validates in C6/C7.
+        let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+        Ok(artifact.stamp_value(event.as_json()))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -669,17 +740,22 @@ pub async fn create_auth_event(
 pub async fn nip44_encrypt_to_self(
     plaintext: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    // Admission precedes the key clone: the lease pins the identity generation
+    // for the ciphertext artifact — see `sign_event`.
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        nip44::encrypt(
+        let ciphertext = nip44::encrypt(
             keys.secret_key(),
             &keys.public_key(),
             &plaintext,
             nip44::Version::V2,
         )
-        .map_err(|e| format!("nip44 encrypt failed: {e}"))
+        .map_err(|e| format!("nip44 encrypt failed: {e}"))?;
+        let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+        Ok(artifact.stamp_value(ciphertext))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -689,102 +765,30 @@ pub async fn nip44_encrypt_to_self(
 pub async fn nip44_decrypt_from_self(
     ciphertext: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<crate::owner_identity_egress::StampedArtifact<String>, String> {
+    // Admission precedes the key clone: the lease pins the identity generation
+    // for the plaintext artifact — see `sign_event`.
+    let lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let keys = state.signing_keys()?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)
-            .map_err(|e| format!("nip44 decrypt failed: {e}"))
+        let plaintext = nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)
+            .map_err(|e| format!("nip44 decrypt failed: {e}"))?;
+        let artifact = crate::owner_identity_egress::register_owner_artifact(&lease);
+        Ok(artifact.stamp_value(plaintext))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[cfg(test)]
-mod nostr_identity_binding_tests {
-    use super::build_nostr_identity_binding_event;
-    use crate::nostr_bind;
-    use nostr::{JsonUtil, Keys};
-
-    fn tag_values(event: &nostr::Event) -> Vec<Vec<String>> {
-        event
-            .tags
-            .iter()
-            .map(|tag| tag.as_slice().to_vec())
-            .collect()
-    }
-
-    #[test]
-    fn build_nostr_identity_binding_event_signs_exact_shape() {
-        let keys = Keys::generate();
-        let event = build_nostr_identity_binding_event(
-            &keys,
-            "550e8400-e29b-41d4-a716-446655440000",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
-            "123456",
-            "https://example.com",
-            "2999-01-01T00:00:00Z",
-        )
-        .unwrap();
-
-        assert_eq!(event.kind.as_u16(), nostr_bind::KIND);
-        assert_eq!(event.content, nostr_bind::CONTENT);
-        assert_eq!(event.pubkey, keys.public_key());
-        assert!(event.verify_id());
-        assert!(event.verify_signature());
-        assert!(nostr::Event::from_json(event.as_json()).is_ok());
-
-        let tags = tag_values(&event);
-        assert!(tags.contains(&vec![
-            "challenge_id".into(),
-            "550e8400-e29b-41d4-a716-446655440000".into(),
-        ]));
-        assert!(tags.contains(&vec![
-            "nonce".into(),
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567".into(),
-        ]));
-        assert!(tags.contains(&vec!["verification_code".into(), "123456".into(),]));
-        assert!(tags.contains(&vec!["audience".into(), "buzz:nostr-identity".into()]));
-        assert!(tags.contains(&vec!["action".into(), "bind_nostr_identity".into(),]));
-        assert!(tags.contains(&vec!["protocol".into(), "buzz-nostr-identity".into(),]));
-        assert!(tags.contains(&vec!["version".into(), "1".into(),]));
-        assert!(tags.contains(&vec!["origin".into(), "https://example.com".into(),]));
-        assert!(tags.contains(&vec!["expires_at".into(), "2999-01-01T00:00:00Z".into(),]));
-    }
-
-    #[test]
-    fn build_nostr_identity_binding_event_rejects_malformed_verification_code() {
-        let keys = Keys::generate();
-        let error = build_nostr_identity_binding_event(
-            &keys,
-            "550e8400-e29b-41d4-a716-446655440000",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
-            "12345a",
-            "https://example.com",
-            "2999-01-01T00:00:00Z",
-        )
-        .unwrap_err();
-
-        assert_eq!(error, "verification_code must be exactly 6 digits");
-    }
-
-    #[test]
-    fn build_nostr_identity_binding_event_rejects_expired_link() {
-        let keys = Keys::generate();
-        let error = build_nostr_identity_binding_event(
-            &keys,
-            "550e8400-e29b-41d4-a716-446655440000",
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567",
-            "123456",
-            "https://example.com",
-            "2000-01-01T00:00:00Z",
-        )
-        .unwrap_err();
-
-        assert_eq!(error, "expires_at is expired");
-    }
-}
+#[path = "identity_binding_tests.rs"]
+mod nostr_identity_binding_tests;
 
 #[cfg(test)]
 #[path = "identity_key_backup_tests.rs"]
 mod identity_key_backup_tests;
+
+#[cfg(test)]
+#[path = "identity_egress_ordering_tests.rs"]
+mod identity_egress_ordering_tests;

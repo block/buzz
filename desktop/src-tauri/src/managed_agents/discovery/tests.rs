@@ -222,8 +222,7 @@ fn effective_agent_command_explicit_override_wins() {
     );
 }
 
-/// Minimal record for `record_agent_command` tests. Only the resolution
-/// inputs (runtime / persona_id / agent_command_override) vary.
+/// Minimal record for `record_agent_command` tests; only runtime/persona_id/agent_command_override vary.
 fn record_with(
     runtime: Option<&str>,
     persona_id: Option<&str>,
@@ -280,6 +279,9 @@ fn record_with(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        library_ref: None,
+        library_applied_revision: None,
+        last_completed_deploy_attempt_id: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -290,7 +292,7 @@ fn record_with(
 
 #[test]
 fn record_agent_command_own_runtime_wins_over_persona() {
-    // A record with its own runtime never consults the persona list.
+    // A record with its own materialized runtime never consults the persona list.
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     let record = record_with(Some("claude"), Some("p1"), None);
     assert_eq!(record_agent_command(&record, &personas), "claude-agent-acp");
@@ -304,8 +306,7 @@ fn record_agent_command_override_beats_runtime() {
 
 #[test]
 fn record_agent_command_legacy_persona_fallback() {
-    // Pre-migration record: persona_id set, no runtime — resolves through
-    // the legacy persona path unchanged.
+    // Pre-migration record: persona_id set, no runtime — legacy path unchanged.
     let personas = vec![persona_with_runtime("p1", Some("goose"))];
     let record = record_with(None, Some("p1"), None);
     assert_eq!(record_agent_command(&record, &personas), "goose");
@@ -395,8 +396,7 @@ fn effective_agent_command_empty_override_is_inherit() {
 
 #[test]
 fn effective_agent_command_falls_back_to_default() {
-    // No override, no persona runtime, and a deleted persona all fall back
-    // to the bundled default.
+    // No override, no persona runtime, and a deleted persona all fall back to the bundled default.
     let personas = vec![persona_with_runtime("p1", None)];
     assert_eq!(
         effective_agent_command(Some("p1"), &personas, None),

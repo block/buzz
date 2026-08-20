@@ -66,10 +66,7 @@ pub async fn get_feed(
         .map(|t| t.split(',').any(|s| s.trim() == "needs_action"))
         .unwrap_or(true);
 
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = state.current_pubkey()?.to_hex();
 
     // Mentions: messages that reference me via #p.
     let mut mention_filter = serde_json::json!({
@@ -498,8 +495,21 @@ pub async fn send_channel_message(
             let parent_id = parent_event_id
                 .as_deref()
                 .ok_or("forum comment requires parent_event_id")?;
-            let thread_ref =
-                resolve_thread_ref(parent_id, &state, &relay_base, Some(&signing_keys)).await?;
+            // Authenticated thread-root read under the owner identity — admit an
+            // owner-identity egress lease for the keyed query and hold it across
+            // the read (the eventual send admits its own below).
+            let read_lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+                crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+            );
+            let thread_ref = resolve_thread_ref(
+                parent_id,
+                &state,
+                &relay_base,
+                Some(&signing_keys),
+                Some(&read_lease),
+            )
+            .await?;
+            drop(read_lease);
             resolved_root = Some(thread_ref.root_event_id.to_hex());
             events::build_forum_comment(
                 channel_uuid,
@@ -513,8 +523,21 @@ pub async fn send_channel_message(
         _ => {
             let thread_ref = match parent_event_id.as_deref() {
                 Some(pid) => {
-                    let tr =
-                        resolve_thread_ref(pid, &state, &relay_base, Some(&signing_keys)).await?;
+                    // Authenticated thread-root read under the owner identity —
+                    // admit an owner-identity egress lease for the keyed query
+                    // and hold it across the read (the send admits its own).
+                    let read_lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+                        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+                    );
+                    let tr = resolve_thread_ref(
+                        pid,
+                        &state,
+                        &relay_base,
+                        Some(&signing_keys),
+                        Some(&read_lease),
+                    )
+                    .await?;
+                    drop(read_lease);
                     resolved_root = Some(tr.root_event_id.to_hex());
                     Some(tr)
                 }
@@ -539,9 +562,13 @@ pub async fn send_channel_message(
     // clock read — persisted as an event cursor by the Projects opener.
     // Submit through the base resolved (and scope-checked) above and the
     // identity snapshotted (and signer-checked) above — a re-resolve or key
-    // re-read here would reopen the mid-command switch window.
+    // re-read here would reopen the mid-command switch window. Owner-authored
+    // send: admit the owner-identity egress lease and hold it across publish.
+    let lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
     let (result, created_at) =
-        submit_event_at_created_at(builder, &state, &relay_base, &signing_keys).await?;
+        submit_event_at_created_at(builder, &state, &relay_base, &signing_keys, &lease).await?;
 
     let depth = match (&parent_event_id, &resolved_root) {
         (None, _) => 0,
@@ -683,7 +710,7 @@ fn managed_agent_submission_auth_tag(
         return Ok(Some(auth_tag));
     }
 
-    let owner_keys = state.keys.lock().map_err(|error| error.to_string())?;
+    let owner_keys = state.signing_keys()?;
     legacy_managed_agent_auth_tag(&owner_keys, agent_pubkey)
 }
 
@@ -767,6 +794,7 @@ pub async fn send_managed_agent_channel_message(
                 &state,
                 &crate::relay::relay_api_base_url_with_override(&state),
                 None,
+                None,
             )
             .await?,
         ),
@@ -807,6 +835,12 @@ pub async fn send_managed_agent_channel_message(
         }
     }
     let mentions = mention_pubkeys.unwrap_or_default();
+    // Managed-agent channel send (P29-C1 closed-world sink, widest blast
+    // radius). Admit BEFORE building the message so the kind:9 `created_at` is
+    // stamped after the rate-limit wait.
+    let lease = crate::owner_identity_egress::EgressLease::ManagedAgentKeyed(
+        crate::owner_identity_egress::admit_managed_agent_egress().await?,
+    );
     let builder = build_managed_agent_channel_message(
         channel_uuid,
         trimmed,
@@ -814,11 +848,17 @@ pub async fn send_managed_agent_channel_message(
         &mentions,
         &client_tags,
     )?;
-    // Same contract as `send_channel_message`: `created_at` is the signed
-    // event's, not a post-publication clock read.
-    let (result, created_at) =
-        submit_event_with_keys_created_at(builder, &state, &keys, submission_auth_tag.as_deref())
-            .await?;
+    // `created_at` is the signed event's own second, not a post-publication
+    // clock read (same cursor contract as `send_channel_message`). The
+    // managed-agent lease admitted above is held across sign → publish.
+    let (result, created_at) = submit_event_with_keys_created_at(
+        builder,
+        &state,
+        &keys,
+        submission_auth_tag.as_deref(),
+        &lease,
+    )
+    .await?;
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
@@ -856,10 +896,7 @@ pub async fn remove_reaction(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // Find our own kind:7 reaction event referencing the target.
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = state.current_pubkey()?.to_hex();
     let target = event_id.trim();
     let trimmed_emoji = emoji.trim();
 
@@ -953,36 +990,9 @@ pub async fn delete_message(
 
 // ── Local helpers ───────────────────────────────────────────────────────────
 
-fn channel_id_from_tags(ev: &nostr::Event) -> Option<String> {
-    ev.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.len() >= 2 && s[0] == "h" {
-            Some(s[1].clone())
-        } else {
-            None
-        }
-    })
-}
+mod feed_item;
+use feed_item::feed_item_from_event;
 
-fn tags_to_vec(ev: &nostr::Event) -> Vec<Vec<String>> {
-    ev.tags.iter().map(|t| t.as_slice().to_vec()).collect()
-}
-
-fn feed_item_from_event(ev: &nostr::Event, category: &str) -> FeedItemInfo {
-    let channel_id = channel_id_from_tags(ev);
-    FeedItemInfo {
-        id: ev.id.to_hex(),
-        kind: ev.kind.as_u16() as u32,
-        pubkey: ev.pubkey.to_hex(),
-        content: ev.content.clone(),
-        created_at: ev.created_at.as_secs(),
-        channel_id,
-        channel_name: String::new(),
-        channel_type: None,
-        tags: tags_to_vec(ev),
-        category: category.to_string(),
-    }
-}
 #[cfg(test)]
 #[path = "messages_tests.rs"]
 mod tests;

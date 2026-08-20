@@ -598,6 +598,107 @@ fn empty_prompt_folds_to_none() {
     assert_eq!(persona.into_agent_record().system_prompt, None);
 }
 
+/// P13-I3 / invariant 4: a legacy device that never touched the library must
+/// be byte-untouched by the fold. This drives the REAL store save→load→save
+/// path (`save_agent_definitions_at` / `load_agent_definitions_at`, the
+/// serializer `save_personas` funnels through), not an in-memory
+/// `to_value`, so it catches field ordering, formatting, and any unrelated
+/// default-field drift that a value-only comparison misses.
+///
+/// The baseline is the exact bytes the pinned-head serializer produces for a
+/// legacy definition: `storage.rs` (the serializer — `serde_json::to_vec_pretty`
+/// over the record vector) is byte-identical base→HEAD, and the three new fields
+/// are `#[serde(skip_serializing_if = "Option::is_none")]`, so a legacy record
+/// with all three `None` serializes exactly as it did at head. The test proves
+/// (1) the three keys never appear on disk and (2) load→save is a byte-fixpoint
+/// on that legacy shape — a one-field regression (dropping a `skip_serializing_if`,
+/// or shedding/adding a field) breaks the fixpoint or the key-absence assertion.
+#[test]
+fn legacy_record_without_deploy_provenance_round_trips_byte_identically() {
+    let dir = tempfile::tempdir().unwrap();
+    let definitions_dir = dir.path();
+
+    // A legacy keyless definition: the shape `into_agent_record` produces and
+    // `save_agent_definitions_at` persists, with all three library fields `None`
+    // (never authored before §3). Keyless so it is a definition, not an instance.
+    let legacy = sample_persona().into_agent_record();
+    assert!(legacy.pubkey.is_empty(), "definition is keyless");
+    assert_eq!(legacy.library_ref, None);
+    assert_eq!(legacy.library_applied_revision, None);
+    assert_eq!(legacy.last_completed_deploy_attempt_id, None);
+
+    // Baseline = the exact bytes the (base==HEAD) serializer writes for this
+    // legacy record. Captured from the first real store write, this is the
+    // pinned-head on-disk form: any drift below is measured against it.
+    crate::managed_agents::storage::save_agent_definitions_at(
+        definitions_dir,
+        std::slice::from_ref(&legacy),
+    )
+    .expect("write legacy store");
+    let store_path = crate::managed_agents::storage::managed_agents_store_path_at(definitions_dir);
+    let baseline = std::fs::read(&store_path).expect("read baseline bytes");
+
+    // The three library keys must never reach disk for a legacy record.
+    let baseline_text = std::str::from_utf8(&baseline).expect("store is utf-8");
+    assert!(
+        !baseline_text.contains("library_ref"),
+        "no library_ref on disk"
+    );
+    assert!(
+        !baseline_text.contains("library_applied_revision"),
+        "no library_applied_revision on disk"
+    );
+    assert!(
+        !baseline_text.contains("last_completed_deploy_attempt_id"),
+        "no last_completed_deploy_attempt_id on disk"
+    );
+
+    // Fixpoint: load the store back and re-save it through the same real path.
+    // A legacy device that never touches the library re-writes byte-identical
+    // bytes — no key resurrection, no field reordering, no default drift.
+    let reloaded = crate::managed_agents::storage::load_agent_definitions_at(definitions_dir)
+        .expect("reload store");
+    assert_eq!(reloaded.len(), 1, "one definition round-trips");
+    assert_eq!(reloaded[0].library_ref, None);
+    assert_eq!(reloaded[0].library_applied_revision, None);
+    assert_eq!(reloaded[0].last_completed_deploy_attempt_id, None);
+
+    crate::managed_agents::storage::save_agent_definitions_at(definitions_dir, &reloaded)
+        .expect("re-save store");
+    let after = std::fs::read(&store_path).expect("read re-saved bytes");
+    assert_eq!(
+        after, baseline,
+        "load→save must be a byte-exact fixpoint on a legacy record"
+    );
+}
+
+/// P14-I2: the deploy-attempt stamp is not projection metadata, so a fresh
+/// projection carries it as `None`, and an ordinary persona save — which
+/// applies a definition VIEW onto a canonical record — must never shed a
+/// non-`None` stamp (the view cannot carry it, so `apply_definition_view` must
+/// leave it untouched).
+#[test]
+fn deploy_attempt_stamp_survives_into_record_and_apply_view() {
+    // Fresh projection: no stamp.
+    let mut record = sample_persona().into_agent_record();
+    assert_eq!(record.last_completed_deploy_attempt_id, None);
+
+    // Seed a landed deploy stamp, then apply an unrelated definition edit.
+    record.last_completed_deploy_attempt_id = Some("attempt-42".to_string());
+    record.backend_agent_id = Some("backend-7".to_string());
+    let mut edited = sample_persona();
+    edited.display_name = "Renamed".to_string();
+    record.apply_definition_view(&edited);
+
+    assert_eq!(record.display_name.as_deref(), Some("Renamed"));
+    assert_eq!(
+        record.last_completed_deploy_attempt_id.as_deref(),
+        Some("attempt-42"),
+        "apply_definition_view must never shed the deploy-attempt stamp",
+    );
+    assert_eq!(record.backend_agent_id.as_deref(), Some("backend-7"));
+}
+
 // ── Mint-time behavioral defaults (B5 quad activation) ──────────────────────
 
 use super::resolve_mint_behavioral_defaults;

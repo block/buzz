@@ -59,8 +59,11 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
 
     // `upstream_url` is always `{relay base}{path}`, so the token can't reach
     // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&app_state, &base_url) {
-        upstream = upstream.header("authorization", auth);
+    if let Some((auth, bearer)) = mint_media_get_auth(&app_state, &base_url).await {
+        // A bearer whose issuing identity was superseded attaches nothing.
+        if bearer.admit_exercise().is_ok() {
+            upstream = upstream.header("authorization", auth);
+        }
     }
 
     if let Some(range) = req.headers().get("range") {
@@ -187,8 +190,11 @@ pub async fn handle_buzz_media(
 
     // `upstream_url` is always `{relay base}{path}`, so the token can't reach
     // a third-party origin (mint_media_get_auth safety contract).
-    if let Some(auth) = mint_media_get_auth(&state, &base) {
-        upstream = upstream.header("authorization", auth);
+    if let Some((auth, bearer)) = mint_media_get_auth(&state, &base).await {
+        // A bearer whose issuing identity was superseded attaches nothing.
+        if bearer.admit_exercise().is_ok() {
+            upstream = upstream.header("authorization", auth);
+        }
     }
 
     if let Some(range) = request.headers().get("range") {

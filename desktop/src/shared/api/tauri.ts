@@ -110,6 +110,13 @@ type RawRelayAgent = {
   respond_to_allowlist?: string[];
 };
 import type { RestartDiffEntry as RawRestartDiffEntry } from "./restartDiff";
+export type { StampedArtifact } from "./stampedArtifact";
+export {
+  signRelayEvent,
+  createAuthEvent,
+  nip44EncryptToSelf,
+  nip44DecryptFromSelf,
+} from "./identityArtifacts";
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
@@ -598,23 +605,6 @@ export async function removeReaction(
   await invokeTauri("remove_reaction", { eventId, emoji });
 }
 
-export async function signRelayEvent(input: {
-  kind: number;
-  content: string;
-  createdAt?: number;
-  tags: string[][];
-}): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("sign_event", input);
-  return JSON.parse(eventJson) as RelayEvent;
-}
-
-export async function createAuthEvent(input: {
-  challenge: string;
-  relayUrl: string;
-}): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("create_auth_event", input);
-  return JSON.parse(eventJson) as RelayEvent;
-}
 function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
   return {
     pubkey: agent.pubkey,
@@ -1059,16 +1049,6 @@ export async function probeBackendProvider(
 
 // ── NIP-44 encrypt-to-self ───────────────────────────────────────────────────
 
-export async function nip44EncryptToSelf(plaintext: string): Promise<string> {
-  return invokeTauri<string>("nip44_encrypt_to_self", { plaintext });
-}
-
-export async function nip44DecryptFromSelf(
-  ciphertext: string,
-): Promise<string> {
-  return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
-}
-
 export async function startPairing(): Promise<string> {
   return invokeTauri<string>("start_pairing");
 }
@@ -1081,20 +1061,20 @@ export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
 
+type ApplyWorkspaceResult = {
+  applied: boolean;
+  degraded: string[];
+  blocked?: string | null;
+};
 export async function applyCommunity(
   relayUrl: string,
   nsec?: string,
   token?: string,
   reposDir?: string,
   agentManagedProfiles?: boolean,
-): Promise<void> {
-  await invokeTauri("apply_workspace", {
-    relayUrl,
-    nsec: nsec ?? null,
-    token: token ?? null,
-    reposDir: reposDir ?? null,
-    agentManagedProfiles: agentManagedProfiles ?? false,
-  });
+): Promise<ApplyWorkspaceResult> {
+  // biome-ignore format: single-line call keeps the function under the file-size limit
+  return invokeTauri<ApplyWorkspaceResult>("apply_workspace", { relayUrl, nsec: nsec ?? null, token: token ?? null, reposDir: reposDir ?? null, agentManagedProfiles: agentManagedProfiles ?? false });
 }
 
 // Validate a candidate repos dir without mutating the filesystem. Rejects

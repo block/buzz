@@ -43,14 +43,23 @@ pub async fn open_dm(
     )?;
 
     // Submit a kind:41010 dm-open event; the relay replies with the channel id
-    // in its OK message payload.
+    // in its OK message payload. This send uses the owner's own identity, so it
+    // admits an owner-identity egress lease and holds it across publish.
     let builder = events::build_dm_open(&pubkeys)?;
-    let result = submit_event_at_with_keys(builder, &state, &api_base_url, &keys).await?;
+    let submit_lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
+    let result =
+        submit_event_at_with_keys(builder, &state, &api_base_url, &keys, &submit_lease).await?;
+    drop(submit_lease);
     let ack: OpenDmAck = parse_command_response(&result.message)?;
 
     // Re-fetch the channel metadata so the frontend gets the same `ChannelInfo`
     // shape as `get_channel_details` — through the same scope-checked base and
     // the same pinned identity.
+    let metadata_lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
     let metadata = query_relay_at_with_keys(
         &state,
         &api_base_url,
@@ -61,8 +70,10 @@ pub async fn open_dm(
         })],
         &keys,
         None,
+        &metadata_lease,
     )
     .await?;
+    drop(metadata_lease);
 
     metadata
         .first()

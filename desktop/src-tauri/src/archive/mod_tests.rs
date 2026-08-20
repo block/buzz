@@ -668,7 +668,7 @@ mod real_relay {
     /// is exercised, including NIP-98 signing inside `query_relay`.
     fn make_test_app_state(keys: Keys, relay_url: &str) -> AppState {
         let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
+        *state.identity_lifecycle_keys_guard().unwrap() = keys;
         *state.relay_url_override.lock().unwrap() = Some(relay_url.to_string());
         state
     }
@@ -749,7 +749,7 @@ mod real_relay {
         state: &AppState,
         db_path: &Path,
     ) -> ArchiveBatchResult {
-        let identity_pk = state.keys.lock().unwrap().public_key().to_hex();
+        let identity_pk = state.current_pubkey().unwrap().to_hex();
         let relay_url = crate::relay::relay_ws_url_with_override(state);
 
         // Phase 1: plan (sync). Connection dropped before any .await.
@@ -765,7 +765,7 @@ mod real_relay {
 
         // Phase 3: persist (sync). Fresh connection, same file.
         let conn = store::open_archive_db(db_path).expect("open archive db for commit");
-        let owner_keys = state.keys.lock().unwrap().clone();
+        let owner_keys = state.identity_lifecycle_keys_guard().unwrap().clone();
         commit_archive(
             bucket_results,
             plan.ephemeral,

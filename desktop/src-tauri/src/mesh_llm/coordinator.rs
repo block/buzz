@@ -361,8 +361,8 @@ pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
     }
 }
 
-pub(crate) async fn publish_stopped_status_once_at(
-    app: &AppHandle,
+pub(crate) async fn publish_stopped_status_once_at<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     relay_url: Option<&str>,
     reason: &str,
 ) {
@@ -480,12 +480,16 @@ async fn publish_status_report_at(
     payload: serde_json::Value,
 ) -> Result<(), String> {
     let api_base_url = crate::relay::relay_http_base_url(relay_url);
+    let lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
     let keys = state.signing_keys()?;
     crate::relay::submit_event_at_with_keys(
         build_status_report_event(payload)?,
         state,
         &api_base_url,
         &keys,
+        &lease,
     )
     .await
     .map(|_| ())

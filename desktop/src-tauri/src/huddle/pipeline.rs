@@ -12,7 +12,7 @@ use std::{
 };
 
 use nostr::JsonUtil;
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
 
 use crate::app_state::AppState;
@@ -621,8 +621,16 @@ pub(crate) fn spawn_transcription_task(
     let spawned_gen = session_generation.load(Ordering::Acquire);
 
     let http_client = state.http_client.clone();
-    let keys = match state.keys.lock() {
-        Ok(k) => k.clone(),
+    // Capture the AppHandle (stable for the process lifetime) rather than a
+    // long-lived owner Keys clone: P29-C1 forbids the STT task from pinning
+    // owner identity across the huddle. Keys are re-resolved per send through
+    // the recovery-gated accessor below, so an identity that enters recovery
+    // mid-huddle stops publishing at once.
+    let app = match state.app_handle.lock() {
+        Ok(guard) => match guard.clone() {
+            Some(app) => app,
+            None => return,
+        },
         Err(_) => return,
     };
     let relay_base_url = crate::relay::relay_api_base_url_with_override(state);
@@ -666,11 +674,29 @@ pub(crate) fn spawn_transcription_task(
                     continue;
                 }
             };
-            // Wait before signing: the relay enforces NIP-98 freshness (±60s)
-            // and the gate may hold for up to MAX_HINT_SECONDS (300s). Sign
-            // the kind event and build NIP-98 auth after the wait so both
-            // timestamps are fresh — single clean order: wait → sign → auth → send.
-            crate::relay_admission::wait_for_rate_limit().await;
+            // Re-resolve keys per send through the recovery-gated accessor and
+            // admit an owner-identity egress lease. try_admit_owner_identity_egress
+            // waits out the rate-limit gate internally (NIP-98 freshness ±60s
+            // under a ≤300s hold), so the lease is born after the wait and spans
+            // only sign → auth → transmit. Acquiring per send means no owner Keys
+            // outlive a single publish, and a mid-huddle recovery latch refuses
+            // the lease so this task stops publishing.
+            let app_state = app.state::<AppState>();
+            let keys = match app_state.signing_keys() {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("buzz-desktop: STT signing key unavailable: {e}");
+                    break;
+                }
+            };
+            let lease = match crate::owner_identity_egress::try_admit_owner_identity_egress().await
+            {
+                Ok(lease) => crate::owner_identity_egress::EgressLease::OwnerIdentity(lease),
+                Err(e) => {
+                    eprintln!("buzz-desktop: STT egress refused: {e}");
+                    break;
+                }
+            };
             let body_bytes = match sign_and_guard_stt_body(builder, &keys) {
                 Ok(b) => b,
                 Err(e) => {
@@ -684,6 +710,7 @@ pub(crate) fn spawn_transcription_task(
                 &reqwest::Method::POST,
                 &url,
                 &body_bytes,
+                &lease,
             ) {
                 Ok(h) => h,
                 Err(e) => {

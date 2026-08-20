@@ -6,6 +6,9 @@ use tauri::{AppHandle, Manager, State};
 use super::mesh_readiness::wait_for_mesh_inference;
 use crate::{app_state::AppState, mesh_llm, relay};
 
+#[cfg(feature = "mesh-llm")]
+#[path = "mesh_llm_scope.rs"]
+pub(crate) mod scope_impl;
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MeshSharingConfig {
@@ -697,37 +700,39 @@ pub(crate) async fn ensure_relay_mesh_for_record(
     // runtime and fall through to re-arm it. The mesh coordinator watchdog also
     // calls this path after eviction so recovery is not start-only (Brad #2304).
     if state.mesh_llm_runtime.lock().await.is_some() {
-        match mesh_llm::recover_stale_mesh_runtime(
-            &state,
-            mesh_llm::MeshRecoveryUrgency::Foreground,
-        )
-        .await
-        {
-            mesh_llm::MeshRuntimeRecovery::Live => {
-                return wait_for_mesh_inference(model_id).await;
-            }
-            mesh_llm::MeshRuntimeRecovery::Evicted | mesh_llm::MeshRuntimeRecovery::Absent => {}
-            mesh_llm::MeshRuntimeRecovery::Debouncing => {
-                return Err(
-                    "Buzz shared compute ingress is temporarily unresponsive; recovery is already scheduled. Try again shortly."
-                        .to_string(),
-                );
-            }
-            mesh_llm::MeshRuntimeRecovery::ReleasePending => {
-                return Err(
-                    "Buzz shared compute is still shutting down its previous local ingress. Try again shortly."
-                        .to_string(),
-                );
-            }
-            mesh_llm::MeshRuntimeRecovery::Replaced => {
-                return wait_for_mesh_inference(model_id).await;
-            }
-            mesh_llm::MeshRuntimeRecovery::RestartRequired => {
-                app.request_restart();
-                return Err(
-                    "Buzz shared compute startup lost its local ingress before shutdown control became available. Buzz is restarting to recover it."
-                        .to_string(),
-                );
+        if scope_impl::check_mesh_runtime_relay_scope(&state).await? {
+            match mesh_llm::recover_stale_mesh_runtime(
+                &state,
+                mesh_llm::MeshRecoveryUrgency::Foreground,
+            )
+            .await
+            {
+                mesh_llm::MeshRuntimeRecovery::Live => {
+                    return wait_for_mesh_inference(model_id).await;
+                }
+                mesh_llm::MeshRuntimeRecovery::Evicted | mesh_llm::MeshRuntimeRecovery::Absent => {}
+                mesh_llm::MeshRuntimeRecovery::Debouncing => {
+                    return Err(
+                        "Buzz shared compute ingress is temporarily unresponsive; recovery is already scheduled. Try again shortly."
+                            .to_string(),
+                    );
+                }
+                mesh_llm::MeshRuntimeRecovery::ReleasePending => {
+                    return Err(
+                        "Buzz shared compute is still shutting down its previous local ingress. Try again shortly."
+                            .to_string(),
+                    );
+                }
+                mesh_llm::MeshRuntimeRecovery::Replaced => {
+                    return wait_for_mesh_inference(model_id).await;
+                }
+                mesh_llm::MeshRuntimeRecovery::RestartRequired => {
+                    app.request_restart();
+                    return Err(
+                        "Buzz shared compute startup lost its local ingress before shutdown control became available. Buzz is restarting to recover it."
+                            .to_string(),
+                    );
+                }
             }
         }
     }
@@ -743,6 +748,17 @@ pub(crate) async fn ensure_relay_mesh_for_record(
         return wait_for_mesh_inference(model_id).await;
     }
 
+    // No serving configuration exists — genuine consumer-only start.
+    // Capture scope BEFORE discovery so a concurrent workspace switch can be
+    // detected under the install lock. Route through
+    // `install_client_under_workspace_transition` which acquires
+    // `workspace_transition`, validates full scope identity
+    // (scope_id, relay, owner, generation), then calls the install closure —
+    // serialized against apply_workspace and live identity import.
+    let captured_scope = state
+        .capture_active_scope()
+        .ok_or("mesh client install: no active workspace scope")?;
+
     let target = match resolve_mesh_bootstrap_target(&state, model_id).await {
         Ok(Some(target)) => target,
         Ok(None) => {
@@ -757,11 +773,18 @@ pub(crate) async fn ensure_relay_mesh_for_record(
             ));
         }
     };
-
-    // No serving configuration exists, so this is a genuine consumer-only
-    // start. A configured serving machine is restored above and never reaches
-    // this client fallback.
-    ensure_client_node_for_model(&state, model_id, Some(target.endpoint_addr)).await?;
+    let model_id_owned = model_id.to_string();
+    let endpoint = target.endpoint_addr;
+    scope_impl::install_client_under_workspace_transition(app, &captured_scope, move || {
+        let state_ref = state.clone();
+        let model_id_ref = model_id_owned.clone();
+        async move {
+            ensure_client_node_for_model(&state_ref, &model_id_ref, Some(endpoint))
+                .await
+                .map(|_| ())
+        }
+    })
+    .await?;
     wait_for_mesh_inference(model_id).await
 }
 
@@ -804,6 +827,9 @@ pub async fn mesh_stop_node(
     mesh_llm::publish_stopped_status_once_at(&app, bound_relay_url.as_deref(), "stop").await;
     Ok(mesh_llm::stopped_status())
 }
+
+/// Stop the local Mesh client (client-mode only). See [`scope_impl::mesh_stop_client`].
+pub(crate) use scope_impl::mesh_stop_client;
 
 #[tauri::command]
 pub async fn mesh_node_status(state: State<'_, AppState>) -> CmdResult<mesh_llm::MeshNodeStatus> {

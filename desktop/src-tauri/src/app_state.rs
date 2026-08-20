@@ -13,11 +13,16 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
 pub(crate) use crate::identity_storage::{IdentityStorage, RecoveryState, ResolvedIdentity};
-use crate::managed_agents::config_bridge::SessionConfigCache;
+use crate::managed_agents::scope::WorkspaceAgentScope;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 
 pub struct AppState {
-    pub keys: Mutex<Keys>,
+    /// Identity signing keys. PRIVATE (P29-C1): reach through
+    /// [`AppState::signing_keys`] (refuses in recovery / under the latch),
+    /// [`AppState::current_pubkey`] (pubkey-only), or
+    /// [`AppState::identity_lifecycle_keys_guard`] (transition/import commit +
+    /// lost-state persist only). No signing path may touch the raw field.
+    keys: Mutex<Keys>,
     /// Durable backend holding `keys`. Updated after the key write and before
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
@@ -32,11 +37,9 @@ pub struct AppState {
     /// validated relay origin.
     pub media_fetch_client: reqwest::Client,
     pub relay_url_override: Mutex<Option<String>>,
-    pub workspace_apply_lock: Arc<AsyncMutex<()>>,
-    pub workspace_apply_generation: AtomicU64,
-    /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
-    pub managed_agent_restore_pending: AtomicBool,
-    /// Disabled by agent-managed profiles so agent profile updates survive start/restore.
+    /// Whether desktop may repair managed-agent kind:0 profiles from its local
+    /// records. Disabled by the agent-managed profiles experiment so an agent's
+    /// own profile updates are not overwritten on start or restore.
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
@@ -63,14 +66,11 @@ pub struct AppState {
     /// lives there. An ephemeral key is generated so the app can open; all
     /// signing commands check this flag via [`AppState::signing_keys`] and
     /// return `Err` so no events are published under the inaccessible identity.
-    /// Mutually exclusive with `identity_lost` (guaranteed by `RecoveryState`
-    /// at the resolve boundary).
-    ///
+    /// Mutually exclusive with `identity_lost` (guaranteed by `RecoveryState`).
     /// Ordering: writers store with `Ordering::Release` after `state.keys` is
-    /// updated, so a reader observing `false` with `Ordering::Acquire` is
-    /// guaranteed to see the updated keys. Writers: `setup()` (initial
-    /// resolution via `resolve_persisted_identity`) and `import_identity`
-    /// (clears the flag when the user successfully imports a new key).
+    /// updated, so a reader observing `false` with `Ordering::Acquire` sees the
+    /// updated keys. Writers: `setup()` (initial resolution) and
+    /// `import_identity` (clears the flag on a successful key import).
     pub keyring_locked: AtomicBool,
     /// Set when identity resolution detected a "lost" state: the migration
     /// marker was present but the keyring was empty and no plaintext fallback
@@ -89,7 +89,20 @@ pub struct AppState {
     /// a newer imported key during concurrent calls. Deliberately separate from
     /// `keys` so readers (signing, get_identity, etc.) are not blocked during
     /// keyring I/O.
-    pub identity_mutation: Mutex<()>,
+    ///
+    /// Layer 1 async lock (order: `identity_mutation` → `workspace_transition`
+    /// → Mesh `rearm_lock` → `mesh_llm_runtime`). May hold across `.await`.
+    pub identity_mutation: AsyncMutex<()>,
+    /// Serializes workspace transitions (`apply_workspace` and live identity
+    /// import). Layer 1 async lock; taken after `identity_mutation`.
+    pub workspace_transition: AsyncMutex<()>,
+    /// #6003 durable-apply lock (owned guard transfers into the restore spawn) + supersede epoch.
+    pub workspace_apply_lock: Arc<AsyncMutex<()>>,
+    pub workspace_apply_generation: AtomicU64,
+    /// Active workspace agent scope. `None` until first `apply_workspace`.
+    /// Every agent command fails closed on `None` — no legacy-root fallback.
+    /// Layer 2 commit epoch (no `.await` while `managed_agents_store_lock` held).
+    pub active_agent_scope: Mutex<Option<WorkspaceAgentScope>>,
     /// Set when the boot-time Phase 2 reset attempted a wipe but verification
     /// failed. The sentinel is preserved so the next relaunch retries. All
     /// identity-dependent setup is skipped; the frontend shows a reset-failed
@@ -98,10 +111,6 @@ pub struct AppState {
     /// Ordering: written once in `setup()` with `Ordering::Release`; read in
     /// `get_identity` with `Ordering::Acquire`.
     pub reset_failed: AtomicBool,
-    /// Cached ACP session config from running agents, keyed by canonical
-    /// `(agent pubkey, relay URL)` runtime identity.
-    /// Populated when the harness emits `session_config_captured` observer events.
-    pub session_config_cache: Mutex<HashMap<ManagedAgentRuntimeKey, SessionConfigCache>>,
     /// IOKit power assertion state — prevents idle sleep while agents run.
     pub prevent_sleep: Arc<Mutex<crate::prevent_sleep::PreventSleepState>>,
     /// In-process mesh-llm node started by Buzz Desktop.
@@ -121,13 +130,12 @@ pub struct AppState {
     /// channel's owner reads back as `is_member=false` until the snapshot
     /// propagates, disabling their own composer. Entries are bound to the
     /// creating identity so an in-process identity swap (`import_identity`,
-    /// workspace apply) can never inherit another identity's stale
-    /// membership. Populated only by this process's own `create_channel`
-    /// calls — a relay can never write into it — so it carries no
-    /// trust-boundary risk. `get_channels` clears an entry once the real
-    /// kind:39002 is observed for the current identity, keeping the set
-    /// bounded and letting a later leave correctly flip the channel back to
-    /// `is_member=false`.
+    /// workspace apply) can never inherit another identity's stale membership.
+    /// Populated only by this process's own `create_channel` calls (a relay can
+    /// never write into it), so it carries no trust-boundary risk. `get_channels`
+    /// clears an entry once the real kind:39002 is observed for the current
+    /// identity, keeping the set bounded and letting a later leave flip the
+    /// channel back to `is_member=false`.
     pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
 }
 
@@ -203,18 +211,18 @@ pub fn build_app_state() -> AppState {
              header across origins (redirect-hop SSRF)",
         ),
         relay_url_override: Mutex::new(None),
-        workspace_apply_lock: Arc::new(AsyncMutex::new(())),
-        workspace_apply_generation: AtomicU64::new(0),
-        managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
-        identity_mutation: Mutex::new(()),
+        identity_mutation: AsyncMutex::new(()),
+        workspace_transition: AsyncMutex::new(()),
+        workspace_apply_lock: Arc::new(AsyncMutex::new(())),
+        workspace_apply_generation: AtomicU64::new(0),
+        active_agent_scope: Mutex::new(None),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
         provider_deploy_locks: Mutex::new(HashMap::new()),
-        session_config_cache: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
         huddle_audio: Default::default(),
         app_handle: Mutex::new(None),
@@ -245,55 +253,6 @@ impl AppState {
         self.huddle_state.lock().map_err(|e| e.to_string())
     }
 
-    pub fn get_session_cache(&self, key: &ManagedAgentRuntimeKey) -> Option<SessionConfigCache> {
-        self.session_config_cache.lock().ok()?.get(key).cloned()
-    }
-
-    pub fn put_session_cache(&self, key: ManagedAgentRuntimeKey, cache: SessionConfigCache) {
-        if let Ok(mut map) = self.session_config_cache.lock() {
-            map.insert(key, cache);
-        }
-    }
-
-    pub fn clear_agent_session_cache(&self, key: &ManagedAgentRuntimeKey) {
-        if let Ok(mut map) = self.session_config_cache.lock() {
-            map.remove(key);
-        }
-    }
-
-    pub fn clear_agent_session_caches(&self, pubkey: &str) {
-        if let Ok(mut map) = self.session_config_cache.lock() {
-            map.retain(|key, _| key.pubkey != pubkey);
-        }
-    }
-
-    /// Record that `channel_id` was just created by `creator_pubkey` and its
-    /// kind:39002 owner membership has not yet been observed.
-    pub fn mark_pending_owned_channel(&self, creator_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.insert((creator_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
-    /// Whether `channel_id` is still awaiting `my_pubkey`'s kind:39002 entry.
-    /// Bound to `my_pubkey` so an in-process identity swap never inherits
-    /// another identity's pending-owner entry for the same channel id.
-    pub fn is_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) -> bool {
-        self.pending_owned_channels
-            .lock()
-            .map(|set| set.contains(&(my_pubkey.to_string(), channel_id.to_string())))
-            .unwrap_or(false)
-    }
-
-    /// Drop the `(my_pubkey, channel_id)` entry from the pending-owner
-    /// overlay once that identity's real kind:39002 membership has been
-    /// observed.
-    pub fn clear_pending_owned_channel(&self, my_pubkey: &str, channel_id: &str) {
-        if let Ok(mut set) = self.pending_owned_channels.lock() {
-            set.remove(&(my_pubkey.to_string(), channel_id.to_string()));
-        }
-    }
-
     /// Return the active identity keys if they are in a signable state.
     ///
     /// Returns `Err` when the identity is in a lost state (`identity_lost`
@@ -314,10 +273,51 @@ impl AppState {
                  until the identity is restored and Buzz is relaunched"
                 .to_string());
         }
+        // P29-C1: also refuse while owner-identity persistence is latched
+        // `Indeterminate`. A completed transition that could not prove either
+        // durable identity canonical must not sign under the unresolved
+        // identity. The latch is only set by the C5 identity-transition
+        // coordinator, so this is inert (never `true`) until C5 lands, but the
+        // gate is in place at every signer now.
+        if crate::owner_identity_egress::is_identity_indeterminate() {
+            return Err("owner identity is in an indeterminate recovery state; \
+                 event signing is disabled until the identity is reconciled \
+                 and Buzz is relaunched"
+                .to_string());
+        }
         self.keys
             .lock()
             .map_err(|e| e.to_string())
             .map(|k| k.clone())
+    }
+
+    /// The current identity's public key, for routing, query filters, and
+    /// display. Unlike [`signing_keys`](Self::signing_keys) this does NOT
+    /// refuse in recovery: a public key is not signing capability, and the
+    /// recovery-reporting surfaces (`get_identity`) need it to describe the
+    /// recovery state itself. Reads through this accessor rather than the
+    /// private `keys` field so no caller can reach the secret key for a
+    /// pubkey-only need.
+    pub fn current_pubkey(&self) -> Result<nostr::PublicKey, String> {
+        self.keys
+            .lock()
+            .map_err(|e| e.to_string())
+            .map(|k| k.public_key())
+    }
+
+    /// Raw guard on the identity keys for the identity-lifecycle paths ONLY:
+    /// the `apply_workspace` and `import_identity` commit stages (which swap
+    /// keys under their transition guards) and `persist_current_identity`
+    /// (which clones the ephemeral lost-state key to make it durable). These
+    /// paths legitimately operate on keys DURING recovery, so they cannot go
+    /// through [`signing_keys`](Self::signing_keys). Signing and publishing
+    /// MUST use [`signing_keys`](Self::signing_keys), never this — the field
+    /// is private so this is the only write door, and it is named to make a
+    /// signing misuse obvious in review.
+    pub(crate) fn identity_lifecycle_keys_guard(
+        &self,
+    ) -> std::sync::LockResult<std::sync::MutexGuard<'_, Keys>> {
+        self.keys.lock()
     }
 
     /// Emit the current huddle state to the frontend via Tauri event.
@@ -392,7 +392,7 @@ mod keyring_config;
 pub(crate) use keyring_config::keyring_service;
 
 /// Keyring key name for the human identity nsec.
-const IDENTITY_KEY_NAME: &str = "identity";
+pub(crate) const IDENTITY_KEY_NAME: &str = "identity";
 
 /// Filename of the marker written once a successful keyring migration deletes
 /// the legacy `identity.key`. Its presence is the only durable signal that a
@@ -404,7 +404,7 @@ const MIGRATION_MARKER_NAME: &str = "identity.migrated";
 /// The keyring operations the identity resolution flow needs. Abstracted so the
 /// corrupt-keyring recovery decision ([`recover_from_keyring`]) can be
 /// unit-tested against a fake without touching the live OS keyring.
-trait IdentityKeyStore {
+pub(crate) trait IdentityKeyStore {
     fn probe(&self, name: &str) -> crate::secret_store::KeyringProbe;
     fn load(&self, name: &str) -> Result<Option<String>, String>;
     fn store(&self, name: &str, value: &str) -> Result<(), String>;
@@ -615,18 +615,13 @@ fn resolve_identity_with_store(
         }
         KeyringProbe::Unreachable => {
             // Keyring down this boot. If a recoverable file is present, use it
-            // (and do NOT migrate — re-importing later could resurrect a
-            // rotated key). With NO file, the marker disambiguates two states
-            // that are otherwise byte-identical (Unreachable + no file):
-            //   - marker present → the key was migrated into the keyring and the
-            //     file deleted. The real key is unreachable this boot but still
-            //     exists in the keyring. Boot keyring-locked recovery (ephemeral
-            //     key, all signing disabled) so the app can at least open; the
-            //     frontend shows a "unlock the keyring and relaunch" screen.
-            //     Fail-closed semantics are preserved: nothing is ever persisted
-            //     under the ephemeral key, so no silent identity rotation occurs.
-            //   - no marker → genuine first-ever launch with nothing to protect.
-            //     Generate to the `0o600` file (legitimate first-run).
+            // (do NOT migrate — a later import could resurrect a rotated key).
+            // With NO file, the marker disambiguates two byte-identical states:
+            //   - marker present → key was migrated to the keyring and the file
+            //     deleted. It is unreachable this boot but still in the keyring:
+            //     boot keyring-locked recovery (ephemeral key, signing disabled),
+            //     nothing persisted, so no silent rotation.
+            //   - no marker → genuine first-ever launch; generate to `0o600`.
             if !legacy_path.exists() && migration_marker_path(data_dir).exists() {
                 let ephemeral = Keys::generate();
                 eprintln!(
@@ -640,6 +635,11 @@ fn resolve_identity_with_store(
                     recovery: RecoveryState::KeyringLocked,
                     storage: IdentityStorage::Ephemeral,
                 });
+            }
+            // P28-C1: pending transition journal + unreachable keyring → fail closed.
+            use crate::identity_transition_journal::recovery_blocked_boot_if_pending;
+            if let Some(resolved) = recovery_blocked_boot_if_pending(data_dir) {
+                return Ok(resolved);
             }
             let keys = load_file_or_generate(legacy_path, data_dir)?;
             return Ok(ResolvedIdentity {
@@ -887,10 +887,10 @@ fn persist_imported_identity_impl(
     }
 }
 
-/// Public entry point binding [`persist_imported_identity_impl`] to the shared
-/// [`crate::secret_store::SecretStore`]. See the impl for the persistence policy.
+/// Public entry point for imported-identity persistence over any
+/// [`IdentityKeyStore`] (production passes the shared `SecretStore`).
 pub(crate) fn persist_imported_identity(
-    store: &crate::secret_store::SecretStore,
+    store: &impl IdentityKeyStore,
     keys: &Keys,
     legacy_path: &std::path::Path,
     data_dir: &std::path::Path,
@@ -1030,7 +1030,7 @@ fn quarantine_corrupt_key(key_path: &std::path::Path, data_dir: &std::path::Path
     }
 }
 
-fn load_key_file(path: &std::path::Path) -> Result<Keys, String> {
+pub(crate) fn load_key_file(path: &std::path::Path) -> Result<Keys, String> {
     let content = std::fs::read_to_string(path).map_err(|e| format!("read identity.key: {e}"))?;
     let trimmed = content.trim();
     if trimmed.is_empty() {

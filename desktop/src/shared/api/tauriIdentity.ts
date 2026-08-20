@@ -1,4 +1,5 @@
 import { invokeTauri } from "@/shared/api/tauri";
+import type { StampedArtifact } from "@/shared/api/stampedArtifact";
 import type { Identity, IdentityStorage } from "@/shared/api/types";
 
 type RawIdentity = {
@@ -26,7 +27,10 @@ export async function getIdentity(): Promise<Identity> {
 }
 
 export async function getNsec(): Promise<string> {
-  return invokeTauri<string>("get_nsec");
+  // P33 identity-export artifact. C6/C7: thread {value, artifact} to the
+  // reveal/copy boundary and add the generation-compare — unwrap is temporary.
+  const r = await invokeTauri<StampedArtifact<string>>("get_nsec");
+  return r.value;
 }
 
 export async function importIdentity(
@@ -74,7 +78,14 @@ export async function generateBackupPassphrase(
 
 /** Encrypt the current identity as an in-memory NIP-49 backup for native save. */
 export async function createNcryptsecBackup(password: string): Promise<string> {
-  return invokeTauri<string>("create_ncryptsec_backup", { password });
+  // P33 identity-export artifact (recovers the identity itself). C6/C7: thread
+  // {value, artifact} to every save boundary and add the generation-compare —
+  // unwrap is temporary.
+  const r = await invokeTauri<StampedArtifact<string>>(
+    "create_ncryptsec_backup",
+    { password },
+  );
+  return r.value;
 }
 
 /** Save a portable backup copy. Returns null when the native dialog is cancelled. */

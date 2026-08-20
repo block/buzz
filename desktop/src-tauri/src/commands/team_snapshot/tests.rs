@@ -226,6 +226,9 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        library_ref: None,
+        library_applied_revision: None,
+        last_completed_deploy_attempt_id: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
@@ -739,7 +742,8 @@ fn full_rollback_at_teams_boundary_absent_agents_store() {
 // ── NIP-49 egress guard: boundary 6 (team snapshot engram submit) ────────────
 
 mod egress_guard_boundary {
-    use super::super::submit_engram_event;
+    use super::super::capture_team_snapshot_import_entry;
+    use crate::commands::personas::snapshot::import::submit_engram_event;
 
     const NCRYPTSEC: &str = "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
 
@@ -762,4 +766,136 @@ mod egress_guard_boundary {
         .unwrap_err();
         assert!(err.contains("key-backup material"), "{err}");
     }
+
+    // ── Captured-scope behavioral tests: call the real production entry guard ───
+    //
+    // These tests call `capture_team_snapshot_import_entry` — the production
+    // scope-capture and owner-key agreement guard used by `confirm_team_snapshot_import`
+    // at command entry. The guard takes only `&AppState`, so tests exercise it
+    // without needing an AppHandle or async runtime.
+
+    fn build_team_import_state(
+        owner_keys: nostr::Keys,
+        scope: Option<crate::managed_agents::scope::WorkspaceAgentScope>,
+    ) -> crate::app_state::AppState {
+        let state = crate::app_state::build_app_state();
+        {
+            let mut locked = state.identity_lifecycle_keys_guard().unwrap();
+            *locked = owner_keys;
+        }
+        if let Some(s) = scope {
+            state.commit_active_scope(s);
+        }
+        state
+    }
+
+    /// `capture_team_snapshot_import_entry` with no active workspace scope → rejects
+    /// with "no active workspace scope" before any I/O.
+    ///
+    /// Calls the real production entry guard. Proves the scope fail-closed contract.
+    #[test]
+    fn test_confirm_team_snapshot_import_no_scope_rejected() {
+        let owner_keys = nostr::Keys::generate();
+        let state = build_team_import_state(owner_keys, None);
+
+        let result = capture_team_snapshot_import_entry(&state);
+
+        assert!(
+            result.is_err(),
+            "no scope must reject the import entry guard"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("no active workspace scope"),
+            "error must describe missing scope: {err}"
+        );
+    }
+
+    /// `capture_team_snapshot_import_entry` with a mismatched owner pubkey → rejects
+    /// with "owner pubkey mismatch" before any file decode.
+    ///
+    /// Calls the real production entry guard. Simulates a concurrent identity
+    /// import that replaced the signing key after the scope was set.
+    /// This is the identity-switch-before-store rejection test.
+    #[test]
+    fn test_confirm_team_snapshot_import_owner_mismatch_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let scope_keys = nostr::Keys::generate();
+        let other_keys = nostr::Keys::generate();
+
+        let gen = crate::managed_agents::scope::current_scope_generation();
+        let scope = crate::managed_agents::scope::WorkspaceAgentScope {
+            scope_id: "ts-test".to_string(),
+            relay_url: "wss://captured.example".to_string(),
+            owner_pubkey: scope_keys.public_key().to_hex(),
+            definitions_dir: tmp.path().to_path_buf(),
+            generation: gen,
+        };
+
+        // State holds other_keys — pubkey differs from scope.owner_pubkey.
+        let state = build_team_import_state(other_keys, Some(scope));
+
+        let result = capture_team_snapshot_import_entry(&state);
+
+        assert!(
+            result.is_err(),
+            "owner mismatch must reject the import entry guard"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("owner pubkey mismatch") || err.contains("mismatch"),
+            "error must describe owner pubkey mismatch: {err}"
+        );
+    }
+
+    /// `capture_team_snapshot_import_entry` with matching owner keys → succeeds,
+    /// returning captured scope and owner keys.
+    ///
+    /// Proves: scope capture → owner key check PASSES → entry returned with
+    /// matching pubkeys. The captured relay URL is also verified to match the
+    /// scope — proving the switch-between-store-and-profile contract: outbound
+    /// operations will use captured relay, not live state.
+    #[test]
+    fn test_confirm_team_snapshot_import_matching_owner_passes_entry_guard() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let owner_keys = nostr::Keys::generate();
+        let gen = crate::managed_agents::scope::current_scope_generation();
+        let scope = crate::managed_agents::scope::WorkspaceAgentScope {
+            scope_id: "ts-test".to_string(),
+            relay_url: "wss://captured.example".to_string(),
+            owner_pubkey: owner_keys.public_key().to_hex(),
+            definitions_dir: tmp.path().to_path_buf(),
+            generation: gen,
+        };
+        let expected_pubkey = owner_keys.public_key().to_hex();
+
+        let state = build_team_import_state(owner_keys, Some(scope));
+
+        let result = capture_team_snapshot_import_entry(&state);
+
+        assert!(
+            result.is_ok(),
+            "matching owner must pass the entry guard: {:?}",
+            result.err()
+        );
+        let entry = result.unwrap();
+        assert_eq!(
+            entry.captured_scope.owner_pubkey, expected_pubkey,
+            "captured scope must carry the expected owner pubkey"
+        );
+        assert_eq!(
+            entry.captured_owner_keys.public_key().to_hex(),
+            expected_pubkey,
+            "captured owner keys must match the scope owner pubkey"
+        );
+        assert_eq!(
+            entry.captured_scope.relay_url, "wss://captured.example",
+            "captured relay URL must be from the scope, not live state"
+        );
+    }
 }
+
+#[path = "seam_tests.rs"]
+mod seam_tests;

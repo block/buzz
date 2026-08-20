@@ -313,6 +313,13 @@ pub(crate) async fn flush_pending_events_at(
         // timestamp at publish time; kind, tags, and content are preserved,
         // and `mark_synced` below still compares against the retained row's
         // original `created_at`/`content`, which are untouched.
+        // Admit BEFORE re-signing: archive requests get a fresh `created_at`
+        // at publish time (relay ±120s freshness), so admission — which waits
+        // out the rate-limit gate — must precede the re-sign to keep the
+        // request fresh under a gate hold.
+        let lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+            crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+        );
         let is_archive_request =
             buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind);
         let event = if is_archive_request {
@@ -326,6 +333,7 @@ pub(crate) async fn flush_pending_events_at(
             state,
             &relay_api_base,
             owner_keys,
+            &lease,
         )
         .await
         .is_err()

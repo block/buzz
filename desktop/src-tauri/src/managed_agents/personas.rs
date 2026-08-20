@@ -1,8 +1,29 @@
 use std::fs;
 
-use tauri::AppHandle;
+use crate::{
+    managed_agents::{AgentDefinition, ManagedAgentRecord},
+    util::now_iso,
+};
+use serde::Serialize;
 
-use crate::{managed_agents::AgentDefinition, util::now_iso};
+/// Read-only persona view for the list/get command boundary (§2.7, resolves
+/// P4-C1). `definition` is the unchanged mutation-input shape; it flattens onto
+/// the wire so the frontend keeps consuming a flat `RawPersona` with two new
+/// optional fields rather than a nested shape.
+///
+/// The metadata fields are OUTPUT-ONLY: no command input, client payload, or
+/// inbound event may author them, and they are never round-tripped into a save
+/// — §3's library operations are their only writers. They surface the shared
+/// indicator without changing the persona mutation contract.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PersonaView {
+    #[serde(flatten)]
+    pub definition: AgentDefinition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_applied_revision: Option<u64>,
+}
 
 struct BuiltInPersona {
     id: &'static str,
@@ -335,7 +356,9 @@ pub fn validate_persona_activation_change(
     Ok(())
 }
 
-pub fn load_personas(app: &AppHandle) -> Result<Vec<AgentDefinition>, String> {
+pub fn load_personas<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Vec<AgentDefinition>, String> {
     let now = now_iso();
 
     // Post-fold: definitions live in the unified agent store, presented in
@@ -350,6 +373,28 @@ pub fn load_personas(app: &AppHandle) -> Result<Vec<AgentDefinition>, String> {
     let (records, changed) = merge_personas(records, &now);
     if changed {
         save_personas(app, &records)?;
+    }
+
+    Ok(records)
+}
+
+/// Scoped variant of [`load_personas`]: load from an explicit definitions
+/// directory instead of resolving through the active scope. Used by
+/// operations that captured a [`WorkspaceAgentScope`] at entry to guarantee
+/// scope stability across awaits.
+pub(crate) fn load_personas_at(
+    definitions_dir: &std::path::Path,
+) -> Result<Vec<AgentDefinition>, String> {
+    let now = now_iso();
+
+    let records = crate::managed_agents::storage::load_agent_definitions_at(definitions_dir)?
+        .iter()
+        .filter_map(|record| record.to_definition_view())
+        .collect();
+
+    let (records, changed) = merge_personas(records, &now);
+    if changed {
+        save_personas_at(definitions_dir, &records)?;
     }
 
     Ok(records)
@@ -373,17 +418,333 @@ pub(crate) fn load_personas_from_path(
         .map_err(|error| format!("failed to parse persona store: {error}"))
 }
 
-pub fn save_personas(app: &AppHandle, records: &[AgentDefinition]) -> Result<(), String> {
-    let mut sorted = records.to_vec();
-    sort_personas(&mut sorted);
+/// Read personas with their cross-workspace library metadata (§2.7 read-side
+/// exposure, resolves P4-C1). The list/get command boundary calls this instead
+/// of [`load_personas`]; the ~78 non-command readers keep the flat
+/// `Vec<AgentDefinition>` loader unchanged.
+///
+/// The definition projection is IDENTICAL to [`load_personas`] (same built-in
+/// merge and write-back); each merged definition is then paired with its raw
+/// record's `library_ref`/`library_applied_revision` by slug. Built-in
+/// personas added by the merge have no raw record and so carry no metadata —
+/// exactly right, they are never library projections.
+pub(crate) fn load_persona_views<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<Vec<PersonaView>, String> {
+    let definitions = load_personas(app)?;
+    let raw = crate::managed_agents::storage::load_agent_definitions(app)?;
+    Ok(pair_persona_views(definitions, &raw))
+}
 
-    // Post-fold: persona saves write key-less definition records into the
-    // unified agent store (instances preserved by `save_agent_definitions`).
-    let definitions: Vec<_> = sorted
-        .into_iter()
-        .map(|persona| persona.into_agent_record())
+/// Scoped variant of [`load_persona_views`]. Part of the scoped `_at()` API:
+/// exercised by tests now, consumed by §3 activation reconcile once the library
+/// read side lands.
+#[allow(dead_code)]
+pub(crate) fn load_persona_views_at(
+    definitions_dir: &std::path::Path,
+) -> Result<Vec<PersonaView>, String> {
+    let definitions = load_personas_at(definitions_dir)?;
+    let raw = crate::managed_agents::storage::load_agent_definitions_at(definitions_dir)?;
+    Ok(pair_persona_views(definitions, &raw))
+}
+
+/// Pair each merged definition with the library metadata of the raw record that
+/// shares its slug. Pure and total: a definition with no matching raw record
+/// (a built-in the merge just added) yields `None`/`None`, and library metadata
+/// is read from the raw record ONLY — never from the definition view, which
+/// cannot carry it.
+fn pair_persona_views(
+    definitions: Vec<AgentDefinition>,
+    raw: &[ManagedAgentRecord],
+) -> Vec<PersonaView> {
+    let metadata: std::collections::HashMap<&str, (&Option<String>, &Option<u64>)> = raw
+        .iter()
+        .filter_map(|record| {
+            record.slug.as_deref().map(|slug| {
+                (
+                    slug,
+                    (&record.library_ref, &record.library_applied_revision),
+                )
+            })
+        })
         .collect();
+
+    definitions
+        .into_iter()
+        .map(|definition| {
+            let (library_ref, library_applied_revision) = metadata
+                .get(definition.id.as_str())
+                .map(|(r, rev)| ((*r).clone(), **rev))
+                .unwrap_or((None, None));
+            PersonaView {
+                definition,
+                library_ref,
+                library_applied_revision,
+            }
+        })
+        .collect()
+}
+
+pub fn save_personas<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    records: &[AgentDefinition],
+) -> Result<(), String> {
+    let existing = crate::managed_agents::storage::load_agent_definitions(app)?;
+    let definitions = merge_preserving_definitions(existing, records)?;
     crate::managed_agents::storage::save_agent_definitions(app, &definitions)
+}
+
+/// Scoped variant of [`save_personas`]: write to an explicit definitions
+/// directory. Used by [`load_personas_at`] write-back and any operation that
+/// captured a [`WorkspaceAgentScope`] at entry.
+pub(crate) fn save_personas_at(
+    definitions_dir: &std::path::Path,
+    records: &[AgentDefinition],
+) -> Result<(), String> {
+    let existing = crate::managed_agents::storage::load_agent_definitions_at(definitions_dir)?;
+    let definitions = merge_preserving_definitions(existing, records)?;
+    crate::managed_agents::storage::save_agent_definitions_at(definitions_dir, &definitions)
+}
+
+/// The canonical raw-record-by-slug lookup (§2.7, §8 Phase 0). One place
+/// resolves a slug to its authoritative on-disk record so the library-aware
+/// routing decision is identical for delete, inbound upsert/tombstone, and
+/// snapshot/team import. Command preflights consult it BEFORE any destructive
+/// effect (`library_ref` is not view-carried, so the route can only be read
+/// from the raw store, never from an inbound/import view).
+pub(crate) fn raw_record_by_slug<'a>(
+    records: &'a [ManagedAgentRecord],
+    slug: &str,
+) -> Option<&'a ManagedAgentRecord> {
+    records
+        .iter()
+        .find(|record| record.slug.as_deref() == Some(slug))
+}
+
+/// Where a persona mutation on a slug must be routed (§2.7). A keyless record
+/// carrying `library_ref` is a library projection: deleting it or overwriting
+/// its authoritative shared slots is a library operation that must go through
+/// the §3.4 workspace-remove state machine (`ExcludePending` intent first) or
+/// the §3 library-authoritative inbound branch — NEVER the plain local writer.
+/// A record with no `library_ref` (and a brand-new persona) takes the
+/// head-identical plain path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MutationRoute {
+    /// Plain keyless record (or a new persona): the head-identical local path.
+    Plain,
+    /// Library-projected record: routing is a §3 deliverable. Until it lands,
+    /// the projected path fails closed so no plain writer can silently drop or
+    /// overwrite a shared definition.
+    LibraryProjected,
+}
+
+impl MutationRoute {
+    /// Classify a mutation by its currently-stored record. `None` (no existing
+    /// record — a create) is always [`Plain`](Self::Plain).
+    fn for_record(record: Option<&ManagedAgentRecord>) -> Self {
+        match record {
+            Some(record) if record.library_ref.is_some() => Self::LibraryProjected,
+            _ => Self::Plain,
+        }
+    }
+
+    /// The route for a mutation targeting `slug` against the raw store — the
+    /// decision delete and snapshot/team import consult before taking the plain
+    /// path. The slug is the persona `id`, which is the raw record's `slug`.
+    pub(crate) fn for_slug(records: &[ManagedAgentRecord], slug: &str) -> Self {
+        Self::for_record(raw_record_by_slug(records, slug))
+    }
+
+    /// The route for an inbound mutation identified by its persona d-tag. The
+    /// inbound apply/tombstone arms match a local record by
+    /// [`persona_d_tag`](crate::managed_agents::persona_events::persona_d_tag),
+    /// NOT by slug — an in-app persona's d-tag is its `id`, but a team-sourced
+    /// persona keys on `source_team_persona_slug`. Routing must consult the raw
+    /// record under the SAME derivation the apply/tombstone uses, or a projected
+    /// team persona would slip past a slug-only check. `library_ref` is not
+    /// view-carried, so the route can only be read from the raw store.
+    pub(crate) fn for_persona_d_tag(records: &[ManagedAgentRecord], d_tag: &str) -> Self {
+        Self::for_record(records.iter().find(|record| {
+            record.to_definition_view().is_some_and(|view| {
+                crate::managed_agents::persona_events::persona_d_tag(&view) == d_tag
+            })
+        }))
+    }
+
+    /// The route for the DEFINITION a keyed instance links to — the read side
+    /// of the §2.8 definition–instance relation resolver. An instance's
+    /// `persona_id` IS the linked definition's slug (they are assigned in
+    /// lockstep: `into_agent_record` sets `slug = id`, and every linked
+    /// instance carries `persona_id == definition.slug`). This is the ONE
+    /// canonical join every library mechanism uses to discover an
+    /// instance↔definition relationship — the inbound kind:30177 canonical-
+    /// linkage rule consults it to decide whether an instance's linkage is
+    /// library-owned; nothing re-derives the `persona_id` join ad hoc.
+    ///
+    /// A definition-less instance (`persona_id == None`) links to no definition
+    /// and is always [`Plain`](Self::Plain), as is a `persona_id` that resolves
+    /// to a plain definition or to no definition at all (a create, or a stale
+    /// link). Only a `persona_id` resolving to a `library_ref`-carrying
+    /// definition is [`LibraryProjected`](Self::LibraryProjected).
+    pub(crate) fn for_linked_definition(
+        definitions: &[ManagedAgentRecord],
+        persona_id: Option<&str>,
+    ) -> Self {
+        match persona_id {
+            Some(slug) => Self::for_slug(definitions, slug),
+            None => Self::Plain,
+        }
+    }
+
+    /// Refuse a plain-path mutation whose target `slug` resolves to a
+    /// library-projected record (§2.7). The command boundaries that key by slug
+    /// — `delete_persona` and snapshot/team import — call this on the RAW
+    /// keyless store BEFORE any destructive effect, so a projected target fails
+    /// closed with one uniform refusal until §3's state machine routes it. A
+    /// plain or unknown slug (a fresh insert) returns `Ok`.
+    pub(crate) fn reject_projected_slug(
+        records: &[ManagedAgentRecord],
+        slug: &str,
+    ) -> Result<(), String> {
+        if Self::for_slug(records, slug) == Self::LibraryProjected {
+            return Err(format!(
+                "persona {slug} is a library projection: route it through the library, \
+                 not a plain persona save (§2.7)"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The shared-definition slots (§2.2 allowlist) of a record, borrowed for
+/// equality comparison. A plain persona save may freely change a projected
+/// record's SCOPE-LOCAL fields (`is_active`, `env_vars`, timestamps), but
+/// changing any of these library-authoritative slots is a shared-definition
+/// edit that must route through the library — so the merge seam compares only
+/// this fingerprint, never the whole record. The field set mirrors
+/// [`SharedDefinition`](crate::managed_agents::library::SharedDefinition), the
+/// sole writer of these slots.
+#[derive(PartialEq)]
+struct SharedSlotFingerprint<'a> {
+    display_name: &'a Option<String>,
+    avatar_url: &'a Option<String>,
+    system_prompt: &'a Option<String>,
+    runtime: &'a Option<String>,
+    model: &'a Option<String>,
+    provider: &'a Option<String>,
+    name_pool: &'a [String],
+    respond_to: &'a Option<String>,
+    respond_to_allowlist: &'a [String],
+    parallelism: &'a Option<u32>,
+}
+
+impl<'a> SharedSlotFingerprint<'a> {
+    fn of(record: &'a ManagedAgentRecord) -> Self {
+        Self {
+            display_name: &record.display_name,
+            avatar_url: &record.avatar_url,
+            system_prompt: &record.system_prompt,
+            runtime: &record.runtime,
+            model: &record.model,
+            provider: &record.provider,
+            name_pool: &record.name_pool,
+            respond_to: &record.definition_respond_to,
+            respond_to_allowlist: &record.definition_respond_to_allowlist,
+            parallelism: &record.definition_parallelism,
+        }
+    }
+}
+
+/// Build the definition half of a persona save so that every field living only
+/// on [`ManagedAgentRecord`] — `library_ref`, `library_applied_revision`,
+/// `last_completed_deploy_attempt_id`, and any future non-view slot — survives
+/// an ordinary save (§2.7, resolves P3-C1).
+///
+/// At head, `save_personas` reconstructed every record wholesale through
+/// [`AgentDefinition::into_agent_record`], so one unrelated local edit erased
+/// the projection metadata on every OTHER definition — silently detaching every
+/// shared agent. Here each view is instead applied onto the canonical raw
+/// record of the same slug via [`ManagedAgentRecord::apply_definition_view`],
+/// which writes ONLY the view-carried slots and leaves the rest intact. A
+/// genuinely new persona (no matching raw record) is projected fresh through
+/// `into_agent_record` — it has no metadata to lose.
+///
+/// This makes every writer that funnels through `save_personas[_at]` (create,
+/// update, activation toggle, delete, inbound upsert/tombstone, snapshot/team
+/// import, team deletion) merge-preserving *by construction*.
+///
+/// **Library-aware routing (§2.7, resolves P4-C1/P4-C2).** A [`LibraryProjected`]
+/// record must not be mutated by this plain path:
+/// - a projected record absent from `views` is a deletion that must advance the
+///   §3.4 `ExcludePending` state machine, not silently drop the row;
+/// - a `views` entry that would change a projected record's SHARED slots (the
+///   [`shared_slot_fingerprint`] allowlist) is a shared-definition edit (ruling
+///   3a) or a library-linked inbound upsert (P4-C2) that must route through the
+///   library, not overwrite the local cache with no revision.
+///
+/// Both fail closed. A view that touches only a projected record's SCOPE-LOCAL
+/// fields (`is_active`, `env_vars`, timestamps) leaves the shared fingerprint
+/// unchanged and rides through the plain path — the reason a legitimate local
+/// toggle on a projected agent is not blocked. This save-seam guard is
+/// defense-in-depth: each command boundary (delete, inbound upsert/tombstone,
+/// snapshot/team import) runs its own [`MutationRoute::for_slug`] preflight
+/// BEFORE any destructive effect, so a projected target never reaches a
+/// half-applied state even though the seam would also reject it here.
+///
+/// [`LibraryProjected`]: MutationRoute::LibraryProjected
+fn merge_preserving_definitions(
+    existing: Vec<crate::managed_agents::ManagedAgentRecord>,
+    views: &[AgentDefinition],
+) -> Result<Vec<crate::managed_agents::ManagedAgentRecord>, String> {
+    let mut by_slug: std::collections::HashMap<String, ManagedAgentRecord> = existing
+        .into_iter()
+        .filter_map(|record| record.slug.clone().map(|slug| (slug, record)))
+        .collect();
+
+    let mut merged = Vec::with_capacity(views.len());
+    for view in views {
+        match by_slug.remove(&view.id) {
+            Some(mut record) => {
+                if MutationRoute::for_record(Some(&record)) == MutationRoute::LibraryProjected {
+                    let mut candidate = record.clone();
+                    candidate.apply_definition_view(view);
+                    if SharedSlotFingerprint::of(&candidate) != SharedSlotFingerprint::of(&record) {
+                        return Err(format!(
+                            "persona '{}' is a library projection: shared-content edits must \
+                             route through the library, not a plain persona save (§2.7)",
+                            view.id
+                        ));
+                    }
+                    // Only scope-local slots (`is_active`, `env_vars`,
+                    // timestamps) changed — apply them. `candidate` carries the
+                    // edit and keeps the projection metadata intact, because
+                    // `apply_definition_view` never writes `library_ref` or its
+                    // siblings. A local toggle on a shared agent must take
+                    // effect, not be silently dropped.
+                    merged.push(candidate);
+                } else {
+                    record.apply_definition_view(view);
+                    merged.push(record);
+                }
+            }
+            None => merged.push(view.clone().into_agent_record()),
+        }
+    }
+
+    // Every record left in `by_slug` is absent from `views` — a deletion. A
+    // plain record drops exactly as at head; a projected record must fail closed
+    // (§3.4 removal routing not yet wired).
+    for leftover in by_slug.values() {
+        if MutationRoute::for_record(Some(leftover)) == MutationRoute::LibraryProjected {
+            return Err(format!(
+                "persona '{}' is a library projection: removal must route through the §3.4 \
+                 ExcludePending state machine, not a plain persona save (§2.7)",
+                leftover.slug.as_deref().unwrap_or("<unknown>")
+            ));
+        }
+    }
+
+    Ok(merged)
 }
 
 #[cfg(test)]

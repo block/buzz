@@ -16,13 +16,19 @@ pub async fn get_relay_json<T: DeserializeOwned>(
     if !path_with_query.starts_with('/') {
         return Err("relay GET path must begin with '/'".to_string());
     }
-    crate::relay_admission::wait_for_rate_limit().await;
+    // Owner-default GET: admit the owner-identity egress lease (which waits out
+    // the rate-limit gate internally, then validates the latch) and hold it
+    // across sign → auth → transmit, mirroring `query_relay`. The wrapper
+    // self-admits so its transitive callers need no witness.
+    let lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
     let url = format!(
         "{}{}",
         relay_api_base_url_with_override(state),
         path_with_query
     );
-    let auth = build_nip98_auth_header(&Method::GET, &url, &[], state)?;
+    let auth = build_nip98_auth_header(&Method::GET, &url, &[], state, &lease)?;
     let response = state
         .http_client
         .get(&url)

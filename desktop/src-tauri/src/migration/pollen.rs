@@ -2,20 +2,23 @@
 
 use std::path::Path;
 
-use tauri::Manager;
-
 use super::persona_version_from_record;
 
-/// Rename the built-in research agent in persisted definitions and linked
-/// instances without overwriting user-customized fields.
-pub(super) fn migrate_pollen_agent_name(app: &tauri::AppHandle) {
-    let Ok(dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let path = dir.join("agents/managed-agents.json");
+/// Rename the built-in research agent in a scoped `definitions_dir`'s
+/// `managed-agents.json` without overwriting user-customized fields.
+///
+/// Runs as scope-init step 1.5 (after fold, before strip): the fold has lifted
+/// definitions into the scoped store, so the rename sees them, and the
+/// profile-reconcile queue this writes lands next to the scoped store where
+/// `load_pending_profile_reconciliations` looks. `migrate_pollen_agent_name_in_file`
+/// self-logs and swallows IO/parse errors, so this always returns `Ok(())` — a
+/// missing or unreadable store is a no-op, not a scope-init failure.
+pub(crate) fn migrate_pollen_agent_name_at(definitions_dir: &Path) -> Result<(), String> {
+    let path = definitions_dir.join("managed-agents.json");
     if path.exists() {
         migrate_pollen_agent_name_in_file(&path, &crate::util::now_iso());
     }
+    Ok(())
 }
 
 fn migrate_pollen_agent_name_in_file(path: &Path, now: &str) {

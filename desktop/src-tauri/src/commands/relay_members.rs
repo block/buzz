@@ -64,10 +64,7 @@ pub async fn list_relay_members(state: State<'_, AppState>) -> Result<serde_json
 pub async fn get_my_relay_membership(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let my_pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
-    };
+    let my_pubkey = state.current_pubkey()?.to_hex();
 
     let events = query_relay(
         &state,

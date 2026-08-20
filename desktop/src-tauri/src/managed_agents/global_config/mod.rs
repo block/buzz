@@ -30,7 +30,7 @@ use tauri::AppHandle;
 use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
-use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
+use crate::managed_agents::storage::atomic_write_json_restricted;
 use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 
 /// The global agent configuration record.
@@ -174,19 +174,48 @@ pub fn normalize_global_config_fields(config: &mut GlobalAgentConfig) {
     }
 }
 
-fn global_config_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(managed_agents_base_dir(app)?.join("global-agent-config.json"))
+/// Resolve the active-scope `global-agent-config.json` path. Fails closed on
+/// `None` scope. No fallback to the legacy unscoped root.
+fn global_config_path<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager as _;
+    let state = app.state::<crate::app_state::AppState>();
+    let scope = state.capture_active_scope().ok_or_else(|| {
+        "no active workspace scope — apply a workspace before accessing global config".to_string()
+    })?;
+    Ok(global_config_path_at(&scope.definitions_dir))
+}
+
+/// Scoped variant: resolve `global-agent-config.json` under a workspace scope's
+/// definitions directory.
+pub(crate) fn global_config_path_at(definitions_dir: &std::path::Path) -> std::path::PathBuf {
+    definitions_dir.join("global-agent-config.json")
 }
 
 /// Load the global agent config from disk.
 ///
 /// Returns the default (all-empty) config if the file does not exist yet.
-pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, String> {
+pub fn load_global_agent_config<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<GlobalAgentConfig, String> {
     let path = global_config_path(app)?;
+    load_global_agent_config_from_path(&path)
+}
+
+/// Scoped variant: load global agent config from the given definitions dir.
+pub(crate) fn load_global_agent_config_at(
+    definitions_dir: &std::path::Path,
+) -> Result<GlobalAgentConfig, String> {
+    let path = global_config_path_at(definitions_dir);
+    load_global_agent_config_from_path(&path)
+}
+
+fn load_global_agent_config_from_path(path: &std::path::Path) -> Result<GlobalAgentConfig, String> {
     if !path.exists() {
         return Ok(GlobalAgentConfig::default());
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read global agent config: {e}"))?;
     serde_json::from_str(&content).map_err(|e| format!("failed to parse global agent config: {e}"))
 }
@@ -202,6 +231,26 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
     normalize_global_config_fields(&mut config);
 
     let path = global_config_path(app)?;
+    let payload = serde_json::to_vec_pretty(&config)
+        .map_err(|e| format!("failed to serialize global agent config: {e}"))?;
+    atomic_write_json_restricted(&path, &payload)
+}
+
+/// Scoped variant: save global agent config into the given definitions dir.
+pub(crate) fn save_global_agent_config_at(
+    definitions_dir: &std::path::Path,
+    config: &GlobalAgentConfig,
+) -> Result<(), String> {
+    let mut config = config.clone();
+    strip_empty_env_vars(&mut config);
+    normalize_global_config_fields(&mut config);
+
+    let path = global_config_path_at(definitions_dir);
+    // Ensure the directory exists (scoped dirs are created lazily).
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create scoped store dir: {e}"))?;
+    }
     let payload = serde_json::to_vec_pretty(&config)
         .map_err(|e| format!("failed to serialize global agent config: {e}"))?;
     atomic_write_json_restricted(&path, &payload)

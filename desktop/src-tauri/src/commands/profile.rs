@@ -114,14 +114,19 @@ pub async fn update_profile_at_relay(
         "authors": [expected_pubkey],
         "limit": 1
     });
+    let query_lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
     let prior_events = query_relay_at_with_keys(
         &state,
         &api_base_url,
         std::slice::from_ref(&filter),
         &signer,
         None,
+        &query_lease,
     )
     .await?;
+    drop(query_lease);
     let prior_event = prior_events.first();
     let current: Value = prior_event
         .and_then(|event| serde_json::from_str::<Value>(&event.content).ok())
@@ -136,10 +141,28 @@ pub async fn update_profile_at_relay(
         return Err("profile avatar changed before deferred save".to_string());
     }
 
+    // Admit BEFORE building the event: `build_deferred_profile_event` stamps
+    // `created_at` at build time, so admission (which waits out the rate-limit
+    // gate) must precede it to keep the kind:0 event fresh under a gate hold.
+    let submit_lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
     let builder = build_deferred_profile_event(&current, &avatar_url, prior_event)?;
-    submit_event_at_with_keys(builder, &state, &api_base_url, &signer).await?;
+    submit_event_at_with_keys(builder, &state, &api_base_url, &signer, &submit_lease).await?;
+    drop(submit_lease);
 
-    let events = query_relay_at_with_keys(&state, &api_base_url, &[filter], &signer, None).await?;
+    let requery_lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
+    let events = query_relay_at_with_keys(
+        &state,
+        &api_base_url,
+        &[filter],
+        &signer,
+        None,
+        &requery_lease,
+    )
+    .await?;
     Ok(events
         .first()
         .map(nostr_convert::profile_info_from_event)
@@ -394,8 +417,7 @@ pub async fn get_presence(
 }
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    Ok(keys.public_key().to_hex())
+    Ok(state.current_pubkey()?.to_hex())
 }
 
 fn current_pubkey_hex_unwrap(state: &AppState) -> String {
@@ -426,11 +448,11 @@ mod tests {
 
         let captured = capture_expected_signer(&state, &original_pubkey)
             .expect("matching identity should be captured");
-        *state.keys.lock().expect("lock keys") = nostr::Keys::generate();
+        *state.identity_lifecycle_keys_guard().expect("lock keys") = nostr::Keys::generate();
 
         assert_eq!(captured.public_key().to_hex(), original_pubkey);
         assert_ne!(
-            state.keys.lock().expect("lock keys").public_key().to_hex(),
+            state.current_pubkey().expect("pubkey").to_hex(),
             original_pubkey
         );
         assert_eq!(
@@ -480,5 +502,97 @@ mod tests {
         assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
         assert_eq!(filter["limit"], serde_json::json!(25));
         assert_eq!(filter["page"], serde_json::json!(1));
+    }
+
+    /// End-to-end drive of `update_profile_at_relay`'s three-lease path
+    /// (query → submit → re-query) against a per-path counting loopback relay.
+    ///
+    /// Proves the P29-C1 posture Paul gated C1 close on: the deferred profile
+    /// save admits exactly one owner-identity egress lease per network op and
+    /// submits the kind:0 event exactly once. It also exercises the C1c
+    /// accessor sweep on the live path — `capture_expected_signer` reads the
+    /// identity through `signing_keys()` (the latch-gated accessor), so a
+    /// regression that broke the accessor or the funnel witness threading would
+    /// fail here rather than only in unit isolation.
+    #[tokio::test]
+    async fn update_profile_at_relay_submits_exactly_once_across_three_leases() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
+        crate::relay_admission::reset_rate_limit_gate();
+
+        let query_count = Arc::new(AtomicUsize::new(0));
+        let submit_count = Arc::new(AtomicUsize::new(0));
+        let (qc, sc) = (Arc::clone(&query_count), Arc::clone(&submit_count));
+
+        // Loopback relay: the `/query` path answers `[]` (empty profile
+        // history), any other path (the submit endpoint) answers an accepted
+        // `SubmitEventResponse`. Both are counted so the test can assert the
+        // exactly-once submit + two queries of the deferred save flow.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or("");
+                let body = if request_line.contains("/query") {
+                    qc.fetch_add(1, Ordering::SeqCst);
+                    "[]".to_string()
+                } else {
+                    sc.fetch_add(1, Ordering::SeqCst);
+                    r#"{"event_id":"deadbeef","accepted":true,"message":"ok"}"#.to_string()
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        let app = tauri::test::mock_builder()
+            .manage(crate::app_state::build_app_state())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app");
+        use tauri::Manager;
+        let state = app.state::<crate::app_state::AppState>();
+        let expected_pubkey = state.signing_keys().unwrap().public_key().to_hex();
+
+        let result = update_profile_at_relay(
+            format!("http://{addr}"),
+            expected_pubkey.clone(),
+            None,
+            "https://example.com/avatar.png".to_string(),
+            state,
+        )
+        .await
+        .expect("deferred profile save must complete");
+
+        // Empty re-query returns the empty canonical profile for the identity.
+        assert_eq!(result.pubkey, expected_pubkey);
+        // Exactly-once posture: one prior-query, one submit, one re-query.
+        assert_eq!(
+            submit_count.load(Ordering::SeqCst),
+            1,
+            "kind:0 submitted once"
+        );
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            2,
+            "prior + re-query only"
+        );
+
+        server.join().unwrap();
+        crate::relay_admission::reset_rate_limit_gate();
     }
 }

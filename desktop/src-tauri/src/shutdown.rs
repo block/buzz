@@ -133,50 +133,86 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(app)?;
+
+    // When no workspace scope is active (boot before first apply_workspace, or
+    // after import_identity cleared the scope) we cannot load the definitions
+    // store — it fails closed by design. In that case, skip the record-based
+    // cleanup and drain only from the in-memory runtime map, which may still
+    // hold processes that were running before the scope was cleared.
+    let has_scope = state.capture_active_scope().is_some();
+    let mut records = if has_scope {
+        load_managed_agents(app).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let mut runtimes = state
         .managed_agent_processes
         .lock()
         .map_err(|error| error.to_string())?;
-    let (mut changed, _exited) = sync_managed_agent_processes(
-        &mut records,
-        &mut runtimes,
-        &managed_agents::current_instance_id(app),
-    );
-    changed |= kill_stale_tracked_processes(
-        &mut records,
-        &runtimes,
-        &managed_agents::current_instance_id(app),
-    );
+
+    let mut changed = false;
+    if !records.is_empty() {
+        let (rec_changed, _exited) = sync_managed_agent_processes(
+            &mut records,
+            &mut runtimes,
+            &managed_agents::current_instance_id(app),
+        );
+        changed |= rec_changed;
+        changed |= kill_stale_tracked_processes(
+            &mut records,
+            &runtimes,
+            &managed_agents::current_instance_id(app),
+        );
+    }
 
     // Stop all tracked agents. Send SIGTERM to all process
     // groups first, then wait for exits in parallel to avoid serial 1s waits.
     struct AgentToStop {
-        idx: usize,
+        /// Index into `records`; `None` when the runtime has no matching record
+        /// (no-scope path or an orphaned runtime after a scope clear).
+        record_idx: Option<usize>,
         pid: u32,
         runtime: Option<managed_agents::ManagedAgentPairRuntime>,
     }
 
     let mut to_stop: Vec<AgentToStop> = Vec::new();
-    for (idx, record) in records.iter().enumerate() {
-        if record.backend != BackendKind::Local {
-            continue;
-        }
-        // Drain every tracked pair for this record, not just the first — an
-        // agent can run one harness per community, and each pair gets the
-        // graceful SIGTERM → 2s wait → SIGKILL fan-out with a stop log
-        // marker, instead of falling through to the orphan sweep's 200ms
-        // grace below.
-        for key in managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey) {
-            let runtime = runtimes.remove(&key);
-            let Some(pid) = runtime
-                .as_ref()
-                .map(|rt| rt.child.id())
-                .or(record.runtime_pid)
-            else {
+    if !records.is_empty() {
+        for (idx, record) in records.iter().enumerate() {
+            if record.backend != BackendKind::Local {
                 continue;
-            };
-            to_stop.push(AgentToStop { idx, pid, runtime });
+            }
+            // Drain every tracked pair for this record, not just the first — an
+            // agent can run one harness per community, and each pair gets the
+            // graceful SIGTERM → 2s wait → SIGKILL fan-out with a stop log
+            // marker, instead of falling through to the orphan sweep's 200ms
+            // grace below.
+            for key in managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey) {
+                let runtime = runtimes.remove(&key);
+                let Some(pid) = runtime
+                    .as_ref()
+                    .map(|rt| rt.child.id())
+                    .or(record.runtime_pid)
+                else {
+                    continue;
+                };
+                to_stop.push(AgentToStop {
+                    record_idx: Some(idx),
+                    pid,
+                    runtime,
+                });
+            }
+        }
+    }
+    // No-scope path: drain any runtimes that are still tracked in memory even
+    // though we have no record store to update. Kill every remaining entry.
+    if records.is_empty() {
+        for (_, runtime) in runtimes.drain() {
+            to_stop.push(AgentToStop {
+                record_idx: None,
+                pid: runtime.child.id(),
+                runtime: Some(runtime),
+            });
         }
     }
 
@@ -218,31 +254,35 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
             }
         }
 
-        // Reap children and update records.
+        // Reap children and update records where available.
         for mut agent in to_stop {
             if let Some(ref mut rt) = agent.runtime {
-                // Best-effort reap — don’t block shutdown if the child is stuck
+                // Best-effort reap — don't block shutdown if the child is stuck
                 // in uninterruptible sleep. The zombie will be cleaned up when
                 // our process exits and launchd reaps it.
                 let _ = rt.child.try_wait();
-                // Write log marker (best-effort).
-                let record = &records[agent.idx];
-                let _ = managed_agents::append_log_marker(
-                    &rt.log_path,
-                    &format!(
-                        "=== stopped {} ({}) at {} ===",
-                        record.name,
-                        record.pubkey,
-                        util::now_iso()
-                    ),
-                );
+                // Write log marker (best-effort) only when we have a matching record.
+                if let Some(idx) = agent.record_idx {
+                    let record = &records[idx];
+                    let _ = managed_agents::append_log_marker(
+                        &rt.log_path,
+                        &format!(
+                            "=== stopped {} ({}) at {} ===",
+                            record.name,
+                            record.pubkey,
+                            util::now_iso()
+                        ),
+                    );
+                }
             }
-            let record = &mut records[agent.idx];
-            record.runtime_pid = None;
-            record.last_stopped_at = Some(util::now_iso());
-            record.updated_at = util::now_iso();
-            record.last_exit_code = None;
-            record.last_error = None;
+            if let Some(idx) = agent.record_idx {
+                let record = &mut records[idx];
+                record.runtime_pid = None;
+                record.last_stopped_at = Some(util::now_iso());
+                record.updated_at = util::now_iso();
+                record.last_exit_code = None;
+                record.last_error = None;
+            }
         }
     }
 
@@ -261,7 +301,7 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
     // whose desktop process is no longer running and reap them.
     managed_agents::reap_dead_instance_agents(&managed_agents::current_instance_id(app), &[]);
 
-    if changed {
+    if changed && !records.is_empty() {
         save_managed_agents(app, &records)?;
     }
 

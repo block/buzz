@@ -45,19 +45,14 @@ use crate::managed_agents::{team_persona_key, ManagedAgentRecord, TeamRecord};
 /// path recurs. Gating detach on a clean repair preserves `source_dir` as retry
 /// evidence for that boot; the next boot retries repair and, once clean,
 /// detaches.
-pub(super) fn repair_then_detach_teams(app: &tauri::AppHandle) {
-    let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
-        return;
-    };
-    orchestrate_repair_then_detach(
-        || repair_team_membership_in_dir(&base_dir),
-        || super::detach::detach_directory_backed_teams_in_dir(&base_dir),
-    );
-}
-
-/// Gate `detach` on a successful `repair`: run detach only when repair returned
-/// `Ok`. Injected ops keep the gate `AppHandle`-free so a failing repair's
-/// skip-detach behavior is unit-testable without a filesystem fault.
+///
+/// In the scoped pipeline this gate is preserved BY CONSTRUCTION rather than by
+/// this orchestration: `run_scoped_migrations` runs the repair as step 4.5 and
+/// the detach as step 5, both fatal-on-`Err`, so a failed repair withholds the
+/// `_ready` marker and detach never runs — `source_dir` survives for the next
+/// boot's retry. The helper below is retained only as unit coverage of that
+/// gate's decision logic.
+#[cfg(test)]
 fn orchestrate_repair_then_detach(
     repair: impl FnOnce() -> Result<usize, String>,
     detach: impl FnOnce() -> Result<usize, String>,
@@ -89,7 +84,7 @@ fn orchestrate_repair_then_detach(
 /// `base_dir` is the managed-agents base directory (`<AppDataDir>/agents/`).
 /// Returns the number of records changed across both files (0 = nothing to do,
 /// nothing written, so a re-run is a clean no-op).
-pub(super) fn repair_team_membership_in_dir(base_dir: &Path) -> Result<usize, String> {
+pub(crate) fn repair_team_membership_in_dir(base_dir: &Path) -> Result<usize, String> {
     let teams_path = base_dir.join("teams.json");
     let agents_path = base_dir.join("managed-agents.json");
 

@@ -3,10 +3,11 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        current_instance_id, delete_agent_key, load_managed_agents, load_personas, load_teams,
-        save_managed_agents, save_personas, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_persona_activation_change,
-        validate_persona_deletion, AgentDefinition, ManagedAgentRecord,
+        current_instance_id, delete_agent_key, load_agent_definitions, load_managed_agents,
+        load_persona_views, load_personas, load_teams, save_managed_agents, save_personas,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
+        validate_persona_activation_change, validate_persona_deletion, AgentDefinition,
+        ManagedAgentRecord, MutationRoute, PersonaView,
     },
     util::now_iso,
 };
@@ -28,6 +29,7 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 
 mod pending;
 pub(in crate::commands) use pending::retain_persona_pending;
+pub(in crate::commands) use pending::retain_persona_pending_in_scope;
 pub(super) use pending::tombstone_persona_pending;
 mod create;
 pub use create::create_persona;
@@ -40,7 +42,7 @@ mod inbound;
 pub use inbound::reconcile_inbound_persona_event;
 
 #[tauri::command]
-pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, String> {
+pub async fn list_personas(app: AppHandle) -> Result<Vec<PersonaView>, String> {
     use tauri::Manager;
     tokio::task::spawn_blocking(move || {
         let state = app.state::<AppState>();
@@ -48,9 +50,23 @@ pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, Strin
             .managed_agents_store_lock
             .lock()
             .map_err(|error| error.to_string())?;
-        let mut personas = load_personas(&app)?;
-        pending::project_active_persona_sharing(&app, &state, &mut personas);
-        Ok(personas)
+        let views = load_persona_views(&app)?;
+        // Share state is a command-layer projection over the definition view;
+        // project it onto the definitions, then re-pair with each view's
+        // library metadata. Order is the deterministic `load_personas` sort and
+        // is preserved through both halves.
+        let mut definitions: Vec<AgentDefinition> =
+            views.iter().map(|view| view.definition.clone()).collect();
+        pending::project_active_persona_sharing(&app, &state, &mut definitions);
+        Ok(definitions
+            .into_iter()
+            .zip(views)
+            .map(|(definition, view)| PersonaView {
+                definition,
+                library_ref: view.library_ref,
+                library_applied_revision: view.library_applied_revision,
+            })
+            .collect())
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
@@ -140,6 +156,18 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
             // so every deleted persona here is one this owner published.
             let d_tag = crate::managed_agents::persona_events::persona_d_tag(persona);
 
+            // Library-projection preflight (§2.7): a projected persona's delete
+            // is a §3.4 workspace-remove that must journal an `ExcludePending`
+            // intent, NOT a local cascade that destroys the linked instances. The
+            // route is read from the RAW keyless record (`library_ref` is not
+            // view-carried), under the store lock, BEFORE any runtime stop,
+            // `commit_cascade_agents`, keyring deletion, or tombstone — so a
+            // projected target reaches none of them. The save-seam guard would
+            // also reject the persona save, but only after the cascade already
+            // ran; this refusal is what keeps the delete atomic.
+            let raw_definitions = load_agent_definitions(&app)?;
+            MutationRoute::reject_projected_slug(&raw_definitions, &id)?;
+
             // ── Phase 1: Stage ─────────────────────────────────────────────
             //
             // Load agents, sync process state, and build the cascade set. Lock
@@ -152,16 +180,13 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     .managed_agent_processes
                     .lock()
                     .map_err(|error| error.to_string())?;
-                let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
+                let (sync_changed, _exited) = sync_managed_agent_processes(
                     &mut agents,
                     &mut runtimes,
                     &current_instance_id(&app),
                 );
                 if sync_changed {
                     save_managed_agents(&app, &agents)?;
-                }
-                for pk in &exited_pubkeys {
-                    state.clear_agent_session_caches(pk);
                 }
                 // runtimes drops here (process lock released before Phase 2).
             }
@@ -233,7 +258,6 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
 
             // Side effects — strictly after records leave disk.
             for pk in &cascade {
-                state.clear_agent_session_caches(pk);
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);
@@ -307,7 +331,7 @@ pub async fn set_persona_active(
 
 pub(crate) const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
 mod card;
-mod snapshot;
+pub(crate) mod snapshot;
 pub use card::*;
 #[cfg(test)]
 pub(crate) use snapshot::import::decode_snapshot_from_bytes;

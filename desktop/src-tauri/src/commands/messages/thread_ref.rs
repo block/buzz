@@ -11,14 +11,17 @@ use crate::{
 /// Reads through the explicit `api_base_url` the calling command resolved —
 /// never re-resolving the workspace override — so a mid-command community
 /// switch cannot split one logical send across two relays. Callers that
-/// pinned a signer snapshot pass it as `keys` so this read's NIP-98 auth is
-/// minted by the same identity that signs the eventual event; `None`
-/// preserves the active-identity read for unpinned callers.
+/// pinned a signer snapshot pass it as `keys`, together with an owner-identity
+/// egress `lease`, so this read's NIP-98 auth is minted by the same identity
+/// that signs the eventual event and clears the identity-egress barrier;
+/// `keys = None` (with `lease = None`) preserves the unauthenticated
+/// active-identity read for unpinned callers.
 pub(super) async fn resolve_thread_ref(
     parent_event_id: &str,
     state: &AppState,
     api_base_url: &str,
     keys: Option<&nostr::Keys>,
+    lease: Option<&crate::owner_identity_egress::EgressLease>,
 ) -> Result<events::ThreadRef, String> {
     let parent_eid =
         EventId::from_hex(parent_event_id).map_err(|e| format!("invalid parent event ID: {e}"))?;
@@ -28,9 +31,11 @@ pub(super) async fn resolve_thread_ref(
         "kinds": [9, 40002, 45001, 45003, buzz_core_pkg::kind::KIND_HUDDLE_STARTED],
         "limit": 1
     })];
-    let evs = match keys {
-        Some(keys) => query_relay_at_with_keys(state, api_base_url, &filters, keys, None).await?,
-        None => query_relay_at(state, api_base_url, &filters).await?,
+    let evs = match (keys, lease) {
+        (Some(keys), Some(lease)) => {
+            query_relay_at_with_keys(state, api_base_url, &filters, keys, None, lease).await?
+        }
+        _ => query_relay_at(state, api_base_url, &filters).await?,
     };
 
     let parent = evs

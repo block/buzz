@@ -308,6 +308,69 @@ fn slimming_republish_wave_is_one_time() {
 // engine both the boot reconcile and the interactive edit paths
 // (`retain_managed_agent_pending`, persona-rename propagation) run on.
 
+/// Durable retry owner (P1-I1): the boot-time reconcile re-queues the
+/// authoritative row over a hostile retained head. This is what makes the
+/// inbound §2.8 convergence recoverable even if its corrective re-retain failed
+/// — the on-disk record is authoritative, and every launch re-diffs it against
+/// the retained head. Models a frozen inbound event that landed a foreign
+/// projection at a future `created_at`: the next boot re-retains the local
+/// record's real projection at a monotonic bump past it, queued for publish.
+#[test]
+fn boot_reconcile_requeues_authoritative_row_over_hostile_head() {
+    let dir = TempDir::new().unwrap();
+    let keys = nostr::Keys::generate();
+    let owner = keys.public_key().to_hex();
+    let pubkey = "a".repeat(64);
+    let record = sample_record(&pubkey, "Authoritative");
+    write_store(&dir, &[record]);
+
+    // Seed a hostile retained head: a foreign projection at a far-future
+    // created_at, exactly what a frozen inbound 30177 leaves behind when its
+    // corrective re-retain failed.
+    let hostile_created_at = (nostr::Timestamp::now().as_secs() as i64) + 86_400;
+    {
+        let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+        retain_event(
+            &conn,
+            &RetainedEvent {
+                kind: KIND_MANAGED_AGENT,
+                pubkey: owner.clone(),
+                d_tag: pubkey.clone(),
+                content: serde_json::json!({ "name": "Hostile Repoint" }).to_string(),
+                created_at: hostile_created_at,
+                raw_event: String::new(),
+                pending_sync: false,
+            },
+        )
+        .unwrap();
+    }
+
+    // Boot reconcile: the on-disk record's projection differs from the hostile
+    // head, so it re-queues the authoritative row.
+    assert_eq!(reconcile_agents_in_dir(dir.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let row = get_retained_event(&conn, KIND_MANAGED_AGENT, &owner, &pubkey)
+        .unwrap()
+        .unwrap();
+    assert!(
+        row.content.contains("Authoritative"),
+        "boot reconcile must restore the authoritative projection"
+    );
+    assert!(
+        !row.content.contains("Hostile"),
+        "the hostile head must be superseded"
+    );
+    assert!(
+        row.pending_sync,
+        "the corrective row must queue for publish"
+    );
+    assert!(
+        row.created_at > hostile_created_at,
+        "created_at must bump past the hostile head so the relay accepts it"
+    );
+}
+
 /// A rename re-retains the identity record under the SAME coordinate (the
 /// agent pubkey) with the new name, queued for publish, with a created_at
 /// strictly past the retained head so the relay's replaceable-event rule

@@ -780,7 +780,10 @@ impl NestRegenGate {
 /// Process-wide ordered write gate for nest-context regeneration.
 static NEST_REGEN: NestRegenGate = NestRegenGate::new();
 
-pub async fn regenerate_nest_context(app: &AppHandle, generation: u64) -> Result<(), String> {
+pub async fn regenerate_nest_context<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    generation: u64,
+) -> Result<(), String> {
     let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
     let agents_md = nest.join("AGENTS.md");
 
@@ -825,7 +828,7 @@ pub async fn regenerate_nest_context(app: &AppHandle, generation: u64) -> Result
 /// Archive/unarchive trigger this directly, but the regen races the relay's
 /// `kind:13535` snapshot update, so a just-archived agent may still linger for
 /// one cycle until the next regen (any agent/team edit or the next launch).
-pub fn try_regenerate_nest(app: &AppHandle) {
+pub fn try_regenerate_nest<R: tauri::Runtime>(app: &AppHandle<R>) {
     let generation = NEST_REGEN.claim();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -833,6 +836,20 @@ pub fn try_regenerate_nest(app: &AppHandle) {
             eprintln!("buzz-desktop: nest context regeneration failed: {error}");
         }
     });
+}
+
+/// Awaited nest-context regeneration for callers that must observe the outcome.
+///
+/// Claims a generation through the same [`NEST_REGEN`] gate as
+/// [`try_regenerate_nest`], so ordering with concurrent fire-and-forget regens
+/// is preserved, then awaits the render/commit and propagates any error. The
+/// workspace-apply path uses this to surface regeneration failure as
+/// applied-but-degraded rather than swallowing it on a spawned task.
+pub(crate) async fn regenerate_nest_now<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    let generation = NEST_REGEN.claim();
+    regenerate_nest_context(app, generation).await
 }
 
 #[cfg(test)]

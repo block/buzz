@@ -410,3 +410,466 @@ fn fizz_builtin_resolves_to_buzz_agent() {
         "Fizz must resolve to buzz-agent specifically"
     );
 }
+
+// ── §2.7 merge-preserving persona save (P3-C1 / P4-C1 acceptance) ─────────────
+
+use super::{
+    load_persona_views_at, load_personas_at, merge_preserving_definitions, save_personas_at,
+};
+use crate::managed_agents::storage::{load_agent_definitions_at, save_agent_definitions_at};
+use crate::managed_agents::ManagedAgentRecord;
+
+/// A keyless definition projected from a shared library entry: it carries
+/// `library_ref`/`library_applied_revision`, which live ONLY on
+/// `ManagedAgentRecord` and are exactly what head's wholesale save erased.
+fn projected_record(slug: &str, revision: u64) -> ManagedAgentRecord {
+    let mut record = custom_persona(slug, "Shared Agent").into_agent_record();
+    record.library_ref = Some(format!("lib-{slug}"));
+    record.library_applied_revision = Some(revision);
+    record
+}
+
+/// Assert the projected record survives a save with its library metadata and
+/// index invariant intact. `label` names the writer shape for failure output.
+fn assert_projection_survived(saved: &[ManagedAgentRecord], label: &str) {
+    let projected = saved
+        .iter()
+        .find(|record| record.slug.as_deref() == Some("shared"))
+        .unwrap_or_else(|| panic!("{label}: projected record must survive the save"));
+    assert_eq!(
+        projected.library_ref.as_deref(),
+        Some("lib-shared"),
+        "{label}: library_ref must survive an unrelated writer",
+    );
+    assert_eq!(
+        projected.library_applied_revision,
+        Some(3),
+        "{label}: library_applied_revision must survive an unrelated writer",
+    );
+    assert_eq!(
+        saved
+            .iter()
+            .filter(|record| record.library_ref.as_deref() == Some("lib-shared"))
+            .count(),
+        1,
+        "{label}: exactly one keyless record may link the library entry",
+    );
+}
+
+/// P3-C1 acceptance: every persona writer funnels through `save_personas[_at]`,
+/// so a save that touches ONLY an unrelated persona must leave a projected
+/// record's library metadata untouched. At head, `into_agent_record`
+/// reconstructed the whole vector and erased it. Each closure models one
+/// writer's vector transformation (create, update, activation toggle, delete,
+/// inbound upsert, inbound tombstone, team import, team delete) applied to the
+/// unrelated persona — never the projected one.
+#[test]
+fn merge_preserving_save_keeps_library_metadata_across_every_writer_shape() {
+    let seed = || {
+        vec![
+            projected_record("shared", 3),
+            custom_persona("custom:plain", "Plain").into_agent_record(),
+        ]
+    };
+
+    type Shape = (
+        &'static str,
+        fn(Vec<AgentDefinition>) -> Vec<AgentDefinition>,
+    );
+    let shapes: Vec<Shape> = vec![
+        ("create", |mut views| {
+            views.push(custom_persona("custom:new", "New"));
+            views
+        }),
+        ("update", |mut views| {
+            for view in &mut views {
+                if view.id == "custom:plain" {
+                    view.display_name = "Renamed".to_string();
+                }
+            }
+            views
+        }),
+        ("activation_toggle", |mut views| {
+            for view in &mut views {
+                if view.id == "custom:plain" {
+                    view.is_active = !view.is_active;
+                }
+            }
+            views
+        }),
+        ("delete_unrelated", |views| {
+            views
+                .into_iter()
+                .filter(|v| v.id != "custom:plain")
+                .collect()
+        }),
+        ("inbound_upsert_unrelated", |mut views| {
+            views.push(custom_persona("custom:inbound", "Inbound"));
+            views
+        }),
+        ("inbound_tombstone_unrelated", |views| {
+            views
+                .into_iter()
+                .filter(|v| v.id != "custom:plain")
+                .collect()
+        }),
+        ("team_import", |mut views| {
+            let mut member = custom_persona("team:member", "Team Member");
+            member.source_team = Some("team-1".to_string());
+            views.push(member);
+            views
+        }),
+        ("team_delete", |views| {
+            views
+                .into_iter()
+                .filter(|v| !v.id.starts_with("team:"))
+                .collect()
+        }),
+    ];
+
+    for (label, transform) in shapes {
+        let existing = seed();
+        // A writer always passes the definition VIEW of the current store —
+        // library metadata is stripped because `AgentDefinition` cannot carry
+        // it. The seam must re-merge it from the canonical raw record.
+        let views: Vec<AgentDefinition> = existing
+            .iter()
+            .filter_map(|record| record.to_definition_view())
+            .collect();
+        let saved = merge_preserving_definitions(existing, &transform(views))
+            .unwrap_or_else(|e| panic!("{label}: unrelated writer must not fail: {e}"));
+        assert_projection_survived(&saved, label);
+    }
+}
+
+/// §2.7 fail-closed routing (P4-C1/P4-C2): a plain persona save must not be
+/// able to DELETE a library-projected record. Dropping the projected view from
+/// the save vector is a removal that must advance the §3.4 `ExcludePending`
+/// state machine; until that lands the seam rejects it rather than silently
+/// dropping the row.
+#[test]
+fn merge_preserving_save_rejects_deleting_a_projected_record() {
+    let existing = vec![
+        projected_record("shared", 3),
+        custom_persona("custom:plain", "Plain").into_agent_record(),
+    ];
+    // The save vector omits "shared" entirely — a deletion of the projection.
+    let views = vec![custom_persona("custom:plain", "Plain")];
+    let err = merge_preserving_definitions(existing, &views)
+        .expect_err("deleting a projected record must fail closed");
+    assert!(err.contains("shared") && err.contains("removal"), "{err}");
+}
+
+/// §2.7 fail-closed routing (P4-C2): a plain persona save must not overwrite a
+/// projected record's shared content. A view that changes a shared slot is a
+/// library edit / library-linked inbound upsert that must route through the
+/// library with a revision, not become an unjournaled local edit.
+#[test]
+fn merge_preserving_save_rejects_editing_a_projected_records_shared_slot() {
+    let existing = vec![projected_record("shared", 3)];
+    // Re-pass the projected view but mutate a shared slot (display name).
+    let mut view = existing[0].to_definition_view().expect("view");
+    view.display_name = "Hijacked".to_string();
+    let err = merge_preserving_definitions(existing, &[view])
+        .expect_err("editing projected shared content must fail closed");
+    assert!(err.contains("shared") && err.contains("edits"), "{err}");
+}
+
+/// The no-op case that keeps the every-writer guarantee honest: re-passing a
+/// projected record's own view (metadata stripped, no field changed) is NOT a
+/// mutation and must ride through intact — otherwise an unrelated writer that
+/// re-serializes the whole store would trip the fail-closed guard.
+#[test]
+fn merge_preserving_save_passes_unchanged_projected_record_through() {
+    let existing = vec![
+        projected_record("shared", 3),
+        custom_persona("custom:plain", "Plain").into_agent_record(),
+    ];
+    let views: Vec<AgentDefinition> = existing
+        .iter()
+        .filter_map(|record| record.to_definition_view())
+        .collect();
+    let saved =
+        merge_preserving_definitions(existing, &views).expect("unchanged projection must pass");
+    assert_projection_survived(&saved, "noop_reserialize");
+}
+
+/// `MutationRoute::for_slug` classifies a projected slug as `LibraryProjected`,
+/// a plain slug and an unknown slug (a create) as `Plain` — the decision every
+/// §3 delete/inbound/import caller consults before the plain path.
+#[test]
+fn mutation_route_classifies_projected_plain_and_unknown_slugs() {
+    let records = vec![
+        projected_record("shared", 3),
+        custom_persona("custom:plain", "Plain").into_agent_record(),
+    ];
+    assert_eq!(
+        super::MutationRoute::for_slug(&records, "shared"),
+        super::MutationRoute::LibraryProjected,
+    );
+    assert_eq!(
+        super::MutationRoute::for_slug(&records, "custom:plain"),
+        super::MutationRoute::Plain,
+    );
+    assert_eq!(
+        super::MutationRoute::for_slug(&records, "does-not-exist"),
+        super::MutationRoute::Plain,
+    );
+}
+
+/// `for_persona_d_tag` is the inbound routing key, and it is deliberately NOT
+/// `for_slug`. A team-sourced projected persona derives its d-tag from
+/// `source_team_persona_slug`, which differs from its UUID `slug`/`id`. The
+/// inbound apply/tombstone arms match a local record by `persona_d_tag`, so the
+/// preflight MUST route on the same derivation — a slug-only check would read
+/// the very same inbound event as `Plain` and let it overwrite or delete the
+/// projection. This pins that divergence: the projection is found by its d-tag
+/// but NOT by its slug, and an unknown d-tag is a fresh insert (`Plain`).
+#[test]
+fn mutation_route_for_persona_d_tag_catches_projected_team_slug_that_for_slug_misses() {
+    let mut record = projected_record("uuid-team-persona", 5);
+    // Team-sourced: the d-tag derives from the pack slug, not the UUID id/slug.
+    record.source_team_persona_slug = Some("codereviewer".to_string());
+    let records = vec![record];
+
+    // The inbound key (d-tag) finds the projection.
+    assert_eq!(
+        super::MutationRoute::for_persona_d_tag(&records, "codereviewer"),
+        super::MutationRoute::LibraryProjected,
+    );
+    // The slug key does NOT — this is exactly why inbound must not use for_slug.
+    assert_eq!(
+        super::MutationRoute::for_slug(&records, "codereviewer"),
+        super::MutationRoute::Plain,
+    );
+    // A d-tag matching no record is a fresh insert: Plain.
+    assert_eq!(
+        super::MutationRoute::for_persona_d_tag(&records, "unknown"),
+        super::MutationRoute::Plain,
+    );
+}
+
+/// §2.8 relation-resolver read side: `for_linked_definition` classifies an
+/// instance's linkage by resolving its `persona_id` against the raw keyless
+/// definition store. A `persona_id` pointing at a projected definition is
+/// `LibraryProjected`; one pointing at a plain definition, at no definition (a
+/// stale link), or `None` (a definition-less instance) is `Plain`. This is the
+/// canonical join the inbound kind:30177 rule consults — the same `persona_id →
+/// slug` derivation every library mechanism uses, resolved one way.
+#[test]
+fn for_linked_definition_classifies_projected_plain_absent_and_none() {
+    let definitions = vec![
+        projected_record("shared", 3),
+        custom_persona("custom:plain", "Plain").into_agent_record(),
+    ];
+
+    // Instance linked to a projected definition → LibraryProjected.
+    assert_eq!(
+        super::MutationRoute::for_linked_definition(&definitions, Some("shared")),
+        super::MutationRoute::LibraryProjected,
+    );
+    // Instance linked to a plain definition → Plain.
+    assert_eq!(
+        super::MutationRoute::for_linked_definition(&definitions, Some("custom:plain")),
+        super::MutationRoute::Plain,
+    );
+    // Instance whose persona_id resolves to no definition (a stale link) → Plain.
+    assert_eq!(
+        super::MutationRoute::for_linked_definition(&definitions, Some("does-not-exist")),
+        super::MutationRoute::Plain,
+    );
+    // Definition-less instance (`persona_id == None`) → Plain.
+    assert_eq!(
+        super::MutationRoute::for_linked_definition(&definitions, None),
+        super::MutationRoute::Plain,
+    );
+}
+
+/// §2.8 resolver vs. `persona_d_tag`: the instance→definition join keys on the
+/// definition's UUID `slug` (== the instance `persona_id`), NOT the team-
+/// derived d-tag. A team-sourced projected definition whose `persona_id`/`slug`
+/// is a UUID but whose d-tag is the pack slug must still resolve as projected
+/// through `for_linked_definition` — the resolver and the inbound d-tag
+/// preflight key on different fields for different callers, and this pins that
+/// the linkage join uses the slug.
+#[test]
+fn for_linked_definition_keys_on_slug_not_persona_d_tag() {
+    let mut definition = projected_record("uuid-shared", 5);
+    definition.source_team_persona_slug = Some("codereviewer".to_string());
+    let definitions = vec![definition];
+
+    // The instance's `persona_id` is the definition's UUID slug — resolves.
+    assert_eq!(
+        super::MutationRoute::for_linked_definition(&definitions, Some("uuid-shared")),
+        super::MutationRoute::LibraryProjected,
+    );
+    // The team d-tag is NOT the slug — it does not resolve the linkage join.
+    assert_eq!(
+        super::MutationRoute::for_linked_definition(&definitions, Some("codereviewer")),
+        super::MutationRoute::Plain,
+    );
+}
+
+/// The fingerprint narrowing (F3): a plain persona save may freely change a
+/// projected record's SCOPE-LOCAL fields (`is_active`, `env_vars`) — these are
+/// not library-authoritative, so the shared fingerprint is unchanged and the
+/// edit rides through the seam with the projection metadata intact. Only the
+/// shared-definition slots are gated (see the reject test above). Without the
+/// narrowing, a whole-record compare would wrongly block a legitimate local
+/// activation toggle or env edit on a shared agent.
+#[test]
+fn merge_preserving_save_allows_scope_local_edit_on_projected_record() {
+    let existing = vec![projected_record("shared", 3)];
+    let mut view = existing[0].to_definition_view().expect("view");
+    view.is_active = !view.is_active;
+    view.env_vars =
+        std::collections::BTreeMap::from([("API_KEY".to_string(), "value".to_string())]);
+
+    let saved = merge_preserving_definitions(existing, &[view])
+        .expect("a scope-local edit on a projection must pass the seam");
+    assert_projection_survived(&saved, "scope_local_edit");
+
+    let shared = saved
+        .iter()
+        .find(|record| record.slug.as_deref() == Some("shared"))
+        .expect("projected record survives the scope-local edit");
+    assert!(!shared.is_active, "activation toggle must be applied");
+    assert_eq!(
+        shared.env_vars.get("API_KEY").map(String::as_str),
+        Some("value"),
+        "env edit must be applied",
+    );
+}
+
+/// The same guarantee through the on-disk `_at` seam — proving the storage
+/// layer and the built-in-merge write-back preserve the metadata too — plus the
+/// §2.7 read-side exposure (P4-C1): `load_persona_views_at` surfaces the
+/// metadata for a projected record and reports none for a plain one.
+#[test]
+fn save_personas_at_preserves_library_metadata_on_disk() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let definitions_dir = dir.path();
+
+    save_agent_definitions_at(
+        definitions_dir,
+        &[
+            projected_record("shared", 3),
+            custom_persona("custom:plain", "Plain").into_agent_record(),
+        ],
+    )
+    .expect("seed raw store");
+
+    // A full writer cycle: load the views (metadata stripped), edit the
+    // unrelated persona, save back through the merge-preserving seam. The load
+    // also merges built-ins and writes them back — another writer exercised.
+    let mut views = load_personas_at(definitions_dir).expect("load personas");
+    for view in &mut views {
+        if view.id == "custom:plain" {
+            view.display_name = "Renamed".to_string();
+        }
+    }
+    save_personas_at(definitions_dir, &views).expect("save personas");
+
+    let raw = load_agent_definitions_at(definitions_dir).expect("reload raw store");
+    let projected = raw
+        .iter()
+        .find(|record| record.slug.as_deref() == Some("shared"))
+        .expect("projected record survives on disk");
+    assert_eq!(projected.library_ref.as_deref(), Some("lib-shared"));
+    assert_eq!(projected.library_applied_revision, Some(3));
+
+    let persona_views = load_persona_views_at(definitions_dir).expect("load persona views");
+    let shared_view = persona_views
+        .iter()
+        .find(|view| view.definition.id == "shared")
+        .expect("shared view present");
+    assert_eq!(shared_view.library_ref.as_deref(), Some("lib-shared"));
+    assert_eq!(shared_view.library_applied_revision, Some(3));
+
+    let plain_view = persona_views
+        .iter()
+        .find(|view| view.definition.id == "custom:plain")
+        .expect("plain view present");
+    assert!(
+        plain_view.library_ref.is_none() && plain_view.library_applied_revision.is_none(),
+        "a plain persona must surface no library metadata",
+    );
+}
+
+/// F3 per-command-path preflight (§2.7): every command boundary reads its route
+/// from the RAW keyless store it loads, never from an in-memory vector or an
+/// inbound/import view (`library_ref` is not view-carried). `delete_persona` and
+/// both snapshot/team imports load `load_agent_definitions[_at]` then route on
+/// `for_slug`; both inbound arms load the same store then route on
+/// `for_persona_d_tag`. The command bodies take a concrete `AppHandle<Wry>`, so
+/// they cannot be driven by the `MockRuntime` harness — this binds the decision
+/// each one consults to the real serializer path instead: a projected keyless
+/// definition must survive the `pubkey.is_empty()` definition filter AND the
+/// JSON round-trip and STILL classify `LibraryProjected`, or a preflight would
+/// wave a projected target onto the destructive plain path. A team-sourced
+/// projection exercises the inbound d-tag key (derived from
+/// `source_team_persona_slug`, not the UUID slug) end-to-end through disk. The
+/// refusal-precedes-all-effects ordering is by construction at each call site
+/// (verified by source inspection) — the preflight is the first statement under
+/// the store lock, before any runtime stop, cascade delete, retention write, or
+/// keyed-record save.
+#[test]
+fn command_preflight_routes_projected_record_off_the_reloaded_raw_store() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let definitions_dir = dir.path();
+
+    let mut projected = projected_record("uuid-shared", 3);
+    // Team-sourced: the inbound arms match by `persona_d_tag`, which derives
+    // from the pack slug, not the UUID id/slug.
+    projected.source_team_persona_slug = Some("codereviewer".to_string());
+    save_agent_definitions_at(
+        definitions_dir,
+        &[
+            projected,
+            custom_persona("custom:plain", "Plain").into_agent_record(),
+        ],
+    )
+    .expect("seed raw store");
+
+    // The exact load every preflight runs (`load_agent_definitions[_at]` share
+    // one body: read the store, retain keyless definitions). The projected
+    // keyless definition must survive it, or the route would silently be Plain.
+    let raw = load_agent_definitions_at(definitions_dir).expect("reload raw store");
+    assert!(
+        raw.iter().any(|r| r.slug.as_deref() == Some("uuid-shared")),
+        "projected keyless definition must survive the definition filter",
+    );
+
+    // delete + snapshot/team import key: route on the UUID slug.
+    assert_eq!(
+        super::MutationRoute::for_slug(&raw, "uuid-shared"),
+        super::MutationRoute::LibraryProjected,
+        "delete/import preflight must refuse a projected slug",
+    );
+    assert_eq!(
+        super::MutationRoute::for_slug(&raw, "custom:plain"),
+        super::MutationRoute::Plain,
+        "a plain persona is not a projection",
+    );
+
+    // inbound upsert/tombstone key: route on the team-derived d-tag. A slug-only
+    // check would MISS it (the d-tag is not the UUID slug) — which is exactly
+    // why the arms must use for_persona_d_tag.
+    let projected_view = raw
+        .iter()
+        .find(|r| r.slug.as_deref() == Some("uuid-shared"))
+        .and_then(|r| r.to_definition_view())
+        .expect("projected view");
+    let d_tag = crate::managed_agents::persona_events::persona_d_tag(&projected_view);
+    assert_eq!(d_tag, "codereviewer");
+    assert_eq!(
+        super::MutationRoute::for_persona_d_tag(&raw, &d_tag),
+        super::MutationRoute::LibraryProjected,
+        "inbound preflight must refuse a projected target by its d-tag",
+    );
+    assert_eq!(
+        super::MutationRoute::for_slug(&raw, &d_tag),
+        super::MutationRoute::Plain,
+        "the d-tag is not the slug — a slug-only inbound check would miss it",
+    );
+}

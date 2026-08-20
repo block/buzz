@@ -292,8 +292,13 @@ async fn fetch_blob_bytes_with_cap(
     // `validate_download_url`, satisfying the mint_media_get_auth safety
     // contract (the token never leaves the relay origin).
     let relay_base = relay_api_base_url_with_override(state);
-    if let Some(auth) = mint_media_get_auth(state, &relay_base) {
-        req = req.header("authorization", auth);
+    if let Some((auth, bearer)) = mint_media_get_auth(state, &relay_base).await {
+        // Validate the durable bearer immediately before attaching it: a
+        // capability whose issuing identity was superseded by a transition
+        // attaches nothing (the fetch proceeds unauthenticated, fail-open).
+        if bearer.admit_exercise().is_ok() {
+            req = req.header("authorization", auth);
+        }
     }
 
     let resp = req.send().await.map_err(|e| classify_request_error(&e))?;

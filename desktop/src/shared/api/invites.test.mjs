@@ -105,7 +105,13 @@ function setupTauriStubs(
     invoke: async (command, args) => {
       calls.invokeArgs.push({ command, args });
       if (command === "get_relay_http_url") return httpBase;
-      if (command === "sign_event") return JSON.stringify(authEvent);
+      // sign_event returns the NIP-AP stamped artifact `{ value, artifact }`;
+      // the adapter unwraps `.value` (generation-compare lands in C6/C7).
+      if (command === "sign_event")
+        return {
+          value: JSON.stringify(authEvent),
+          artifact: { id: 0, generation: 0 },
+        };
       throw new Error(`Unexpected Tauri command: ${command}`);
     },
   };

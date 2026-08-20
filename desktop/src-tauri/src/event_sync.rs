@@ -13,25 +13,35 @@ use std::path::Path;
 /// `sync_team_personas` wrote in [`crate::migration::run_boot_migrations`]
 /// (see its `# Ordering` guard). Event signing needs the resolved owner keys,
 /// so this runs after identity resolution, not in the boot migrations.
+///
+/// `definitions_dir` is the scoped definitions directory for this workspace
+/// (`WorkspaceAgentScope::definitions_dir`). Reads personas/teams/agents from
+/// that directory rather than the legacy unscoped `agents/` root.
+///
+/// Persona and agent legs stay best-effort: they log and swallow, and their
+/// failure does not undo the boot team-membership repair. The team leg is
+/// fatal — it establishes the superseding local head (a monotonic
+/// `created_at`) that lets `retain_inbound_event`'s equal/older guard reject a
+/// stale relay roster. If it fails, the caller must not let the frontend expose
+/// the community and start inbound replay against an un-superseded disk state.
 pub fn run_event_sync(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     owner_keys: &nostr::Keys,
     db_path: &Path,
+    definitions_dir: &Path,
 ) -> Result<(), String> {
-    // Persona and agent legs stay best-effort: they log and swallow, and their
-    // failure does not undo the boot team-membership repair. The team leg is
-    // fatal — it establishes the superseding local head (a monotonic
-    // `created_at`) that lets `retain_inbound_event`'s equal/older guard reject
-    // a stale relay roster. If it fails, the caller must not let the frontend
-    // expose the community and start inbound replay against an un-superseded
-    // disk state.
-    migrate_personas_to_events(app, owner_keys, db_path);
-    migrate_teams_to_events(app, owner_keys, db_path)?;
-    crate::managed_agents::reconcile::reconcile_agents_to_events(app, owner_keys, db_path);
+    migrate_personas_to_events(definitions_dir, owner_keys, db_path);
+    migrate_teams_to_events(definitions_dir, owner_keys, db_path)?;
+    crate::managed_agents::reconcile::reconcile_agents_to_events(
+        definitions_dir,
+        owner_keys,
+        db_path,
+    );
     Ok(())
 }
 
-/// Run the scoped event reconcile to completion on the blocking pool.
+/// Run the scoped event reconcile to completion on the blocking pool, awaiting
+/// it and propagating failure.
 ///
 /// Callers that must not let downstream work observe a not-yet-retained disk
 /// state (e.g. `apply_workspace` before the frontend can start inbound history
@@ -47,10 +57,13 @@ pub async fn run_event_sync_blocking(
     app: tauri::AppHandle,
     owner_keys: nostr::Keys,
     db_path: std::path::PathBuf,
+    definitions_dir: std::path::PathBuf,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || run_event_sync(&app, &owner_keys, &db_path))
-        .await
-        .map_err(|e| format!("event-sync: spawn_blocking failed: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        run_event_sync(&app, &owner_keys, &db_path, &definitions_dir)
+    })
+    .await
+    .map_err(|e| format!("event-sync: spawn_blocking failed: {e}"))?
 }
 
 /// Reconcile `personas.json` into the persona-event retention store.
@@ -73,14 +86,10 @@ pub async fn run_event_sync_blocking(
 /// `pending_sync = 1` for later relay publish. Migration succeeds on local
 /// write, not relay acknowledgment. Every retained row is a real signed
 /// event — there is no placeholder path.
-pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys, db_path: &Path) {
-    use crate::managed_agents::managed_agents_base_dir;
-
-    let Ok(base_dir) = managed_agents_base_dir(app) else {
-        return;
-    };
-
-    match migrate_personas_in_dir_at(&base_dir, keys, db_path) {
+///
+/// `definitions_dir` is the scoped definitions directory (`WorkspaceAgentScope::definitions_dir`).
+pub fn migrate_personas_to_events(definitions_dir: &Path, keys: &nostr::Keys, db_path: &Path) {
+    match migrate_personas_in_dir_at(definitions_dir, keys, db_path) {
         Ok(0) => {}
         Ok(migrated) => {
             eprintln!(
@@ -231,17 +240,18 @@ fn migrate_personas_in_dir_at(
 ///
 /// Must run after the persisted identity is resolved (it signs each event with
 /// the owner's keys).
+///
+/// `definitions_dir` is the scoped definitions directory (`WorkspaceAgentScope::definitions_dir`).
+///
+/// The team leg is fatal (returns `Result`): a repaired local team head must be
+/// durably retained with a superseding `monotonic_created_at` before inbound
+/// replay can race a stale relay head in.
 pub fn migrate_teams_to_events(
-    app: &tauri::AppHandle,
+    definitions_dir: &Path,
     keys: &nostr::Keys,
     db_path: &Path,
 ) -> Result<(), String> {
-    use crate::managed_agents::managed_agents_base_dir;
-
-    let base_dir = managed_agents_base_dir(app)
-        .map_err(|e| format!("team-event-migration: base dir unavailable: {e}"))?;
-
-    match migrate_teams_in_dir_at(&base_dir, keys, db_path) {
+    match migrate_teams_in_dir_at(definitions_dir, keys, db_path) {
         Ok(0) => Ok(()),
         Ok(migrated) => {
             eprintln!("buzz-desktop: team-event-migration: {migrated} teams migrated to retention");

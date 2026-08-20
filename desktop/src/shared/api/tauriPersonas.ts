@@ -443,17 +443,45 @@ export async function confirmAgentSnapshotImport(
   );
 }
 
+// Machine-readable reason an inbound kind:30177 event's linkage authorship was
+// rejected under the §2.8 canonical-linkage rule. Mirrors the Rust
+// `LinkageFreezeReason` (camelCase-serialized).
+export type LinkageFreezeReason = "ownedByLibrary" | "inadmissibleNewLink";
+
+// A frozen-linkage degradation surfaced by `reconcileInboundPersonaEvent`.
+// Mirrors the Rust `LinkageDegradation`.
+export type LinkageDegradation = {
+  reason: LinkageFreezeReason;
+  agentPubkey: string;
+  message: string;
+};
+
+// Typed result of `reconcileInboundPersonaEvent`. `degradation` is null unless
+// the reconcile froze a §2.8 linkage change. Mirrors the Rust
+// `InboundReconcileOutcome`.
+export type InboundReconcileOutcome = {
+  degradation: LinkageDegradation | null;
+};
+
 // Patches a single inbound persona/team/agent projection event into the local
 // store (personas.json). The backend resolves the match key and the
 // pending-edit race; the frontend forwards the raw Nostr event JSON plus the
 // relay it arrived on, so a workspace switch mid-flight cannot retain the event
 // into the newly active community's scoped store.
+//
+// Returns a typed outcome. Its `degradation` is set only when an inbound
+// kind:30177 event's linkage authorship was rejected under the §2.8
+// canonical-linkage rule (interim fail-closed posture) and the local head was
+// re-retained to converge the relay back; otherwise it is null.
 export async function reconcileInboundPersonaEvent(
   eventJson: string,
   arrivalRelayUrl: string,
-): Promise<void> {
-  await invokeTauri("reconcile_inbound_persona_event", {
-    eventJson,
-    arrivalRelayUrl,
-  });
+): Promise<InboundReconcileOutcome> {
+  return invokeTauri<InboundReconcileOutcome>(
+    "reconcile_inbound_persona_event",
+    {
+      eventJson,
+      arrivalRelayUrl,
+    },
+  );
 }

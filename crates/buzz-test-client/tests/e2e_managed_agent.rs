@@ -366,3 +366,193 @@ async fn test_managed_agent_tombstone_deletes_coordinate() {
 
     client.disconnect().await.expect("disconnect");
 }
+
+/// NIP-33 author-coordinate isolation probe (relay-level, two keypairs on one relay).
+///
+/// This test verifies relay-level NIP-33 author scoping. It does NOT cover
+/// desktop workspace activation, `apply_workspace`, the scoped file store,
+/// inbound event routing, or runtime fan-out — those are verified by desktop
+/// unit tests and the live two-workspace probe run after Thufir's clear.
+///
+/// Two distinct owner keypairs share one relay. The test verifies:
+///
+/// 1. Owner A's events are author-scoped: a subscription filtered by
+///    `author: owner_a` returns only owner_a's events, not owner_b's.
+/// 2. Symmetrically, owner B's subscription returns only owner_b's events.
+/// 3. NIP-33 coordinates are scoped by `(kind, author, d-tag)`. A subscription
+///    for `(kind=30177, author=owner_b, d=shared_d_tag)` returns B's event —
+///    not A's — confirming the (kind, author, d-tag) tuple is unique per owner.
+///
+/// The filesystem isolation proof (different `(relay_url, owner_pubkey)` pairs
+/// always produce distinct scope_id directories) is covered separately by the
+/// scope_id unit tests.
+#[tokio::test]
+#[ignore]
+async fn test_two_workspace_relay_partition() {
+    let url = relay_url();
+
+    // Workspace A and workspace B: two distinct owner keypairs (same relay)
+    let owner_a_keys = Keys::generate();
+    let owner_b_keys = Keys::generate();
+
+    // Use the same d-tag value (simulating same agent slug) in both workspaces.
+    // Relay NIP-33 addressing is (kind, author, d-tag) — so same d-tag but
+    // different authors are distinct coordinates that cannot collide.
+    let shared_d_tag = "workspace-leak-probe-agent";
+
+    // Publish agent definition as owner A
+    let mut client_a = BuzzTestClient::connect(&url, &owner_a_keys)
+        .await
+        .expect("owner_a connect");
+    let content_a = agent_projection_content("WorkspaceA-ExclusiveAgent");
+    let event_a = EventBuilder::new(Kind::Custom(AGENT_KIND), content_a.clone())
+        .tag(Tag::identifier(shared_d_tag))
+        .sign_with_keys(&owner_a_keys)
+        .expect("owner_a sign");
+    let ok_a = client_a
+        .send_event(event_a)
+        .await
+        .expect("send owner_a event");
+    assert!(
+        ok_a.accepted,
+        "relay rejected owner_a's event: {}",
+        ok_a.message
+    );
+
+    // Publish agent definition as owner B (same relay, different owner)
+    let mut client_b = BuzzTestClient::connect(&url, &owner_b_keys)
+        .await
+        .expect("owner_b connect");
+    let content_b = agent_projection_content("WorkspaceB-ExclusiveAgent");
+    let event_b = EventBuilder::new(Kind::Custom(AGENT_KIND), content_b.clone())
+        .tag(Tag::identifier(shared_d_tag))
+        .sign_with_keys(&owner_b_keys)
+        .expect("owner_b sign");
+    let ok_b = client_b
+        .send_event(event_b)
+        .await
+        .expect("send owner_b event");
+    assert!(
+        ok_b.accepted,
+        "relay rejected owner_b's event: {}",
+        ok_b.message
+    );
+
+    // ── Direction 1: owner_a's author-scoped subscription ──────────────────
+    // Owner A subscribes to their own agent coordinate.
+    // Must see exactly their definition, not owner_b's.
+    let sid_a = sub_id("probe-workspace-a");
+    let filter_a = Filter::new()
+        .kind(Kind::Custom(AGENT_KIND))
+        .author(owner_a_keys.public_key())
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [shared_d_tag]);
+    client_a
+        .subscribe(&sid_a, vec![filter_a])
+        .await
+        .expect("owner_a subscribe");
+    let events_a = client_a
+        .collect_until_eose(&sid_a, Duration::from_secs(5))
+        .await
+        .expect("owner_a collect");
+
+    assert_eq!(
+        events_a.len(),
+        1,
+        "owner_a's NIP-33 subscription must return exactly 1 event (their own), got {}",
+        events_a.len()
+    );
+    assert!(
+        events_a[0].content.contains("WorkspaceA-ExclusiveAgent"),
+        "owner_a's event must contain workspace-A content, got: {}",
+        events_a[0].content
+    );
+    assert_eq!(
+        events_a[0].pubkey,
+        owner_a_keys.public_key(),
+        "owner_a's subscription must not return events from owner_b"
+    );
+    assert!(
+        !events_a[0].content.contains("WorkspaceB-ExclusiveAgent"),
+        "workspace A's subscription must NOT return workspace B's content"
+    );
+
+    // ── Direction 2: owner_b's author-scoped subscription ──────────────────
+    // Symmetric: owner B must see only their definition.
+    let sid_b = sub_id("probe-workspace-b");
+    let filter_b = Filter::new()
+        .kind(Kind::Custom(AGENT_KIND))
+        .author(owner_b_keys.public_key())
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [shared_d_tag]);
+    client_b
+        .subscribe(&sid_b, vec![filter_b])
+        .await
+        .expect("owner_b subscribe");
+    let events_b = client_b
+        .collect_until_eose(&sid_b, Duration::from_secs(5))
+        .await
+        .expect("owner_b collect");
+
+    assert_eq!(
+        events_b.len(),
+        1,
+        "owner_b's NIP-33 subscription must return exactly 1 event (their own), got {}",
+        events_b.len()
+    );
+    assert!(
+        events_b[0].content.contains("WorkspaceB-ExclusiveAgent"),
+        "owner_b's event must contain workspace-B content, got: {}",
+        events_b[0].content
+    );
+    assert_eq!(
+        events_b[0].pubkey,
+        owner_b_keys.public_key(),
+        "owner_b's subscription must not return events from owner_a"
+    );
+    assert!(
+        !events_b[0].content.contains("WorkspaceA-ExclusiveAgent"),
+        "workspace B's subscription must NOT return workspace A's content"
+    );
+
+    // ── Direction 3: NIP-33 coordinate ownership — B's coord returns B's event ──
+    // Owner A subscribes to the same d-tag but filtered by owner_b's pubkey.
+    // This proves that NIP-33 coordinates are scoped by (kind, author, d-tag):
+    // A's coordinate and B's coordinate are distinct even though they share
+    // the same d-tag value, because they are authored by different pubkeys.
+    // The query returns B's event — not A's — confirming per-author isolation.
+    let sid_cross = sub_id("probe-cross-scope");
+    let filter_cross = Filter::new()
+        .kind(Kind::Custom(AGENT_KIND))
+        .author(owner_b_keys.public_key()) // owner_b's pubkey
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [shared_d_tag]);
+    client_a
+        .subscribe(&sid_cross, vec![filter_cross])
+        .await
+        .expect("cross-scope subscribe");
+    let events_cross = client_a
+        .collect_until_eose(&sid_cross, Duration::from_secs(5))
+        .await
+        .expect("cross-scope collect");
+
+    // The cross-scope query must return B's event (by B's pubkey), not A's.
+    // This confirms NIP-33 coordinates are scoped by (kind, author, d-tag).
+    assert_eq!(
+        events_cross.len(),
+        1,
+        "cross-scope query must return exactly 1 event (B's own), got {}",
+        events_cross.len()
+    );
+    assert_eq!(
+        events_cross[0].pubkey,
+        owner_b_keys.public_key(),
+        "cross-scope query must return B's event, not A's"
+    );
+    assert!(
+        !events_cross[0]
+            .content
+            .contains("WorkspaceA-ExclusiveAgent"),
+        "cross-scope query must NOT return workspace A's definitions"
+    );
+
+    client_a.disconnect().await.expect("owner_a disconnect");
+    client_b.disconnect().await.expect("owner_b disconnect");
+}

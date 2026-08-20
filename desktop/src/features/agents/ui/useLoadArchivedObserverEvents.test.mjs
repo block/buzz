@@ -193,10 +193,30 @@ installDOMShim();
 /** @type {Map<string, (args: unknown) => Promise<unknown>>} */
 const ipcHandlers = new Map();
 
+// Owner-identity artifact producers (NIP-AP) return `{ value, artifact }` across
+// the Tauri boundary; the adapters unwrap `.value`. Mocks return the bare value,
+// so wrap it in the stamped shape for these commands (inert stamp in C3 — the
+// generation-compare lands in C6/C7). Keep this set in sync with the producers.
+const STAMPED_ARTIFACT_COMMANDS = new Set([
+  "sign_event",
+  "create_auth_event",
+  "build_observer_control_event",
+  "sign_nostr_identity_binding",
+  "nip44_encrypt_to_self",
+  "nip44_decrypt_from_self",
+  "decrypt_observer_event",
+]);
+function wrapV(cmd, value) {
+  return STAMPED_ARTIFACT_COMMANDS.has(cmd)
+    ? { value, artifact: { id: 0, generation: 0 } }
+    : value;
+}
+
 globalThis.__TAURI_INTERNALS__ = {
   invoke: (cmd, args) => {
     const handler = ipcHandlers.get(cmd);
-    if (handler) return handler(args);
+    if (handler)
+      return Promise.resolve(handler(args)).then((v) => wrapV(cmd, v));
     return Promise.reject(new Error(`unmocked Tauri command: ${cmd}`));
   },
   transformCallback: (_cb) => {

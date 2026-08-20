@@ -9,12 +9,8 @@ use crate::managed_agents::{ManagedAgentRecord, TeamRecord};
 /// Lift pack instructions into `TeamRecord.instructions` and detach
 /// directory-backed teams from their source directories.
 ///
-/// Core logic, decoupled from the Tauri `AppHandle` for testing.
-///
-/// Runs on app launch (gated on a clean team-membership repair) if any
-/// `TeamRecord` still has `source_dir` set. Both output files are written
-/// atomically (temp-file + rename), so a crash mid-write leaves the previous
-/// version intact and the migration can safely retry on next boot.
+/// `base_dir` is the managed-agents base directory (`<AppDataDir>/agents/`).
+/// Returns the number of teams detached (0 = nothing to do).
 ///
 /// Steps (written last so the idempotency gate stays open until both files
 /// are committed):
@@ -26,10 +22,7 @@ use crate::managed_agents::{ManagedAgentRecord, TeamRecord};
 ///    `instructions` if the field is not already set.
 /// 4. Clear `source_dir`, `is_symlink`, `symlink_target`, `version` on each
 ///    directory-backed `TeamRecord`.
-///
-/// `base_dir` is the managed-agents base directory (`<AppDataDir>/agents/`).
-/// Returns the number of teams detached (0 = nothing to do).
-pub(super) fn detach_directory_backed_teams_in_dir(base_dir: &Path) -> Result<usize, String> {
+pub(crate) fn detach_directory_backed_teams_in_dir(base_dir: &Path) -> Result<usize, String> {
     let teams_path = base_dir.join("teams.json");
     let agents_path = base_dir.join("managed-agents.json");
 

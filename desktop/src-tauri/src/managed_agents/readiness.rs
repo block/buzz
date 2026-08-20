@@ -430,8 +430,7 @@ fn collect_missing_requirements(
     match rt.id {
         "buzz-agent" => buzz_agent_requirements(effective),
         "goose" => {
-            // Read the file config once at the call site so the inner fn is
-            // pure and unit-testable by injection.
+            // Read the file config once at the call site so the inner fn is pure and unit-testable by injection.
             let file_cfg = read_goose_file_config();
             goose_requirements(effective, file_cfg.as_ref())
         }
@@ -1465,8 +1464,7 @@ mod tests {
 
     #[test]
     fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
-        // User env_vars must win over baked defaults; in OSS builds baked map is empty,
-        // so this validates the user-env layer is present in the output.
+        // env_vars provider/model must win over baked defaults (empty in OSS).
         let mut env_vars = BTreeMap::new();
         env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
         env_vars.insert(
@@ -1526,6 +1524,9 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            library_ref: None,
+            library_applied_revision: None,
+            last_completed_deploy_attempt_id: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
@@ -1549,8 +1550,7 @@ mod tests {
 
     #[test]
     fn buzz_agent_databricks_v2_with_databricks_model_but_no_buzz_agent_model_is_ready() {
-        // The baked buzz-releases env sets DATABRICKS_MODEL but not BUZZ_AGENT_MODEL.
-        // An agent with only DATABRICKS_MODEL must pass the readiness gate.
+        // Baked buzz-releases env has DATABRICKS_MODEL but no BUZZ_AGENT_MODEL; an agent with only DATABRICKS_MODEL must pass the gate.
         let env = make_env(
             "buzz-agent",
             env_with(&[

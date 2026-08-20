@@ -951,6 +951,40 @@ pub(super) fn dedupe_models(models: Vec<MeshModelOption>) -> Vec<MeshModelOption
         .collect()
 }
 
+/// Build a minimal client-mode `DesktopMeshRuntime` for unit tests.
+///
+/// The task is immediately aborted so `status()` returns a definitive state
+/// without blocking. Mode is `Client` so `fail_if_client_mesh_active` treats
+/// it as an active client session.
+#[cfg(test)]
+pub(crate) fn build_mock_client_runtime_for_test() -> DesktopMeshRuntime {
+    let task: tokio::task::JoinHandle<anyhow::Result<EmbeddedNodeHandle>> =
+        tokio::spawn(async { anyhow::bail!("mock client — never completes") });
+    task.abort();
+    let request = StartMeshNodeRequest {
+        mode: MeshNodeMode::Client,
+        model_id: None,
+        max_vram_gb: None,
+        join_token: Some("mock-join-token".to_string()),
+        mesh_name: None,
+        relay_url: None,
+        trusted_owner_ids: None,
+    };
+    DesktopMeshRuntime {
+        id: 99,
+        handle: tokio::sync::Mutex::new(DesktopMeshHandle::Starting {
+            task,
+            queued_join_tokens: Vec::new(),
+        }),
+        mode: MeshNodeMode::Client,
+        api_base_url: "http://127.0.0.1:1/v1".to_string(),
+        console_url: "http://127.0.0.1:2".to_string(),
+        model_id: None,
+        model_name: None,
+        start_request: request,
+    }
+}
+
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;

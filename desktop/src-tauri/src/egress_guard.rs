@@ -11,7 +11,7 @@
 //! | 3 | pre-signed path into the boundary-1 funnel | `relay/submit.rs` |
 //! | 4 | `submit_signed_event_with_keys` | `relay.rs` |
 //! | 5 | huddle STT publisher | `huddle/pipeline.rs` |
-//! | 6 | `submit_engram_event` (team snapshot) | `commands/team_snapshot.rs` |
+//! | 6 | `submit_engram_event` (team snapshot) | `commands/personas/snapshot/import.rs` (shared with boundary 7) |
 //! | 7 | `submit_engram_event` (persona import) | `commands/personas/snapshot/import.rs` |
 //! | 8 | native websocket send loop (all webview relay WS) | `native_websocket.rs` |
 //!

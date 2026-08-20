@@ -212,6 +212,9 @@ fn local_agent() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        library_ref: None,
+        library_applied_revision: None,
+        last_completed_deploy_attempt_id: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -264,7 +267,8 @@ fn inbound_managed_agent_drops_injected_secrets_and_harness() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    let access_changed = apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+    let InboundAgentApply { access_changed, .. } =
+        apply_inbound_managed_agent(&mut agents, &[], AGENT_PUBKEY, content);
 
     assert_eq!(
         access_changed,
@@ -360,7 +364,7 @@ fn inbound_definition_less_agent_applies_quad() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+    apply_inbound_managed_agent(&mut agents, &[], AGENT_PUBKEY, content);
 
     let a = &agents[0];
     assert_eq!(a.persona_id, None);
@@ -380,7 +384,7 @@ fn inbound_managed_agent_no_match_is_noop() {
     let content =
         crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
     let mut agents = vec![local_agent()];
-    apply_inbound_managed_agent(&mut agents, "someotheragentpubkey", content);
+    apply_inbound_managed_agent(&mut agents, &[], "someotheragentpubkey", content);
 
     // No agent minted from a relay event — it would have no secret key.
     assert_eq!(agents.len(), 1);
@@ -390,336 +394,249 @@ fn inbound_managed_agent_no_match_is_noop() {
     );
 }
 
-// ── Team (30176) inbound ─────────────────────────────────────────────────
+// ── §2.8 canonical-linkage rule (kind:30177) ─────────────────────────────
 
-const TEAM_ID: &str = "team-local-id";
-
-fn local_team() -> TeamRecord {
-    TeamRecord {
-        id: TEAM_ID.to_string(),
-        name: "Local Team".to_string(),
-        description: Some("local desc".to_string()),
-        instructions: None,
-        persona_ids: vec!["p-local".to_string()],
-        is_builtin: false,
-        source_dir: Some(std::path::PathBuf::from("/local/team/dir")),
-        is_symlink: true,
-        symlink_target: Some("/external".to_string()),
-        version: Some("1.0".to_string()),
-        created_at: "2025-01-01T00:00:00Z".to_string(),
-        updated_at: "2025-01-01T00:00:00Z".to_string(),
+/// A keyless definition (former persona) for the linkage resolver: `into_
+/// agent_record` sets `slug = id`, and a projected one carries `library_ref`.
+fn definition(slug: &str, projected: bool) -> ManagedAgentRecord {
+    let mut record = inbound_for(slug, "Definition").into_agent_record();
+    if projected {
+        record.library_ref = Some(format!("lib-{slug}"));
+        record.library_applied_revision = Some(1);
     }
-}
-
-fn team_content(name: &str) -> TeamEventContent {
-    TeamEventContent {
-        name: name.to_string(),
-        description: Some("remote desc".to_string()),
-        instructions: Some(Some("remote instructions".to_string())),
-        persona_ids: Some(vec!["p-remote-1".to_string(), "p-remote-2".to_string()]),
-    }
-}
-
-/// An inbound event shaped like one from a client that predates
-/// always-publish: `instructions`/`persona_ids` both omitted (`None`).
-fn team_content_omitting_optional_fields(name: &str) -> TeamEventContent {
-    TeamEventContent {
-        name: name.to_string(),
-        description: Some("remote desc".to_string()),
-        instructions: None,
-        persona_ids: None,
-    }
-}
-
-/// An inbound event that explicitly clears both fields: `instructions` is
-/// `Some(None)` (JSON `null`), `persona_ids` is `Some(vec![])`.
-fn team_content_clearing_optional_fields(name: &str) -> TeamEventContent {
-    TeamEventContent {
-        name: name.to_string(),
-        description: Some("remote desc".to_string()),
-        instructions: Some(None),
-        persona_ids: Some(vec![]),
-    }
-}
-
-#[test]
-fn inbound_team_match_patches_shared_preserves_local() {
-    let mut teams = vec![local_team()];
-    apply_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        team_content("Renamed Team"),
-    );
-
-    assert_eq!(teams.len(), 1, "no duplicate row");
-    let t = &teams[0];
-    // Shared fields overwritten.
-    assert_eq!(t.name, "Renamed Team");
-    assert_eq!(t.description, Some("remote desc".to_string()));
-    assert_eq!(t.instructions, Some("remote instructions".to_string()));
-    assert_eq!(
-        t.persona_ids,
-        vec!["p-remote-1".to_string(), "p-remote-2".to_string()]
-    );
-    // Install-local fields preserved.
-    assert_eq!(t.id, TEAM_ID);
-    assert_eq!(
-        t.source_dir,
-        Some(std::path::PathBuf::from("/local/team/dir"))
-    );
-    assert!(t.is_symlink);
-    assert_eq!(t.symlink_target, Some("/external".to_string()));
-    assert_eq!(t.version, Some("1.0".to_string()));
-    assert_eq!(t.created_at, "2025-01-01T00:00:00Z");
-}
-
-#[test]
-fn inbound_team_omitted_fields_preserve_local() {
-    // A `None` for instructions/persona_ids means the publisher predates
-    // always-publish — its true value is unknown, so reconcile must
-    // preserve whatever this device already has. This is the fix for the
-    // Sietch Tabr wipe: an old-shaped (or genuinely field-omitting) event
-    // must not blank out a team that has real membership/instructions.
-    let mut teams = vec![local_team()];
-    // Give local_team real instructions so preservation is discriminating:
-    // the pre-fix blind-overwrite bug would collapse this to `None`, while
-    // the fix must leave it untouched on an omitted field.
-    teams[0].instructions = Some("local instructions".to_string());
-    apply_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        team_content_omitting_optional_fields("Renamed Team"),
-    );
-
-    assert_eq!(teams.len(), 1);
-    let t = &teams[0];
-    assert_eq!(
-        t.name, "Renamed Team",
-        "shared non-optional field still overwrites"
-    );
-    assert_eq!(
-        t.instructions,
-        Some("local instructions".to_string()),
-        "omitted instructions preserves local value rather than wiping it"
-    );
-    assert_eq!(
-        t.persona_ids,
-        vec!["p-local".to_string()],
-        "omitted persona_ids preserves local membership rather than wiping it"
-    );
-}
-
-#[test]
-fn inbound_team_explicit_clear_overwrites_local() {
-    // `Some(None)` / `Some(vec![])` are the explicit-clear signals a
-    // pre-fix client can never produce — these must still overwrite local.
-    let mut teams = vec![local_team()];
-    // Give local_team real instructions so the clear has something to erase.
-    teams[0].instructions = Some("local instructions".to_string());
-
-    apply_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        team_content_clearing_optional_fields("Cleared Team"),
-    );
-
-    assert_eq!(teams.len(), 1);
-    let t = &teams[0];
-    assert_eq!(t.instructions, None, "explicit null clears instructions");
-    assert_eq!(
-        t.persona_ids,
-        Vec::<String>::new(),
-        "explicit empty array clears membership"
-    );
-}
-
-#[test]
-fn inbound_team_no_match_inserts_idempotently() {
-    let mut teams = vec![local_team()];
-    let other = "team-remote-id";
-    apply_inbound_team(&mut teams, other.to_string(), team_content("New Team"));
-
-    assert_eq!(teams.len(), 2, "unmatched inbound is inserted");
-    let inserted = teams.iter().find(|t| t.id == other).unwrap();
-    assert_eq!(inserted.name, "New Team");
-    assert!(
-        inserted.source_dir.is_none(),
-        "inserted team has no local install dir"
-    );
-    // Re-receive stays idempotent.
-    apply_inbound_team(&mut teams, other.to_string(), team_content("New Team"));
-    assert_eq!(teams.len(), 2, "re-receive of inserted team no-ops");
-}
-
-// ── Inbound team → membership propagation (commit_inbound_team wiring) ─────
-
-use std::cell::RefCell;
-
-/// A running instance of `persona_id`, optionally bound to a team.
-fn team_instance(seed: char, persona_id: &str, team_id: Option<&str>) -> ManagedAgentRecord {
-    let mut record = local_agent();
-    record.pubkey = seed.to_string().repeat(64);
-    record.name = persona_id.to_string();
-    record.persona_id = Some(persona_id.to_string());
-    record.team_id = team_id.map(str::to_string);
     record
 }
 
-/// An inbound team edit that ADDS a persona must bind that persona's unbound
-/// running instances to the team — exactly like a local `update_team`. Without
-/// the propagation wiring the instance stays unbound (member in roster, not in
-/// behavior) until restart.
+/// Inbound kind:30177 content carrying an explicit `persona_id` (or `None`).
+/// Mirrors the wire shape `managed_agent_content_from_event` produces.
+fn agent_content(name: &str, persona_id: Option<&str>) -> ManagedAgentEventContent {
+    ManagedAgentEventContent {
+        name: name.to_string(),
+        persona_id: persona_id.map(str::to_string),
+        system_prompt: None,
+        model: None,
+        provider: None,
+        persona_source_version: None,
+        parallelism: 4,
+        respond_to: crate::managed_agents::RespondTo::OwnerOnly,
+        respond_to_allowlist: vec![],
+    }
+}
+
+/// A local instance linked to `persona_id`, keyed by `AGENT_PUBKEY`.
+fn linked_agent(persona_id: &str) -> ManagedAgentRecord {
+    let mut agent = local_agent();
+    agent.persona_id = Some(persona_id.to_string());
+    agent
+}
+
+/// An inbound event that would re-point a library-owned linkage is frozen:
+/// `persona_id` stays on the local library-projected definition, safe fields
+/// still apply, and the caller is told to converge the relay head back (§2.8).
 #[test]
-fn inbound_team_add_binds_unbound_instance_through_wiring() {
-    let mut teams = vec![local_team()];
-    teams[0].persona_ids = vec!["p-existing".to_string()];
-    let existing = vec![
-        team_instance('a', "p-added", None),
-        team_instance('b', "p-existing", Some(TEAM_ID)),
-    ];
-    let saved = RefCell::new(None);
+fn inbound_30177_freezes_repoint_of_library_owned_linkage() {
+    let definitions = vec![definition("shared-def", true)];
+    let mut agents = vec![linked_agent("shared-def")];
 
-    commit_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        TeamEventContent {
-            name: "Team".to_string(),
-            description: None,
-            instructions: None,
-            persona_ids: Some(vec!["p-existing".to_string(), "p-added".to_string()]),
-        },
-        |_| Ok(()),
-        || Ok(existing.clone()),
-        |records| {
-            *saved.borrow_mut() = Some(records.to_vec());
-            Ok(())
-        },
-    )
-    .expect("inbound add succeeds");
+    // Inbound tries to re-point the linkage to a different definition.
+    let outcome = apply_inbound_managed_agent(
+        &mut agents,
+        &definitions,
+        AGENT_PUBKEY,
+        agent_content("Renamed", Some("other-def")),
+    );
 
-    let saved = saved
-        .borrow()
-        .clone()
-        .expect("add must save the agent store");
     assert_eq!(
-        saved[0].team_id.as_deref(),
-        Some(TEAM_ID),
-        "the added persona's unbound instance is bound to the team"
+        outcome.linkage,
+        InboundAgentLinkage::Frozen(LinkageFreezeReason::OwnedByLibrary),
+        "re-pointing a library-owned linkage must freeze",
+    );
+    let a = &agents[0];
+    assert_eq!(
+        a.persona_id,
+        Some("shared-def".to_string()),
+        "linkage must stay on the local library-owned definition",
+    );
+    assert_eq!(a.name, "Renamed", "safe per-instance fields still apply");
+    assert_eq!(a.parallelism, 4, "safe per-instance fields still apply");
+}
+
+/// An inbound event that would CLEAR a library-owned linkage
+/// (`persona_id: None`) is frozen the same way — clearing is authorship too.
+#[test]
+fn inbound_30177_freezes_clear_of_library_owned_linkage() {
+    let definitions = vec![definition("shared-def", true)];
+    let mut agents = vec![linked_agent("shared-def")];
+
+    let outcome = apply_inbound_managed_agent(
+        &mut agents,
+        &definitions,
+        AGENT_PUBKEY,
+        agent_content("Renamed", None),
+    );
+
+    assert_eq!(
+        outcome.linkage,
+        InboundAgentLinkage::Frozen(LinkageFreezeReason::OwnedByLibrary),
     );
     assert_eq!(
-        saved[1].team_id.as_deref(),
-        Some(TEAM_ID),
-        "an instance already on the team is untouched"
+        agents[0].persona_id,
+        Some("shared-def".to_string()),
+        "a definition-less inbound must not clear a library-owned linkage",
     );
 }
 
-/// An inbound team edit that REMOVES a persona ("keep agents") must detach that
-/// persona's instances bound to this team, so a kept instance stops drawing the
-/// team's instructions at spawn.
+/// An inbound event that would newly link a currently-plain instance to a
+/// library-projected definition is frozen as an inadmissible new link — only
+/// the Phase-4b coordinator may admit a projected link (§2.8, P6-C1 interim).
 #[test]
-fn inbound_team_removal_detaches_instance_through_wiring() {
-    let mut teams = vec![local_team()];
-    teams[0].persona_ids = vec!["p-removed".to_string()];
-    let existing = vec![team_instance('a', "p-removed", Some(TEAM_ID))];
-    let saved = RefCell::new(None);
+fn inbound_30177_freezes_inadmissible_new_link_to_projected_definition() {
+    let definitions = vec![definition("shared-def", true)];
+    // Local instance is definition-less (plain).
+    let mut agents = vec![linked_agent("")];
+    agents[0].persona_id = None;
 
-    commit_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        TeamEventContent {
-            name: "Team".to_string(),
-            description: None,
-            instructions: None,
-            persona_ids: Some(vec![]),
-        },
-        |_| Ok(()),
-        || Ok(existing.clone()),
-        |records| {
-            *saved.borrow_mut() = Some(records.to_vec());
-            Ok(())
-        },
-    )
-    .expect("inbound removal succeeds");
+    let outcome = apply_inbound_managed_agent(
+        &mut agents,
+        &definitions,
+        AGENT_PUBKEY,
+        agent_content("Renamed", Some("shared-def")),
+    );
 
-    let saved = saved
-        .borrow()
-        .clone()
-        .expect("removal must save the agent store");
     assert_eq!(
-        saved[0].team_id, None,
-        "the removed persona's instance is detached from the team"
+        outcome.linkage,
+        InboundAgentLinkage::Frozen(LinkageFreezeReason::InadmissibleNewLink),
+        "a new link to a projected definition must fail closed",
+    );
+    assert_eq!(
+        agents[0].persona_id, None,
+        "the inadmissible new link must not be authored",
     );
 }
 
-/// An inbound edit that omits `persona_ids` (a pre-always-publish client)
-/// preserves local membership, so the delta is empty and no instance is
-/// re-pointed — a metadata-only inbound edit must not disturb bindings.
+/// A linkage change that touches only plain definitions applies as at head —
+/// the §2.8 rule freezes ONLY library-owned or projected-target changes, never
+/// an ordinary plain relink.
 #[test]
-fn inbound_team_omitted_roster_leaves_bindings_untouched() {
-    let mut teams = vec![local_team()];
-    teams[0].persona_ids = vec!["p-a".to_string()];
-    let existing = vec![team_instance('a', "p-a", None)];
-    let saved = RefCell::new(None);
+fn inbound_30177_applies_plain_relink_unchanged() {
+    let definitions = vec![definition("plain-a", false), definition("plain-b", false)];
+    let mut agents = vec![linked_agent("plain-a")];
 
-    commit_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        team_content_omitting_optional_fields("Renamed"),
-        |_| Ok(()),
-        || Ok(existing.clone()),
-        |records| {
-            *saved.borrow_mut() = Some(records.to_vec());
-            Ok(())
-        },
+    let outcome = apply_inbound_managed_agent(
+        &mut agents,
+        &definitions,
+        AGENT_PUBKEY,
+        agent_content("Renamed", Some("plain-b")),
+    );
+
+    assert_eq!(outcome.linkage, InboundAgentLinkage::Applied);
+    assert_eq!(
+        agents[0].persona_id,
+        Some("plain-b".to_string()),
+        "a plain→plain relink applies exactly as at head",
+    );
+}
+
+/// An inbound event that leaves the linkage unchanged is never frozen even when
+/// the linked definition is library-projected — the definition quad is still
+/// correctly omitted (linked), and safe fields apply. Freezing keys on a
+/// linkage CHANGE, not on the linked definition's library status alone.
+#[test]
+fn inbound_30177_no_linkage_change_applies_even_when_projected() {
+    let definitions = vec![definition("shared-def", true)];
+    let mut agents = vec![linked_agent("shared-def")];
+    agents[0].system_prompt = Some("local prompt".to_string());
+
+    let outcome = apply_inbound_managed_agent(
+        &mut agents,
+        &definitions,
+        AGENT_PUBKEY,
+        agent_content("Renamed", Some("shared-def")),
+    );
+
+    assert_eq!(outcome.linkage, InboundAgentLinkage::Applied);
+    let a = &agents[0];
+    assert_eq!(a.persona_id, Some("shared-def".to_string()));
+    assert_eq!(a.name, "Renamed");
+    assert_eq!(
+        a.system_prompt,
+        Some("local prompt".to_string()),
+        "a linked inbound omits the definition quad — the local snapshot survives",
+    );
+}
+
+// ── §2.8 convergence: corrective re-retain is not best-effort (P1-I1) ─────
+
+/// The healthy convergence path re-retains the LOCAL record's authoritative
+/// projection under its coordinate, queued for publish — this is the row that
+/// makes the relay head converge back after a frozen inbound event was
+/// retained.
+#[test]
+fn converge_frozen_linkage_re_retains_local_head_pending() {
+    use crate::managed_agents::retention::{get_retained_event, open_retention_db};
+    let dir = tempfile::TempDir::new().unwrap();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let keys = nostr::Keys::generate();
+    let agents = vec![local_agent()];
+
+    converge_frozen_linkage(&conn, &keys, &agents, AGENT_PUBKEY).unwrap();
+
+    let row = get_retained_event(
+        &conn,
+        buzz_core_pkg::kind::KIND_MANAGED_AGENT,
+        &keys.public_key().to_hex(),
+        AGENT_PUBKEY,
     )
-    .expect("inbound metadata-only edit succeeds");
-
+    .unwrap()
+    .expect("convergence must retain the local head");
+    assert!(row.pending_sync, "corrective row must queue for publish");
     assert!(
-        saved.borrow().is_none(),
-        "an empty membership delta writes nothing to the agent store"
+        row.content.contains("Local Agent"),
+        "retained row must be the local authoritative projection",
     );
 }
 
-/// A failing agent-store write after the authoritative `save_teams` is
-/// swallowed: the inbound reconcile still succeeds (boot repair is the retry),
-/// so a secondary-store hiccup never aborts an inbound event whose team write
-/// already landed.
+/// A failed corrective re-retain MUST propagate as `Err`, never be swallowed.
+/// The inbound event is already the retained head when this runs; if it were
+/// swallowed the command would report success while a non-authoritative head
+/// stayed retained (and replay is dead — the same event re-arriving is
+/// `Skipped` at the equal-`created_at` guard). A connection with no
+/// `persona_events` table models the retention write failing after the inbound
+/// retain: `retain_agent_record`'s first query fails.
 #[test]
-fn inbound_team_swallows_agent_store_failure() {
-    let mut teams = vec![local_team()];
-    teams[0].persona_ids = vec![];
-    commit_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        TeamEventContent {
-            name: "Team".to_string(),
-            description: None,
-            instructions: None,
-            persona_ids: Some(vec!["p-added".to_string()]),
-        },
-        |_| Ok(()),
-        || Err("agent store unreadable".to_string()),
-        |_| Ok(()),
-    )
-    .expect("inbound reconcile swallows secondary-store failure");
+fn converge_frozen_linkage_errs_when_retain_fails() {
+    let poisoned = rusqlite::Connection::open_in_memory().unwrap();
+    let keys = nostr::Keys::generate();
+    let agents = vec![local_agent()];
+
+    let err = converge_frozen_linkage(&poisoned, &keys, &agents, AGENT_PUBKEY).unwrap_err();
+    assert!(
+        err.contains("convergence"),
+        "a failed corrective re-retain must surface as an error: {err}"
+    );
 }
 
-/// A `persist_teams` error propagates — the authoritative team write failing is
-/// a real reconcile failure, unlike best-effort agent IO.
+/// A frozen classification with no matching local record is an internal
+/// inconsistency (the freeze was decided against a record that must exist) and
+/// fails closed rather than silently no-oping the convergence.
 #[test]
-fn inbound_team_propagates_persist_teams_error() {
-    let mut teams = vec![local_team()];
-    let err = commit_inbound_team(
-        &mut teams,
-        TEAM_ID.to_string(),
-        team_content("Team"),
-        |_| Err("disk full".to_string()),
-        || Ok(vec![]),
-        |_| Ok(()),
-    )
-    .expect_err("a failed team persist must propagate");
-    assert_eq!(err, "disk full");
+fn converge_frozen_linkage_errs_when_record_missing() {
+    use crate::managed_agents::retention::open_retention_db;
+    let dir = tempfile::TempDir::new().unwrap();
+    let conn = open_retention_db(&dir.path().join("retention.db")).unwrap();
+    let keys = nostr::Keys::generate();
+
+    let err = converge_frozen_linkage(&conn, &keys, &[], AGENT_PUBKEY).unwrap_err();
+    assert!(
+        err.contains("not found"),
+        "a missing frozen record must fail closed: {err}"
+    );
 }
+
+// Team (kind:30176) inbound tests — split to keep this file under the cap.
+#[path = "team_tests.rs"]
+mod team_tests;
+use team_tests::{local_team, TEAM_ID};
 
 // ── Tombstone (kind:5) consume ────────────────────────────────────────────
 
@@ -850,6 +767,12 @@ fn inbound_gate_accepts_validly_signed_event() {
     let parsed = parse_verified_inbound_event(&event.as_json()).unwrap();
     assert_eq!(parsed.pubkey, keys.public_key());
 }
+
+// The command-seam integration fixture (P2-I1) lives in a sibling file to keep
+// this module under the 1000-line file-size cap. Included here so it shares the
+// fixtures above via `use super::*`.
+#[path = "seam_tests.rs"]
+mod seam_tests;
 
 #[test]
 fn inbound_persona_rejects_invisible_definition_text() {

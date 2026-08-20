@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::app_state::AppState;
 use crate::managed_agents::{
     effective_repos_dir, ensure_repos_symlink, nest_dir, restore_managed_agents_on_launch,
-    try_regenerate_nest, write_persisted_repos_dir,
+    write_persisted_repos_dir,
 };
 use crate::relay;
 
@@ -34,31 +34,6 @@ async fn begin_workspace_apply(
     let guard = lock.lock_owned().await;
     let ticket = next_apply_generation(generation);
     (guard, ticket)
-}
-
-/// Adopt the pre-scoping global retention database's pending rows into `scope`.
-///
-/// Best-effort: a failure is logged and the boot proceeds. The migration's own
-/// crash-safety guards make the next launch retry safely, and blocking the
-/// workspace apply on it would be worse than a delayed publish.
-fn migrate_legacy_retention_into(
-    app: &AppHandle,
-    scope: &crate::managed_agents::retention::RetentionScope,
-) {
-    let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
-        return;
-    };
-    match crate::managed_agents::retention::migrate_legacy_retention_db(
-        &base_dir,
-        &scope.db_path,
-        &scope.owner_keys.public_key().to_hex(),
-    ) {
-        Ok(0) => {}
-        Ok(copied) => {
-            eprintln!("buzz-desktop: adopted {copied} legacy retained event(s) into this community")
-        }
-        Err(error) => eprintln!("buzz-desktop: legacy retention migration failed: {error}"),
-    }
 }
 
 #[derive(Deserialize)]
@@ -107,11 +82,11 @@ pub struct ActiveWorkspaceInfo {
 /// Returns the current active workspace info (relay URL + pubkey).
 #[tauri::command]
 pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspaceInfo, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    let pubkey = state.current_pubkey()?;
     let relay_url = relay::relay_ws_url_with_override(&state);
     Ok(ActiveWorkspaceInfo {
         relay_url,
-        pubkey: keys.public_key().to_hex(),
+        pubkey: pubkey.to_hex(),
     })
 }
 
@@ -142,13 +117,24 @@ pub async fn validate_repos_dir(dir: String) -> Result<(), String> {
 /// Tauri backend with the selected workspace's relay URL, keys, and repos
 /// directory.
 ///
+/// Returns `WorkspaceApplyResult`:
+/// - `applied: true`, `blocked: None` → new scope committed; post-commit
+///   failures surface as `degraded` entries (informational — workspace IS
+///   active).
+/// - `applied: true`, `blocked: Some(reason)` → scope committed, but
+///   post-commit provider-access reconciliation failed hard; dependent
+///   post-commit steps were skipped (fail-closed). Workspace IS active but
+///   caller must park on the loading gate — retry by re-applying.
+/// - `applied: false` → drain failed; old scope still active; `degraded`
+///   names what could not be stopped or restored by compensation.
+///
 /// A bad `repos_dir` is non-fatal: relay/keys always apply (the relay is the
 /// active workspace's own choice — orthogonal to the filesystem repos dir),
 /// the bad value is NOT persisted (so the next boot starts clean), the
 /// `REPOS` symlink is skipped (REPOS stays a real dir), a `repos-dir-error`
-/// event surfaces the reason, and the command returns `Ok`. The dialogs
-/// already block a bad path at Save (`validate_repos_dir`); this fallback only
-/// catches a value that went bad after save (deleted dir, unmounted volume).
+/// event surfaces the reason. The dialogs already block a bad path at Save
+/// (`validate_repos_dir`); this fallback only catches a value that went bad
+/// after save (deleted dir, unmounted volume).
 #[tauri::command]
 pub async fn apply_workspace(
     relay_url: String,
@@ -156,116 +142,347 @@ pub async fn apply_workspace(
     repos_dir: Option<String>,
     agent_managed_profiles: Option<bool>,
     app: AppHandle,
-) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    // Take the generation only after entering the serialized transaction. An
-    // apply that is already running remains authoritative until it releases
-    // the lock; the next apply then advances the generation. This keeps every
-    // awaited reconciliation/event-sync phase inside one ordered transaction.
-    let (apply_guard, apply_generation) = begin_workspace_apply(
-        state.workspace_apply_lock.clone(),
-        &state.workspace_apply_generation,
-    )
-    .await;
+) -> Result<crate::managed_agents::scope::WorkspaceApplyResult, String> {
+    // ── Layer 1: async serialization lock + Mesh preflight ──────────────────
+    // workspace_transition serializes apply_workspace and live identity import
+    // so scope transitions are never concurrent.
+    //
+    // When the `mesh-llm` feature is active, `with_workspace_transition_preflight`
+    // acquires the lock AND runs `fail_if_client_mesh_active` under a single guard,
+    // with the guard held across the entire async body.  When the feature is off,
+    // we acquire the lock inline (no preflight needed).
+    #[cfg(feature = "mesh-llm")]
+    {
+        let app_for_preflight = app.clone();
+        return crate::commands::mesh_llm::scope_impl::with_workspace_transition_preflight(
+            &app_for_preflight,
+            move || {
+                Box::pin(apply_workspace_body(
+                    relay_url,
+                    nsec,
+                    repos_dir,
+                    agent_managed_profiles,
+                    app,
+                ))
+            },
+        )
+        .await;
+    }
+    #[cfg(not(feature = "mesh-llm"))]
+    {
+        let lock_app = app.clone();
+        let lock_state = lock_app.state::<AppState>();
+        let _transition_guard = lock_state.workspace_transition.lock().await;
+        apply_workspace_body(relay_url, nsec, repos_dir, agent_managed_profiles, app).await
+    }
+}
+async fn apply_workspace_body(
+    relay_url: String,
+    nsec: Option<String>,
+    repos_dir: Option<String>,
+    agent_managed_profiles: Option<bool>,
+    app: AppHandle,
+) -> Result<crate::managed_agents::scope::WorkspaceApplyResult, String> {
+    use crate::managed_agents::scope::WorkspaceApplyResult;
 
     let restore_app = app.clone();
-    let apply_app = app.clone();
+    // #6003: take the apply epoch under the durable apply lock. The owned guard
+    // transfers into the fire-and-forget restore spawn below, so a queued apply
+    // cannot mutate relay/identity until this apply's restore has finished every
+    // mutable workspace read — it outlives the command return that
+    // `workspace_transition` bounds. The generation lets each post-`await` phase
+    // detect it was superseded by a newer apply and abort.
+    let (apply_guard, apply_generation) = {
+        let lock_state = restore_app.state::<AppState>();
+        begin_workspace_apply(
+            lock_state.workspace_apply_lock.clone(),
+            &lock_state.workspace_apply_generation,
+        )
+        .await
+    };
     // Capture the caller's relay before the blocking apply. Reading shared
     // state afterward could pick up a newer concurrent community switch.
     let profile_reconcile_relay = relay_url.clone();
-    tokio::task::spawn_blocking(move || {
-        let app = apply_app;
-        let state = app.state::<AppState>();
+    let blocking_result: Result<WorkspaceApplyResult, String> =
+        tokio::task::spawn_blocking(move || {
+            let state = app.state::<AppState>();
 
-        // ── Validate before mutating ──────────────────────────────────────────
-        let parsed_keys = match nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(nsec_trimmed) => {
-                Some(Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?)
-            }
-            None => None,
-        };
-
-        // Decide the effective repos_dir from the candidate. A bad path does NOT
-        // reject — it is treated as if no override were set: relay/keys still
-        // apply, the bad value is not persisted, and a `repos-dir-error` surfaces
-        // the reason. Persisting a bad path would make every later boot read it,
-        // fail to resolve the symlink, and silently skip agent restore. One
-        // validate (inside `effective_repos_dir`) drives both the emit and the
-        // persisted value. `nest` is resolved softly: when absent there is nothing
-        // to persist or symlink, and relay/keys must still apply unconditionally.
-        let nest = nest_dir();
-        let effective_repos_dir = match nest.as_deref() {
-            Some(nest) => match effective_repos_dir(nest, repos_dir.as_deref()) {
-                Ok(value) => value,
-                Err(error) => {
-                    let _ = app.emit("repos-dir-error", error);
-                    None
+            // ── Validate before mutating ──────────────────────────────────────
+            let parsed_keys = match nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(nsec_trimmed) => {
+                    Some(Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?)
                 }
-            },
-            None => None,
-        };
+                None => None,
+            };
 
-        // Defense in depth: this transaction still owns the serialized apply
-        // generation before making its first mutation. Normal queued applies
-        // cannot advance it until this transaction releases the guard.
+            // Decide the effective repos_dir from the candidate. A bad path does NOT
+            // reject — it is treated as if no override were set: relay/keys still
+            // apply, the bad value is not persisted, and a `repos-dir-error` surfaces
+            // the reason.
+            let nest = nest_dir();
+            let effective_repos_dir = match nest.as_deref() {
+                Some(nest) => match effective_repos_dir(nest, repos_dir.as_deref()) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = app.emit("repos-dir-error", error);
+                        None
+                    }
+                },
+                None => None,
+            };
+
+            // ── Prepare: derive target scope and run staged initialization ────
+            // Reversible prepare stage: the old scope remains active throughout.
+            let base_dir = crate::managed_agents::managed_agents_base_dir(&app).unwrap_or_default();
+            let effective_owner_pubkey = match &parsed_keys {
+                Some(keys) => keys.public_key().to_hex(),
+                None => state.current_pubkey()?.to_hex(),
+            };
+            let target_scope_id =
+                crate::managed_agents::scope::derive_scope_id(&relay_url, &effective_owner_pubkey);
+            let scope_dir =
+                crate::managed_agents::scope::scoped_definitions_dir(&base_dir, &target_scope_id);
+            crate::managed_agents::scope_init::ensure_scope_ready(
+                &target_scope_id,
+                &scope_dir,
+                &base_dir,
+                &effective_owner_pubkey,
+            )?;
+
+            // ── Layer 2: drain + commit under one continuous lock ─────────────
+            // #6003 defense in depth: this transaction still owns the apply
+            // generation before its first mutation (the drain below). A queued
+            // apply cannot advance it — it is blocked on `workspace_apply_lock`,
+            // which this transaction holds via `apply_guard` — so this assert
+            // only ever trips if the invariant is violated.
+            assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+            // `managed_agent_runtime_transition` is held from journal creation
+            // through the end of the commit swap so no start/reconcile can insert
+            // a new runtime into the gap between drain and scope publication.
+            //
+            // `managed_agents_store_lock` is acquired immediately after
+            // `managed_agent_runtime_transition` and held through commit so that
+            // a concurrent save_managed_agents (e.g., a runtime status flush)
+            // cannot interleave with the drain or the scope swap.
+            //
+            // All fallible guards (relay_url_override, keys, active_agent_scope)
+            // are acquired BEFORE any field is mutated so a poison or other lock
+            // failure cannot leave us half-committed with old processes drained.
+            let rt_transition = state
+                .managed_agent_runtime_transition
+                .lock()
+                .map_err(|e| e.to_string())?;
+
+            let _store = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|e| e.to_string())?;
+
+            // Capture the current (pre-switch) scope so compensation can
+            // validate generation before restarting journal entries.
+            let pre_switch_scope = state.capture_active_scope();
+
+            // Build the journal and drain under the held transition lock.
+            let (stopped_entries, _remaining, drain_error) =
+                crate::managed_agents::drain_scope_runtimes(&app, &state);
+
+            if let Some(drain_err) = drain_error {
+                // Drain failed — compensate by restarting what we stopped.
+                // Drop the store lock BEFORE calling compensate_drain (it
+                // re-acquires the store internally), but keep rt_transition
+                // held: passing it to compensate_drain closes the interleave
+                // window where a concurrent start could slip in between drop
+                // and reacquire.
+                drop(_store);
+                let comp_err = if let Some(scope) = pre_switch_scope.as_ref() {
+                    crate::managed_agents::compensate_drain(
+                        &app,
+                        &stopped_entries,
+                        scope,
+                        rt_transition,
+                    )
+                } else {
+                    drop(rt_transition);
+                    None
+                };
+                let degraded_msg = match comp_err {
+                    Some(comp) => {
+                        format!("drain failed ({drain_err}); compensation also failed: {comp}")
+                    }
+                    None => format!("drain failed ({drain_err}); old runtimes restored"),
+                };
+                return Ok(WorkspaceApplyResult::drain_failed(degraded_msg));
+            }
+
+            // Acquire all fallible commit guards BEFORE mutating any field.
+            // If any guard fails, compensation runs and no field has changed.
+            // For each failure: drop only _store before compensate_drain (which
+            // re-acquires it), but keep rt_transition held through the call.
+            let mut override_guard = match state.relay_url_override.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    drop(_store);
+                    let comp_err = if let Some(scope) = pre_switch_scope.as_ref() {
+                        crate::managed_agents::compensate_drain(
+                            &app,
+                            &stopped_entries,
+                            scope,
+                            rt_transition,
+                        )
+                    } else {
+                        drop(rt_transition);
+                        None
+                    };
+                    let msg = format!(
+                        "commit failed (relay lock poisoned: {e}){}",
+                        comp_err
+                            .map_or_else(String::new, |c| format!("; compensation failed: {c}"))
+                    );
+                    return Ok(WorkspaceApplyResult::drain_failed(msg));
+                }
+            };
+            let mut keys_guard = match state.identity_lifecycle_keys_guard() {
+                Ok(g) => g,
+                Err(e) => {
+                    drop(override_guard);
+                    drop(_store);
+                    let comp_err = if let Some(scope) = pre_switch_scope.as_ref() {
+                        crate::managed_agents::compensate_drain(
+                            &app,
+                            &stopped_entries,
+                            scope,
+                            rt_transition,
+                        )
+                    } else {
+                        drop(rt_transition);
+                        None
+                    };
+                    let msg = format!(
+                        "commit failed (keys lock poisoned: {e}){}",
+                        comp_err
+                            .map_or_else(String::new, |c| format!("; compensation failed: {c}"))
+                    );
+                    return Ok(WorkspaceApplyResult::drain_failed(msg));
+                }
+            };
+            let mut scope_guard = match state.active_agent_scope.lock() {
+                Ok(g) => g,
+                Err(e) => {
+                    drop(keys_guard);
+                    drop(override_guard);
+                    drop(_store);
+                    let comp_err = if let Some(scope) = pre_switch_scope.as_ref() {
+                        crate::managed_agents::compensate_drain(
+                            &app,
+                            &stopped_entries,
+                            scope,
+                            rt_transition,
+                        )
+                    } else {
+                        drop(rt_transition);
+                        None
+                    };
+                    let msg = format!(
+                        "commit failed (scope lock poisoned: {e}){}",
+                        comp_err
+                            .map_or_else(String::new, |c| format!("; compensation failed: {c}"))
+                    );
+                    return Ok(WorkspaceApplyResult::drain_failed(msg));
+                }
+            };
+
+            // ── Infallible commit: all guards held, no .await, no I/O ─────────
+            *override_guard = Some(relay_url.clone());
+            drop(override_guard);
+            crate::relay_admission::reset_gate_for_workspace_change();
+
+            if let Some(new_keys) = parsed_keys {
+                *keys_guard = new_keys;
+            }
+            let owner_pubkey = keys_guard.public_key().to_hex();
+            drop(keys_guard);
+
+            state
+                .managed_agent_profile_reconcile_enabled
+                .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
+
+            let generation = crate::managed_agents::scope::next_scope_generation();
+            let scope = crate::managed_agents::scope::WorkspaceAgentScope::new(
+                relay_url,
+                owner_pubkey,
+                &base_dir,
+                generation,
+            );
+            *scope_guard = Some(scope);
+            drop(scope_guard);
+            drop(rt_transition);
+
+            // ── Filesystem side-effects (non-fatal) ───────────────────────────
+            if let Some(nest) = nest.as_deref() {
+                if let Err(error) = write_persisted_repos_dir(nest, effective_repos_dir.as_deref())
+                {
+                    eprintln!("buzz-desktop: persist repos dir failed: {error}");
+                }
+                if let Err(error) = ensure_repos_symlink(nest, effective_repos_dir.as_deref()) {
+                    eprintln!("buzz-desktop: repos dir setup failed: {error}");
+                    let _ = app.emit("repos-dir-error", error);
+                }
+            }
+
+            Ok::<WorkspaceApplyResult, String>(WorkspaceApplyResult::success())
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+
+    // If blocking returned a drain-failed result, surface it now.
+    let apply_result = blocking_result?;
+    if !apply_result.applied {
+        return Ok(apply_result);
+    }
+
+    // ── Post-commit (non-rollback) ──────────────────────────────────────
+    // The workspace HAS switched. Post-commit failures surface as degradation
+    // on the applied result — we never pretend the old scope survived.
+    // #6003: re-assert the epoch before the awaited post-commit phases. We hold
+    // `apply_guard` across the whole body, so a queued apply is still blocked on
+    // `workspace_apply_lock` and cannot have advanced the generation; this is
+    // defense in depth against a future refactor that releases the guard early.
+    {
+        let state = restore_app.state::<AppState>();
         assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+    }
+    let mut degraded: Vec<String> = Vec::new();
 
-        // ── Apply all state changes (nothing below can fail) ──────────────────
-        {
-            let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
-            *override_guard = Some(relay_url);
-        }
-        // Reset the Rust-side admission gate when switching workspace/community,
-        // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).
-        crate::relay_admission::reset_gate_for_workspace_change();
-
-        if let Some(keys) = parsed_keys {
-            let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
-            *keys_guard = keys;
-        }
-
-        // Keep the backend-side reconcile guard aligned with the frontend
-        // experiment before launch-time restore can spawn any agents. Missing
-        // means the stable behavior: desktop remains authoritative.
-        state
-            .managed_agent_profile_reconcile_enabled
-            .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
-
-        // ── Filesystem side-effect (non-fatal) ────────────────────────────────
-        // Persist the *effective* repos_dir (None when the candidate failed
-        // validation) for the backend to read at boot, then re-point REPOS to
-        // match. Persisting first makes the dotfile authoritative even if the
-        // symlink apply fails here (e.g. a non-empty real REPOS): the next boot
-        // reads the persisted value and resolves the symlink before any agent can
-        // clone into REPOS. A bad candidate persists `None`, so the next boot is
-        // clean and agent restore proceeds. Failure of either must NOT fail the
-        // command — relay/keys are already applied. Surface symlink errors via
-        // `repos-dir-error`.
-        if let Some(nest) = nest.as_deref() {
-            if let Err(error) = write_persisted_repos_dir(nest, effective_repos_dir.as_deref()) {
-                eprintln!("buzz-desktop: persist repos dir failed: {error}");
-            }
-            if let Err(error) = ensure_repos_symlink(nest, effective_repos_dir.as_deref()) {
-                eprintln!("buzz-desktop: repos dir setup failed: {error}");
-                let _ = app.emit("repos-dir-error", error);
-            }
-        }
-
-        try_regenerate_nest(&app);
-
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
-
-    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
+    // Nest context reflects the active scope's agents.md — regenerate now that
+    // the scope is committed. Awaited (not fire-and-forget) so a regeneration
+    // failure surfaces as applied-but-degraded rather than vanishing on a
+    // spawned task. Agents still run fine against a stale AGENTS.md.
+    if let Err(error) = crate::managed_agents::regenerate_nest_now(&restore_app).await {
+        degraded.push(format!("nest context regeneration failed: {error}"));
+    }
 
     let state = restore_app.state::<AppState>();
-    super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await?;
+    if let Err(reason) =
+        super::agents::provider_access::reconcile_on_workspace_apply(&restore_app, &state).await
+    {
+        // Provider-access reconciliation failed after the scope committed.
+        // Preserves #4053's fail-closed intent: no agents spawn against a
+        // workspace whose provider deployment may not have accepted
+        // owner-only access. Return applied-but-blocked so the frontend
+        // can park on the loading gate with a truthful error rather than
+        // falsely treating the workspace as unapplied.
+        return Ok(
+            crate::managed_agents::scope::WorkspaceApplyResult::applied_but_blocked(
+                reason, degraded,
+            ),
+        );
+    }
+
     // The Bumble→Pollen migration may have renamed stopped agents. Reconcile
     // their relay profiles independently of runtime restore; successful writes
     // record this relay while retaining the agent for other communities, and
-    // failures retry on the next workspace apply.
+    // failures retry on the next workspace apply. The loader is scope-resolved
+    // (scoped-store queue path), so this runs after the scope has committed.
     crate::managed_agents::spawn_pending_profile_reconciliations(
         &restore_app,
         &profile_reconcile_relay,
@@ -276,32 +493,57 @@ pub async fn apply_workspace(
     // collapse every community into one pending-event store.
     match crate::managed_agents::retention::active_retention_scope(&restore_app, &state) {
         Ok(scope) => {
-            // Adopt whatever the pre-scoping release left queued in the global
-            // retention database BEFORE the scoped reconcile and flush run, so
-            // stranded tombstones and archive requests publish on this boot
-            // instead of being abandoned by the storage cutover. Best-effort:
-            // it is not a prerequisite for the superseding head — the team leg
-            // below builds the repaired roster's head fresh from disk with a
-            // monotonic `created_at` regardless of what the legacy copy left.
-            migrate_legacy_retention_into(&restore_app, &scope);
-            // Await the reconcile to completion — do NOT spawn it — and
-            // propagate its failure. The boot migration may have repaired team
-            // membership on disk; the frontend starts inbound history replay
-            // the moment `useCommunityInit` observes the applied workspace, and
-            // an old relay team head could otherwise win that race and overwrite
-            // the repaired `persona_ids`. The team leg is fatal (see
-            // `run_event_sync`): only its success durably retains the corrected
-            // head with a superseding `monotonic_created_at`, so
-            // `retain_inbound_event`'s equal/older guard rejects the stale head.
-            // On failure we return `Err` — the command reports failure,
-            // `useCommunityInit` never exposes the community, and inbound replay
-            // never starts against an un-superseded disk state.
-            crate::event_sync::run_event_sync_blocking(
-                restore_app.clone(),
-                scope.owner_keys,
-                scope.db_path,
-            )
-            .await?;
+            if let Some(agent_scope) = state.capture_active_scope() {
+                // Per-apply team-membership repair. Main runs the repair on
+                // every boot (`repair_then_detach_teams`); its drift source #2
+                // — adding a persona to a team not backfilling running
+                // instances' `team_id` — is ongoing, not one-shot, so a
+                // once-per-scope-lifetime repair in scope-init would be a silent
+                // downgrade. Repair-only (no detach; detach stays one-shot in
+                // scope-init) and upstream of the superseding-head write below
+                // so the fatal team leg retains the corrected roster.
+                // Best-effort: a failure is logged and does not block the apply;
+                // the corrected roster is re-derived on the next apply.
+                if let Err(error) =
+                    crate::migration::repair_team_membership_in_dir(&agent_scope.definitions_dir)
+                {
+                    eprintln!("buzz-desktop: per-apply team-membership repair failed: {error}");
+                }
+                // Legacy global-retention adoption (main's per-apply
+                // `migrate_legacy_retention_into`) is dropped as subsumed:
+                // scope-init's pre-Ready family already runs
+                // `migrate_legacy_retention_db` (Step A) into the identical
+                // scoped `db_path` this scope resolves, and the READY_MARKER v2
+                // bump re-runs that step for scopes marked Ready by the v1
+                // pipeline. The adoption is one-shot per scope by design, so the
+                // scope-init call fully covers it.
+                //
+                // Await the reconcile to completion — do NOT spawn it — and
+                // propagate its failure. The boot migration may have repaired
+                // team membership on disk; the frontend starts inbound history
+                // replay the moment `useCommunityInit` observes the applied
+                // workspace, and an old relay team head could otherwise win that
+                // race and overwrite the repaired `persona_ids`. The team leg is
+                // fatal (see `run_event_sync`): only its success durably retains
+                // the corrected head with a superseding `monotonic_created_at`,
+                // so `retain_inbound_event`'s equal/older guard rejects the
+                // stale head. On failure we return `Err` — the command reports
+                // failure, `useCommunityInit` never exposes the community, and
+                // inbound replay never starts against an un-superseded disk
+                // state.
+                crate::event_sync::run_event_sync_blocking(
+                    restore_app.clone(),
+                    scope.owner_keys,
+                    scope.db_path,
+                    agent_scope.definitions_dir,
+                )
+                .await?;
+            } else {
+                degraded.push(
+                    "active agent scope unavailable after workspace apply — event sync skipped"
+                        .to_string(),
+                );
+            }
         }
         Err(error) => {
             // Scope resolution is a prerequisite for establishing the
@@ -315,58 +557,66 @@ pub async fn apply_workspace(
         }
     }
 
-    let restore_pending = state
-        .managed_agent_restore_pending
-        .swap(false, Ordering::AcqRel);
-
-    // Transfer the apply guard to launch restoration. The command can return
-    // promptly, but a queued workspace cannot mutate relay/identity until the
-    // restore has completed every mutable workspace read and side effect.
+    // Per-transition restore: always restore the new scope's auto-start agents
+    // (replaces the launch-only `managed_agent_restore_pending.swap` one-shot).
+    // Fire-and-forget spawn so the command returns promptly; restore failures
+    // are surfaced as a structured `workspace-degraded` event consumed by the UI.
     #[cfg(feature = "mesh-llm")]
     {
-        let restore_lock = apply_guard;
         let app = restore_app.clone();
+        // #6003: transfer the apply guard into the restore task so a queued
+        // apply stays blocked on `workspace_apply_lock` until restore's every
+        // mutable workspace read completes — the guard outlives this return.
+        let restore_lock = apply_guard;
         tauri::async_runtime::spawn(async move {
             let _restore_lock = restore_lock;
             let state = app.state::<AppState>();
-            if restore_pending {
-                if let Err(error) =
-                    crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
-                {
-                    eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
-                }
+            // Restore mesh sharing first so a slow stopped-status request cannot
+            // overwrite a newly restored serving status.
+            if let Err(error) = crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
+            {
+                eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
             }
             crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
-            if restore_pending {
-                if let Err(error) =
-                    restore_managed_agents_on_launch(&app, &state.shutdown_started).await
-                {
-                    eprintln!("buzz-desktop: failed to restore managed agents: {error}");
-                }
+            if let Err(error) =
+                restore_managed_agents_on_launch(&app, &state.shutdown_started).await
+            {
+                let msg = format!("agent restore failed: {error}");
+                eprintln!("buzz-desktop: {msg}");
+                let _ = app.emit("workspace-degraded", &msg);
             }
         });
-        return Ok(());
     }
 
     #[cfg(not(feature = "mesh-llm"))]
-    if restore_pending {
-        let restore_lock = apply_guard;
+    {
         let app = restore_app.clone();
+        // #6003: transfer the apply guard into the restore task (see mesh-llm
+        // branch) so a queued apply cannot mutate relay/identity until restore
+        // finishes.
+        let restore_lock = apply_guard;
         tauri::async_runtime::spawn(async move {
             let _restore_lock = restore_lock;
             let state = app.state::<AppState>();
             if let Err(error) =
                 restore_managed_agents_on_launch(&app, &state.shutdown_started).await
             {
-                eprintln!("buzz-desktop: failed to restore managed agents: {error}");
+                let msg = format!("agent restore failed: {error}");
+                eprintln!("buzz-desktop: {msg}");
+                let _ = app.emit("workspace-degraded", &msg);
             }
         });
-        return Ok(());
     }
 
-    assert_current_apply_generation(&state.workspace_apply_generation, apply_generation)?;
-
-    Ok(())
+    if degraded.is_empty() {
+        Ok(WorkspaceApplyResult::success())
+    } else {
+        Ok(degraded
+            .into_iter()
+            .fold(WorkspaceApplyResult::success(), |r, msg| {
+                r.with_degradation(msg)
+            }))
+    }
 }
 
 #[cfg(test)]

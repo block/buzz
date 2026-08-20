@@ -55,7 +55,7 @@ pub(crate) async fn connect_audio_relay(
     let relay_url = crate::relay::relay_ws_url_with_override(state);
     let ws_url = format!("{relay_url}/huddle/{channel_id}/audio");
 
-    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+    let keys = state.signing_keys()?;
 
     // TTS interrupt flags — recv task cancels TTS when remote humans speak.
     let (tts_cancel, tts_active) = {
@@ -98,6 +98,13 @@ pub(crate) async fn connect_audio_relay(
         nostr::Tag::parse(["relay", &relay_url]).map_err(|e| format!("tag relay: {e}"))?,
         nostr::Tag::parse(["challenge", &challenge]).map_err(|e| format!("tag challenge: {e}"))?,
     ];
+    // Issuance runs under a bounded egress lease: the NIP-42 auth that
+    // establishes this session's connection-lifetime authority is an ordinary
+    // leased sign→send operation (spec L4569-4570). The lease is held only
+    // across sign → send-auth and dropped before we await `joined`; the
+    // durable session capability registered below carries the authority
+    // forward for the unsigned frames the send task emits.
+    let auth_lease = crate::owner_identity_egress::try_admit_owner_identity_egress().await?;
     let event = nostr::EventBuilder::new(nostr::Kind::Custom(22242), "")
         .tags(tags)
         .sign_with_keys(&keys)
@@ -120,6 +127,20 @@ pub(crate) async fn connect_audio_relay(
         .send(WsMsg::Text(auth_msg.to_string().into()))
         .await
         .map_err(|e| format!("send auth: {e}"))?;
+    // Register the durable session capability WHILE the auth lease is still
+    // held, so it stamps the generation that lease was admitted under — the
+    // generation the NIP-42 auth was signed under. Registering after the
+    // `joined` await (where the lease is already dropped) would re-read a
+    // generation that a concurrent transition may have bumped, stamping the
+    // winning generation onto authority derived from the losing identity — a
+    // barrier bypass. Its cancellation token is the C5 barrier's teardown
+    // handle; the send task validates it before every frame.
+    let cancel = CancellationToken::new();
+    let session = crate::owner_identity_egress::register_owner_session(&auth_lease, cancel.clone());
+    // Sign → auth-send → register complete: the bounded lease has served its
+    // purpose. Drop it before awaiting `joined` so it does not span the wait
+    // (spec L4505-4508); the session capability carries authority forward.
+    drop(auth_lease);
 
     let initial_peers: Vec<(u8, String)> = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
         loop {
@@ -160,7 +181,6 @@ pub(crate) async fn connect_audio_relay(
     .map_err(|_| "timeout waiting for joined from relay".to_string())?
     .map_err(|e: String| e)?;
 
-    let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(50);
     let output_device_name = state
@@ -181,6 +201,7 @@ pub(crate) async fn connect_audio_relay(
             tts_cancel,
             tts_active,
             output_device_name,
+            session,
         })
         .await
         {
@@ -215,6 +236,12 @@ struct AudioRelayPipelineArgs {
     tts_cancel: Arc<AtomicBool>,
     tts_active: Arc<AtomicBool>,
     output_device_name: Option<String>,
+    /// The durable owner-identity session capability for this connection.
+    /// Validated before every frame send so a frame cannot ride the
+    /// established peer after an identity transition has superseded it.
+    session: crate::owner_identity_egress::OwnerIdentityCapability<
+        crate::owner_identity_egress::SessionPolicy,
+    >,
 }
 
 async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String> {
@@ -228,6 +255,7 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         tts_cancel,
         tts_active,
         output_device_name,
+        session,
     } = args;
 
     let mut encoder = opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip)
@@ -247,6 +275,10 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
     let cancel_send = cancel.clone();
 
     let send_task = tokio::spawn(async move {
+        // The session capability moves into the send task: it lives exactly as
+        // long as the frames it authorizes, and dropping it (task exit)
+        // deregisters it from the egress registry.
+        let session = session;
         use super::wire::{audio_level_dbov, FrameHeader, V2_HEADER_LEN};
         let mut encoder = encoder; // Move encoder into task.
         const FRAME_SAMPLES: usize = 960;
@@ -272,6 +304,17 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
             if pcm_bytes.len() % 4 != 0 {
                 continue; // Malformed batch.
             }
+
+            // Validate the session capability immediately before transmitting
+            // this batch: a cheap generation compare, not a re-auth. Once an
+            // identity transition supersedes the generation this session was
+            // authenticated under, exercise is refused and the connection tears
+            // down — no frame rides the old peer under an unresolved identity.
+            if let Err(e) = session.admit_exercise() {
+                eprintln!("buzz-desktop: huddle audio session revoked: {e}");
+                break;
+            }
+
             let samples: Vec<f32> = pcm_bytes
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))

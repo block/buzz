@@ -4,18 +4,25 @@
 //! sends until the quota window clears — matching the TS-side gate in
 //! `relayRateLimitGate.ts` that already governs WebSocket operations.
 //!
-//! **Coverage:** all entry points in `relay.rs` (`query_relay_at`,
-//! `submit_event`, `submit_signed_event`, `submit_signed_event_with_keys`,
-//! `sync_managed_agent_profile`) and the three previously-direct senders
-//! (`submit_engram_event` in snapshot import + team_snapshot, huddle STT)
-//! all call `wait_for_rate_limit()` before `.send()`.
+//! **Coverage:** the wait is centralized in the two owner-identity egress
+//! admission constructors — `try_admit_owner_identity_egress` and
+//! `admit_managed_agent_egress` (`owner_identity_egress`). Each waits out the
+//! gate FIRST, then admits its lease. Because the explicit-key relay funnels
+//! (`submit_signed_event_at_with_keys`, `submit_event_at_with_keys`,
+//! `submit_signed_event_with_keys`, `submit_event_with_keys`,
+//! `query_relay_at_with_keys`, and the NIP-98 builders) require an
+//! `EgressLease` witness whose ONLY constructors are those admission entry
+//! points, no send can reach `.send()` without having waited — the wait can no
+//! longer be forgotten at a call site. The eight owner/managed-agent egress
+//! construction sites this closes over are enumerated in the
+//! `owner_identity_egress` module doc.
 //!
 //! **Media upload/download and `/info`** call `relay_error_message()` on
 //! non-200 responses, so their 429s arm the shared gate as conservative
 //! back-off (any relay overload signal is worth honouring across domains).
-//! They do not call `wait_for_rate_limit()` themselves — their operations
-//! are driven by user-initiated file transfers rather than bridge event flow,
-//! and they have independent retry logic.
+//! They do not wait on the gate themselves — their operations are driven by
+//! user-initiated file transfers rather than bridge event flow, and they have
+//! independent retry logic.
 //!
 //! **Community scope:** the gate is reset on every `apply_workspace` call,
 //! mirroring the TS gate's `resetRateLimitGate()` on community switch in
@@ -41,10 +48,6 @@ const DEFAULT_RATE_LIMIT_SECONDS: u64 = 10;
 pub const MAX_HINT_SECONDS: u64 = 300;
 
 static GATE_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);
-
-// The gate is process-wide, so every test that can arm it must serialize.
-#[cfg(test)]
-pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Arm (or extend) the admission gate from a relay 429.
 ///
@@ -104,13 +107,20 @@ pub fn reset_rate_limit_gate() {
     *GATE_EXPIRY.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// Serializes every test that arms the process-wide gate static — including
+/// `owner_identity_egress`'s wait-in-admission test — so armed expiries never
+/// bleed between parallel test threads.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // The gate is a process-wide static shared by every test in this binary,
-    // so all tests that arm it serialize on one async lock to keep expiries
-    // from bleeding between parallel test threads.
+    // so all gate tests serialize on the module-level `TEST_SERIAL` (shared
+    // with cross-module gate consumers) to keep armed expiries from bleeding
+    // between parallel test threads.
 
     #[tokio::test(start_paused = true)]
     async fn wait_returns_immediately_when_gate_is_inactive() {
@@ -401,6 +411,7 @@ mod tests {
             &reqwest::Method::POST,
             "https://relay.example.com/events",
             b"{}",
+            &crate::owner_identity_egress::test_owner_egress_lease(),
         )
         .expect("header build must succeed");
 

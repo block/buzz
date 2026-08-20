@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { isMacPlatform } from "@/shared/lib/platform";
+import { toast } from "sonner";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
@@ -285,20 +286,79 @@ export function useCommunityInit(
       // imported key. `loadCommunities()` strips lingering `nsec` fields from
       // legacy entries; this site refuses to apply one even if present.
       try {
-        await applyCommunity(
+        const applyResult = await applyCommunity(
           activeCommunity.relayUrl,
           undefined,
           activeCommunity.token,
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
         );
+
+        if (!applyResult.applied) {
+          // Drain failed; old scope is still active. Treat as a fatal apply
+          // error: park on the loading gate so the user can retry by switching
+          // workspaces again.
+          const reason = applyResult.degraded.join("; ");
+          console.error(
+            "[useCommunityInit] workspace apply blocked by drain failure:",
+            reason,
+          );
+          if (!cancelled) {
+            setResult({
+              isReady: false,
+              needsSetup: false,
+              appliedKey: null,
+              error: `Workspace switch failed (agents could not stop): ${reason}`,
+            });
+          }
+          return;
+        }
+
+        if (applyResult.blocked != null) {
+          // Scope committed (applied: true) but post-commit provider-access
+          // reconciliation failed. The new workspace IS active, but dependent
+          // steps (event sync, agent restore) were skipped to preserve
+          // fail-closed behavior. Park on the loading gate so the user can
+          // retry by re-applying the workspace — same semantics as the catch
+          // block below, but truthfully reflecting that the workspace committed.
+          console.error(
+            "[useCommunityInit] workspace applied but blocked by provider reconciliation failure:",
+            applyResult.blocked,
+          );
+          if (!cancelled) {
+            setResult({
+              isReady: false,
+              needsSetup: false,
+              appliedKey: null,
+              error: `Workspace applied but provider access configuration failed: ${applyResult.blocked}`,
+            });
+          }
+          return;
+        }
+
+        // Workspace applied. Surface any post-commit degradation as a
+        // user-visible warning toast — the workspace IS active, but some
+        // best-effort post-commit steps failed (nest, event-sync, restore).
+        if (applyResult.degraded.length > 0) {
+          const reason = applyResult.degraded.join("; ");
+          console.warn(
+            "[useCommunityInit] workspace applied with degradation:",
+            applyResult.degraded,
+          );
+          toast.warning("Workspace applied with partial failures", {
+            description: reason,
+            duration: 8000,
+          });
+        }
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
         // it as non-fatal (relay/keys apply, bad value not persisted, REPOS
         // falls back to a real dir, a `repos-dir-error` toast surfaces it) and
         // returns Ok, so the app boots into a working state where the user can
-        // fix the value in community settings. This catch now only fires on a
-        // genuine relay/key apply failure (e.g. an invalid nsec or a poisoned
+        // fix the value in community settings. Provider-access reconciliation
+        // failures also no longer reach here — they arrive as `applied: true` +
+        // `blocked: string` and are handled above. This catch now only fires on
+        // a genuine relay/key apply failure (e.g. an invalid nsec or a poisoned
         // lock). For those, marking the community ready would render
         // community-scoped UI against a backend that never applied — park on
         // the loading gate (isReady:false, no appliedKey) instead.

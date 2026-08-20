@@ -3,42 +3,11 @@
 
 use std::path::Path;
 
-/// Fold `personas.json` into the unified agent store (Phase 1A.2).
-///
-/// One-way, versioned by presence: runs only while `personas.json` exists.
-/// Each persona becomes a key-less definition record
-/// ([`AgentDefinition::into_agent_record`]) appended to `managed-agents.json`
-/// via the definition-preserving save; the old file is renamed to
-/// `personas.json.bak` so a second boot is a no-op and the data survives for
-/// manual recovery. Built-ins are skipped — `merge_personas` regenerates them
-/// from code on every load, exactly as before.
-///
-/// Ordering (see `run_boot_migrations`): runs after the JSON-level
-/// `personas.json` migrations (which must see the legacy file) and BEFORE
-/// every consumer of the `load/save_personas` shims — `sync_team_personas`,
-/// `reconcile_provider_mcp_commands`, and `materialize_agent_runtimes` all
-/// read definitions post-fold via [`load_persona_runtimes`]'s unified-store
-/// branch.
-pub fn fold_personas_into_agent_store(app: &tauri::AppHandle) {
-    let Ok(base_dir) = crate::managed_agents::managed_agents_base_dir(app) else {
-        return;
-    };
-    match fold_personas_in_dir(&base_dir) {
-        Ok(None) => {}
-        Ok(Some(folded)) => {
-            eprintln!(
-                "buzz-desktop: persona-store-fold: {folded} definitions folded into the unified store"
-            );
-        }
-        Err(e) => eprintln!("buzz-desktop: persona-store-fold: {e}"),
-    }
-}
-
 /// Core fold logic, decoupled from the Tauri `AppHandle` for testing.
 /// Operates on the raw JSON files — no keyring interaction: instance records
 /// are passed through byte-identical, and folded definitions carry no keys.
 /// Returns `Ok(None)` when there is no `personas.json` to fold.
-fn fold_personas_in_dir(base_dir: &Path) -> Result<Option<usize>, String> {
+pub(crate) fn fold_personas_in_dir(base_dir: &Path) -> Result<Option<usize>, String> {
     let personas_path = base_dir.join("personas.json");
     if !personas_path.exists() {
         return Ok(None);

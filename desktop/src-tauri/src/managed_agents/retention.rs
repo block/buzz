@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension};
-use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
 use crate::app_state::AppState;
+use crate::managed_agents::scope::derive_scope_id;
 
 mod legacy_migration;
 pub use legacy_migration::migrate_legacy_retention_db;
@@ -30,20 +30,33 @@ pub struct RetentionScope {
 }
 
 /// Decide whether `scope` — the workspace's active retention scope — is the one
-/// that owns an event delivered by `arrival_relay_url`.
+/// that owns an event delivered by `arrival_relay_url` from `arrival_owner_pubkey`.
 ///
 /// Inbound reconcile resolves its retention database when it PROCESSES an event,
 /// while the event belongs to the community that DELIVERED it. `None` means a
-/// workspace switch happened in between and the caller must drop the event
-/// rather than file community A's event into community B's store.
+/// workspace switch happened in between (relay or owner changed), and the caller
+/// must drop the event rather than file community A's event into community B's store.
+///
+/// Matching both relay and owner ensures that an in-flight old-owner event on
+/// the same relay cannot land in the new owner's active store after an identity
+/// switch.
 ///
 /// The comparison goes through the same normalization
-/// [`scoped_retention_db_path`] hashes, so "same relay" can never disagree with
+/// [`scoped_retention_db_path`] hashes, so "same scope" can never disagree with
 /// "same database".
-pub fn scope_for_arrival(scope: RetentionScope, arrival_relay_url: &str) -> Option<RetentionScope> {
-    let same_scope =
+pub fn scope_for_arrival(
+    scope: RetentionScope,
+    arrival_relay_url: &str,
+    arrival_owner_pubkey: &str,
+) -> Option<RetentionScope> {
+    let same_relay =
         normalized_relay_scope(&scope.relay_url) == normalized_relay_scope(arrival_relay_url);
-    same_scope.then_some(scope)
+    let same_owner = scope
+        .owner_keys
+        .public_key()
+        .to_hex()
+        .eq_ignore_ascii_case(arrival_owner_pubkey.trim());
+    (same_relay && same_owner).then_some(scope)
 }
 
 /// Relay-URL form that identifies a retention scope: equivalent workspace URLs
@@ -54,28 +67,42 @@ fn normalized_relay_scope(relay_url: &str) -> &str {
 
 /// Resolve the retention database path for a relay + owner pair.
 ///
-/// The normalized scope is hashed so relay URLs never become path components.
-/// Trimming a trailing slash keeps equivalent workspace URLs on one scope.
+/// Delegates to [`derive_scope_id`] from the shared scope module so the hash
+/// is byte-identical between the retention DB path and the definition store
+/// path — "same scope" can never disagree between the two subsystems.
 pub fn scoped_retention_db_path(base_dir: &Path, relay_url: &str, owner_pubkey: &str) -> PathBuf {
-    let normalized_relay = normalized_relay_scope(relay_url);
-    let mut hasher = Sha256::new();
-    hasher.update(owner_pubkey.trim().to_ascii_lowercase().as_bytes());
-    hasher.update(b"\0");
-    hasher.update(normalized_relay.as_bytes());
-    let scope_id = hex::encode(hasher.finalize());
+    let scope_id = derive_scope_id(relay_url, owner_pubkey);
     base_dir.join("retention").join(format!("{scope_id}.db"))
 }
 
 /// Snapshot the active relay + owner and resolve their durable event store.
 ///
+/// Derives relay and owner from the captured [`WorkspaceAgentScope`] so both
+/// the retention DB path and the definitions path come from the same single
+/// scope authority. Returns `Err` when no active scope exists (fail closed) or
+/// when the signing keys disagree with the scope's captured owner pubkey
+/// (defensive; the scope is the authority).
+///
 /// Callers keep the returned relay and keys alongside the path whenever work
 /// crosses an `.await`; a later workspace switch cannot retarget that work.
 pub fn active_retention_scope(app: &AppHandle, state: &AppState) -> Result<RetentionScope, String> {
-    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    let scope = state.capture_active_scope().ok_or_else(|| {
+        "active_retention_scope: no active workspace scope — fail closed".to_string()
+    })?;
     let owner_keys = state.signing_keys()?;
+    // Validate that the signing keys agree with the scope's owner. In
+    // practice they are always consistent (committed together); this guard
+    // catches the narrow window where they haven't been committed yet.
+    let keys_pubkey = owner_keys.public_key().to_hex();
+    if !keys_pubkey.eq_ignore_ascii_case(&scope.owner_pubkey) {
+        return Err(format!(
+            "active_retention_scope: signing keys pubkey ({keys_pubkey}) does not match \
+             active scope owner ({}) — scope may not yet be fully committed",
+            scope.owner_pubkey
+        ));
+    }
     let base_dir = super::managed_agents_base_dir(app)?;
-    let db_path =
-        scoped_retention_db_path(&base_dir, &relay_url, &owner_keys.public_key().to_hex());
+    let db_path = scoped_retention_db_path(&base_dir, &scope.relay_url, &scope.owner_pubkey);
     let parent = db_path
         .parent()
         .ok_or_else(|| "retention scope path has no parent".to_string())?;
@@ -83,13 +110,39 @@ pub fn active_retention_scope(app: &AppHandle, state: &AppState) -> Result<Reten
         .map_err(|error| format!("failed to create retention scope directory: {error}"))?;
     Ok(RetentionScope {
         db_path,
-        relay_url,
+        relay_url: scope.relay_url,
+        owner_keys,
+    })
+}
+
+/// Build a `RetentionScope` from a captured [`WorkspaceAgentScope`] and keys.
+/// Use instead of [`active_retention_scope`] when a captured scope is held.
+/// Derives `base_dir` two levels up from `definitions_dir`.
+pub(crate) fn retention_scope_from_captured(
+    captured: &crate::managed_agents::scope::WorkspaceAgentScope,
+    owner_keys: nostr::Keys,
+) -> Result<RetentionScope, String> {
+    let base_dir = captured
+        .definitions_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or("retention_scope_from_captured: definitions_dir has fewer than two parent levels")?;
+    let db_path = scoped_retention_db_path(base_dir, &captured.relay_url, &captured.owner_pubkey);
+    std::fs::create_dir_all(
+        db_path
+            .parent()
+            .ok_or("retention scope path has no parent")?,
+    )
+    .map_err(|e| format!("failed to create retention scope directory: {e}"))?;
+    Ok(RetentionScope {
+        db_path,
+        relay_url: captured.relay_url.clone(),
         owner_keys,
     })
 }
 
 /// Snapshot the active relay + owner, but only when it is the scope that owns
-/// events delivered by `arrival_relay_url`.
+/// events delivered by `arrival_relay_url` from `arrival_owner_pubkey`.
 ///
 /// Resolving the scope and matching it in one step is what closes the gap: the
 /// returned scope is both the one that will be written to and the one the event
@@ -99,10 +152,12 @@ pub fn arrival_retention_scope(
     app: &AppHandle,
     state: &AppState,
     arrival_relay_url: &str,
+    arrival_owner_pubkey: &str,
 ) -> Result<Option<RetentionScope>, String> {
     Ok(scope_for_arrival(
         active_retention_scope(app, state)?,
         arrival_relay_url,
+        arrival_owner_pubkey,
     ))
 }
 
@@ -472,505 +527,4 @@ pub fn get_retained_event(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn retention_scope_is_stable_and_separates_relay_and_owner() {
-        let base = Path::new("/tmp/buzz-retention-test");
-        let owner_a = "a".repeat(64);
-        let owner_b = "b".repeat(64);
-        let community_a = scoped_retention_db_path(base, "wss://a.example/", &owner_a);
-        assert_eq!(
-            community_a,
-            scoped_retention_db_path(base, "wss://a.example", &owner_a)
-        );
-        assert_ne!(
-            community_a,
-            scoped_retention_db_path(base, "wss://b.example", &owner_a)
-        );
-        assert_ne!(
-            community_a,
-            scoped_retention_db_path(base, "wss://a.example", &owner_b)
-        );
-    }
-
-    #[test]
-    fn test_arrival_relay_matching_agrees_with_database_identity() {
-        let base = Path::new("/tmp/buzz-retention-test");
-        let keys = nostr::Keys::generate();
-        let owner = keys.public_key().to_hex();
-        let scope = |relay: &str| RetentionScope {
-            db_path: scoped_retention_db_path(base, relay, &owner),
-            relay_url: relay.to_string(),
-            owner_keys: keys.clone(),
-        };
-        let community_a = scoped_retention_db_path(base, "wss://a.example", &owner);
-
-        // "Same relay" and "same database" must never disagree: every URL the
-        // match accepts has to hash to the scope's own db path, and every URL it
-        // rejects has to hash somewhere else.
-        for equivalent in ["wss://a.example", "wss://a.example/", " wss://a.example "] {
-            assert_eq!(
-                scope_for_arrival(scope("wss://a.example"), equivalent).map(|scope| scope.db_path),
-                Some(community_a.clone()),
-                "{equivalent}"
-            );
-            assert_eq!(
-                scoped_retention_db_path(base, equivalent, &owner),
-                community_a,
-                "{equivalent}"
-            );
-        }
-
-        assert!(
-            scope_for_arrival(scope("wss://b.example"), "wss://a.example").is_none(),
-            "an event from community A must not be filed while community B is active"
-        );
-        assert_ne!(
-            scoped_retention_db_path(base, "wss://b.example", &owner),
-            community_a
-        );
-    }
-
-    #[test]
-    fn concurrent_open_waits_for_initialization_lock() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("retention.db");
-        let first = open_retention_db(&path).unwrap();
-        first.execute_batch("BEGIN EXCLUSIVE").unwrap();
-
-        let second_path = path.clone();
-        let second = std::thread::spawn(move || open_retention_db(&second_path));
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        first.execute_batch("COMMIT").unwrap();
-
-        assert!(second.join().unwrap().is_ok());
-    }
-
-    fn test_db() -> Connection {
-        open_retention_db(Path::new(":memory:")).unwrap()
-    }
-
-    fn sample_event() -> RetainedEvent {
-        RetainedEvent {
-            kind: 30175,
-            pubkey: "abc123".to_string(),
-            d_tag: "test-persona".to_string(),
-            content: r#"{"display_name":"Test"}"#.to_string(),
-            created_at: 1000,
-            raw_event: r#"{"id":"..."}"#.to_string(),
-            pending_sync: true,
-        }
-    }
-
-    #[test]
-    fn inbound_preflight_does_not_consume_event_before_commit() {
-        let conn = test_db();
-        let mut inbound = sample_event();
-        inbound.pending_sync = false;
-
-        assert_eq!(
-            inbound_event_outcome(&conn, &inbound).unwrap(),
-            InboundOutcome::Applied
-        );
-        assert!(
-            get_retained_event(&conn, inbound.kind, &inbound.pubkey, &inbound.d_tag)
-                .unwrap()
-                .is_none()
-        );
-        // A failed store/runtime apply can replay the same head because the
-        // preflight did not advance retention.
-        assert_eq!(
-            inbound_event_outcome(&conn, &inbound).unwrap(),
-            InboundOutcome::Applied
-        );
-        assert_eq!(
-            retain_inbound_event(&conn, &inbound).unwrap(),
-            InboundOutcome::Applied
-        );
-        assert_eq!(
-            inbound_event_outcome(&conn, &inbound).unwrap(),
-            InboundOutcome::Skipped
-        );
-    }
-
-    #[test]
-    fn retain_and_retrieve() {
-        let conn = test_db();
-        let event = sample_event();
-        retain_event(&conn, &event).unwrap();
-
-        let results = get_retained_personas(&conn, "abc123").unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].d_tag, "test-persona");
-        assert_eq!(results[0].created_at, 1000);
-        assert!(results[0].pending_sync);
-    }
-
-    #[test]
-    fn tombstone_retention_keys_are_distinct_across_kinds() {
-        // A persona slug, team id, and agent pubkey that all happen to equal
-        // "shared" must occupy DISTINCT kind:5 rows so one tombstone's pending
-        // publish never clobbers another's (F2c).
-        let conn = test_db();
-        for target_kind in [30175u32, 30176, 30177] {
-            retain_event(
-                &conn,
-                &RetainedEvent {
-                    kind: 5,
-                    pubkey: "owner".to_string(),
-                    d_tag: tombstone_retention_d_tag(target_kind, "shared"),
-                    content: String::new(),
-                    created_at: 1000,
-                    raw_event: format!("{{\"k\":{target_kind}}}"),
-                    pending_sync: true,
-                },
-            )
-            .unwrap();
-        }
-        // Three distinct rows survive — no PK collision clobbered any of them.
-        for target_kind in [30175u32, 30176, 30177] {
-            let row = get_retained_event(
-                &conn,
-                5,
-                "owner",
-                &tombstone_retention_d_tag(target_kind, "shared"),
-            )
-            .unwrap();
-            assert!(
-                row.is_some(),
-                "tombstone for kind {target_kind} was clobbered"
-            );
-        }
-    }
-
-    #[test]
-    fn upsert_replaces_newer() {
-        let conn = test_db();
-        let mut event = sample_event();
-        retain_event(&conn, &event).unwrap();
-
-        event.content = r#"{"display_name":"Updated"}"#.to_string();
-        event.created_at = 2000;
-        retain_event(&conn, &event).unwrap();
-
-        let results = get_retained_personas(&conn, "abc123").unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].created_at, 2000);
-        assert!(results[0].content.contains("Updated"));
-    }
-
-    #[test]
-    fn upsert_ignores_older() {
-        let conn = test_db();
-        let mut event = sample_event();
-        event.created_at = 2000;
-        retain_event(&conn, &event).unwrap();
-
-        event.content = r#"{"display_name":"Old"}"#.to_string();
-        event.created_at = 1000;
-        retain_event(&conn, &event).unwrap();
-
-        let results = get_retained_personas(&conn, "abc123").unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].created_at, 2000);
-        assert!(!results[0].content.contains("Old"));
-    }
-
-    #[test]
-    fn pending_sync_query() {
-        let conn = test_db();
-        let mut event = sample_event();
-        event.pending_sync = true;
-        retain_event(&conn, &event).unwrap();
-
-        let mut event2 = sample_event();
-        event2.d_tag = "other".to_string();
-        event2.pending_sync = false;
-        retain_event(&conn, &event2).unwrap();
-
-        let pending = get_pending_sync(&conn).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].d_tag, "test-persona");
-    }
-
-    #[test]
-    fn test_mark_synced_matching_row_clears_flag() {
-        let conn = test_db();
-        let event = sample_event();
-        retain_event(&conn, &event).unwrap();
-
-        mark_synced(&conn, 30175, "abc123", "test-persona", 1000, &event.content).unwrap();
-
-        let pending = get_pending_sync(&conn).unwrap();
-        assert!(pending.is_empty());
-
-        let results = get_retained_personas(&conn, "abc123").unwrap();
-        assert_eq!(results.len(), 1);
-        assert!(!results[0].pending_sync);
-    }
-
-    #[test]
-    fn test_mark_synced_stale_version_leaves_flag_set() {
-        let conn = test_db();
-        let published = sample_event();
-        retain_event(&conn, &published).unwrap();
-
-        // A newer edit lands at the same coordinate before the flush loop
-        // clears the version it published.
-        let mut newer = sample_event();
-        newer.content = r#"{"display_name":"Edited"}"#.to_string();
-        newer.created_at = 2000;
-        retain_event(&conn, &newer).unwrap();
-
-        // Clearing against the OLD version must not touch the newer pending row.
-        mark_synced(
-            &conn,
-            30175,
-            "abc123",
-            "test-persona",
-            1000,
-            &published.content,
-        )
-        .unwrap();
-
-        let pending = get_pending_sync(&conn).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].created_at, 2000);
-    }
-
-    #[test]
-    fn test_delete_retained_event_removes_row() {
-        let conn = test_db();
-        retain_event(&conn, &sample_event()).unwrap();
-
-        delete_retained_event(&conn, 30175, "abc123", "test-persona").unwrap();
-
-        assert!(get_retained_event(&conn, 30175, "abc123", "test-persona")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn test_delete_retained_event_missing_row_is_noop() {
-        let conn = test_db();
-        delete_retained_event(&conn, 30175, "abc123", "nonexistent").unwrap();
-    }
-
-    #[test]
-    fn has_retained_personas_works() {
-        let conn = test_db();
-        assert!(!has_retained_personas(&conn, "abc123").unwrap());
-
-        let event = sample_event();
-        retain_event(&conn, &event).unwrap();
-
-        assert!(has_retained_personas(&conn, "abc123").unwrap());
-        assert!(!has_retained_personas(&conn, "other").unwrap());
-    }
-
-    #[test]
-    fn get_retained_event_by_coordinate() {
-        let conn = test_db();
-        let event = sample_event();
-        retain_event(&conn, &event).unwrap();
-
-        let found = get_retained_event(&conn, 30175, "abc123", "test-persona").unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().d_tag, "test-persona");
-
-        let not_found = get_retained_event(&conn, 30175, "abc123", "nonexistent").unwrap();
-        assert!(not_found.is_none());
-    }
-
-    #[test]
-    fn idempotent_retain_same_timestamp() {
-        let conn = test_db();
-        let event = sample_event();
-        retain_event(&conn, &event).unwrap();
-        retain_event(&conn, &event).unwrap();
-
-        let results = get_retained_personas(&conn, "abc123").unwrap();
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn inbound_no_local_row_applies() {
-        let conn = test_db();
-        let mut event = sample_event();
-        event.pending_sync = false;
-
-        assert_eq!(
-            retain_inbound_event(&conn, &event).unwrap(),
-            InboundOutcome::Applied
-        );
-
-        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.created_at, 1000);
-        assert!(!row.pending_sync);
-    }
-
-    #[test]
-    fn inbound_equal_second_skips_and_preserves_pending() {
-        let conn = test_db();
-        // Pending local edit at t=1000.
-        let local = sample_event();
-        retain_event(&conn, &local).unwrap();
-
-        // Inbound at the SAME second with different content.
-        let inbound = RetainedEvent {
-            content: r#"{"display_name":"Remote"}"#.to_string(),
-            pending_sync: false,
-            ..sample_event()
-        };
-        assert_eq!(
-            retain_inbound_event(&conn, &inbound).unwrap(),
-            InboundOutcome::Skipped
-        );
-
-        // Local pending row is untouched: flag preserved, content unchanged so
-        // the flush republishes and the relay resolves last-writer-wins.
-        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
-            .unwrap()
-            .unwrap();
-        assert!(row.pending_sync);
-        assert!(row.content.contains("Test"));
-    }
-
-    #[test]
-    fn inbound_strictly_newer_applies_and_clears_pending() {
-        let conn = test_db();
-        // Pending local edit at t=1000.
-        let local = sample_event();
-        retain_event(&conn, &local).unwrap();
-
-        // Inbound strictly newer with different content.
-        let inbound = RetainedEvent {
-            content: r#"{"display_name":"Remote"}"#.to_string(),
-            created_at: 2000,
-            pending_sync: false,
-            ..sample_event()
-        };
-        assert_eq!(
-            retain_inbound_event(&conn, &inbound).unwrap(),
-            InboundOutcome::Applied
-        );
-
-        // Inbound wins: content replaced and pending cleared, so the stale
-        // local edit stops republishing instead of looping.
-        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.created_at, 2000);
-        assert!(!row.pending_sync);
-        assert!(row.content.contains("Remote"));
-    }
-
-    #[test]
-    fn inbound_older_skips() {
-        let conn = test_db();
-        let mut local = sample_event();
-        local.created_at = 2000;
-        retain_event(&conn, &local).unwrap();
-
-        let inbound = RetainedEvent {
-            content: r#"{"display_name":"Stale"}"#.to_string(),
-            created_at: 1000,
-            pending_sync: false,
-            ..sample_event()
-        };
-        assert_eq!(
-            retain_inbound_event(&conn, &inbound).unwrap(),
-            InboundOutcome::Skipped
-        );
-
-        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.created_at, 2000);
-        assert!(!row.content.contains("Stale"));
-    }
-
-    #[test]
-    fn pending_sync_publishes_tombstones_before_replacements() {
-        // B5 resurrection race: a kind:5 retained in session N and the same
-        // coordinate's replacement 30175 retained on the next boot can sit
-        // pending together. The relay's a-tag deletion ignores timestamps,
-        // so the tombstone MUST publish first or it wipes the replacement.
-        let conn = test_db();
-        let replacement = RetainedEvent {
-            kind: 30175,
-            created_at: 2000,
-            pending_sync: true,
-            ..sample_event()
-        };
-        retain_event(&conn, &replacement).unwrap();
-        let tombstone = RetainedEvent {
-            kind: 5,
-            d_tag: tombstone_retention_d_tag(30175, "test-persona"),
-            content: String::new(),
-            created_at: 1000,
-            pending_sync: true,
-            ..sample_event()
-        };
-        retain_event(&conn, &tombstone).unwrap();
-
-        let pending = get_pending_sync(&conn).unwrap();
-        assert_eq!(pending.len(), 2);
-        assert_eq!(pending[0].kind, 5, "tombstone first");
-        assert_eq!(pending[1].kind, 30175, "replacement second");
-    }
-
-    #[test]
-    fn deferral_predicate_is_kind_and_pubkey_qualified() {
-        // Mid-sweep barrier semantics: a failed tombstone defers ONLY the
-        // replacement at its exact coordinate — same target kind, same pubkey.
-        use std::collections::HashSet;
-
-        let failed: HashSet<(String, String)> = HashSet::from([(
-            "abc123".to_string(),
-            tombstone_retention_d_tag(30175, "test-persona"),
-        )]);
-
-        // The covered replacement defers.
-        assert!(deferred_behind_failed_tombstone(
-            30175,
-            "abc123",
-            "test-persona",
-            &failed
-        ));
-        // Kind-qualified: a coinciding slug under a DIFFERENT kind is a
-        // distinct coordinate (the cross-kind collision the retention d-tag
-        // encoding exists to prevent) — never deferred.
-        assert!(!deferred_behind_failed_tombstone(
-            30177,
-            "abc123",
-            "test-persona",
-            &failed
-        ));
-        // Never crosses pubkeys.
-        assert!(!deferred_behind_failed_tombstone(
-            30175,
-            "other-key",
-            "test-persona",
-            &failed
-        ));
-        // Never defers kind:5 rows, even at a "matching" retention key.
-        assert!(!deferred_behind_failed_tombstone(
-            5,
-            "abc123",
-            "test-persona",
-            &failed
-        ));
-        // Unrelated d-tags publish normally.
-        assert!(!deferred_behind_failed_tombstone(
-            30175,
-            "abc123",
-            "other-persona",
-            &failed
-        ));
-    }
-}
+mod tests;

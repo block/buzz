@@ -5,24 +5,6 @@ use super::*;
 use std::collections::BTreeMap;
 
 #[test]
-fn archive_file_name_validation_rejects_escapes() {
-    assert!(validate_archive_file_name("eva-1234.agent.png").is_ok());
-    for bad in [
-        "../escape.agent.png",
-        "sub/dir.agent.png",
-        "sub\\dir.agent.png",
-        "not-a-card.png",
-        "plain.json",
-        "",
-    ] {
-        assert!(
-            validate_archive_file_name(bad).is_err(),
-            "expected rejection: {bad:?}"
-        );
-    }
-}
-
-#[test]
 fn card_template_decodes_with_expected_shape() {
     // The embedded template is generation input only, but a corrupt or
     // accidentally swapped asset should fail the build's test gate, not a
@@ -356,31 +338,6 @@ fn save_rejects_plain_png_without_snapshot_chunk() {
     img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .unwrap();
     assert!(decode_snapshot_png(&png).is_err());
-}
-
-#[test]
-fn archived_sidecar_without_memory_level_defaults_to_none() {
-    // Every mint before the memory option existed embedded MemoryLevel::None
-    // structurally, so old sidecars (no memoryLevel field) must deserialize
-    // to None — the gallery's disclosure depends on this being honest.
-    let legacy = r#"{
-        "storedFileName": "eva-1234.agent.png",
-        "fileName": "eva.agent.png",
-        "agentId": "abc",
-        "agentName": "Eva",
-        "designerNotes": "",
-        "locked": false,
-        "mintedAt": "2026-07-28T00:00:00Z"
-    }"#;
-    let meta: ArchivedCardMeta = serde_json::from_str(legacy).unwrap();
-    assert_eq!(meta.memory_level, MemoryLevel::None);
-
-    let with_level = legacy.replace(
-        "\"locked\": false,",
-        "\"locked\": false, \"memoryLevel\": \"everything\",",
-    );
-    let meta: ArchivedCardMeta = serde_json::from_str(&with_level).unwrap();
-    assert_eq!(meta.memory_level, MemoryLevel::Everything);
 }
 
 #[test]

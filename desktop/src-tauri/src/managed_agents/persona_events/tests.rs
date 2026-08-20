@@ -55,6 +55,9 @@ pub(super) fn sample_record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        library_ref: None,
+        library_applied_revision: None,
+        last_completed_deploy_attempt_id: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
@@ -854,7 +857,7 @@ mod flush_barrier {
         .sign_with_keys(&keys)
         .unwrap();
         let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
+        *state.identity_lifecycle_keys_guard().unwrap() = keys;
 
         let fresh = resign_with_fresh_timestamp(&stale, &state).unwrap();
 
@@ -913,7 +916,7 @@ mod flush_barrier {
         }
 
         let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
+        *state.identity_lifecycle_keys_guard().unwrap() = keys;
         *state.relay_url_override.lock().unwrap() = Some(spawn_stub_relay().await);
 
         let flushed = flush_pending_events(&db_path, &state).await.expect("flush");

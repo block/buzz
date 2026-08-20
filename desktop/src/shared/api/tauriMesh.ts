@@ -48,6 +48,21 @@ export async function meshStopNode(): Promise<MeshNodeStatus> {
   return await invokeTauri<MeshNodeStatus>("mesh_stop_node");
 }
 
+/**
+ * Stop the local Mesh **client** (consuming) runtime.
+ *
+ * Unlike `meshStopNode` which only tears down a serve runtime, this command
+ * only tears down a client-mode runtime. Required by Option A: a workspace
+ * switch fails while a client session is active; the user calls this to stop
+ * sharing-compute usage before the switch can proceed.
+ *
+ * Returns the post-stop status. Serve-mode and absent runtimes are left
+ * unchanged and `Ok` is returned — this has no effect on sharing nodes.
+ */
+export async function meshStopClient(): Promise<MeshNodeStatus> {
+  return await invokeTauri<MeshNodeStatus>("mesh_stop_client");
+}
+
 export async function meshNodeStatus(): Promise<MeshNodeStatus> {
   return await invokeTauri<MeshNodeStatus>("mesh_node_status");
 }

@@ -95,11 +95,19 @@ async fn publish_prepared_persona(
     prepared: PreparedPersonaPublication,
 ) -> Result<SetPersonaSharedResult, String> {
     let api_base_url = crate::relay::relay_http_base_url(&prepared.scope.relay_url);
+    // The persona event was signed during preparation, so this is admit-before-
+    // submit (freshness is fixed at preparation time). The lease still gates the
+    // send under the identity-persistence latch and waits out the rate-limit
+    // gate before transmit.
+    let lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+        crate::owner_identity_egress::try_admit_owner_identity_egress().await?,
+    );
     let publish_result = crate::relay::submit_signed_event_at_with_keys(
         &prepared.event,
         state,
         &api_base_url,
         &prepared.scope.owner_keys,
+        &lease,
     )
     .await;
 

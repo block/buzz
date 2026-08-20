@@ -78,11 +78,7 @@ fn managed_policy_filters(
 }
 
 fn current_user_pubkey(state: &AppState) -> Result<String, String> {
-    state
-        .keys
-        .lock()
-        .map(|keys| keys.public_key().to_hex())
-        .map_err(|error| error.to_string())
+    state.current_pubkey().map(|pubkey| pubkey.to_hex())
 }
 
 pub(super) fn advance_relay_cursor(filter: &mut serde_json::Value, page: &[nostr::Event]) {
@@ -339,13 +335,18 @@ mod real_relay_tests {
 
     fn state_for(keys: Keys) -> AppState {
         let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
+        *state.identity_lifecycle_keys_guard().unwrap() = keys;
         *state.relay_url_override.lock().unwrap() = Some(relay_ws_url());
         state
     }
 
     async fn publish(builder: EventBuilder, signer: &Keys, state: &AppState) {
-        relay::submit_event_with_keys(builder, state, signer, None)
+        let lease = crate::owner_identity_egress::EgressLease::OwnerIdentity(
+            crate::owner_identity_egress::try_admit_owner_identity_egress()
+                .await
+                .expect("admit owner-identity egress for fixture"),
+        );
+        relay::submit_event_with_keys(builder, state, signer, None, &lease)
             .await
             .expect("publish real-relay fixture");
     }

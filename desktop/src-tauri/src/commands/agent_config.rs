@@ -259,42 +259,72 @@ pub async fn get_agent_config_surface(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RuntimeConfigSurface, String> {
-    let record = {
+    get_agent_config_surface_for(pubkey, &app, &state)
+}
+
+/// Runtime-generic core of [`get_agent_config_surface`].
+///
+/// Split out so the capability gate — read the session cache only through a
+/// still-live, same-scope runtime — can be exercised under
+/// `tauri::test::MockRuntime`. The command is a thin `AppHandle<Wry>` wrapper.
+pub(crate) fn get_agent_config_surface_for<R: tauri::Runtime>(
+    pubkey: String,
+    app: &tauri::AppHandle<R>,
+    state: &AppState,
+) -> Result<RuntimeConfigSurface, String> {
+    // Capture the active scope up front so the session-config gate below
+    // compares against a single consistent scope, even if a workspace switch
+    // races this read.
+    let current_scope_id = state.capture_active_scope().map(|scope| scope.scope_id);
+
+    let (record, session_cache) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
             .map_err(|e| e.to_string())?;
-        let mut records = load_managed_agents(&app)?;
+        let mut records = load_managed_agents(app)?;
         let mut runtimes = state
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        let (sync_changed, exited_pubkeys) =
-            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        // Exited runtimes are pruned here; their `session_config` dies with the
+        // removed entry, so no separate cache clear is needed.
+        let (sync_changed, _exited) =
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(app));
         if sync_changed {
-            save_managed_agents(&app, &records)?;
+            save_managed_agents(app, &records)?;
         }
-        for pubkey in &exited_pubkeys {
-            state.clear_agent_session_caches(pubkey);
-        }
-        records
+        let record = records
             .into_iter()
             .find(|r| r.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+
+        // Consumption is capability-gated: the cache is read only through the
+        // same still-current runtime that could have written it. No live
+        // matching runtime (untracked, exited, or a different scope) ⇒ the
+        // pre-spawn surface, exactly as if no frame had arrived. A delayed
+        // frame from a drained workspace cannot surface here because the only
+        // place its cache could live — that runtime entry — is gone.
+        let runtime_key = ManagedAgentRuntimeKey::new(
+            pubkey.clone(),
+            &crate::relay::effective_agent_relay_url(
+                &record.relay_url,
+                &crate::relay::relay_ws_url_with_override(state),
+            ),
+        )?;
+        let session_cache = runtimes.get_mut(&runtime_key).and_then(|runtime| {
+            let live = matches!(runtime.child.try_wait(), Ok(None));
+            (runtime.scope_id == current_scope_id && live)
+                .then(|| runtime.session_config.clone())
+                .flatten()
+        });
+        (record, session_cache)
     };
 
-    let personas = load_personas(&app).unwrap_or_default();
+    let personas = load_personas(app).unwrap_or_default();
     let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
-    let runtime_key = ManagedAgentRuntimeKey::new(
-        pubkey.clone(),
-        &crate::relay::effective_agent_relay_url(
-            &record.relay_url,
-            &crate::relay::relay_ws_url_with_override(&state),
-        ),
-    )?;
-    let session_cache = state.get_session_cache(&runtime_key);
-    let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
 
     // #3493: for claude agents, resolve the settings.json and .claude.json paths
     // from the agent's effective CLAUDE_CONFIG_DIR env var (if set), falling
@@ -329,46 +359,49 @@ pub async fn get_agent_config_surface(
     ))
 }
 
-/// Store a `session_config_captured` observer event payload into the session cache.
+/// Store a `session_config_captured` observer event payload onto the emitting
+/// runtime's session cache.
 ///
-/// Called by the TypeScript observer relay when it decrypts a `session_config_captured`
-/// event from a running agent. The payload contains raw ACP session/new fields.
+/// Called by the TypeScript observer relay when it decrypts a
+/// `session_config_captured` event from a running agent. The payload contains
+/// raw ACP session/new fields plus the pair identity (`relayUrl`, `startNonce`)
+/// the harness attaches.
+///
+/// This command is in the runtime-capability sub-class of `arrival_routed`
+/// (§3.3a): its authority is the emitting PROCESS, not an issuing workspace, so
+/// it cannot be `owned`; its purpose is a runtime-cache mutation, so it cannot
+/// be `read_only`. The frame is admitted only when its exact
+/// `{pubkey, relay_url, start_nonce}` resolves to a tracked runtime whose child
+/// is still live and whose `scope_id` equals the current active scope. Any miss
+/// — missing nonce, untracked pair, generation mismatch, exited process, scope
+/// mismatch — discards the frame, mutating nothing. A managed-agent store read
+/// never establishes ownership: the then-active store is precisely the authority
+/// that rotates underneath a delayed frame.
 #[tauri::command]
 pub fn put_agent_session_config(
     pubkey: String,
     payload: serde_json::Value,
-    app: AppHandle,
     state: State<'_, AppState>,
 ) {
-    let record_relay_url = {
-        let _guard = match state.managed_agents_store_lock.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        match load_managed_agents(&app) {
-            Ok(records) => match records.into_iter().find(|r| r.pubkey == pubkey) {
-                Some(record) => record.relay_url,
-                None => return,
-            },
-            _ => return,
-        }
+    // No nonce ⇒ old harness. Drop, never fall back to a relay-only key: a
+    // fallback would recreate the ownerless write this contract removes.
+    let Some(start_nonce) = payload
+        .get("startNonce")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let Some(relay_url) = payload.get("relayUrl").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Ok(runtime_key) = ManagedAgentRuntimeKey::new(pubkey, relay_url) else {
+        return;
     };
 
-    // Pair identity: prefer the relay URL the harness attached to the payload
-    // (same pattern as lifecycle frames). Older harnesses don't attach one;
-    // fall back to the record's effective relay — with no attached URL the
-    // frame can only have arrived over the active workspace relay, which is
-    // exactly what effective_agent_relay_url resolves to absent a pin.
-    let relay_url = payload
-        .get("relayUrl")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            crate::relay::effective_agent_relay_url(
-                &record_relay_url,
-                &crate::relay::relay_ws_url_with_override(&state),
-            )
-        });
+    // Capture the active scope BEFORE taking the runtime lock so a concurrent
+    // workspace switch cannot slip a stale scope past the check.
+    let current_scope_id = state.capture_active_scope().map(|scope| scope.scope_id);
 
     let config_options = parse_config_options(payload.get("configOptions"));
     let available_modes = parse_modes(&config_options, payload.get("modes"));
@@ -388,10 +421,25 @@ pub fn put_agent_session_config(
         captured_at: crate::util::now_iso(),
     };
 
-    let Ok(runtime_key) = ManagedAgentRuntimeKey::new(pubkey, &relay_url) else {
+    // Validate + mutate under the runtime-map lock so the resolved runtime
+    // cannot be drained between the check and the write.
+    let Ok(mut runtimes) = state.managed_agent_processes.lock() else {
         return;
     };
-    state.put_session_cache(runtime_key, cache);
+    let Some(runtime) = runtimes.get_mut(&runtime_key) else {
+        return;
+    };
+    if runtime.start_nonce != start_nonce {
+        return;
+    }
+    if runtime.scope_id != current_scope_id {
+        return;
+    }
+    match runtime.child.try_wait() {
+        Ok(None) => {}
+        _ => return,
+    }
+    runtime.session_config = Some(cache);
 }
 
 fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionEntry> {
@@ -576,3 +624,7 @@ pub fn persist_agent_effort_level(
 #[cfg(test)]
 #[path = "agent_config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_config_capability_tests.rs"]
+mod capability_tests;
