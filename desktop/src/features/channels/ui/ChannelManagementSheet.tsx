@@ -30,6 +30,7 @@ import {
 } from "@/features/channels/lib/ephemeralChannel";
 import type { Channel, ChannelMember, Workflow } from "@/shared/api/types";
 import { useWorkflowEditorOverlay } from "@/shared/context/WorkflowEditorOverlayContext";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
@@ -117,11 +118,12 @@ export function ChannelManagementSheet({
     !isSplitLayout,
   );
   const channelId = channel?.id ?? null;
+  const workflowsEnabled = useFeatureEnabled("workflows");
   const detailsQuery = useChannelDetailsQuery(channelId, open);
   const membersQuery = useChannelMembersQuery(channelId, open);
   const canvasQuery = useCanvasQuery(channelId, channelId !== null && open);
   const workflowsQuery = useChannelWorkflowsQuery(
-    channelId !== null && open ? channelId : null,
+    workflowsEnabled && channelId !== null && open ? channelId : null,
   );
   const updateChannelDetailsMutation = useUpdateChannelMutation(channelId);
   const archiveChannelMutation = useArchiveChannelMutation(channelId);
@@ -176,6 +178,11 @@ export function ChannelManagementSheet({
   const [activeView, setActiveView] = React.useState<
     "summary" | "canvas" | "workflows"
   >("summary");
+  React.useEffect(() => {
+    if (!workflowsEnabled && activeView === "workflows") {
+      setActiveView("summary");
+    }
+  }, [activeView, workflowsEnabled]);
   const { cancelDeferredModalOpen, openNextFrame: openModalNextFrame } =
     useDeferredModalOpen();
 
@@ -388,6 +395,7 @@ export function ChannelManagementSheet({
             canvasQuery={canvasQuery}
             channelId={channelId}
             currentPubkey={currentPubkey}
+            workflowsEnabled={workflowsEnabled}
             workflowsQuery={workflowsQuery}
             onCreateWorkflow={handleCreateWorkflow}
             onOpenWorkflow={handleOpenWorkflow}
@@ -439,6 +447,7 @@ export function ChannelManagementSheet({
               canvasQuery={canvasQuery}
               channelId={channelId}
               currentPubkey={currentPubkey}
+              workflowsEnabled={workflowsEnabled}
               workflowsQuery={workflowsQuery}
               onCreateWorkflow={handleCreateWorkflow}
               onOpenWorkflow={handleOpenWorkflow}
@@ -625,6 +634,7 @@ type ChannelManagementPanelContentProps = {
   canvasQuery: { isLoading: boolean };
   channelId: string | null;
   currentPubkey?: string;
+  workflowsEnabled: boolean;
   workflowsQuery: {
     data?: Workflow[];
     error: unknown;
@@ -669,6 +679,7 @@ function ChannelManagementPanelContent({
   canvasQuery,
   channelId,
   currentPubkey,
+  workflowsEnabled,
   workflowsQuery,
   onCreateWorkflow,
   onOpenWorkflow,
@@ -823,20 +834,24 @@ function ChannelManagementPanelContent({
                   testId="channel-canvas-ingress"
                   trailing={canvasQuery.isLoading ? "Loading..." : undefined}
                 />
-                <IngressRow
-                  description={
-                    workflowsQuery.isLoading
-                      ? undefined
-                      : `${workflowsQuery.data?.length ?? 0} workflow${workflowsQuery.data?.length === 1 ? "" : "s"}`
-                  }
-                  icon={WorkflowIcon}
-                  label="Workflows"
-                  onClick={() => setActiveView("workflows")}
-                  testId="channel-workflows-ingress"
-                  trailing={workflowsQuery.isLoading ? "Loading..." : undefined}
-                />
+                {workflowsEnabled ? (
+                  <IngressRow
+                    description={
+                      workflowsQuery.isLoading
+                        ? undefined
+                        : `${workflowsQuery.data?.length ?? 0} workflow${workflowsQuery.data?.length === 1 ? "" : "s"}`
+                    }
+                    icon={WorkflowIcon}
+                    label="Workflows"
+                    onClick={() => setActiveView("workflows")}
+                    testId="channel-workflows-ingress"
+                    trailing={
+                      workflowsQuery.isLoading ? "Loading..." : undefined
+                    }
+                  />
+                ) : null}
               </div>
-            ) : (
+            ) : workflowsEnabled ? (
               <IngressRow
                 description={
                   workflowsQuery.isLoading
@@ -849,7 +864,7 @@ function ChannelManagementPanelContent({
                 testId="channel-workflows-ingress"
                 trailing={workflowsQuery.isLoading ? "Loading..." : undefined}
               />
-            )}
+            ) : null}
 
             {canJoin || canLeave || canEditChannel ? (
               <FieldGroup testId="channel-management-actions">
@@ -970,7 +985,7 @@ function ChannelManagementPanelContent({
               isArchived={isArchived}
             />
           </div>
-        ) : (
+        ) : activeView === "workflows" && workflowsEnabled ? (
           <ChannelWorkflowsSection
             error={workflowsQuery.error}
             loading={workflowsQuery.isLoading}
@@ -979,7 +994,7 @@ function ChannelManagementPanelContent({
             onRetry={() => void workflowsQuery.refetch()}
             workflows={workflowsQuery.data ?? []}
           />
-        )}
+        ) : null}
       </AuxiliaryPanelBody>
     </AuxiliaryPanelContext.Provider>
   );

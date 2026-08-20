@@ -5,6 +5,7 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_TYPING_INDICATOR,
 } from "../../src/shared/constants/kinds";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 import {
   TEST_IDENTITIES,
   installMockBridge,
@@ -2950,6 +2951,37 @@ test("manage channel places canvas between channel info and actions", async ({
   expect(leaveBox).not.toBeNull();
   expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
   expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
+});
+
+test("channel settings hides workflows and skips its query when the experiment is disabled", async ({
+  page,
+}) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    overrides.workflows = false;
+    window.localStorage.setItem(key, JSON.stringify(overrides));
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  await expect(page.getByTestId("channel-workflows-ingress")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__?.some(
+          ({ command }) => command === "get_channel_workflows",
+        ),
+      ),
+    )
+    .toBe(false);
 });
 
 test("channel settings opens and creates channel workflows over the channel", async ({
