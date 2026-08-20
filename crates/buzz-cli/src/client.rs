@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -495,6 +496,26 @@ mod media_download_tests {
     }
 }
 
+#[cfg(test)]
+mod local_http_alias_tests {
+    use super::*;
+
+    #[test]
+    fn maps_subdomain_localhost_to_ipv4_loopback() {
+        let (host, address) = local_http_alias("http://buzz.localhost:3000")
+            .expect("local alias should be recognised");
+        assert_eq!(host, "buzz.localhost");
+        assert_eq!(address, "127.0.0.1:3000".parse().expect("valid address"));
+    }
+
+    #[test]
+    fn leaves_remote_and_secure_hosts_to_normal_dns() {
+        assert!(local_http_alias("https://buzz.localhost:3000").is_none());
+        assert!(local_http_alias("http://nocoded.communities.buzz.xyz").is_none());
+        assert!(local_http_alias("http://localhost:3000").is_none());
+    }
+}
+
 const QUERY_PAGE_SIZE: u32 = 500;
 
 fn advance_query_cursor(
@@ -528,6 +549,22 @@ pub struct BuzzClient {
     auth_tag_json: Option<String>,
 }
 
+fn local_http_alias(relay_url: &str) -> Option<(String, SocketAddr)> {
+    let parsed = url::Url::parse(relay_url).ok()?;
+    if parsed.scheme() != "http" {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if !host.ends_with(".localhost") {
+        return None;
+    }
+    let port = parsed.port_or_known_default()?;
+    Some((
+        host.to_string(),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+    ))
+}
+
 impl BuzzClient {
     /// Create a new client pointing at `relay_url`.
     ///
@@ -544,9 +581,13 @@ impl BuzzClient {
         auth_tag: Option<Tag>,
         auth_tag_json: Option<String>,
     ) -> Result<Self, CliError> {
-        let http = reqwest::Client::builder()
+        let mut http_builder = reqwest::Client::builder()
             .timeout(env_duration_secs("BUZZ_TIMEOUT_SECS", 30))
-            .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15))
+            .connect_timeout(env_duration_secs("BUZZ_CONNECT_TIMEOUT_SECS", 15));
+        if let Some((host, address)) = local_http_alias(&relay_url) {
+            http_builder = http_builder.resolve(&host, address);
+        }
+        let http = http_builder
             .build()
             .map_err(|e| CliError::Other(e.to_string()))?;
         Ok(Self {

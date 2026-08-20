@@ -115,6 +115,7 @@ const DRAIN_BUDGET_PER_ITER: usize = 1;
 const GATED_OBSERVER_QUEUE_CAP: usize = 256;
 
 use std::time::Instant;
+use std::{net::Ipv4Addr, net::SocketAddr};
 
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
@@ -125,7 +126,9 @@ use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    client_async, connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -540,6 +543,34 @@ enum RelayCommand {
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+fn local_ws_alias(relay_url: &str) -> Option<(String, SocketAddr)> {
+    let parsed = relay_url.parse::<url::Url>().ok()?;
+    if parsed.scheme() != "ws" {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if !host.ends_with(".localhost") {
+        return None;
+    }
+    let port = parsed.port_or_known_default()?;
+    Some((
+        host.to_string(),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+    ))
+}
+
+async fn connect_relay(relay_url: &str) -> Result<WsStream, tokio_tungstenite::tungstenite::Error> {
+    if let Some((_host, address)) = local_ws_alias(relay_url) {
+        let tcp = tokio::net::TcpStream::connect(address).await?;
+        let stream = MaybeTlsStream::Plain(tcp);
+        let (ws, _response) = client_async(relay_url, stream).await?;
+        return Ok(ws);
+    }
+
+    let (ws, _response) = connect_async(relay_url).await?;
+    Ok(ws)
+}
+
 /// Harness-side relay client.
 ///
 /// Connects to the Buzz relay, authenticates via NIP-42, and streams
@@ -648,13 +679,18 @@ impl HarnessRelay {
             .await;
         });
 
+        let mut http_builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5));
+        if let Some((host, address)) = local_ws_alias(relay_url) {
+            http_builder = http_builder.resolve(&host, address);
+        }
+
         Ok(Self {
             event_rx,
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .connect_timeout(std::time::Duration::from_secs(5))
+            http: http_builder
                 .build()
                 .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
             relay_url: relay_url.to_string(),
@@ -3843,11 +3879,11 @@ async fn do_connect(
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
 ) -> Result<(WsStream, VecDeque<RelayMessage>), RelayError> {
-    let parsed = relay_url
+    relay_url
         .parse::<url::Url>()
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
-    let (ws, _response) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+    let ws = tokio::time::timeout(CONNECT_TIMEOUT, connect_relay(relay_url))
         .await
         .map_err(|_| RelayError::ConnectionClosed)? // timeout → treat as connection failure
         .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
@@ -4010,6 +4046,41 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_subdomain_localhost_to_ipv4_loopback() {
+        let (host, address) =
+            local_ws_alias("ws://buzz.localhost:3000").expect("local alias should be recognised");
+        assert_eq!(host, "buzz.localhost");
+        assert_eq!(address, "127.0.0.1:3000".parse().expect("valid address"));
+    }
+
+    #[test]
+    fn leaves_remote_and_secure_hosts_to_normal_dns() {
+        assert!(local_ws_alias("wss://buzz.localhost:3000").is_none());
+        assert!(local_ws_alias("ws://nocoded.communities.buzz.xyz").is_none());
+        assert!(local_ws_alias("ws://localhost:3000").is_none());
+    }
+
+    #[tokio::test]
+    async fn connects_subdomain_localhost_without_system_dns() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept test client");
+            tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept websocket")
+        });
+
+        let client = connect_relay(&format!("ws://buzz.localhost:{}", address.port()))
+            .await
+            .expect("connect through local alias");
+        drop(client);
+        server.await.expect("server task");
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
