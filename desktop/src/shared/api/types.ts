@@ -667,9 +667,9 @@ export type RuntimeConfigSurface = {
   sources: ConfigSourceReport;
   /** #3493: `true` when the surface was read from a user-set `CLAUDE_CONFIG_DIR` — drives the Keychain caveat note in the panel. */
   claudeConfigDirCustom?: boolean;
-  /** B5: the adapter-advertised `thought_level` configId, discovered from the running session. Present only for claude after the first session. Drives the effort picker. */
+  /** The adapter-advertised `thought_level` configId, discovered from the running session — present once a session advertises `thought_level` support (Claude today; any effort-capable ACP adapter in general). Drives the effort picker. */
   effortConfigId?: string;
-  /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
+  /** Adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
   effortOptions?: AcpConfigOptionValue[];
 };
 

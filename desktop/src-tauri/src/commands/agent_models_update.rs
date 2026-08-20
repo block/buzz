@@ -115,15 +115,17 @@ pub async fn update_managed_agent(
         // Harness edit: the persona's runtime is authoritative, so an explicit
         // `agent_command_override` is persisted ONLY when the user picks a
         // command that diverges from the persona, and the empty/whitespace
-        // "Inherit from persona" sentinel clears both the pin and the
-        // materialized record runtime. A name-only edit
+        // "Inherit from persona" sentinel clears the pin, the materialized
+        // record runtime, AND the per-instance effort override (column here,
+        // env aliases after `env_vars` is applied below). A name-only edit
         // (`agent_command == None`) leaves the pin intact. `harness_override`
         // threads the user's explicit intent — see `apply_agent_command_update`
         // and `update_time_agent_command_override` for the full resolution
         // rules.
+        let mut inherit_transition = false;
         if let Some(agent_command) = input.agent_command {
             let personas = load_personas(&app).unwrap_or_default();
-            crate::managed_agents::apply_agent_command_update(
+            inherit_transition = crate::managed_agents::apply_agent_command_update(
                 record,
                 &personas,
                 &agent_command,
@@ -136,10 +138,22 @@ pub async fn update_managed_agent(
         // mcp_command is intentionally not applied here — the effective MCP
         // command is always catalog-derived (known_acp_runtime at spawn time)
         // and the per-record field is never read by the runtime.
-        if let Some(env_vars) = input.env_vars {
-            crate::managed_agents::validate_user_env_keys(&env_vars)?;
-            record.env_vars = env_vars;
+        //
+        // Apply the caller-supplied `env_vars` (validated first), then — only on
+        // the pin→inherit transition — strip the record effort env aliases. The
+        // order is load-bearing: stripping AFTER the env replacement is what
+        // stops a same-request `env_vars` map from reintroducing a stale effort
+        // alias while the instance inherits its harness. The column was already
+        // cleared inside `apply_agent_command_update`. See
+        // `apply_env_vars_then_effort_transition` for the pinned invariant.
+        if let Some(ref env_vars) = input.env_vars {
+            crate::managed_agents::validate_user_env_keys(env_vars)?;
         }
+        crate::managed_agents::apply_env_vars_then_effort_transition(
+            record,
+            input.env_vars,
+            inherit_transition,
+        );
 
         // Native provider/model fields are authoritative. Keep the typed marker
         // derived for new records while retaining legacy typed records for

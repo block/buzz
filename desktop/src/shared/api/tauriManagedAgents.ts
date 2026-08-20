@@ -64,9 +64,12 @@ export async function setManagedAgentAutoRestart(
 }
 
 /**
- * B5: persist the canonical startup effort for a local managed agent. Applied
- * as `BUZZ_ACP_EFFORT_LEVEL` at the next spawn. Pass `null` to clear (reverts
- * to the adapter default). Rejects non-local agents.
+ * Persist the canonical startup effort for a local managed agent. Stored as the
+ * harness-agnostic `effort_level` column and projected to each runtime's native
+ * key at the next spawn (`GOOSE_THINKING_EFFORT` for Goose,
+ * `BUZZ_AGENT_THINKING_EFFORT` for buzz-agent, the `BUZZ_ACP_EFFORT_LEVEL`
+ * startup sentinel for Claude/Codex and keyless adapters). Pass `null` to clear
+ * (reverts to the inherited/adapter default). Rejects non-local agents.
  */
 export async function persistAgentEffortLevel(
   pubkey: string,

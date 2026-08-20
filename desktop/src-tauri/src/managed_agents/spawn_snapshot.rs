@@ -31,7 +31,6 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{
-    claude_config::EFFORT_LEVEL_ENV_VAR,
     effective_config::{resolve_effective_config, EffectiveConfigResult},
     known_acp_runtime, normalize_agent_args,
     persona_events::preview_prospective_persona_snapshot,
@@ -128,30 +127,30 @@ pub(crate) struct SpawnConfigSnapshot {
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
     /// The startup effort the harness will actually apply, resolved by
-    /// [`effective_effort`]: the persisted canonical `record.effort_level` when
-    /// present, else the user-seeded `BUZZ_ACP_EFFORT_LEVEL` from the layered
-    /// env. This is the *sole* representation of effort in the snapshot — the
-    /// key is stripped from `env` (see `from_inputs`) so an authority handoff
-    /// that leaves the effective value unchanged (canonical `low` replacing a
-    /// user env `low`, or the reverse) produces no spurious drift entry, and an
-    /// env-only edit still surfaces as exactly one `effort_level` entry.
+    /// [`effective_effort`]: the single effort key the harness-agnostic
+    /// projection left in `descriptor.env` under the runtime's destination key.
+    /// This is the *sole* representation of effort in the snapshot — every
+    /// effort key is stripped from `env` (see `from_inputs`) so an authority
+    /// handoff that leaves the effective value unchanged produces no spurious
+    /// drift entry, and an effort edit surfaces as exactly one `effort_level`
+    /// entry.
     pub effort_level: Option<String>,
 }
 
-/// The startup effort a spawn would actually apply, mirroring `apply_effort_env`
-/// exactly: the persisted canonical `record.effort_level` wins, and only when it
-/// is absent does a user-supplied `BUZZ_ACP_EFFORT_LEVEL` from the layered env
-/// seed startup effort. This is the resolver input for the snapshot's single
-/// `effort_level` representation; the same precedence runs at spawn time in
-/// `runtime.rs`, so badge and process can never disagree.
-pub(crate) fn effective_effort(
-    record: &ManagedAgentRecord,
-    descriptor_env: &BTreeMap<String, String>,
-) -> Option<String> {
-    record
-        .effort_level
-        .clone()
-        .or_else(|| descriptor_env.get(EFFORT_LEVEL_ENV_VAR).cloned())
+/// The startup effort a spawn actually applied, read from the single effort key
+/// the harness-agnostic projection left in `descriptor.env`.
+///
+/// The projection (`config_bridge::effort`) ran inside the descriptor resolver,
+/// resolving the effective value over the canonical column and every env tier,
+/// then reducing the env to exactly one effort key under the runtime's
+/// destination key (`effort_dest_key`). Reading that key here means the badge
+/// compares precisely what launched — no separate precedence to drift from the
+/// spawn path, and an invalid canonical that fell through to an inherited tier
+/// is reflected as the inherited value, not the raw column.
+pub(crate) fn effective_effort(descriptor: &EffectiveHarnessDescriptor) -> Option<String> {
+    let runtime = known_acp_runtime(&descriptor.command);
+    let dest_key = super::config_bridge::effort::effort_dest_key(runtime);
+    descriptor.env.get(dest_key).cloned()
 }
 
 impl SpawnConfigSnapshot {
@@ -178,14 +177,16 @@ impl SpawnConfigSnapshot {
                 .unwrap_or("")
                 .to_string(),
             // Effort has ONE representation in the snapshot: `effort_level`
-            // below, always holding `effective_effort`. Stripping the env key
-            // here means a canonical/user-env authority handoff at the same
-            // value is a no-op (no phantom `env.BUZZ_ACP_EFFORT_LEVEL` add or
-            // remove) and an env-only effort edit surfaces as exactly one
+            // below, always holding the projected effective value. Every effort
+            // key is stripped from `env` (the full suppress set) so an authority
+            // handoff at the same value is a no-op (no phantom `env.*EFFORT*` add
+            // or remove) and an env-only effort edit surfaces as exactly one
             // `effort_level` entry rather than a duplicate under `env.`.
             env: {
                 let mut env = descriptor.env.clone();
-                env.remove(EFFORT_LEVEL_ENV_VAR);
+                for key in super::config_bridge::effort::effort_suppress_keys() {
+                    env.remove(key);
+                }
                 env
             },
             relay_url: relay_url.to_string(),
@@ -215,10 +216,10 @@ impl SpawnConfigSnapshot {
             // effective value — that is correct, it is what actually runs.
             parallelism: super::effective_parallelism(&descriptor.command, record.parallelism),
             // Sole effort representation — see the field doc and the `env`
-            // strip above. Resolver reads the record's canonical value and the
-            // raw descriptor env (before the strip), so a user-seeded env value
-            // is preserved as the effective effort when no canonical is set.
-            effort_level: effective_effort(record, &descriptor.env),
+            // strip above. Reads the single projected effort key the descriptor
+            // resolver left in `descriptor.env`, so the badge compares exactly
+            // what launched regardless of which tier supplied the value.
+            effort_level: effective_effort(descriptor),
         }
     }
 

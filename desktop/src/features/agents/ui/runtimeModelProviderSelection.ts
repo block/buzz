@@ -20,6 +20,24 @@ import {
  * dialog-specific side effects (inherit pins, command sync, catalog memory)
  * at the call site. Divergent behaviors are parameterized, never merged.
  */
+
+/**
+ * Every runtime-owned thinking-effort env key: the native keys of all known
+ * runtimes plus the retained ACP-startup transport sentinel. Mirrors the Rust
+ * `effort_suppress_keys()` full sweep (`config_bridge/effort.rs`).
+ *
+ * On a runtime switch these aliases become stale — they express the *previous*
+ * runtime's vocabulary — so they are cleared. The canonical persisted effort
+ * (`record.effort_level`) is a direct-write column owned by `EffortPickerField`
+ * (AGENTS.md rule 14), lives outside this env-state selection, and is therefore
+ * PRESERVED across the switch: the launch projection normalizes it (or skips it
+ * as absent) for the destination runtime, and switching back restores it.
+ */
+const EFFORT_ENV_ALIASES = [
+  "GOOSE_THINKING_EFFORT",
+  "BUZZ_AGENT_THINKING_EFFORT",
+  "BUZZ_ACP_EFFORT_LEVEL",
+] as const;
 export type RuntimeModelProviderSelection = {
   provider: string;
   model: string;
@@ -44,6 +62,19 @@ export function selectionOnRuntimeChange(
   },
 ): RuntimeModelProviderSelection {
   const next = { ...current };
+
+  // F3 nondestructive switch policy: clear the previous runtime's stale
+  // thinking-effort env aliases (all native keys + the ACP sentinel). The
+  // canonical `record.effort_level` column is direct-write and not part of this
+  // selection state, so it is preserved — the launch projection re-expresses it
+  // for the destination runtime, and switching back restores the preference.
+  if (params.previousRuntime !== params.nextRuntime) {
+    let envVars = next.envVars;
+    for (const key of EFFORT_ENV_ALIASES) {
+      envVars = envVarsWithoutKey(envVars, key);
+    }
+    next.envVars = envVars;
+  }
 
   if (
     shouldClearModelForRuntimeChange(

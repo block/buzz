@@ -220,8 +220,9 @@ with a TypeScript lookup table or an id comparison in a component.
    dialog (see rule 11): keep effort state inside the section component, never
    as dialog-level props. The read-only display is the `thinkingEffort`
    normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
-   already shows both facts — `field.value` (canonical, the effort the next
-   spawn will launch with) and, when a running ACP session differs,
+   already shows both facts — `field.value` (canonical: the effort the next
+   spawn will launch with, projected to the runtime's native key) and, when a
+   running ACP session differs,
    `field.overriddenValue` struck through (the live session's current effort).
    No component owns "configured vs current" logic; the reader's canonical tier
    ordering feeds both facts. Do not add a second effort write path or restate

@@ -537,14 +537,19 @@ fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<
 
 /// Persist the canonical startup effort level for a local managed agent.
 ///
-/// B5 (v4 direct-write): the panel's EffortPicker calls this directly to set the
-/// effort a spawn will apply at next session start. The value is stored on the
-/// record; at spawn `runtime.rs` injects it as `BUZZ_ACP_EFFORT_LEVEL` and the
-/// harness applies it via `session/set_config_option` against the adapter's
-/// advertised `thought_level` configId. Pass `None` to clear (adapter default).
+/// The panel's EffortPicker calls this directly to set the effort a spawn will
+/// apply at next session start. The value is stored on the harness-agnostic
+/// `effort_level` record column; at spawn the launch projection
+/// (`config_bridge::effort`, invoked from `runtime.rs`) resolves the effective
+/// value and emits it under the destination runtime's native key
+/// (`GOOSE_THINKING_EFFORT`, `BUZZ_AGENT_THINKING_EFFORT`, or the
+/// `BUZZ_ACP_EFFORT_LEVEL` startup sentinel for Claude/Codex and keyless
+/// adapters, which apply it via `session/set_config_option` against the
+/// adapter's advertised `thought_level` configId). Pass `None` to clear
+/// (reverts to the inherited/adapter default).
 ///
-/// Rejects non-local backends: remote agents receive effort through `policy_env`
-/// at deploy time (see `agents_deploy.rs`), never this local persistence path —
+/// Rejects non-local backends: remote agents receive effort through the launch
+/// projection at deploy time (see `agents_deploy.rs`), never this local persistence path —
 /// so an effort edit against a deployed agent is a caller error, not a silent
 /// no-op that leaves the panel and the running agent disagreeing.
 #[tauri::command]

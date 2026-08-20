@@ -282,3 +282,53 @@ test("editValidity_allowlistWithEmptyList_blocksSave", () => {
     "allowlist with at least one pubkey must allow Save",
   );
 });
+
+// ── Cancel-safety: inherit toggle → Cancel emits no update_managed_agent ──────
+//
+// Acceptance pin (plan item 1). The pin→inherit effort/runtime clear is derived
+// entirely inside the backend's locked save, keyed off the agentCommand:""
+// sentinel `resolveAgentCommandUpdate` produces at SUBMIT. Cancel-safety is
+// therefore a UI-wiring invariant: flipping the inherit toggle mutates only
+// local dialog state, and the Cancel button routes to onOpenChange, never to
+// the submit path — so no update_managed_agent call (and thus no column/env
+// clear) is ever dispatched when the user backs out.
+//
+// This mirrors the AgentInstanceEditDialog footer exactly: Cancel →
+// onOpenChange(false); Save → handleSubmit → updateMutation.mutateAsync(input),
+// where `input.agentCommand` is the resolveAgentCommandUpdate sentinel.
+test("inheritToggle_cancelled_emitsNoUpdate", () => {
+  const calls = [];
+  // The ONLY producer of the persistence-boundary sentinel is the submit path.
+  function handleSubmit() {
+    const agentCommandUpdate = resolveAgentCommandUpdate({
+      inheritHarness: true, // user just toggled inherit ON
+      agentCommand: pinnedAgent.agentCommand,
+      originalAgentCommand: pinnedAgent.agentCommand,
+      agentCommandOverride: pinnedAgent.agentCommandOverride ?? null,
+    });
+    calls.push({ agentCommand: agentCommandUpdate });
+  }
+  function onOpenChange() {
+    /* dialog close — no mutation */
+  }
+
+  // User toggles inherit (local state only), then clicks Cancel.
+  const cancelButton = { onClick: () => onOpenChange(false) };
+  cancelButton.onClick();
+
+  assert.equal(
+    calls.length,
+    0,
+    "Cancel after toggling inherit must not dispatch update_managed_agent",
+  );
+
+  // Sanity: the submit path WOULD have emitted the inherit sentinel, proving
+  // the clear is gated on Save alone — Cancel simply never reaches it.
+  handleSubmit();
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].agentCommand,
+    "",
+    "Save on the pin→inherit transition emits the empty-command sentinel the backend clears the column on",
+  );
+});

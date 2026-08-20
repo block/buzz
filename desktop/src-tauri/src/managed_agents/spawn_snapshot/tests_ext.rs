@@ -27,86 +27,112 @@ fn effort_set_then_cleared_round_trips_to_no_effort_projection() {
 }
 
 #[test]
-fn shadowed_user_env_effort_edit_under_canonical_is_empty_diff() {
-    // Canonical `high` shadows the user env seed. Editing that seed low→medium
-    // changes nothing effective (canonical wins and the env key is stripped),
-    // so the projections are identical and no badge lights.
-    let mut low_env = record_with_env_effort("low");
-    low_env.effort_level = Some("high".into());
-    let mut medium_env = record_with_env_effort("medium");
-    medium_env.effort_level = Some("high".into());
+fn canonical_edit_under_record_native_env_is_empty_diff() {
+    // For Goose, the record-native env key `GOOSE_THINKING_EFFORT` outranks the
+    // canonical column (CLEAR authority order). With a record-native `low`
+    // present, editing the shadowed canonical high→medium changes nothing
+    // effective, so the projections are identical and no badge lights.
+    let mut high_col = record_with_env_effort("low");
+    high_col.effort_level = Some("high".into());
+    let mut medium_col = record_with_env_effort("low");
+    medium_col.effort_level = Some("medium".into());
     assert_eq!(
-        snap(&low_env),
-        snap(&medium_env),
-        "editing a canonical-shadowed user env must not badge"
+        snap(&high_col),
+        snap(&medium_col),
+        "editing a record-native-env-shadowed canonical must not badge"
     );
 }
 
 #[test]
-fn clearing_canonical_reveals_env_fallback_and_creates_a_diff() {
-    // Canonical `high` over a user env seed `low`: clearing the canonical drops
-    // the effective effort to the env fallback `low`, a real change that badges.
-    let mut canonical = record_with_env_effort("low");
-    canonical.effort_level = Some("high".into());
-    let env_only = record_with_env_effort("low");
+fn clearing_record_native_env_reveals_canonical_and_creates_a_diff() {
+    // Record-native env `low` shadows canonical `high`: removing the record env
+    // key drops resolution to the canonical `high`, a real change that badges.
+    let mut env_over_canonical = record_with_env_effort("low");
+    env_over_canonical.effort_level = Some("high".into());
+    let mut canonical_only = goose_record();
+    canonical_only.effort_level = Some("high".into());
     assert_ne!(
-        snap(&canonical),
-        snap(&env_only),
-        "clearing canonical must reveal the env fallback and badge"
+        snap(&env_over_canonical),
+        snap(&canonical_only),
+        "removing the record-native env must reveal the canonical and badge"
     );
 }
 
-// ── B5 effort: single canonical representation ───────────────────────────
+// ── Effort: single canonical representation ──────────────────────────────
 //
 // `effective_effort` and the snapshot's `effort_level` field are the sole
-// carrier of startup effort. `BUZZ_ACP_EFFORT_LEVEL` is stripped from the
-// snapshot `env` so an authority handoff at an unchanged effective value
-// (canonical replacing a user-env seed, or the reverse) raises no spurious
-// restart badge, while a genuine effort change surfaces exactly once.
+// carrier of startup effort. Every effort key is stripped from the snapshot
+// `env` so an authority handoff at an unchanged effective value raises no
+// spurious restart badge, while a genuine effort change surfaces exactly once.
 
-/// Look up the `env.BUZZ_ACP_EFFORT_LEVEL` leaf of a canonical snapshot, if any.
+/// Look up the `env.GOOSE_THINKING_EFFORT` leaf of a canonical snapshot, if any
+/// (the record()'s runtime is Goose, so this is its destination key).
 fn effort_env_leaf(canonical: &serde_json::Value) -> Option<&serde_json::Value> {
     canonical
         .get("env")
-        .and_then(|env| env.get("BUZZ_ACP_EFFORT_LEVEL"))
+        .and_then(|env| env.get("GOOSE_THINKING_EFFORT"))
 }
 
-/// A record whose user env seeds `BUZZ_ACP_EFFORT_LEVEL` (the pre-canonical
-/// authority: no persisted `effort_level`, effort comes from user env_vars).
+/// A Goose record whose record-native env seeds `GOOSE_THINKING_EFFORT` (the
+/// top authority tier for Goose: effort comes from user env_vars, no column).
+/// Pins `runtime = "goose"` so the effective command resolves to Goose and
+/// `GOOSE_THINKING_EFFORT` is the record-*native* key — without it the record
+/// falls back to the default `buzz-agent` runtime, for which that key is a
+/// foreign env alias the projection suppresses rather than an authority tier.
 fn record_with_env_effort(value: &str) -> ManagedAgentRecord {
     let mut rec = record();
+    rec.runtime = Some("goose".into());
     rec.env_vars
-        .insert("BUZZ_ACP_EFFORT_LEVEL".into(), value.into());
+        .insert("GOOSE_THINKING_EFFORT".into(), value.into());
+    rec
+}
+
+/// A Goose record with no effort env: the canonical column is the authority.
+fn goose_record() -> ManagedAgentRecord {
+    let mut rec = record();
+    rec.runtime = Some("goose".into());
     rec
 }
 
 #[test]
-fn effective_effort_prefers_persisted_canonical_over_user_env() {
-    // Canonical wins, mirroring spawn's `apply_effort_env` (written after the
-    // user env layer). The env value is ignored when a canonical is present.
-    let mut rec = record();
-    rec.effort_level = Some("high".into());
-    let env = BTreeMap::from([("BUZZ_ACP_EFFORT_LEVEL".to_string(), "low".to_string())]);
-    assert_eq!(effective_effort(&rec, &env).as_deref(), Some("high"));
+fn effective_effort_reads_the_projected_key_for_the_runtime() {
+    // The projection reduced the descriptor env to one effort key under the
+    // runtime's destination key. `effective_effort` reads exactly that key.
+    // A Goose descriptor carries `GOOSE_THINKING_EFFORT`.
+    let descriptor = EffectiveHarnessDescriptor {
+        command: "goose".into(),
+        args: vec![],
+        env: BTreeMap::from([("GOOSE_THINKING_EFFORT".to_string(), "high".to_string())]),
+    };
+    assert_eq!(effective_effort(&descriptor).as_deref(), Some("high"));
 }
 
 #[test]
-fn effective_effort_falls_back_to_user_env_when_no_canonical() {
-    // No persisted canonical → the user-seeded env value is the effective
-    // startup effort, exactly what a spawn would leave in place.
-    let rec = record();
-    let env = BTreeMap::from([("BUZZ_ACP_EFFORT_LEVEL".to_string(), "low".to_string())]);
-    assert_eq!(effective_effort(&rec, &env).as_deref(), Some("low"));
+fn effective_effort_reads_acp_sentinel_for_keyless_runtime() {
+    // Claude/Codex/keyless-ACP descriptors carry the effective value under the
+    // ACP-startup sentinel, which is the destination key for a runtime with no
+    // native thinking-effort env var (here: the claude adapter command).
+    let descriptor = EffectiveHarnessDescriptor {
+        command: "claude-code-acp".into(),
+        args: vec![],
+        env: BTreeMap::from([("BUZZ_ACP_EFFORT_LEVEL".to_string(), "low".to_string())]),
+    };
+    assert_eq!(effective_effort(&descriptor).as_deref(), Some("low"));
 }
 
 #[test]
-fn effective_effort_is_none_without_canonical_or_env() {
-    assert_eq!(effective_effort(&record(), &BTreeMap::new()), None);
+fn effective_effort_is_none_without_a_projected_key() {
+    let descriptor = EffectiveHarnessDescriptor {
+        command: "goose".into(),
+        args: vec![],
+        env: BTreeMap::new(),
+    };
+    assert_eq!(effective_effort(&descriptor), None);
 }
 
 #[test]
 fn snapshot_carries_effort_in_field_not_env() {
-    // Always-canonicalize: a user-seeded effort reaches the snapshot ONLY as
+    // Always-canonicalize: a record-native effort reaches the snapshot ONLY as
     // the `effort_level` field; the raw env key is stripped so effort has one
     // representation, never two.
     let canonical = snap(&record_with_env_effort("low"));
@@ -118,16 +144,42 @@ fn snapshot_carries_effort_in_field_not_env() {
     assert_eq!(
         effort_env_leaf(&canonical),
         None,
-        "BUZZ_ACP_EFFORT_LEVEL must be stripped from the snapshot env"
+        "GOOSE_THINKING_EFFORT must be stripped from the snapshot env"
+    );
+}
+
+#[test]
+fn foreign_transport_sentinel_is_suppressed_for_goose() {
+    // A user-seeded `BUZZ_ACP_EFFORT_LEVEL` is a foreign transport key for a
+    // Goose descriptor: never an authority tier, and stripped from the snapshot
+    // env by the suppress set. Editing it low→medium changes nothing.
+    let mut low = record();
+    low.env_vars
+        .insert("BUZZ_ACP_EFFORT_LEVEL".into(), "low".into());
+    let mut medium = record();
+    medium
+        .env_vars
+        .insert("BUZZ_ACP_EFFORT_LEVEL".into(), "medium".into());
+    assert_eq!(
+        snap(&low),
+        snap(&medium),
+        "a foreign transport effort key must be suppressed for Goose and never badge"
+    );
+    let canonical = snap(&low);
+    assert_eq!(
+        canonical
+            .get("env")
+            .and_then(|env| env.get("BUZZ_ACP_EFFORT_LEVEL")),
+        None,
+        "the foreign sentinel must be stripped from the snapshot env"
     );
 }
 
 #[test]
 fn equal_value_effort_authority_handoff_env_to_canonical_is_no_op() {
-    // User env `low` (no canonical) → persisted canonical `low` while the env
-    // seed remains: the effective effort is `low` either way, so a restart
-    // would change nothing. Old raw-env snapshots would have shown drift; the
-    // single canonical representation makes the projections identical.
+    // Record-native env `low` (no column) → canonical column `low` while the
+    // record env remains: the effective effort is `low` either way (env wins,
+    // but the value is identical), so a restart would change nothing.
     let env_authority = record_with_env_effort("low");
     let mut canonical_authority = record_with_env_effort("low");
     canonical_authority.effort_level = Some("low".into());
@@ -139,29 +191,16 @@ fn equal_value_effort_authority_handoff_env_to_canonical_is_no_op() {
 }
 
 #[test]
-fn equal_value_effort_authority_handoff_canonical_to_env_is_no_op() {
-    // The reverse direction: canonical `low` (env seed present) → env `low`
-    // only (canonical cleared). Effective effort stays `low`; no badge.
-    let mut canonical_authority = record_with_env_effort("low");
-    canonical_authority.effort_level = Some("low".into());
-    let env_authority = record_with_env_effort("low");
-    assert_eq!(
-        snap(&canonical_authority),
-        snap(&env_authority),
-        "clearing the canonical while the env seed holds the same value must not badge"
-    );
-}
-
-#[test]
 fn env_only_effort_edit_changes_effort_level_not_env() {
-    // An env-only effort edit (no canonical) moves the single `effort_level`
-    // representation and never reintroduces an `env.BUZZ_ACP_EFFORT_LEVEL`
-    // leaf, so the diff names `effort_level` once rather than duplicating it.
+    // A record-native env effort edit (no column) moves the single
+    // `effort_level` representation and never reintroduces a
+    // `env.GOOSE_THINKING_EFFORT` leaf, so the diff names `effort_level` once
+    // rather than duplicating it.
     let low = snap(&record_with_env_effort("low"));
     let high = snap(&record_with_env_effort("high"));
     assert_ne!(
         low, high,
-        "an env-only effort edit must change the snapshot"
+        "a record-native effort edit must change the snapshot"
     );
     assert_eq!(
         low.get("effort_level").and_then(|v| v.as_str()),
