@@ -79,8 +79,14 @@ import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
+import useChannelTargetCallbacks from "./useChannelTargetCallbacks";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useThreadRailContext } from "../ThreadRailContext";
+import {
+  usePinnedThreadExpandedReplyIdsChange,
+  useRestorePinnedThreadExpansion,
+} from "../usePinnedThreadExpansionPersistence";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
@@ -94,8 +100,11 @@ export function ChannelScreen({
   targetForumReplyId,
   targetMessageEvents,
   targetMessageId,
+  targetMessageLoadSettled,
+  threadRailNavigation,
 }: ChannelScreenProps) {
   const { goHome } = useAppNavigation();
+  const threadRail = useThreadRailContext();
   const { activeCommunity } = useCommunities();
   const {
     clearChannelUnreadSource,
@@ -171,6 +180,12 @@ export function ChannelScreen({
     openThreadHeadId,
     optimisticOpenThreadHeadId,
   });
+  const handlePinnedThreadExpandedReplyIdsChange =
+    usePinnedThreadExpandedReplyIdsChange({
+      activeChannelId,
+      effectiveOpenThreadHeadId,
+      threadRail,
+    });
   const isNotifiedForEffectiveThread =
     effectiveOpenThreadHeadId != null
       ? isNotifiedForThread(effectiveOpenThreadHeadId)
@@ -485,6 +500,7 @@ export function ChannelScreen({
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
     markRevealedRepliesRead,
+    onExpandedThreadReplyIdsChange: handlePinnedThreadExpandedReplyIdsChange,
     profiles: messageProfiles,
     recordThreadInteraction,
     openThreadHeadId: effectiveOpenThreadHeadId,
@@ -631,28 +647,31 @@ export function ChannelScreen({
     },
     [],
   );
-  const handleThreadScrollTargetResolved = React.useCallback(() => {
-    setThreadScrollTargetId(null);
-  }, []);
-  const handleTargetReached = React.useCallback(() => {
-    clearMessageRouteTarget({ replace: true });
-  }, [clearMessageRouteTarget]);
+  const { handleTargetReached, handleThreadScrollTargetResolved } =
+    useChannelTargetCallbacks(clearMessageRouteTarget, setThreadScrollTargetId);
   React.useEffect(() => {
     resetComposerTargets(activeChannelId);
   }, [activeChannelId, resetComposerTargets]);
-  const mainTimelineTargetMessageId = useChannelRouteTarget({
-    activeChannel,
-    activeChannelId,
-    closeAgentSession: handleCloseAgentSession,
-    setEditTargetId,
-    setExpandedThreadReplyIds,
-    setOpenThreadHeadId,
-    setProfilePanelPubkey,
-    setThreadReplyTargetId,
-    setThreadScrollTargetId,
-    targetMessageId,
-    timelineMessages,
-  });
+  const threadRailTargetKey = threadRailNavigation ? targetMessageId : null;
+  React.useLayoutEffect(() => {
+    if (!threadRailTargetKey) return;
+    resetComposerTargets(activeChannelId);
+  }, [activeChannelId, resetComposerTargets, threadRailTargetKey]);
+  const { mainTimelineTargetMessageId, routeTargetReady } =
+    useChannelRouteTarget({
+      activeChannel,
+      activeChannelId,
+      closeAgentSession: handleCloseAgentSession,
+      setEditTargetId,
+      setExpandedThreadReplyIds,
+      setOpenThreadHeadId,
+      setProfilePanelPubkey,
+      setThreadReplyTargetId,
+      setThreadScrollTargetId,
+      targetMessageId,
+      suppressReplyTarget: threadRailNavigation,
+      timelineMessages,
+    });
   useThreadTargetSync({
     clearOptimisticThreadOverride,
     editTargetId,
@@ -665,8 +684,16 @@ export function ChannelScreen({
     setOpenThreadHeadId,
     setThreadReplyTargetId,
     setThreadScrollTargetId,
+    suppressDefaultReplyTarget: threadRailNavigation,
     threadReplyTargetId,
     threadReplyTargetMessage,
+  });
+  useRestorePinnedThreadExpansion({
+    activeChannelId,
+    effectiveOpenThreadHeadId,
+    setExpandedThreadReplyIds,
+    threadRail,
+    threadRouteTargetReady: routeTargetReady || targetMessageLoadSettled,
   });
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
@@ -944,6 +971,7 @@ export function ChannelScreen({
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
                   threadAllMessages={displayedThreadAllMessages}
+                  threadExpandedReplyIds={expandedThreadReplyIds}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
                   threadMessagesPending={threadRepliesQuery.isPending}

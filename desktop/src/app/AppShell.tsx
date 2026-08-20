@@ -34,10 +34,15 @@ import {
   useHideDmMutation,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
+import { ThreadRailProvider } from "@/features/channels/ThreadRailContext";
+import { threadRailRootIdFromSearch } from "@/features/channels/threadRailNavigation";
+import { ThreadRail } from "@/features/channels/ui/ThreadRail";
+import { useThreadRail } from "@/features/channels/useThreadRail";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
+
 import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
@@ -178,6 +183,11 @@ export function AppShell() {
     : DEFAULT_SETTINGS_SECTION;
   const startupReady = useDeferredStartup();
   const identityQuery = useIdentityQuery();
+  const threadRail = useThreadRail(
+    identityQuery.data?.pubkey,
+    communitiesHook.activeCommunity?.relayUrl,
+  );
+  const openThreadRootId = threadRailRootIdFromSearch(location.search);
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
@@ -369,6 +379,7 @@ export function AppShell() {
     markChannelUnread,
     clearChannelUnreadSource,
     unreadChannelIds,
+    unreadThreadRootIds,
     topLevelUnreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
@@ -424,6 +435,7 @@ export function AppShell() {
     threadActivityItems,
     mutedRootIds,
   });
+
   const markAllChannelsRead = React.useCallback(() => {
     markAllReadSources({
       activeChannelId: activeChannel?.id ?? null,
@@ -760,7 +772,7 @@ export function AppShell() {
               />
             ) : null}
             <SidebarProvider
-              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible"
+              className="relative z-10 min-h-0 min-w-0 flex-1 flex-col overflow-visible !bg-transparent"
               data-testid="app-sidebar-layer"
             >
               <AppProfilePanelProvider>
@@ -923,9 +935,26 @@ export function AppShell() {
                           <TerminalBootstrap {...effectiveTerminalContext} />
                         }
                       >
-                        <Outlet />
+                        <ThreadRailProvider rail={threadRail}>
+                          <Outlet />
+                        </ThreadRailProvider>
                       </AppShellChannelSurface>
                     </TerminalContextOverrideProvider>
+                    {!isHuddleRoom ? (
+                      <ThreadRail
+                        collapsed={threadRail.collapsed}
+                        onNavigate={(destination) =>
+                          void goChannel(destination.channelId, destination)
+                        }
+                        onRename={threadRail.rename}
+                        onToggleCollapsed={threadRail.toggleCollapsed}
+                        onUnpin={threadRail.unpin}
+                        openThreadRootId={openThreadRootId}
+                        pins={threadRail.pins}
+                        selectedChannelId={selectedChannelId}
+                        unreadRootIds={unreadThreadRootIds}
+                      />
+                    ) : null}
                     {!isHuddleRoom ? (
                       <RelayConnectionOverlay
                         card={relayConnectionCard}

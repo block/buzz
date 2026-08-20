@@ -21,6 +21,7 @@ export function useThreadTargetSync({
   setOpenThreadHeadId,
   setThreadReplyTargetId,
   setThreadScrollTargetId,
+  suppressDefaultReplyTarget = false,
   threadReplyTargetId,
   threadReplyTargetMessage,
 }: {
@@ -35,6 +36,7 @@ export function useThreadTargetSync({
   setOpenThreadHeadId: PanelValueSetter;
   setThreadReplyTargetId: (id: string | null) => void;
   setThreadScrollTargetId: (id: string | null) => void;
+  suppressDefaultReplyTarget?: boolean;
   threadReplyTargetId: string | null;
   threadReplyTargetMessage: TimelineMessage | null;
 }) {
@@ -50,7 +52,11 @@ export function useThreadTargetSync({
       return;
     }
 
-    if (openThreadHeadMessage && !threadReplyTargetId) {
+    if (
+      openThreadHeadMessage &&
+      !threadReplyTargetId &&
+      !suppressDefaultReplyTarget
+    ) {
       setThreadReplyTargetId(openThreadHeadMessage.id);
       return;
     }
@@ -73,6 +79,7 @@ export function useThreadTargetSync({
     setOpenThreadHeadId,
     setThreadReplyTargetId,
     setThreadScrollTargetId,
+    suppressDefaultReplyTarget,
     threadReplyTargetId,
     threadReplyTargetMessage,
   ]);

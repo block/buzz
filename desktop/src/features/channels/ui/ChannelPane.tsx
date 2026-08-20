@@ -148,6 +148,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   profilePanelView,
   targetMessageId,
   threadAllMessages,
+  threadExpandedReplyIds,
   threadHeadMessage,
   threadMessages,
   threadMessagesPending = false,
@@ -504,17 +505,20 @@ export const ChannelPane = React.memo(function ChannelPane({
     ) : (
       <React.Fragment key={options.key ?? testId}>{panel}</React.Fragment>
     );
+  const threadSurfaceKey = threadHeadMessage
+    ? `${THREAD_SURFACE_KEY}:${activeChannelId}:${threadHeadMessage.id}`
+    : THREAD_SURFACE_KEY;
   const wrapThreadPanel = (panel: React.ReactNode) =>
     useFocusThreadDrawer ? (
       <FocusThreadDrawer
         channelName={activeChannel?.name ?? "channel"}
-        key={THREAD_SURFACE_KEY}
+        key={threadSurfaceKey}
         onClose={onCloseThread}
       >
         {panel}
       </FocusThreadDrawer>
     ) : (
-      wrapAux(panel, "message-thread-panel", { key: THREAD_SURFACE_KEY })
+      wrapAux(panel, "message-thread-panel", { key: threadSurfaceKey })
     );
   const threadHeaderLeading = useSplitAuxiliaryPane ? (
     <ThreadViewModeToggle onChange={changeThreadViewMode} />
@@ -826,6 +830,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
                 threadHead={threadHeadMessage}
+                expandedReplyIds={threadExpandedReplyIds}
                 videoReviewPresentation={threadVideoReviewPresentation}
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}

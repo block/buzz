@@ -191,6 +191,7 @@ export function useAppNavigation() {
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
         thread?: string;
+        threadRail?: boolean;
         threadRootId?: string | null;
       },
     ) =>
@@ -211,6 +212,7 @@ export function useAppNavigation() {
               ? { agentSession: options.agentSession }
               : {}),
             ...(options?.thread ? { thread: options.thread } : {}),
+            ...(options?.threadRail ? { threadRail: "1" } : {}),
             ...(options?.autoSend ? { autoSend: options.autoSend } : {}),
           },
         },

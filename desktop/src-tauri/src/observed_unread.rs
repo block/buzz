@@ -128,6 +128,7 @@ pub(crate) struct ChannelProjection {
     channel_id: String,
     latest: u64,
     count: u64,
+    unread_root_ids: Vec<String>,
     badge_count: u64,
     app_badge_count: u64,
     top_level_unread: bool,
@@ -356,6 +357,7 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
                 channel_id,
                 latest,
                 count: 0,
+                unread_root_ids: Vec::new(),
                 badge_count: 0,
                 app_badge_count: 0,
                 top_level_unread: false,
@@ -393,6 +395,7 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
                 channel_id: channel,
                 latest: 0,
                 count: 0,
+                unread_root_ids: Vec::new(),
                 badge_count: 0,
                 app_badge_count: 0,
                 top_level_unread: false,
@@ -400,12 +403,20 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
             });
         entry.latest = entry.latest.max(created);
         entry.count += 1;
+        if let Some(root) = root.as_ref() {
+            if !entry.unread_root_ids.contains(root) {
+                entry.unread_root_ids.push(root.clone());
+            }
+        }
         entry.badge_count += u64::from(badge);
         entry.app_badge_count += u64::from(app);
         entry.top_level_unread |= root.is_none();
         entry.high_priority_unread |= high;
     }
     let mut result: Vec<_> = by_channel.into_values().collect();
+    for entry in &mut result {
+        entry.unread_root_ids.sort();
+    }
     result.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
     Ok(result)
 }
@@ -870,6 +881,7 @@ mod tests {
                 channel_id: "ch".into(),
                 latest: 42,
                 count: 2,
+                unread_root_ids: vec!["root-a".into()],
                 badge_count: 1,
                 app_badge_count: 1,
                 top_level_unread: true,
@@ -878,7 +890,7 @@ mod tests {
             removed: vec!["old".into()],
         })
         .unwrap();
-        let expected = serde_json::json!({"kind":"delta","scope":{"pubkey":"PK","relayUrl":"wss://relay/"},"generation":"gen","baseRevision":4,"revision":5,"ackedSequence":7,"upserts":[{"channelId":"ch","latest":42,"count":2,"badgeCount":1,"appBadgeCount":1,"topLevelUnread":true,"highPriorityUnread":false}],"removed":["old"]});
+        let expected = serde_json::json!({"kind":"delta","scope":{"pubkey":"PK","relayUrl":"wss://relay/"},"generation":"gen","baseRevision":4,"revision":5,"ackedSequence":7,"upserts":[{"channelId":"ch","latest":42,"count":2,"unreadRootIds":["root-a"],"badgeCount":1,"appBadgeCount":1,"topLevelUnread":true,"highPriorityUnread":false}],"removed":["old"]});
         assert_eq!(actual, expected);
     }
 }

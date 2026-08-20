@@ -797,6 +797,7 @@ export function useUnreadChannels(
       if (!isReadStateReady || !observedPersistence.isScopeLoaded()) {
         return {
           unreadChannelIds: new Set<string>(),
+          unreadThreadRootIds: new Set<string>(),
           topLevelUnreadChannelIds: new Set<string>(),
           highPriorityUnreadChannelIds: new Set<string>(),
           unreadChannelCounts: new Map<string, number>(),
@@ -805,6 +806,7 @@ export function useUnreadChannels(
       }
 
       const unread = new Set<string>();
+      const unreadThreadRoots = new Set<string>();
       const topLevelUnread = new Set<string>();
       const highPriority = new Set<string>();
       const counts = new Map<string, number>();
@@ -832,11 +834,23 @@ export function useUnreadChannels(
         const nativeProjection = observedPersistence.isNative()
           ? observedPersistence.projectionsRef.current.get(channel.id)
           : undefined;
+        for (const rootId of nativeProjection?.unreadRootIds ?? []) {
+          unreadThreadRoots.add(rootId);
+        }
         const unreadCount = observedPersistence.isNative()
           ? (nativeProjection?.count ?? 0)
           : latestByChannelRef.current.get(channel.id) === undefined
             ? 0
             : countUnreadObservedEvents(observedEvents, readAtForObservedEvent);
+        for (const event of observedEvents?.values() ?? []) {
+          const eventReadAt = readAtForObservedEvent(event);
+          if (
+            event.rootId !== null &&
+            (eventReadAt === null || event.createdAt > eventReadAt)
+          ) {
+            unreadThreadRoots.add(event.rootId);
+          }
+        }
         if (unreadCount === 0) {
           if (!isForcedUnread) continue;
           unread.add(channel.id);
@@ -890,6 +904,7 @@ export function useUnreadChannels(
 
       return {
         unreadChannelIds: unread,
+        unreadThreadRootIds: unreadThreadRoots,
         topLevelUnreadChannelIds: topLevelUnread,
         highPriorityUnreadChannelIds: highPriority,
         unreadChannelCounts: counts,
@@ -906,6 +921,7 @@ export function useUnreadChannels(
     ]);
 
   const unreadChannelIds = useStableSet(rawUnread.unreadChannelIds);
+  const unreadThreadRootIds = useStableSet(rawUnread.unreadThreadRootIds);
   const topLevelUnreadChannelIds = useStableSet(
     rawUnread.topLevelUnreadChannelIds,
   );
@@ -965,6 +981,7 @@ export function useUnreadChannels(
 
   return {
     unreadChannelIds,
+    unreadThreadRootIds,
     topLevelUnreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
