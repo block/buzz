@@ -624,6 +624,12 @@ export function AgentInstanceEditDialog({
     originalRuntimeSupportsProvider,
   });
 
+  const accessSettingsChanged =
+    respondTo !== agent.respondTo ||
+    allowNonOwnerDm !== agent.allowNonOwnerDm ||
+    (respondTo === "allowlist" &&
+      respondToAllowlist.join(",") !== agent.respondToAllowlist.join(","));
+
   const canSubmit =
     computeEditAgentFormValidity({
       name,
@@ -635,9 +641,9 @@ export function AgentInstanceEditDialog({
       selectedRuntimeId,
       inheritHarness,
       agentCommand,
-      requiredEnvKeyMissing,
+      requiredEnvKeyMissing: requiredEnvKeyMissing && !accessSettingsChanged,
     }) &&
-    providerValid &&
+    (providerValid || accessSettingsChanged) &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -765,13 +771,8 @@ export function AgentInstanceEditDialog({
       }
       showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
-      const accessChanged =
-        respondTo !== agent.respondTo ||
-        allowNonOwnerDm !== agent.allowNonOwnerDm ||
-        (respondTo === "allowlist" &&
-          respondToAllowlist.join(",") !== agent.respondToAllowlist.join(","));
       onUpdated?.(result.agent);
-      if (accessChanged && isManagedAgentActive(result.agent)) {
+      if (accessSettingsChanged && isManagedAgentActive(result.agent)) {
         toast(`${result.agent.name} access settings saved. Restart the agent to apply them.`);
       }
       // The auto-restart policy deliberately never fires for a stopped or
