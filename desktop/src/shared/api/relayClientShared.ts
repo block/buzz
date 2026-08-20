@@ -73,6 +73,13 @@ type LiveSubscription = {
    * `min(pendingReplaySince, cursor window)`.
    */
   pendingReplaySince?: number;
+  /** Dispatch-level duplicate suppression shared by restored-live and repair. */
+  reconnectReplay?: {
+    generation: number;
+    seenEventIds: Set<string>;
+    liveEose: boolean;
+    repairDone: boolean;
+  };
   closedRetryAttempt?: number;
   closedRetryTimeout?: number;
 };

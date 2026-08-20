@@ -1,15 +1,26 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
   buildReconnectReplayFilter,
+  DB_CREATED_AT_FLOOR_SECS,
+  FENCE_CLOCK_MARGIN_SECS,
+  RELAY_INGEST_FUTURE_TOLERANCE_SECS,
+  RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS,
+  replayReconnectHistoryPages,
   PAGE_REPLAY_MAX_ATTEMPTS,
   replayLiveSubscriptions,
   REPLAY_BATCH_SIZE,
   shouldPageReconnectReplay,
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
-import { prepareSubscriptionEvent } from "./relayClosedRecovery.ts";
+import {
+  markReconnectLiveEose,
+  markReconnectRepairDone,
+  prepareSubscriptionEvent,
+  shouldDispatchSubscriptionEvent,
+} from "./relayClosedRecovery.ts";
 
 // ── Fake-timer + Date.now setup for gate tests ────────────────────────────────
 
@@ -77,12 +88,34 @@ function event(id, createdAt) {
 function eventRange(prefix, start, count) {
   return Array.from({ length: count }, (_, index) =>
     event(`${prefix}-${index}`, start + index),
-  );
+  ).reverse();
 }
 
 function replayFilter(filter, since, until) {
   return buildReconnectReplayFilter(filter, since, until);
 }
+
+test("channel replay lookback stays coupled to relay and DB source constants", async () => {
+  const [ingest, fence] = await Promise.all([
+    readFile("../crates/buzz-relay/src/handlers/ingest.rs", "utf8"),
+    readFile("../crates/buzz-db/src/replica_fence.rs", "utf8"),
+  ]);
+  assert.match(
+    ingest,
+    new RegExp(
+      `MAX_TIMESTAMP_DRIFT_SECS: i64 = ${RELAY_INGEST_FUTURE_TOLERANCE_SECS}`,
+    ),
+  );
+  assert.match(
+    fence,
+    new RegExp(`CREATED_AT_FLOOR_SECS: i64 = ${DB_CREATED_AT_FLOOR_SECS}`),
+  );
+  assert.match(
+    fence,
+    new RegExp(`FENCE_CLOCK_MARGIN_SECS: i64 = ${FENCE_CLOCK_MARGIN_SECS}`),
+  );
+  assert.equal(RECONNECT_REPLAY_CHANNEL_LOOKBACK_SECS, 1_865);
+});
 
 // ── buildReconnectReplayFilter ────────────────────────────────────────────────
 
@@ -208,7 +241,7 @@ test("replay sends all subs in one batch when count equals REPLAY_BATCH_SIZE", a
     sendRaw: async (payload) => {
       sentIds.push(payload[1]);
     },
-    requestHistory: async () => [],
+    requestRepair: async () => [],
     setTimeoutFn: (fn, _ms) => {
       delayCount++;
       fn();
@@ -244,7 +277,7 @@ test("replay splits subscriptions into batches of REPLAY_BATCH_SIZE", async () =
     sendRaw: async (payload) => {
       sentIds.push(payload[1]);
     },
-    requestHistory: async () => [],
+    requestRepair: async () => [],
     setTimeoutFn: (fn, _ms) => {
       delayCount++;
       batchBreakpoints.push(sentIds.length);
@@ -300,7 +333,7 @@ test("visible channel subscription is sent first", async () => {
     sendRaw: async (payload) => {
       sentOrder.push(payload[1]);
     },
-    requestHistory: async () => [],
+    requestRepair: async () => [],
     visibleChannelId: "ch-visible",
   });
 
@@ -331,7 +364,7 @@ test("replay waits for rate-limit gate before sending REQs", async () => {
     sendRaw: async (payload) => {
       sentIds.push(payload[1]);
     },
-    requestHistory: async () => [],
+    requestRepair: async () => [],
     setTimeoutFn: (fn, _ms) => {
       fn();
       return 0;
@@ -370,7 +403,7 @@ test("stale replay sends no REQs when generation advances while gate was active"
     sendRaw: async (payload) => {
       sentIds.push(payload[1]);
     },
-    requestHistory: async () => [],
+    requestRepair: async () => [],
     isActive: () => generationActive,
   });
 
@@ -412,12 +445,11 @@ test("channel reconnect replay pages the missed window until a short page", asyn
 
   await replayLiveSubscriptions({
     subscriptions,
-    now: 2000,
     sendRaw: async (payload) => {
       sentPayloads.push(payload);
     },
-    requestHistory: async (filter) => {
-      historyFilters.push(filter);
+    requestRepair: async (request) => {
+      historyFilters.push(request);
       return pages.shift() ?? [];
     },
   });
@@ -435,25 +467,25 @@ test("channel reconnect replay pages the missed window until a short page", asyn
   ]);
   assert.deepEqual(historyFilters, [
     {
-      kinds: filter.kinds,
-      "#h": ["channel-1"],
+      channelId: "channel-1",
       limit: 500,
-      since: 995,
-      until: 2000,
+      since: 0,
+      until: undefined,
+      beforeId: undefined,
     },
     {
-      kinds: filter.kinds,
-      "#h": ["channel-1"],
+      channelId: "channel-1",
       limit: 500,
-      since: 995,
+      since: 0,
       until: 1501,
+      beforeId: "newest-0",
     },
     {
-      kinds: filter.kinds,
-      "#h": ["channel-1"],
+      channelId: "channel-1",
       limit: 500,
-      since: 995,
+      since: 0,
       until: 1002,
+      beforeId: "middle-0",
     },
   ]);
   assert.equal(delivered.length, 1008);
@@ -500,7 +532,6 @@ test("reconnect replay starts live REQs in parallel and preserves per-sub page o
 
   const replayPromise = replayLiveSubscriptions({
     subscriptions,
-    now: 2000,
     pageReplayConcurrency: 2,
     sendRaw: (payload) => {
       sentPayloads.push(payload);
@@ -508,9 +539,9 @@ test("reconnect replay starts live REQs in parallel and preserves per-sub page o
         sendResolvers.push(resolve);
       });
     },
-    requestHistory: async (filter) => {
-      const channelId = filter["#h"]?.[0];
-      historyFiltersByChannel[channelId].push(filter.until);
+    requestRepair: async (request) => {
+      const channelId = request.channelId;
+      historyFiltersByChannel[channelId].push(request.until);
       return pagesByChannel[channelId].shift() ?? [];
     },
   });
@@ -533,8 +564,8 @@ test("reconnect replay starts live REQs in parallel and preserves per-sub page o
   await replayPromise;
 
   assert.deepEqual(historyFiltersByChannel, {
-    "channel-1": [2000, 1501],
-    "channel-2": [2000, 1701],
+    "channel-1": [undefined, 1501],
+    "channel-2": [undefined, 1701],
   });
 });
 
@@ -574,7 +605,7 @@ test("batch-1 arms gate mid-replay: batch-2 is withheld until gate expires", asy
         activateRateLimit(5);
       }
     },
-    requestHistory: async () => [],
+    requestRepair: async () => [],
     setTimeoutFn: (fn, _ms) => {
       fn();
       return 0;
@@ -623,9 +654,8 @@ test("history backfill rejection never escapes replayLiveSubscriptions", async (
   // Must resolve — a rejection here is the socket-killing flap regression.
   await replayLiveSubscriptions({
     subscriptions,
-    now: 2000,
     sendRaw: async () => {},
-    requestHistory: async () => {
+    requestRepair: async () => {
       historyCalls++;
       throw new Error("rate-limited: quota exceeded; retry in 4s");
     },
@@ -661,9 +691,8 @@ test("backfill retry waits out the armed gate, then succeeds", async () => {
   });
   const replayPromise = replayLiveSubscriptions({
     subscriptions,
-    now: 2000,
     sendRaw: async () => {},
-    requestHistory: async () => {
+    requestRepair: async () => {
       attemptAtMs.push(fakeNow);
       if (attemptAtMs.length === 1) {
         // Mirror relayClosedRecovery: the CLOSED handler arms the gate
@@ -708,9 +737,8 @@ test("backfill retry aborts when the subscription was replaced", async () => {
   let historyCalls = 0;
   await replayLiveSubscriptions({
     subscriptions,
-    now: 2000,
     sendRaw: async () => {},
-    requestHistory: async () => {
+    requestRepair: async () => {
       historyCalls++;
       // Simulate the subscription being torn down while the REQ is in flight.
       subscriptions.delete("live-1");
@@ -743,15 +771,14 @@ test("exhausted backfill pins the floor: next replay still requests the original
   // Reconnect 1: every backfill attempt is rate-limited.
   await replayLiveSubscriptions({
     subscriptions,
-    now: 2000,
     sendRaw: async () => {},
-    requestHistory: async () => {
+    requestRepair: async () => {
       throw new Error("rate-limited: quota exceeded; retry in 4s");
     },
   });
   assert.equal(
     subscription.pendingReplaySince,
-    995,
+    0,
     "exhausted backfill must pin the unresolved window's lower bound",
   );
 
@@ -763,10 +790,9 @@ test("exhausted backfill pins the floor: next replay still requests the original
   const historyFilters = [];
   await replayLiveSubscriptions({
     subscriptions,
-    now: 2200,
     sendRaw: async () => {},
-    requestHistory: async (filter) => {
-      historyFilters.push(filter);
+    requestRepair: async (request) => {
+      historyFilters.push(request);
       return [];
     },
   });
@@ -774,7 +800,7 @@ test("exhausted backfill pins the floor: next replay still requests the original
   assert.equal(historyFilters.length, 1);
   assert.equal(
     historyFilters[0].since,
-    995,
+    0,
     "replay must start from the pinned floor, not the advanced cursor",
   );
   assert.equal(
@@ -787,16 +813,15 @@ test("exhausted backfill pins the floor: next replay still requests the original
   const laterFilters = [];
   await replayLiveSubscriptions({
     subscriptions,
-    now: 2300,
     sendRaw: async () => {},
-    requestHistory: async (filter) => {
-      laterFilters.push(filter);
+    requestRepair: async (request) => {
+      laterFilters.push(request);
       return [];
     },
   });
   assert.equal(
     laterFilters[0].since,
-    2095,
+    235,
     "after recovery the cursor governs again",
   );
 });
@@ -822,10 +847,9 @@ test("in-flight stale abort keeps the pinned floor for the superseding connectio
   let historyCalls = 0;
   await replayLiveSubscriptions({
     subscriptions,
-    now: 2000,
     sendRaw: async () => {},
     isActive: () => generationActive,
-    requestHistory: async () => {
+    requestRepair: async () => {
       historyCalls++;
       // Connection A is superseded while the REQ is in flight: the generation
       // advances, but the subscription keeps its key AND object identity —
@@ -845,9 +869,138 @@ test("in-flight stale abort keeps the pinned floor for the superseding connectio
   );
   assert.equal(
     subscription.pendingReplaySince,
-    995,
+    0,
     "a stale-generation abort must not clear the floor the new connection needs",
   );
+});
+
+test("future-dated cursor repairs backdated edits and deletions", async () => {
+  resetGate();
+  const delivered = [];
+  const recovered = [
+    { ...event("5".repeat(64), 10_010), kind: 5 },
+    { ...event("6".repeat(64), 10_011), kind: 9005 },
+    { ...event("7".repeat(64), 10_012), kind: 40003 },
+  ];
+  const subscription = {
+    mode: "live",
+    filter: buildChannelFilter("channel-1", 50),
+    onEvent: (value) => delivered.push(value),
+    // Relay accepted this event 900s in the future before disconnect.
+    lastSeenCreatedAt: 10_900,
+  };
+  const requests = [];
+  await replayLiveSubscriptions({
+    subscriptions: new Map([["live-1", subscription]]),
+    generation: 11,
+    sendRaw: async () => {},
+    requestRepair: async (request) => {
+      requests.push(request);
+      return recovered;
+    },
+  });
+  assert.equal(requests[0].since, 9_035);
+  assert.equal(requests[0].until, undefined);
+  assert.deepEqual(
+    delivered.map((value) => value.kind),
+    [5, 9005, 40003],
+  );
+});
+
+test("dense-second repair advances by event id without gaps", async () => {
+  resetGate();
+  const delivered = [];
+  const requests = [];
+  const subscription = {
+    mode: "live",
+    filter: buildChannelFilter("channel-1", 50),
+    onEvent: (value) => delivered.push(value.id),
+    lastSeenCreatedAt: 2000,
+  };
+  const dense = Array.from({ length: 1_205 }, (_, index) =>
+    event(index.toString().padStart(64, "0"), 2000),
+  );
+  await replayLiveSubscriptions({
+    subscriptions: new Map([["live-1", subscription]]),
+    generation: 7,
+    sendRaw: async () => {},
+    requestRepair: async (request) => {
+      requests.push(request);
+      const start = request.beforeId
+        ? dense.findIndex((value) => value.id === request.beforeId) + 1
+        : 0;
+      return dense.slice(start, start + request.limit);
+    },
+  });
+  assert.equal(delivered.length, dense.length);
+  assert.equal(new Set(delivered).size, dense.length);
+  assert.deepEqual(
+    requests.map((request) => request.beforeId),
+    [undefined, dense[499].id, dense[999].id],
+  );
+});
+
+test("replay dedupe clears only after both completions and never from stale generation", () => {
+  for (const repairFirst of [true, false]) {
+    const subscription = {
+      mode: "live",
+      filter: buildChannelFilter("channel-1", 50),
+      onEvent: () => {},
+      reconnectReplay: {
+        generation: 12,
+        seenEventIds: new Set(["seen"]),
+        liveEose: false,
+        repairDone: false,
+      },
+    };
+    markReconnectRepairDone(subscription, 11);
+    markReconnectLiveEose(subscription, 11);
+    assert.equal(subscription.reconnectReplay.generation, 12);
+    if (repairFirst) {
+      markReconnectRepairDone(subscription, 12);
+      assert.ok(subscription.reconnectReplay);
+      markReconnectLiveEose(subscription, 12);
+    } else {
+      markReconnectLiveEose(subscription, 12);
+      assert.ok(subscription.reconnectReplay);
+      markReconnectRepairDone(subscription, 12);
+    }
+    assert.equal(subscription.reconnectReplay, undefined);
+  }
+});
+
+test("live-before-repair and repair-before-live dispatch once", async () => {
+  const shared = event("a".repeat(64), 1000);
+  for (const liveFirst of [true, false]) {
+    const delivered = [];
+    const subscription = {
+      mode: "live",
+      filter: buildChannelFilter("channel-1", 50),
+      onEvent: (value) => delivered.push(value.id),
+      reconnectReplay: {
+        generation: 4,
+        seenEventIds: new Set(),
+        liveEose: false,
+        repairDone: false,
+      },
+    };
+    if (liveFirst) {
+      assert.equal(shouldDispatchSubscriptionEvent(subscription, shared), true);
+      subscription.onEvent(shared);
+    }
+    await replayReconnectHistoryPages({
+      subscription,
+      channelId: "channel-1",
+      since: 0,
+      until: 1000,
+      isActive: () => true,
+      requestRepair: async () => [shared],
+    });
+    if (!liveFirst && shouldDispatchSubscriptionEvent(subscription, shared)) {
+      subscription.onEvent(shared);
+    }
+    assert.deepEqual(delivered, [shared.id]);
+  }
 });
 
 // ── Teardown ──────────────────────────────────────────────────────────────────

@@ -145,18 +145,52 @@ export function prepareSubscriptionEvent(
   return true;
 }
 
+export function shouldDispatchSubscriptionEvent(
+  subscription: Extract<RelaySubscription, { mode: "live" }>,
+  event: RelayEvent,
+) {
+  const replay = subscription.reconnectReplay;
+  if (replay?.seenEventIds.has(event.id)) return false;
+  replay?.seenEventIds.add(event.id);
+  return true;
+}
+
+export function markReconnectLiveEose(
+  subscription: Extract<RelaySubscription, { mode: "live" }>,
+  generation: number,
+) {
+  const replay = subscription.reconnectReplay;
+  if (!replay || replay.generation !== generation) return;
+  replay.liveEose = true;
+  if (replay.repairDone) subscription.reconnectReplay = undefined;
+}
+
+export function markReconnectRepairDone(
+  subscription: Extract<RelaySubscription, { mode: "live" }>,
+  generation: number,
+) {
+  const replay = subscription.reconnectReplay;
+  if (!replay || replay.generation !== generation) return;
+  replay.repairDone = true;
+  if (replay.liveEose) subscription.reconnectReplay = undefined;
+}
+
 export function handleSubscriptionEose({
   subscriptions,
   subId,
   closeSubscription,
+  generation,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   closeSubscription: (subId: string) => Promise<void>;
+  generation?: number;
 }) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "live") {
+    if (generation !== undefined)
+      markReconnectLiveEose(subscription, generation);
     subscription.resolveReady?.("eose");
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;
