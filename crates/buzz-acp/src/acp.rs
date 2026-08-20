@@ -459,8 +459,23 @@ impl AcpClient {
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
+        // ── WSL agent wrap ──────────────────────────────────────────────────
+        // When the host (Buzz Desktop on Windows) located the agent inside a
+        // WSL distribution rather than on the Windows PATH, it sets
+        // BUZZ_ACP_AGENT_WSL_PATH to the in-distro absolute path. The bare
+        // command does not exist on Windows, so the agent must be launched
+        // through wsl.exe; WSL interop bridges the stdio pipes, leaving the
+        // NDJSON channel byte-transparent. `command` keeps its original
+        // identity so default_agent_env / default_agent_args still apply.
+        let wsl_wrap = wsl_spawn_wrap();
+        let (program, prefix_args): (String, Vec<String>) = match &wsl_wrap {
+            Some(wrap) => (wrap.program.clone(), wrap.prefix_args()),
+            None => (command.to_string(), Vec::new()),
+        };
+
+        let mut cmd = tokio::process::Command::new(&program);
+        cmd.args(&prefix_args)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Inherit stderr so agent logs are visible in the harness terminal.
@@ -514,6 +529,43 @@ impl AcpClient {
         }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
+        }
+
+        // WSL wrap: forward every agent-intended env var across the WSL
+        // boundary. wsl.exe children only import Windows-side variables whose
+        // names appear in WSLENV, so without this the agent would silently
+        // lose both the per-runtime defaults (e.g. HERMES_ACP_SKIP_CONFIGURED_MCP)
+        // and persona env (e.g. GOOSE_PROVIDER). Keys are forwarded whether
+        // the value came from injection or from the inherited parent env —
+        // either way it is present in the wsl.exe process environment.
+        if let Some(wrap) = &wsl_wrap {
+            let mut forward_keys: Vec<String> = crate::config::default_agent_env(command)
+                .iter()
+                .map(|(key, _)| (*key).to_string())
+                .collect();
+            for (key, _) in extra_env {
+                if key == "WSLENV" {
+                    continue;
+                }
+                forward_keys.push(key.clone());
+            }
+            // An explicit persona WSLENV wins as the merge base; otherwise
+            // inherit the harness's own WSLENV (may itself carry flags).
+            let base = extra_env
+                .iter()
+                .find(|(key, _)| key == "WSLENV")
+                .map(|(_, value)| value.clone())
+                .or_else(|| std::env::var("WSLENV").ok());
+            let merged = merge_wslenv(base.as_deref(), &forward_keys);
+            if !merged.is_empty() {
+                cmd.env("WSLENV", merged);
+            }
+            tracing::info!(
+                program = %wrap.program,
+                linux_path = %wrap.linux_path,
+                distro = ?wrap.distro,
+                "spawning agent through WSL"
+            );
         }
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
@@ -2335,6 +2387,161 @@ fn kill_process_group(_pid: u32) -> bool {
     false
 }
 
+/// Resolved WSL spawn target: launch `program` (wsl.exe) with
+/// [`WslSpawnWrap::prefix_args`] followed by the agent's normal args.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WslSpawnWrap {
+    /// wsl.exe to launch — System32 absolute path when available, else the
+    /// bare name for standard CreateProcess search.
+    program: String,
+    /// Optional non-default distro (`wsl.exe -d <distro>`).
+    distro: Option<String>,
+    /// Agent's absolute path inside the distro (e.g. `/home/u/.local/bin/hermes-acp`).
+    linux_path: String,
+}
+
+impl WslSpawnWrap {
+    /// Argument prefix that makes wsl.exe exec the in-distro agent binary.
+    fn prefix_args(&self) -> Vec<String> {
+        let mut prefix = Vec::with_capacity(4);
+        if let Some(distro) = &self.distro {
+            prefix.push("-d".to_string());
+            prefix.push(distro.clone());
+        }
+        prefix.push("-e".to_string());
+        prefix.push(self.linux_path.clone());
+        prefix
+    }
+}
+
+/// Pure core of [`wsl_spawn_wrap`], factored for unit testing: validate the
+/// desktop-supplied contract values and decide whether to wrap.
+fn build_wsl_wrap(
+    linux_path: Option<&str>,
+    distro: Option<&str>,
+    host_is_windows: bool,
+) -> Option<WslSpawnWrap> {
+    let linux_path = linux_path?.trim();
+    // Only absolute POSIX paths are meaningful to `wsl.exe -e`; anything else
+    // (empty, relative, a Windows path) indicates a broken contract — refuse
+    // to wrap rather than spawn a confusing wsl.exe error.
+    if linux_path.is_empty() || !linux_path.starts_with('/') {
+        return None;
+    }
+    let distro = distro
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string);
+    if !host_is_windows {
+        tracing::warn!(
+            linux_path,
+            "BUZZ_ACP_AGENT_WSL_PATH is set on a non-Windows host — ignoring WSL wrap"
+        );
+        return None;
+    }
+    Some(WslSpawnWrap {
+        program: wsl_exe_program(),
+        distro,
+        linux_path: linux_path.to_string(),
+    })
+}
+
+/// Read the desktop → buzz-acp WSL contract from the process environment.
+///
+/// Buzz Desktop sets `BUZZ_ACP_AGENT_WSL_PATH` (absolute in-distro path of the
+/// agent command) — and optionally `BUZZ_ACP_AGENT_WSL_DISTRO` — when harness
+/// discovery resolved the agent through its WSL fallback instead of the
+/// Windows PATH. See `managed_agents/wsl.rs` on the desktop side.
+fn wsl_spawn_wrap() -> Option<WslSpawnWrap> {
+    build_wsl_wrap(
+        std::env::var("BUZZ_ACP_AGENT_WSL_PATH").ok().as_deref(),
+        std::env::var("BUZZ_ACP_AGENT_WSL_DISTRO").ok().as_deref(),
+        cfg!(windows),
+    )
+}
+
+/// Prefer the System32 copy of wsl.exe; fall back to the bare name (standard
+/// CreateProcess search order) when SystemRoot is unavailable. System32 first
+/// avoids the WindowsApps app-execution-alias stubs (see block/buzz#2328).
+#[cfg(windows)]
+fn wsl_exe_program() -> String {
+    std::env::var_os("SystemRoot")
+        .map(|root| {
+            std::path::PathBuf::from(root)
+                .join("System32")
+                .join("wsl.exe")
+        })
+        .filter(|p| p.is_file())
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "wsl.exe".to_string())
+}
+
+#[cfg(not(windows))]
+fn wsl_exe_program() -> String {
+    // Never used at runtime (build_wsl_wrap refuses non-Windows hosts), but
+    // must exist so the cfg!(windows) branch above type-checks everywhere.
+    "wsl.exe".to_string()
+}
+
+/// Merge env var names into a WSLENV forwarding list.
+///
+/// `existing` may carry a pre-set WSLENV value, including per-entry flags
+/// (`VAR/p`, `VAR/l`, `VAR/u`) — entries are preserved verbatim and compared
+/// by their name part only, so a flagged entry is never duplicated by a
+/// bare-name forward of the same variable.
+fn merge_wslenv(existing: Option<&str>, keys: &[String]) -> String {
+    let mut entries: Vec<String> = existing
+        .unwrap_or("")
+        .split(':')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    for key in keys {
+        let already = entries
+            .iter()
+            .any(|entry| entry.split('/').next() == Some(key.as_str()));
+        if !already {
+            entries.push(key.clone());
+        }
+    }
+    entries.join(":")
+}
+
+/// Translate an absolute Windows path into the equivalent WSL mount path
+/// (`C:\Users\x\.buzz` → `/mnt/c/Users/x/.buzz`).
+///
+/// Returns `None` for anything that is not a drive-letter path — UNC paths
+/// (`\\server\share`, including `\\wsl.localhost\…`), relative paths, and
+/// already-POSIX paths are all left untouched by the caller.
+fn translate_windows_path_to_wsl(cwd: &str) -> Option<String> {
+    let cwd = cwd.trim();
+    let mut chars = cwd.chars();
+    let drive = chars.next()?;
+    if !drive.is_ascii_alphabetic() || chars.next() != Some(':') {
+        return None;
+    }
+    let rest = cwd[2..].replace('\\', "/");
+    let rest = rest.trim_start_matches('/');
+    Some(format!("/mnt/{}/{}", drive.to_ascii_lowercase(), rest))
+}
+
+/// Session cwd to hand to a WSL-hosted agent via `session/new`.
+///
+/// When this process is spawning agents through the WSL wrap (see
+/// [`wsl_spawn_wrap`]), the agent runs inside the distro where a Windows
+/// drive path such as `C:\Users\x\.buzz` does not exist — and Hermes-class
+/// agents store the session cwd and use it as the root for edit-approval
+/// policies and workspace grounding. Translate drive-letter paths to their
+/// `/mnt/<drive>/…` form; everything else passes through untouched.
+pub(crate) fn session_cwd_for_wsl(cwd: &str) -> String {
+    if wsl_spawn_wrap().is_some() {
+        translate_windows_path_to_wsl(cwd).unwrap_or_else(|| cwd.to_string())
+    } else {
+        cwd.to_string()
+    }
+}
+
 /// Suppress the console window that Windows otherwise allocates for every
 /// console-subsystem child process spawned from a GUI (non-console) parent.
 /// No-op on non-Windows platforms.
@@ -3021,6 +3228,143 @@ mod tests {
             msg.contains("Hard turn timeout"),
             "HardTimeout display: {msg}"
         );
+    }
+
+    // ── WSL session cwd translation ─────────────────────────────────────────
+
+    #[test]
+    fn translate_windows_path_to_wsl_maps_drive_letters() {
+        assert_eq!(
+            translate_windows_path_to_wsl(r"C:\Users\ratz\.buzz"),
+            Some("/mnt/c/Users/ratz/.buzz".to_string())
+        );
+        assert_eq!(
+            translate_windows_path_to_wsl(r"D:\repos\foo"),
+            Some("/mnt/d/repos/foo".to_string())
+        );
+        // Forward-slash drive paths and root paths translate too.
+        assert_eq!(
+            translate_windows_path_to_wsl("C:/Users/ratz"),
+            Some("/mnt/c/Users/ratz".to_string())
+        );
+        assert_eq!(
+            translate_windows_path_to_wsl(r"C:\"),
+            Some("/mnt/c/".to_string())
+        );
+    }
+
+    #[test]
+    fn translate_windows_path_to_wsl_leaves_non_drive_paths_untouched() {
+        for cwd in [
+            r"\\server\share\path",
+            r"\\wsl.localhost\Ubuntu\home\rat",
+            "/home/rat/.buzz",
+            "/mnt/c/Users/ratz",
+            "relative/path",
+            ".",
+            "",
+        ] {
+            assert_eq!(
+                translate_windows_path_to_wsl(cwd),
+                None,
+                "expected no translation: {cwd:?}"
+            );
+        }
+    }
+
+    // ── WSL spawn wrap (pure helpers) ───────────────────────────────────────
+
+    #[test]
+    fn wsl_prefix_args_execs_linux_path_in_default_distro() {
+        let wrap = WslSpawnWrap {
+            program: r"C:\Windows\System32\wsl.exe".to_string(),
+            distro: None,
+            linux_path: "/home/rat/.local/bin/hermes-acp".to_string(),
+        };
+        assert_eq!(
+            wrap.prefix_args(),
+            ["-e", "/home/rat/.local/bin/hermes-acp"]
+        );
+    }
+
+    #[test]
+    fn wsl_prefix_args_prefixes_distro_when_set() {
+        let wrap = WslSpawnWrap {
+            program: "wsl.exe".to_string(),
+            distro: Some("Ubuntu-24.04".to_string()),
+            linux_path: "/usr/local/bin/omp".to_string(),
+        };
+        assert_eq!(
+            wrap.prefix_args(),
+            ["-d", "Ubuntu-24.04", "-e", "/usr/local/bin/omp"]
+        );
+    }
+
+    #[test]
+    fn build_wsl_wrap_accepts_absolute_posix_path_on_windows() {
+        let wrap = build_wsl_wrap(Some("/home/rat/.local/bin/hermes-acp"), Some("  "), true)
+            .expect("valid contract should wrap");
+        assert_eq!(wrap.linux_path, "/home/rat/.local/bin/hermes-acp");
+        // Whitespace-only distro is treated as unset.
+        assert_eq!(wrap.distro, None);
+    }
+
+    #[test]
+    fn build_wsl_wrap_rejects_broken_contract_values() {
+        for bad in [
+            "",
+            "   ",
+            "hermes-acp",
+            "usr/local/bin/hermes-acp",
+            r"C:\tools\hermes.exe",
+        ] {
+            assert_eq!(
+                build_wsl_wrap(Some(bad), None, true),
+                None,
+                "expected rejection: {bad:?}"
+            );
+        }
+        assert_eq!(build_wsl_wrap(None, None, true), None);
+    }
+
+    #[test]
+    fn build_wsl_wrap_refuses_non_windows_hosts() {
+        assert_eq!(
+            build_wsl_wrap(Some("/home/rat/.local/bin/hermes-acp"), None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn merge_wslenv_appends_missing_keys_preserving_order() {
+        let keys = vec![
+            "HERMES_ACP_SKIP_CONFIGURED_MCP".to_string(),
+            "GOOSE_PROVIDER".to_string(),
+        ];
+        assert_eq!(
+            merge_wslenv(None, &keys),
+            "HERMES_ACP_SKIP_CONFIGURED_MCP:GOOSE_PROVIDER"
+        );
+        assert_eq!(
+            merge_wslenv(Some("PATH/l"), &keys),
+            "PATH/l:HERMES_ACP_SKIP_CONFIGURED_MCP:GOOSE_PROVIDER"
+        );
+    }
+
+    #[test]
+    fn merge_wslenv_never_duplicates_flagged_entries() {
+        let keys = vec!["GOPATH".to_string(), "GOPROXY".to_string()];
+        // GOPATH already present with a /p flag — must not be re-added bare.
+        assert_eq!(merge_wslenv(Some("GOPATH/p"), &keys), "GOPATH/p:GOPROXY");
+    }
+
+    #[test]
+    fn merge_wslenv_tolerates_empty_and_colon_noise() {
+        let keys = vec!["A".to_string()];
+        assert_eq!(merge_wslenv(Some(""), &keys), "A");
+        assert_eq!(merge_wslenv(Some("::"), &keys), "A");
+        assert_eq!(merge_wslenv(Some("B::C:"), &keys), "B:C:A");
+        assert_eq!(merge_wslenv(None, &[]), "");
     }
 
     async fn spawn_script(script: &str) -> AcpClient {

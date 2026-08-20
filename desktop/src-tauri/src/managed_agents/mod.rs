@@ -43,6 +43,7 @@ mod team_repair;
 pub(crate) use team_repair::team_persona_key;
 mod teams;
 mod types;
+pub(crate) mod wsl;
 
 // Shared guard for tests that mutate or read process-global PATH.
 #[cfg(test)]
