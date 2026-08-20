@@ -16,7 +16,7 @@ const _schemeKey = 'buzz_color_scheme';
 /// Buzz ships as the default: the first-party pair, so a fresh install gets the
 /// branded top-section gradient without picking a theme first.
 const defaultSchemeName = buzzThemeName;
-const defaultSchemeDisplayName = 'Buzz';
+const defaultSchemeDisplayName = 'Mesh';
 
 /// Pre-loaded SharedPreferences instance, overridden in main().
 final savedPrefsProvider = Provider<SharedPreferences>(

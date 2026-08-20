@@ -611,7 +611,7 @@ export function WorkspaceTabs({
             snapshot={displayedSnapshot}
             unavailableMessage={
               externalHost
-                ? `Not mirrored on Buzz. Repository files are hosted on ${externalHost}.`
+                ? `Not mirrored on Mesh. Repository files are hosted on ${externalHost}.`
                 : undefined
             }
           />

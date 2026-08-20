@@ -96,7 +96,7 @@ pub(crate) fn relaunch_after_mesh_shutdown(app: &tauri::AppHandle) -> ! {
 
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 pub(crate) fn hard_exit_after_mesh_shutdown() -> ! {
-    // SAFETY: all Buzz-managed subprocesses and the embedded Mesh runtime have
+    // SAFETY: all Mesh-managed subprocesses and the embedded Mesh runtime have
     // been stopped. `_exit` intentionally skips only process-global C++
     // destructors and buffered stdio; no application state remains observable.
     unsafe { libc::_exit(0) }

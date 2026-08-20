@@ -36,7 +36,10 @@ type FibreListPaneProps = {
 };
 
 const TAB_TRIGGER_CLASS =
-  "rounded-none border-b-2 border-transparent bg-transparent px-0 py-1 text-sm font-medium text-muted-foreground transition-colors";
+  "inline-flex items-center rounded-none border-b-2 border-transparent bg-transparent px-0 py-1 text-sm font-medium text-muted-foreground transition-colors";
+
+const TAB_COUNT_CLASS =
+  "ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-muted px-1 text-2xs font-medium tabular-nums text-muted-foreground";
 
 export function FibreListPane({
   currentPubkey,
@@ -83,6 +86,15 @@ export function FibreListPane({
             type="button"
           >
             Open
+            <span
+              className={cn(
+                TAB_COUNT_CLASS,
+                listTab === "open" && "text-foreground/70",
+              )}
+              data-testid="fibre-tab-open-count"
+            >
+              {openCount}
+            </span>
           </button>
           <button
             aria-selected={listTab === "done"}
@@ -96,10 +108,16 @@ export function FibreListPane({
             type="button"
           >
             Done
+            <span
+              className={cn(
+                TAB_COUNT_CLASS,
+                listTab === "done" && "text-foreground/70",
+              )}
+              data-testid="fibre-tab-done-count"
+            >
+              {doneCount}
+            </span>
           </button>
-        </div>
-        <div className="text-xs text-muted-foreground">
-          {listTab === "open" ? `${openCount} open` : `${doneCount} done`}
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -135,27 +153,16 @@ export function FibreListPane({
       </TopChromeInsetHeader>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2.5">
         {fibres.length === 0 ? (
-          <div className="inbox-zero-copy px-8 py-14 text-center">
-            {listTab === "open" ? (
-              <>
-                <div className="mb-1.5 text-sm text-foreground/80">
-                  Inbox Zero
-                </div>
-                <div className="text-xs leading-relaxed text-muted-foreground">
-                  Nothing left to triage.
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="mb-1.5 text-sm text-foreground/80">
-                  Nothing completed yet
-                </div>
-                <div className="text-xs leading-relaxed text-muted-foreground">
-                  Mark a fibre done and it will land here.
-                </div>
-              </>
-            )}
-          </div>
+          listTab === "done" ? (
+            <div className="inbox-zero-copy px-8 py-14 text-center">
+              <div className="mb-1.5 text-sm text-foreground/80">
+                Nothing completed yet
+              </div>
+              <div className="text-xs leading-relaxed text-muted-foreground">
+                Mark a fibre done and it will land here.
+              </div>
+            </div>
+          ) : null
         ) : (
           fibres.map((fibre) => {
             const seen = showSeenDots

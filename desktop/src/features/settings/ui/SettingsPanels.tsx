@@ -235,6 +235,8 @@ export const settingsSections: SettingsSectionDescriptor[] = [
 ];
 
 function formatThemeLabel(name: string): string {
+  if (name === "buzz") return "Mesh";
+  if (name === "buzz-dark") return "Mesh Dark";
   return name
     .split("-")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
@@ -406,8 +408,8 @@ const APPEARANCE_MODE_OPTIONS = [
 
 // Reveal/hide motion for the accent picker: a small translate + opacity fade.
 // The picker sits below the theme grid and reads as tucking up behind it, so
-// it enters from above (slides *down* into place when a non-Buzz theme reveals
-// it) and exits upward (slides up behind the grid when Buzz hides it). No
+// it enters from above (slides *down* into place when a non-Mesh theme reveals
+// it) and exits upward (slides up behind the grid when Mesh hides it). No
 // height/scale — height collapse clipped the swatches behind the grid's bottom
 // fade (the "white bar"). Snappier than the modal 0.2s since this is a small
 // settings control, sharing the modal/ProfileSettingsCard easing curve.
@@ -435,9 +437,9 @@ function ThemeSettingsCard() {
   const showCommunityScope = communities.length > 1;
   const communityLabel = appearanceCommunityLabel(activeCommunity?.name);
 
-  // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
-  // so the accent picker is hidden while a Buzz theme is active. `themeName` is
-  // the effective theme, so this also covers System mode resolving to Buzz.
+  // Mesh themes pin a neutral accent (GitHub black in light, white in dark),
+  // so the accent picker is hidden while a Mesh theme is active. `themeName` is
+  // the effective theme, so this also covers System mode resolving to Mesh.
   const buzzThemeSelected = isBuzzTheme(themeName);
   const accentPickerHidden = buzzThemeSelected;
   const shouldReduceMotion = useReducedMotion();
@@ -574,7 +576,7 @@ function ThemeSettingsCard() {
           }}
         />
         {/* Bottom fade — hidden while the accent picker is visible so its
-            near-white gradient (Buzz light) can't mask the swatches below it
+            near-white gradient (Mesh light) can't mask the swatches below it
             (the "white bar"). Kept only when the picker is hidden. */}
         {accentPickerHidden ? (
           <div
@@ -636,7 +638,7 @@ function ThemeSettingsCard() {
     >
       <SettingsSectionHeader
         title="Appearance"
-        description="Choose how Buzz looks and feels."
+        description="Choose how Mesh looks and feels."
       />
 
       <SettingsOptionGroupList>
@@ -716,7 +718,7 @@ function ThemeSettingsCard() {
                 className="text-sm font-normal text-muted-foreground/70"
                 data-settings-subcopy
               >
-                Choose the colors used throughout Buzz.
+                Choose the colors used throughout Mesh.
               </p>
             </div>
             <button
@@ -767,7 +769,7 @@ function ThemeSettingsCard() {
             </AnimatePresence>
           )}
 
-          {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
+          {/* Accent color picker — hidden for Mesh themes (pinned neutral accent).
               Reveal/hide with the translate-up + opacity fade defined by
               ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
               and just renders/unrenders. */}

@@ -188,7 +188,7 @@ export function IdentityRecoveryPairing({
               </p>
             </div>
             <p className="text-xs text-muted-foreground">
-              This gives this desktop permanent access to your Buzz identity.
+              This gives this desktop permanent access to your Mesh identity.
               Only continue if you trust it.
             </p>
             <div className="flex w-full flex-col gap-2">

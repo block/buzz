@@ -302,7 +302,7 @@ test("deleted public starter channels do not strand community onboarding", async
   );
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Take me to Buzz" }).click();
+  await page.getByRole("button", { name: "Take me to Mesh" }).click();
 
   await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0);
   await expect(page).toHaveURL(/#\/channels\/[^/]+$/);
@@ -357,12 +357,12 @@ test("required Welcome creation failure keeps community onboarding open", async 
   );
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Take me to Buzz" }).click();
+  await page.getByRole("button", { name: "Take me to Mesh" }).click();
 
   await expect(page.getByTestId("community-onboarding-flow")).toBeVisible();
   await expect(page.getByText(`${welcomeError} Try again.`)).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Take me to Buzz" }),
+    page.getByRole("button", { name: "Take me to Mesh" }),
   ).toBeEnabled();
   await expect(page.getByTestId("chat-title")).toHaveCount(0);
 });

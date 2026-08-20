@@ -98,7 +98,7 @@ export function useCommunityNavigationTransitions({
       if (!fallback) {
         if (!markCommunityDiscoveryAfterLeave()) {
           throw new Error(
-            "Membership was removed, but community discovery state could not be saved. Restart Buzz and try again.",
+            "Membership was removed, but community discovery state could not be saved. Restart Mesh and try again.",
           );
         }
         await goHome({ replace: true });

@@ -239,7 +239,7 @@ pub async fn discover_agent_models(
         &merged_env,
     );
 
-    // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
+    // Mesh shared compute discovery must not depend on the local OpenAI ingress: that
     // client endpoint is started only after a live target is selected.
     #[cfg(feature = "mesh-llm")]
     if input.provider.as_deref().map(str::trim)
@@ -253,11 +253,11 @@ pub async fn discover_agent_models(
             ],
         )
         .await
-        .map_err(|error| format!("Buzz shared compute model discovery failed: {error}"))?;
+        .map_err(|error| format!("Mesh shared compute model discovery failed: {error}"))?;
         let availability = crate::mesh_llm::availability_from_events(events);
         if availability.models.is_empty() {
             return Err(availability.reason.unwrap_or_else(|| {
-                "No live Buzz shared compute models are available".to_string()
+                "No live Mesh shared compute models are available".to_string()
             }));
         }
         return Ok(AgentModelsResponse {
@@ -281,7 +281,7 @@ pub async fn discover_agent_models(
     if input.provider.as_deref().map(str::trim)
         == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
     {
-        return Err("Buzz shared compute is not available in this build".to_string());
+        return Err("Mesh shared compute is not available in this build".to_string());
     }
 
     if let Some(models) =

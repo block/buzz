@@ -18,7 +18,7 @@
 //! whole window even with glass off.
 //!
 //! Vibrancy applies an `NSVisualEffectView` behind the webview so the desktop
-//! (and windows behind Buzz) blurs through wherever the WKWebView canvas is
+//! (and windows behind Mesh) blurs through wherever the WKWebView canvas is
 //! transparent. It is a native, macOS-only effect: there is no "intensity"
 //! setting at the OS level, only a set of material presets. The frontend tunes
 //! perceived intensity by adjusting CSS surface opacity while this command

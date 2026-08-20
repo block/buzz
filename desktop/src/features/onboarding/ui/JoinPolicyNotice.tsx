@@ -71,7 +71,7 @@ export function JoinPolicyNotice({
             className="cursor-pointer text-xs leading-5 text-muted-foreground"
             htmlFor={agreementConfirmationId}
           >
-            I agree to the Buzz{" "}
+            I agree to the Mesh{" "}
             {policy.termsMarkdown ? (
               <Button
                 className="h-auto p-0 align-baseline text-xs no-underline hover:underline focus-visible:no-underline"

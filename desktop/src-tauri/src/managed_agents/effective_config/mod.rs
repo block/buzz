@@ -126,7 +126,7 @@ const LEGACY_MESH_PROVIDER_ENV_KEY: &str = "SPROUT_AGENT_PROVIDER";
 ///
 /// All three sentinels must match — the local base URL alone is not enough,
 /// since a user may point their own OpenAI-compatible provider at the same
-/// port. The placeholder API key is what makes this Buzz's own preset.
+/// port. The placeholder API key is what makes this Mesh's own preset.
 ///
 /// Two of those sentinels were renamed in the same Jun-11 window, in separate
 /// commits, with neither migrating persisted records: the provider env *key*

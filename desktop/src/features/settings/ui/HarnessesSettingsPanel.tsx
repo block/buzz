@@ -113,7 +113,7 @@ export function HarnessesSettingsPanel() {
   return (
     <SettingsOptionGroup
       data-testid="settings-harnesses"
-      description="Choose which agent tools Buzz can use on this device."
+      description="Choose which agent tools Mesh can use on this device."
       headerAction={
         <Button
           disabled={isRefreshing}

@@ -72,7 +72,7 @@ pub struct AgentDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_source: Option<CatalogSource>,
     /// Harness-level configuration passed to the agent subprocess as environment variables.
-    /// Opaque to Buzz — keys and values are runtime-specific.
+    /// Opaque to Mesh — keys and values are runtime-specific.
     ///
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -425,7 +425,7 @@ pub struct ManagedAgentRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_parallelism: Option<u32>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
-    /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
+    /// inference through Mesh's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
     ///
     /// Not the source of truth. `provider == "relay-mesh"` is, resolved through

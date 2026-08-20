@@ -248,7 +248,7 @@ export function isBuzzTheme(themeName: string): boolean {
 }
 
 /**
- * Resolve the accent to actually apply for a theme: Buzz themes are pinned to
+ * Resolve the accent to actually apply for a theme: Mesh themes are pinned to
  * the neutral accent; every other theme uses the stored/selected accent.
  */
 function resolveEffectiveAccent(
@@ -258,12 +258,12 @@ function resolveEffectiveAccent(
   return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
 }
 
-/** Toggle the Buzz-specific gradient marker independently from glass. */
+/** Toggle the Mesh-specific gradient marker independently from glass. */
 function applyBuzzSidebar(themeName: string) {
   const root = document.documentElement;
   if (isBuzzTheme(themeName)) {
     root.setAttribute("data-buzz-sidebar", "");
-    // Keep the concrete Buzz variant on the root as well as the generic
+    // Keep the concrete Mesh variant on the root as well as the generic
     // marker. The gradient stylesheet matches this attribute directly, which
     // makes WKWebView invalidate the painted background when light/dark mode
     // changes instead of relying only on a custom-property dependency update.
@@ -411,8 +411,8 @@ function applyCachedVars(): string | null {
     glassThemeReady = true;
 
     const accent = getStorageItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
-    // Pin Buzz themes to the neutral accent here too, matching applyTheme.
-    // Otherwise a cached Buzz theme + non-neutral stored accent flashes the
+    // Pin Mesh themes to the neutral accent here too, matching applyTheme.
+    // Otherwise a cached Mesh theme + non-neutral stored accent flashes the
     // old accent on reload until the async applyTheme effect runs.
     applyAccentColor(resolveEffectiveAccent(themeName, accent));
 
@@ -574,8 +574,8 @@ export function ThemeProvider({
     void applyWindowGlass(glassBackground);
   }, [glassBackground]);
 
-  // The stronger selected-row treatment belongs exclusively to Buzz. Keep
-  // the saved preference so it is restored when the user returns to Buzz,
+  // The stronger selected-row treatment belongs exclusively to Mesh. Keep
+  // the saved preference so it is restored when the user returns to Mesh,
   // but remove the live marker for every other theme.
   useEffect(() => {
     setProminentActiveTabActive(

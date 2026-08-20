@@ -25,7 +25,7 @@ pub const BACKUP_LOG_N: u8 = 18;
 /// Highest scrypt cost accepted when decrypting an untrusted backup.
 ///
 /// NIP-49 intentionally leaves `log_n` client-selected. Capping it at the tier
-/// Buzz itself emits keeps generated and upstream-compatible lower-cost backups
+/// Mesh itself emits keeps generated and upstream-compatible lower-cost backups
 /// readable without allowing a crafted payload to request unbounded memory
 /// before password authentication.
 pub const MAX_VERIFY_LOG_N: u8 = BACKUP_LOG_N;

@@ -12,7 +12,7 @@ import { cn } from "@/shared/lib/cn";
  * banner can import the same constants — the two surfaces must never drift.
  */
 export const AUTO_RESTART_ON_BLURB =
-  "Configuration changed since this agent started. Buzz can restart it automatically after ~3 minutes idle, or stop and respawn it to apply now.";
+  "Configuration changed since this agent started. Mesh can restart it automatically after ~3 minutes idle, or stop and respawn it to apply now.";
 
 export const AUTO_RESTART_OFF_BLURB =
   "Configuration changed since this agent started. Automatic restart is off for this agent — stop and respawn it to apply the changes.";

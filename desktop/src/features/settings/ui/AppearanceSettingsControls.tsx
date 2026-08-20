@@ -33,7 +33,7 @@ import {
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionRow } from "./SettingsOptionGroup";
 
-/** Buzz navigation can use either its production tint or a stronger tab. */
+/** Mesh navigation can use either its production tint or a stronger tab. */
 export function ProminentActiveTabSetting() {
   const { prominentActiveTab, setProminentActiveTab } = useTheme();
 
@@ -350,7 +350,7 @@ export function AccentPickerContent({
           className="text-sm font-normal text-muted-foreground/70"
           data-settings-subcopy
         >
-          Choose the highlight color used throughout Buzz.
+          Choose the highlight color used throughout Mesh.
         </p>
       </div>
       <div

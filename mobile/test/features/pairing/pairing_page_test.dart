@@ -24,7 +24,7 @@ void main() {
       );
 
       expect(find.byType(TappableFlappingBee), findsOneWidget);
-      expect(find.text('Welcome to Buzz'), findsOneWidget);
+      expect(find.text('Welcome to Mesh'), findsOneWidget);
       expect(find.text('Scan a QR code'), findsOneWidget);
       expect(find.text('Use pairing code'), findsOneWidget);
       expect(find.text('Connect'), findsNothing);
@@ -340,7 +340,7 @@ void main() {
         ),
       );
 
-      expect(find.textContaining('full Buzz identity'), findsOneWidget);
+      expect(find.textContaining('full Mesh identity'), findsOneWidget);
       expect(find.textContaining('permanent access'), findsOneWidget);
       expect(find.text('Codes Match'), findsOneWidget);
     });

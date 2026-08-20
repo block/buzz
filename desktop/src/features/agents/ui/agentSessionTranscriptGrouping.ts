@@ -375,7 +375,7 @@ function sameKindLabel(item: TranscriptItem, count: number): string {
     return `Read ${count} skill${count === 1 ? "" : "s"}`;
   }
   if (renderClass === "shell") return `Ran ${count} commands`;
-  if (renderClass === "relay-op") return `Ran ${count} Buzz relay ops`;
+  if (renderClass === "relay-op") return `Ran ${count} Mesh relay ops`;
   return `${label} ×${count}`;
 }
 

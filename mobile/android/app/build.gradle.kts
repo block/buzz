@@ -91,7 +91,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        resValue("string", "app_name", "Buzz")
+        resValue("string", "app_name", "Mesh")
     }
 
     signingConfigs {
@@ -113,7 +113,7 @@ android {
                 applicationIdSuffix = worktreeIdSuffix
             }
             if (worktreeLabel != null) {
-                resValue("string", "app_name", "Buzz ($worktreeLabel)")
+                resValue("string", "app_name", "Mesh ($worktreeLabel)")
             }
         }
         release {

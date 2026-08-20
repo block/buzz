@@ -12,7 +12,7 @@
  * (e.g. nostr.build, void.cat) are returned unchanged — they aren't behind
  * Cloudflare Access and can be loaded directly by WKWebView. Without this
  * origin check, external Blossom URLs would be proxied to the wrong server
- * (the Buzz relay), resulting in 404s.
+ * (the Mesh relay), resulting in 404s.
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -303,7 +303,7 @@ export function mediaProxyUrl(port: number, mediaPath: string): string {
 }
 
 /**
- * If `url` is a Blossom media URL hosted on the Buzz relay, rewrite it
+ * If `url` is a Blossom media URL hosted on the Mesh relay, rewrite it
  * to go through the local streaming proxy. External Blossom URLs and
  * non-Blossom URLs are returned unchanged.
  *

@@ -92,7 +92,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_commands: &[],
         cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
         adapter_install_instructions_url: "",
-        cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
+        cli_install_hint: "Mesh talks to Goose through the Goose CLI.",
         adapter_install_hint: "",
         skill_dir: Some(".goose/skills"),
         supports_acp_model_switching: false,
@@ -125,8 +125,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
         cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
-        cli_install_hint: "Buzz talks to Claude Code through the Claude Code CLI.",
-        adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
+        cli_install_hint: "Mesh talks to Claude Code through the Claude Code CLI.",
+        adapter_install_hint: "Mesh talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
@@ -158,8 +158,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
         cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
-        cli_install_hint: "Buzz talks to Codex through the Codex CLI.",
-        adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
+        cli_install_hint: "Mesh talks to Codex through the Codex CLI.",
+        adapter_install_hint: "Mesh talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
         skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
@@ -180,7 +180,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     },
     KnownAcpRuntime {
         id: "buzz-agent",
-        label: "Buzz Agent",
+        label: "Mesh Agent",
         commands: &["buzz-agent"],
         aliases: &[],
         avatar_url: BUZZ_AGENT_AVATAR_URL,
@@ -192,7 +192,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_commands: &[],
         cli_install_instructions_url: "https://github.com/block/buzz",
         adapter_install_instructions_url: "https://github.com/block/buzz",
-        cli_install_hint: "Ships with the Buzz desktop app.",
+        cli_install_hint: "Ships with the Mesh desktop app.",
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: true,
@@ -1113,7 +1113,7 @@ pub fn missing_command_message(command: &str, role: &str) -> String {
     }
 
     format!(
-        "{role} `{command}` was not found. Make sure it is installed and on your PATH. Antivirus software can quarantine bundled binaries — if that happened, restore the file or reinstall Buzz. (Source builds: see TESTING.md.)"
+        "{role} `{command}` was not found. Make sure it is installed and on your PATH. Antivirus software can quarantine bundled binaries — if that happened, restore the file or reinstall Mesh. (Source builds: see TESTING.md.)"
     )
 }
 
@@ -1143,7 +1143,7 @@ pub(crate) fn classify_runtime(
     }
 }
 
-/// The oldest `codex-acp` version supported by Buzz managed agents.
+/// The oldest `codex-acp` version supported by Mesh managed agents.
 ///
 /// Older 1.x adapters are detected successfully, but can still bundle a Codex runtime
 /// that does not reliably give `buzz` CLI subprocesses outbound relay access.

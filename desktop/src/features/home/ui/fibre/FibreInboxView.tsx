@@ -21,7 +21,6 @@ import {
   useFibreFeedbackMutation,
   useFibresQuery,
   usePatchFibreMutation,
-  useRestoreFibresMutation,
 } from "@/features/triage/hooks";
 import { useNow } from "@/shared/lib/useNow";
 
@@ -53,7 +52,6 @@ export function FibreInboxView({
   const { activeCommunity } = useCommunities();
   const fibresQuery = useFibresQuery(currentPubkey);
   const patchMutation = usePatchFibreMutation(currentPubkey);
-  const restoreMutation = useRestoreFibresMutation(currentPubkey);
   const feedbackMutation = useFibreFeedbackMutation();
   const { markSeen, seenAtById } = useFibreSeenState(
     currentPubkey,
@@ -260,7 +258,6 @@ export function FibreInboxView({
       <FibreDetailPane
         currentPubkey={currentPubkey}
         fibre={selected}
-        isZero={listTab === "open" && openCount === 0}
         listTab={listTab}
         nowMs={nowMs}
         profiles={profiles}
@@ -274,15 +271,6 @@ export function FibreInboxView({
         onDone={(fibre) => mark(fibre, "done", "Marked done")}
         onOpenContext={onOpenContext}
         onReopen={reopen}
-        onRestore={() => {
-          restoreMutation.mutate(undefined, {
-            onSuccess: () => toast.success("Restored triaged fibres"),
-            onError: (error) =>
-              toast.error(
-                error instanceof Error ? error.message : "Restore failed",
-              ),
-          });
-        }}
       />
     </div>
   );

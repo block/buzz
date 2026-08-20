@@ -85,7 +85,7 @@ fn test_an_appimage_launch_forces_shared_memory_dmabuf_transport() {
     // No NVIDIA GPU: the AppImage signal has to carry this on its own, which is
     // #2338's reporter (Intel Mesa under the AppRun's pinned XWayland backend).
     let drm = drm(&["0x8086"]);
-    let env = env_from(&[("APPIMAGE", "/home/u/Buzz.AppImage")]);
+    let env = env_from(&[("APPIMAGE", "/home/u/Mesh.AppImage")]);
     let plan = plan(NO_ARGS, &env, drm.path());
 
     assert_eq!(

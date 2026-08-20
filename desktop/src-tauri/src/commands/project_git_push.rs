@@ -83,7 +83,7 @@ mod tests {
         run_git(
             &[
                 "-c",
-                "user.name=Buzz Test",
+                "user.name=Mesh Test",
                 "-c",
                 "user.email=test@example.com",
                 "commit",

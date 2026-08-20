@@ -13,7 +13,7 @@ const SHOTS = "test-results/byoh-after";
 const CATALOG = [
   {
     id: "buzz-agent",
-    label: "Buzz Agent",
+    label: "Mesh Agent",
     avatar_url: "",
     availability: "available",
     command: "buzz-agent",
@@ -71,7 +71,7 @@ const CATALOG = [
     default_args: ["acp"],
     mcp_command: null,
     install_hint:
-      "Buzz talks to Cursor through the cursor-agent CLI's ACP mode.",
+      "Mesh talks to Cursor through the cursor-agent CLI's ACP mode.",
     install_instructions_url: "https://cursor.com/downloads",
     can_auto_install: false,
     underlying_cli_path: null,
@@ -89,7 +89,7 @@ const CATALOG = [
     default_args: ["acp"],
     mcp_command: null,
     install_hint:
-      "Buzz talks to Oh My Pi through its CLI's ACP mode (omp acp).",
+      "Mesh talks to Oh My Pi through its CLI's ACP mode (omp acp).",
     install_instructions_url: "https://github.com/can1357/oh-my-pi",
     can_auto_install: false,
     underlying_cli_path: null,
@@ -107,7 +107,7 @@ const CATALOG = [
     default_args: ["acp"],
     mcp_command: null,
     install_hint:
-      "Buzz talks to OpenCode through its CLI's ACP mode (opencode acp).",
+      "Mesh talks to OpenCode through its CLI's ACP mode (opencode acp).",
     install_instructions_url: "https://opencode.ai/docs",
     can_auto_install: false,
     underlying_cli_path: null,

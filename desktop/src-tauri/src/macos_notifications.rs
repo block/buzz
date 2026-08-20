@@ -152,7 +152,7 @@ fn ensure_bundled_application() -> Result<(), String> {
         Ok(())
     } else {
         Err(
-            "macOS notifications are unavailable when Buzz is not running from an app bundle"
+            "macOS notifications are unavailable when Mesh is not running from an app bundle"
                 .to_string(),
         )
     }

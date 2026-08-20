@@ -829,7 +829,7 @@ const FIBRE_ENGINE_CORS = {
 };
 
 /**
- * Default empty fibre engine so `/` renders Inbox Zero without a live
+ * Default empty fibre engine so `/` renders an empty inbox without a live
  * triage-service. Specs that need seeded fibres should `page.route` the
  * same origin after `installMockBridge` so their handler wins.
  */

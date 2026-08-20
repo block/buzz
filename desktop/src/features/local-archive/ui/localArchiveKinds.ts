@@ -68,7 +68,7 @@ function kindLabel(kind: number): string {
     case 9:
       return "Stream messages (kind 9)";
     case 9005:
-      return "Buzz-native deletions (kind 9005)";
+      return "Mesh-native deletions (kind 9005)";
     case 40002:
       return "Stream messages v2 (kind 40002)";
     case 40003:

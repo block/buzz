@@ -187,7 +187,7 @@ export function HostedCommunityOnboarding({
           hostedCommunityErrorMessage(
             response.error,
             response.correlation_id,
-            "Could not connect the Buzz identity.",
+            "Could not connect the Mesh identity.",
           ),
         );
       }
@@ -212,7 +212,7 @@ export function HostedCommunityOnboarding({
           hostedCommunityErrorMessage(
             released.error,
             released.correlation_id,
-            "Could not disconnect the account's previous Buzz identity.",
+            "Could not disconnect the account's previous Mesh identity.",
           ),
         );
       }
@@ -221,11 +221,11 @@ export function HostedCommunityOnboarding({
         await loadAccount();
         throw new Error(
           bound.error.code === "pubkey_already_bound"
-            ? "This device's Buzz identity belongs to a different Builderlab account and can't be moved from here. Sign out, then sign in with the account that already owns this identity."
+            ? "This device's Mesh identity belongs to a different Builderlab account and can't be moved from here. Sign out, then sign in with the account that already owns this identity."
             : hostedCommunityErrorMessage(
                 bound.error,
                 bound.correlation_id,
-                "Could not connect this device's Buzz identity.",
+                "Could not connect this device's Mesh identity.",
               ),
         );
       }
@@ -304,7 +304,7 @@ export function HostedCommunityOnboarding({
           hostedCommunityErrorMessage(
             available.error,
             available.correlation_id,
-            "That Buzz address is already taken.",
+            "That Mesh address is already taken.",
           ),
         );
       }
@@ -484,7 +484,7 @@ export function HostedCommunityOnboarding({
               <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
                 Sign in to connect a community you already own or create a new
                 one. We’ll open Builderlab in your browser, then bring you back
-                to Buzz.
+                to Mesh.
               </DialogDescription>
               {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
               {action === "Signing in…" ? (
@@ -503,22 +503,22 @@ export function HostedCommunityOnboarding({
                   Sign in to continue
                 </Button>
               )}
-              {/* Quiet breadcrumb: Buzz itself is open source; this hosted
+              {/* Quiet breadcrumb: Mesh itself is open source; this hosted
                     relay is the one account-backed piece of the flow. */}
               <p className="mt-6 w-full border-t border-foreground/10 pt-4 text-xs leading-5 text-foreground/45">
-                Buzz is open source. Builderlab hosts the relay for this
+                Mesh is open source. Builderlab hosts the relay for this
                 account.
               </p>
             </>
           ) : !identity ? (
             <>
               <DialogTitle className="text-xl font-medium text-foreground">
-                Finish connecting Buzz
+                Finish connecting Mesh
               </DialogTitle>
               <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
                 Your Builderlab account
                 {auth.email ? ` (${auth.email})` : ""} is ready. Connect this
-                device’s Buzz identity to finish setup. Your private key stays
+                device’s Mesh identity to finish setup. Your private key stays
                 on this device.
               </DialogDescription>
               {errorBox ? <div className="mt-5 w-full">{errorBox}</div> : null}
@@ -536,10 +536,10 @@ export function HostedCommunityOnboarding({
           ) : (
             <>
               <DialogTitle className="text-xl font-medium text-foreground">
-                This account uses a different Buzz identity
+                This account uses a different Mesh identity
               </DialogTitle>
               <DialogDescription className="mt-2 text-sm leading-6 text-foreground">
-                This account is connected to another Buzz identity. Reconnect
+                This account is connected to another Mesh identity. Reconnect
                 this device, or sign out to use a different email.
               </DialogDescription>
               <p className="mt-4 w-full break-all rounded-xl bg-[rgb(var(--buzz-hosted-community-identity-bg)/0.5)] px-4 py-3 text-left font-mono text-xs text-foreground">
@@ -586,7 +586,7 @@ export function HostedCommunityOnboarding({
       <p className="mx-auto mt-2 max-w-[560px] text-sm leading-6 text-foreground">
         {hasCommunities
           ? "Connect one you own, or start something new."
-          : "Claim a Buzz address to get started."}
+          : "Claim a Mesh address to get started."}
       </p>
 
       <div className="flex w-full flex-1 flex-col justify-center text-left">

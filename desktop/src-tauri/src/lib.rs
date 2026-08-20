@@ -452,7 +452,7 @@ pub fn run() {
                     .store(port, std::sync::atomic::Ordering::Relaxed);
             });
 
-            // Create the Buzz nest (~/.buzz or ~/.buzz-dev for dev builds) before
+            // Create the Mesh nest (~/.buzz or ~/.buzz-dev for dev builds) before
             // agents are restored, so default_agent_workdir() resolves to the
             // nest directory. Non-fatal: agents fall back to $HOME if nest
             // creation fails.

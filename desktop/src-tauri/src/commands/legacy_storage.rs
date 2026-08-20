@@ -165,7 +165,7 @@ fn merge_legacy_workspace_storage(
 }
 
 /// Return workspace-scoped localStorage values from the legacy Sprout WebKit
-/// data directory so the frontend can seed Buzz localStorage before first
+/// data directory so the frontend can seed Mesh localStorage before first
 /// render. This is separate from `migrate_legacy_app_data_dir`: Tauri app data
 /// migration copies files such as `identity.key`, but WebKit localStorage lives
 /// under `~/Library/WebKit/<identifier>/...` on macOS and is not included in the

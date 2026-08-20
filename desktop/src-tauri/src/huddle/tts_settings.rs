@@ -224,7 +224,7 @@ pub(crate) fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|dir| dir.join(SETTINGS_FILE))
-        .map_err(|error| format!("could not locate Buzz settings storage: {error}"))
+        .map_err(|error| format!("could not locate Mesh settings storage: {error}"))
 }
 
 pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
@@ -248,7 +248,7 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
         .ok_or("text-to-speech settings version is invalid")?;
     if version > u64::from(CURRENT_VERSION) {
         return Err(format!(
-            "text-to-speech settings version {version} is newer than this Buzz build supports"
+            "text-to-speech settings version {version} is newer than this Mesh build supports"
         ));
     }
 
@@ -897,7 +897,7 @@ mod tests {
         .expect("fixture write");
         assert!(load_from_path(&path)
             .expect_err("future version should fail")
-            .contains("newer than this Buzz build supports"));
+            .contains("newer than this Mesh build supports"));
     }
 
     #[test]

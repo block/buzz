@@ -40,7 +40,7 @@ function isSafeSnapshotUrl(value: string): boolean {
   }
 }
 
-/** Build Buzz-specific clipboard HTML with the raw URL as its visible link. */
+/** Build Mesh-specific clipboard HTML with the raw URL as its visible link. */
 export function buildSnapshotClipboardHtml({
   attachment,
   displayName,

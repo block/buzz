@@ -45,7 +45,7 @@ const BLOB_KEY: &str = "secrets";
 
 // ── Interprocess advisory lock ─────────────────────────────────────────────
 //
-// Two concurrent Buzz processes (e.g. the signed DMG build and an unsigned dev
+// Two concurrent Mesh processes (e.g. the signed DMG build and an unsigned dev
 // build via `just staging`) share the same OS keychain blob because the
 // service name `"buzz-desktop"` is a constant — it does not key off the bundle
 // identifier. Each process holds its own in-memory cache, so without an

@@ -5,7 +5,7 @@
 //! Precedence: desktop parent env < persona env < agent env (last wins on
 //! key collision). See `runtime::spawn_agent_child`.
 //!
-//! A small set of *reserved* keys includes Buzz's identity, secrets, security
+//! A small set of *reserved* keys includes Mesh's identity, secrets, security
 //! gates, and control-plane values. Save-time validation rejects those keys.
 //! Runtime filtering strips old persisted overrides. Behavior knobs
 //! (GOOSE_MODE, BUZZ_ACP_MODEL, BUZZ_ACP_SYSTEM_PROMPT, …) remain freely
@@ -143,7 +143,7 @@ pub fn validate_user_env_keys(env_vars: &BTreeMap<String, String>) -> Result<(),
     reserved.dedup();
     if !reserved.is_empty() {
         return Err(format!(
-            "the following env vars are reserved by Buzz and cannot be overridden: {}",
+            "the following env vars are reserved by Mesh and cannot be overridden: {}",
             reserved.join(", ")
         ));
     }

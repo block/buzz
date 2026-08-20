@@ -134,7 +134,7 @@ function useBootSplashHold(): BootSplashPhase {
   return phase;
 }
 
-// Animated Buzz mark for the loading gates. The static BuzzMark renders in
+// Animated Mesh mark for the loading gates. The static BuzzMark renders in
 // normal flow and sizes the box — it's plain SVG (no JS/SMIL), so it paints on
 // the very first frame even before scripting starts, avoiding a blank flash on
 // hard reload. The animated FuzzyLogo is layered on top and takes over once it

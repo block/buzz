@@ -18,7 +18,7 @@ const double _searchCompactTextInset =
 
 /// Buzz's global-search text field treatment, shared by search-like inputs.
 class BuzzSearchField extends StatelessWidget {
-  /// Creates a search field with Buzz's shared styling.
+  /// Creates a search field with Mesh's shared styling.
   const BuzzSearchField({
     required this.controller,
     required this.focusNode,

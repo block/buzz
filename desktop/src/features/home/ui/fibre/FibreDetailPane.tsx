@@ -27,7 +27,6 @@ const SHORTCUT_KBD =
 type FibreDetailPaneProps = {
   currentPubkey?: string;
   fibre: Fibre | null;
-  isZero: boolean;
   listTab: "open" | "done";
   nowMs: number;
   profiles?: UserProfileLookup;
@@ -39,7 +38,6 @@ type FibreDetailPaneProps = {
     threadRootId?: string | null,
   ) => void;
   onReopen: (fibre: Fibre) => void;
-  onRestore: () => void;
 };
 
 function ScoreMeter({ color, score }: { color: string; score: number }) {
@@ -63,14 +61,12 @@ function ScoreMeter({ color, score }: { color: string; score: number }) {
 export function FibreDetailPane({
   currentPubkey,
   fibre,
-  isZero,
   listTab,
   nowMs,
   onDone,
   onDismiss,
   onOpenContext,
   onReopen,
-  onRestore,
   profiles,
 }: FibreDetailPaneProps) {
   const [artifactsOpen, setArtifactsOpen] = React.useState(true);
@@ -188,33 +184,8 @@ export function FibreDetailPane({
     );
   }
 
-  if (isZero || !fibre) {
-    return (
-      <div
-        className="flex flex-1 items-center justify-center p-10"
-        data-testid="fibre-zero"
-      >
-        <div className="inbox-zero-copy max-w-sm text-center">
-          <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-muted text-primary">
-            <Info className="h-6 w-6" />
-          </div>
-          <div className="text-xl font-medium tracking-tight">Inbox Zero</div>
-          <p className="mt-2.5 text-sm leading-relaxed text-muted-foreground">
-            Every idea, decision and ask from your channels has been triaged.
-            Buzz keeps reading; new fibres arrive as your team moves.
-          </p>
-          <Button
-            className="mt-5"
-            data-testid="fibre-restore"
-            onClick={onRestore}
-            type="button"
-            variant="secondary"
-          >
-            Restore triaged fibres
-          </Button>
-        </div>
-      </div>
-    );
+  if (!fibre) {
+    return <div className="min-h-0 min-w-0 flex-1" data-testid="fibre-zero" />;
   }
 
   const kind = fibreKindMeta(fibre.kind);

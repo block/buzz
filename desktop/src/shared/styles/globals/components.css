@@ -303,7 +303,7 @@
 
   .buzz-onboarding-neutral-theme {
     /* Landing "chartreuse" — the welcome background; reused for the CTA label. */
-    --buzz-welcome-chartreuse: #d7d72e;
+    --buzz-welcome-chartreuse: #d8b4fe;
     /* Bottom stop of the onboarding shell gradient; also the docked-footer
        scrim color so content scrolling under the CTA fades into the page. */
     --buzz-onboarding-shell-bottom: #d7e7f6;
@@ -311,7 +311,7 @@
     --buzz-onboarding-cta-label: #d7e6f0;
     /* Olive ink for the backup step's private key and its "never share" caption,
        reading against the fuzzy-white key frame. */
-    --buzz-onboarding-backup-ink: #717106;
+    --buzz-onboarding-backup-ink: #5c3d78;
     --background: 0 0% 100%;
     --foreground: 0 0% 9%;
     --primary: 0 0% 9%;

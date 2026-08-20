@@ -684,7 +684,7 @@ pub(crate) fn compare_local_remote_status(
 }
 
 /// The viewer's configured git identity (`user.name` / `user.email`), used by
-/// the frontend to attribute their own commits to their Buzz profile when git
+/// the frontend to attribute their own commits to their Mesh profile when git
 /// author strings don't match any relay profile fields.
 #[tauri::command]
 pub async fn get_git_identity(state: State<'_, AppState>) -> Result<GitIdentityInfo, String> {

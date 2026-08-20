@@ -163,7 +163,7 @@ class _StandaloneSheetDragHandle extends StatelessWidget {
   }
 }
 
-/// Shows a dialog with Buzz's shared motion, respecting reduced-motion settings.
+/// Shows a dialog with Mesh's shared motion, respecting reduced-motion settings.
 Future<T?> showBuzzDialog<T>({
   required BuildContext context,
   required WidgetBuilder builder,

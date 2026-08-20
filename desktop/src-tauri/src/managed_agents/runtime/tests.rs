@@ -1052,7 +1052,7 @@ fn invalid_pubkey_resolves_no_pair_key() {
 
 #[test]
 fn kill_stale_custom_harness_with_marker_is_terminated() {
-    // A record with a PID not in the live runtime map and with the Buzz marker
+    // A record with a PID not in the live runtime map and with the Mesh marker
     // should be terminated even though the binary name is not in KNOWN_AGENT_BINARIES.
     let mut record = minimal_record("pubkey-custom");
     record.runtime_pid = Some(9001);

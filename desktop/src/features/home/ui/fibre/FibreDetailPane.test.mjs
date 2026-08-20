@@ -1,5 +1,5 @@
 /**
- * Fibre detail pane: Inbox Zero empty state and Done from a fixture fibre.
+ * Fibre detail pane: empty open inbox and Done from a fixture fibre.
  * Keyboard Done is covered in the fibre-inbox Playwright spec.
  */
 
@@ -35,14 +35,12 @@ function renderPane(props) {
       { client: lastClient },
       createElement(FibreDetailPane, {
         fibre: null,
-        isZero: true,
         listTab: "open",
         nowMs: NOW,
         onDismiss: () => {},
         onDone: () => {},
         onOpenContext: () => {},
         onReopen: () => {},
-        onRestore: () => {},
         ...props,
       }),
     ),
@@ -84,16 +82,12 @@ afterEach(() => {
 });
 after(() => dom.window.close());
 
-test("Inbox Zero offers restore", () => {
-  const restored = [];
-  renderPane({
-    onRestore: () => restored.push(true),
-  });
+test("empty open inbox has no Inbox Zero copy", () => {
+  renderPane();
 
   assert.ok(screen.getByTestId("fibre-zero"));
-  assert.match(screen.getByTestId("fibre-zero").textContent, /Inbox Zero/);
-  fireEvent.click(screen.getByTestId("fibre-restore"));
-  assert.equal(restored.length, 1);
+  assert.equal(screen.getByTestId("fibre-zero").textContent, "");
+  assert.equal(screen.queryByTestId("fibre-restore"), null);
 });
 
 test("Done shortcut inherits button color", () => {
@@ -118,7 +112,6 @@ test("Done shortcut inherits button color", () => {
 
   renderPane({
     fibre,
-    isZero: false,
   });
 
   const kbd = screen.getByTestId("fibre-done-kbd");
@@ -154,7 +147,6 @@ test("completed fibre offers Reopen instead of Done", () => {
 
   renderPane({
     fibre,
-    isZero: false,
     listTab: "done",
     onReopen: (item) => reopened.push(item.id),
   });

@@ -16,7 +16,7 @@ test("normal first launch uses the already-persisted identity", async ({
 
   const gate = page.getByTestId("machine-onboarding-gate");
   await expect(gate).toBeVisible();
-  await expect(gate).toHaveCSS("background-color", "rgb(215, 215, 46)");
+  await expect(gate).toHaveCSS("background-color", "rgb(216, 180, 254)");
   // Landing carries a subtle dot-grid pattern over the chartreuse fill.
   await expect(gate).toHaveCSS("background-image", /radial-gradient/);
   await expect(gate).toHaveCSS("color", "rgb(23, 23, 23)");
@@ -33,7 +33,7 @@ test("normal first launch uses the already-persisted identity", async ({
   // Non-landing pages layer the dot grid over the chartreuse→light-blue gradient.
   await expect(gate).toHaveCSS(
     "background-image",
-    /radial-gradient\(.*\), linear-gradient\(.*rgb\(215, 215, 46\).*rgb\(215, 231, 246\)\)/s,
+    /radial-gradient\(.*\), linear-gradient\(.*rgb\(216, 180, 254\).*rgb\(215, 231, 246\)\)/s,
   );
   await expect(gate).toHaveCSS("color", "rgb(23, 23, 23)");
   const commands = await page.evaluate(
@@ -111,7 +111,7 @@ test("lost boot offers phone recovery with a single-use QR", async ({
   await expect(page.getByTestId("identity-recovery-pairing")).toBeVisible();
   await expect(page.getByTestId("identity-recovery-qr")).toBeVisible();
   await expect(
-    page.getByText("Scan this code with a signed-in Buzz phone."),
+    page.getByText("Scan this code with a signed-in Mesh phone."),
   ).toBeVisible();
   await expect(
     page.getByText("On your phone, open Settings → Send identity to desktop."),
@@ -201,7 +201,7 @@ test("phone recovery uses the desktop pairing card semantics", async ({
   ).toBeVisible();
   await expect(
     card.getByText(
-      "This gives this desktop permanent access to your Buzz identity. Only continue if you trust it.",
+      "This gives this desktop permanent access to your Mesh identity. Only continue if you trust it.",
     ),
   ).toBeVisible();
   await expect(

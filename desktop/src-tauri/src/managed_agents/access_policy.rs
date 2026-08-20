@@ -27,7 +27,7 @@
 //! The harness gate this projection targets admits the human owner *and* every
 //! cryptographically NIP-OA-verified agent that shares that owner (see
 //! `crates/buzz-acp/src/lib.rs`). That is the intended boundary, not an
-//! oversight: an owner's own agents are inside their trust boundary, and Buzz's
+//! oversight: an owner's own agents are inside their trust boundary, and Mesh's
 //! built-in Welcome team relies on it, because the lead instructs its teammates
 //! while every teammate is created owner-only (see
 //! `welcomeTeammateHasExpectedAccess` in

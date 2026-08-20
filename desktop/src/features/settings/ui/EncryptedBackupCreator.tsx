@@ -277,7 +277,7 @@ export function EncryptedBackupCreator({
         <DialogHeader className="pr-8">
           <DialogTitle>Create a key backup</DialogTitle>
           <DialogDescription>
-            You can close this window while Buzz finishes the backup in the
+            You can close this window while Mesh finishes the backup in the
             background.
           </DialogDescription>
         </DialogHeader>
@@ -331,7 +331,7 @@ export function EncryptedBackupCreator({
 
           {!state.downloadPending && !state.savedPassword ? (
             <p className="text-xs leading-5 text-muted-foreground">
-              Keep the file private and save its password somewhere safe — Buzz
+              Keep the file private and save its password somewhere safe — Mesh
               cannot reset it. Once ready, the backup remains available to
               download for 5 minutes.
             </p>

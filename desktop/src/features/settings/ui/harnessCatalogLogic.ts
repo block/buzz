@@ -164,7 +164,7 @@ export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
 export function adapterUpdateWarning(entry: AcpRuntimeCatalogEntry): string {
   if (entry.id === "codex") {
     return (
-      "This replaces the machine-wide codex-acp adapter. Older Buzz " +
+      "This replaces the machine-wide codex-acp adapter. Older Mesh " +
       "releases using the legacy adapter may lose community access until " +
       "@zed-industries/codex-acp@0.16.0 is restored."
     );

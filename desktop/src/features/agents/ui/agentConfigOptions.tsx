@@ -147,7 +147,7 @@ export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
   { id: "openrouter", label: "OpenRouter" },
-  { id: "relay-mesh", label: "Buzz shared compute" },
+  { id: "relay-mesh", label: "Mesh shared compute" },
   { id: "databricks", label: "Databricks" },
   { id: "databricks_v2", label: "Databricks v2" },
 ];
@@ -314,7 +314,7 @@ export function providerRequiresExplicitModel(
 export function providerDisplayLabel(providerId: string) {
   const trimmedProvider = providerId.trim();
   return trimmedProvider === "relay-mesh"
-    ? "Buzz shared compute"
+    ? "Mesh shared compute"
     : trimmedProvider;
 }
 
@@ -708,7 +708,7 @@ export function computeLocalModeGate({
    * row remains stable while the user types a value.
    */
   requiredEnvKeys: string[];
-  /** Env keys that are not set in Buzz but are satisfied in the runtime's
+  /** Env keys that are not set in Mesh but are satisfied in the runtime's
    *  config file (e.g. "Set in goose config"). */
   fileSatisfiedEnvKeys: string[];
   /** True when the create button may be enabled (from this gate's perspective). */

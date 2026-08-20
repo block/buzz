@@ -289,7 +289,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
         MeshRuntimeRecovery::RestartRequired => {
             if runtime_mode == Some(crate::mesh_llm::MeshNodeMode::Serve) {
                 eprintln!(
-                    "buzz-mesh: serving ingress failed; restarting Buzz to restore Share Compute without changing roles"
+                    "buzz-mesh: serving ingress failed; restarting Mesh to restore Share Compute without changing roles"
                 );
                 app.request_restart();
                 return Ok(());
@@ -304,7 +304,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
                 return Ok(());
             }
             eprintln!(
-                "buzz-mesh: supervised client startup lost its ingress before the SDK exposed a shutdown handle; restarting Buzz"
+                "buzz-mesh: supervised client startup lost its ingress before the SDK exposed a shutdown handle; restarting Mesh"
             );
             app.request_restart();
             return Ok(());
@@ -349,7 +349,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
             }
             Err(error) => {
                 let message = format!(
-                    "{MESH_REARM_ERROR_SENTINEL}Buzz shared compute offline — failed to re-arm local ingress for this agent: {error}"
+                    "{MESH_REARM_ERROR_SENTINEL}Mesh shared compute offline — failed to re-arm local ingress for this agent: {error}"
                 );
                 if let Err(persist_error) = persist_mesh_last_error(app, &record.pubkey, &message) {
                     eprintln!("buzz-mesh: failed to persist recovery error: {persist_error}");

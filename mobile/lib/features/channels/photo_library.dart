@@ -11,7 +11,7 @@ const _photoPermissionRequest = PermissionRequestOption(
   ),
 );
 
-/// A recent photo exposed to Buzz's compact in-composer gallery.
+/// A recent photo exposed to Mesh's compact in-composer gallery.
 @immutable
 class RecentPhoto {
   /// The platform photo-library identifier.
@@ -39,7 +39,7 @@ class PhotoLibraryAccessException implements Exception {
   const PhotoLibraryAccessException();
 
   @override
-  String toString() => 'Photo access is turned off for Buzz.';
+  String toString() => 'Photo access is turned off for Mesh.';
 }
 
 /// Provides the device photo library. Tests can override this with fixtures.

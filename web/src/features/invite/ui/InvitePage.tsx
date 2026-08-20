@@ -188,7 +188,7 @@ export function InvitePage({ code }: { code: string }) {
     <div
       className="flex flex-1 flex-col items-center justify-center px-4 py-16 text-center"
       style={{
-        backgroundImage: "linear-gradient(180deg, #D7D72E 0%, #D7E7F6 100%)",
+        backgroundImage: "linear-gradient(180deg, #D8B4FE 0%, #D7E7F6 100%)",
       }}
     >
       <div className="w-full max-w-xl space-y-4">
@@ -197,7 +197,7 @@ export function InvitePage({ code }: { code: string }) {
             className="h-12 w-12 overflow-hidden bg-black"
             style={{ borderRadius: "22.37%" }}
           >
-            <img alt="Buzz" className="h-full w-full" src={buzzAppIcon} />
+            <img alt="Mesh" className="h-full w-full" src={buzzAppIcon} />
           </div>
           <h1 className="mt-4 text-2xl font-semibold tracking-tight text-black">
             You&apos;re invited to
@@ -247,7 +247,7 @@ export function InvitePage({ code }: { code: string }) {
                 <a
                   href={`buzz://join?relay=${encodeURIComponent(relay)}&code=${encodeURIComponent(code)}`}
                 >
-                  Accept invite in Buzz
+                  Accept invite in Mesh
                 </a>
               </Button>
             ) : (
@@ -260,7 +260,7 @@ export function InvitePage({ code }: { code: string }) {
                 disabled={disabled}
                 onClick={openInvite}
               >
-                Accept invite in Buzz
+                Accept invite in Mesh
               </Button>
             )}
             {browserJoinError ? (

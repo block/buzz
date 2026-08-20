@@ -715,7 +715,7 @@ fn legacy_env_sniff_prefers_renamed_provider_key_over_stale_old_key() {
 }
 
 /// Class A negative: a user's own OpenAI-compatible provider on the same local
-/// port is not Buzz's preset — the placeholder API key is the discriminator.
+/// port is not Mesh's preset — the placeholder API key is the discriminator.
 #[test]
 fn legacy_env_sniff_ignores_user_openai_on_same_local_port() {
     let mut rec = record(None, None, None, None);
@@ -732,7 +732,7 @@ fn legacy_env_sniff_ignores_user_openai_on_same_local_port() {
     assert_eq!(
         resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)),
         None,
-        "a real user key on the mesh port must not be mistaken for Buzz's preset"
+        "a real user key on the mesh port must not be mistaken for Mesh's preset"
     );
 }
 
