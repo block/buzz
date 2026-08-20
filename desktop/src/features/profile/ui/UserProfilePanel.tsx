@@ -73,6 +73,7 @@ import {
   deriveProfileChannels,
   type ProfilePanelTab,
   type ProfilePanelView,
+  profileAgentEditTarget,
   profilePanelTargetKey,
   resolveAgentInstruction,
   resolvePanelProfile,
@@ -406,9 +407,21 @@ export function UserProfilePanel({
     return true;
   }, [managedAgent, resolvedPersona]);
   const handleEditAgent = React.useCallback(() => {
-    if (openResolvedPersonaEditor()) return;
-    setEditAgentOpen(true);
-  }, [openResolvedPersonaEditor, setEditAgentOpen]);
+    const editTarget = profileAgentEditTarget(
+      managedAgent !== undefined,
+      resolvedPersona !== undefined,
+    );
+    if (editTarget === "instance") {
+      setEditAgentOpen(true);
+      return;
+    }
+    if (editTarget === "definition") openResolvedPersonaEditor();
+  }, [
+    managedAgent,
+    openResolvedPersonaEditor,
+    resolvedPersona,
+    setEditAgentOpen,
+  ]);
   const { deleteManagedAgentRecord, deleteManagedAgentsForPersona } =
     useProfileAgentDeletion({
       channels: channelsQuery.data,

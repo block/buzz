@@ -95,6 +95,15 @@ export function profilePanelTargetKey(
   return pubkey ?? `persona:${personaId ?? "unknown"}`;
 }
 
+export function profileAgentEditTarget(
+  hasManagedAgent: boolean,
+  hasResolvedPersona: boolean,
+): "instance" | "definition" | null {
+  if (hasManagedAgent) return "instance";
+  if (hasResolvedPersona) return "definition";
+  return null;
+}
+
 export type UserProfilePanelProps = {
   canResetWidth?: boolean;
   currentPubkey?: string;

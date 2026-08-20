@@ -5,10 +5,18 @@ import {
   parseProfilePanelTab,
   parseProfilePanelView,
   personaManagedAgentUpdate,
+  profileAgentEditTarget,
   profilePanelTabFromSearch,
   profilePanelTargetKey,
   profilePanelViewFromSearch,
 } from "./UserProfilePanelUtils.ts";
+
+test("profile edit targets the deployed instance before its linked definition", () => {
+  assert.equal(profileAgentEditTarget(true, true), "instance");
+  assert.equal(profileAgentEditTarget(true, false), "instance");
+  assert.equal(profileAgentEditTarget(false, true), "definition");
+  assert.equal(profileAgentEditTarget(false, false), null);
+});
 
 function agent(overrides = {}) {
   return {
