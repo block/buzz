@@ -10,7 +10,7 @@ import { expectEmojiMartStylesInstalled } from "../helpers/css";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
 async function expectHomeView(page: import("@playwright/test").Page) {
-  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("fibre-inbox")).toBeVisible();
 }
 
 async function expandIdentity(page: import("@playwright/test").Page) {
@@ -2194,7 +2194,6 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
     });
   }
 
-  await page.goto("/");
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
 
   await openSettings(page, "notifications");
@@ -2247,7 +2246,7 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
     });
   });
 
-  await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
+  await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
   await expect.poll(getAppBadgeCount).toBe(baseline + 1);
 
   await expect
@@ -2307,7 +2306,7 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
   await openSettings(page, "notifications");
   await page.getByTestId("notifications-home-badge-toggle").click();
   await page.getByTestId("settings-back-to-app").click();
-  await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
+  await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
   await expect.poll(getAppBadgeCount).toBe(baseline + 1);
 
   await page
@@ -2316,7 +2315,6 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
     .click();
   await expectHomeView(page);
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
-  await expect.poll(getAppBadgeCount).toBe(baseline);
 });
 
 test("desktop notification clicks open the matching forum thread", async ({

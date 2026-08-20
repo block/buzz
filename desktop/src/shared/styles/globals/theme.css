@@ -965,3 +965,51 @@
   padding-block: var(--buzz-huddle-drawer-inset);
   padding-inline: var(--buzz-huddle-drawer-inset);
 }
+
+/*
+ * Inbox Zero: fade the whole app surface to the starry-sky photo. The image
+ * lives on the same non-fixed 100vw x 100vh layer as the Buzz gradient so
+ * WKWebView does not keep a stale `background-attachment: fixed` raster.
+ */
+.inbox-zero-wallpaper {
+  background-image: url("/inbox-zero-backgrounds/starry-sky.jpg");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 100vw 100vh;
+  opacity: 0;
+  transition: opacity 700ms ease;
+}
+
+.inbox-zero-wallpaper::after {
+  background: rgb(6 10 22 / 28%);
+  content: "";
+  inset: 0;
+  position: absolute;
+}
+
+:root[data-inbox-zero] .inbox-zero-wallpaper {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inbox-zero-wallpaper {
+    transition: none;
+  }
+}
+
+:root[data-inbox-zero] [data-buzz-content-surface],
+:root[data-inbox-zero][data-buzz-sidebar].dark [data-buzz-content-surface],
+:root[data-inbox-zero] [data-buzz-glass-inset],
+:root[data-inbox-zero] [data-testid="app-sidebar"],
+:root[data-inbox-zero] [data-testid="community-rail"],
+:root[data-inbox-zero] [data-testid="app-top-chrome"],
+:root[data-inbox-zero] .buzz-huddle-app-surface {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+:root[data-inbox-zero] .inbox-zero-copy {
+  text-shadow: 0 1px 8px rgb(0 0 0 / 55%);
+}
+

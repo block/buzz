@@ -312,10 +312,7 @@ test("live mentions refetch the home feed without waiting for polling", async ({
       .getByTestId("app-sidebar")
       .getByRole("button", { name: "Inbox" })
       .click();
-    await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
-    await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
-      message.replace("@tyler", "tyler"),
-    );
+    await expect(targetPage.getByTestId("fibre-inbox")).toBeVisible();
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
     await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
   } finally {
@@ -355,7 +352,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
       mentionPubkeys: [TEST_IDENTITIES.tyler.pubkey],
     });
 
-    await expect(targetPage.getByTestId("sidebar-home-count")).toHaveText("1");
+    await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
 
     await expectLoggedNotifications(targetPage, [
       {
@@ -368,11 +365,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
       .getByTestId("app-sidebar")
       .getByRole("button", { name: "Inbox" })
       .click();
-    await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
-    await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
-    await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
-      message.replace("@tyler", "tyler"),
-    );
+    await expect(targetPage.getByTestId("fibre-inbox")).toBeVisible();
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
     await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
   } finally {

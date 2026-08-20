@@ -2,7 +2,7 @@
 
 ## The Problem
 
-When you delegate work to an agent, you are trusting a process you cannot see. The activity feed is the window into that process — but a window is only useful if you can read it at a glance. A raw input/output dump is not a window; it is a transcript you have to decode. It forces you to *parse* before you can *judge*.
+When you delegate work to an agent, you are trusting a process you cannot see. The activity feed is the window into that process — but a window is only useful if you can read it at a glance. A raw input/output dump is not a window; it is a transcript you have to decode. It forces you to _parse_ before you can _judge_.
 
 We wanted a feed you supervise the way you supervise a capable teammate: skim for progress, trust the routine, and catch the one thing that needs you — without reading every line.
 
@@ -10,9 +10,10 @@ We wanted a feed you supervise the way you supervise a capable teammate: skim fo
 
 A developer supervising a delegate. They are not watching for entertainment; they are deciding whether to intervene. Every item in the feed earns its pixels by answering one of three questions:
 
-- **Comprehension** — *what is it doing, and why?*
-- **Confidence** — *is it going well, or is it stuck or wrong?*
-- **Control** — *do I need to step in, and where?*
+- **Comprehension** — _what is it doing, and why?_
+
+- **Confidence** — _is it going well, or is it stuck or wrong?_
+- **Control** — _do I need to step in, and where?_
 
 A feed that answers these instantly converts a stream of events into a sense of trajectory. A feed that does not is just noise with a scrollbar.
 
@@ -38,13 +39,13 @@ These are not a wish list. They are the complete taxonomy: every event the agent
 
 ## Design Principles
 
-- **Semantics over transport.** Render *what the agent did*, not *which API it used*. A message sent through an MCP tool and the same message sent through a shell `buzz` command render as the identical card. How the agent reached the relay is plumbing; what it did is the contract.
+- **Semantics over transport.** Render _what the agent did_, not _which API it used_. A message sent through an MCP tool and the same message sent through a shell `buzz` command render as the identical card. How the agent reached the relay is plumbing; what it did is the contract.
 
 - **Outcome-first.** Lead with success, failure, or result. The reader decides in under a second whether to expand. The raw dump is the fallback, never the headline.
 
 - **Mutate in place.** A running action updates its own row from pending to executing to done or failed. One action is one item, not a trail of duplicated status lines.
 
-- **Never go dark.** The absence of an event is itself information. Silence, idle, and timeout are *rendered states* — "waiting…", "timed out" — never an empty void. This mirrors the rule we hold our agents to: if you didn't show it, it didn't happen.
+- **Never go dark.** The absence of an event is itself information. Silence, idle, and timeout are _rendered states_ — "waiting…", "timed out" — never an empty void. This mirrors the rule we hold our agents to: if you didn't show it, it didn't happen.
 
 - **Failures rise; reads recede.** Salience tracks consequence. Admin actions, writes, and errors are loud. Reads and reasoning are quiet. A buried error is a broken feed.
 
@@ -58,7 +59,7 @@ These are not a wish list. They are the complete taxonomy: every event the agent
 
 ## What This Earns
 
-The feed's real job is to **earn delegation.** Visible progress, visible consent, and visible outcomes compound: each turn you watch go well makes you trust the agent with a larger one. Deciding what *not* to show — suppressing heartbeats and internal chatter — is as much a feature as deciding what to show, because suppression is what makes the signal legible.
+The feed's real job is to **earn delegation.** Visible progress, visible consent, and visible outcomes compound: each turn you watch go well makes you trust the agent with a larger one. Deciding what _not_ to show — suppressing heartbeats and internal chatter — is as much a feature as deciding what to show, because suppression is what makes the signal legible.
 
 A feed built this way is protocol-honest at its base: any compliant agent's messages, thoughts, tool calls, and turns become first-class items regardless of which tools it runs. The Buzz-specific richness — semantic relay cards, the buzz-CLI parser, diff rendering — is a layer of enrichment on top, not a requirement underneath. Non-Buzz agents get a correct, legible feed; Buzz agents get a native one.
 

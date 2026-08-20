@@ -16,6 +16,10 @@ export function GradientLayer() {
         className="buzz-theme-gradient-layer-dark absolute inset-0 opacity-0"
         data-buzz-gradient="dark"
       />
+      <div
+        className="inbox-zero-wallpaper absolute inset-0"
+        data-testid="inbox-zero-wallpaper"
+      />
     </div>
   );
 }

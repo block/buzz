@@ -48,6 +48,10 @@ bootstrap:
 setup: bootstrap
     ./scripts/dev-setup.sh
 
+# Provision the dev environment if needed, then start it (see dev-up.sh --help)
+up *ARGS:
+    ./scripts/dev-up.sh {{ARGS}}
+
 # Install git hooks via lefthook (dispatches from the shared .git/hooks dir so all
 # linked worktrees inherit the same hooks without a worktree-relative .hooks path)
 hooks:

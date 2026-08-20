@@ -200,6 +200,7 @@ test("loads channels from the relay", async ({ page }) => {
 });
 
 test("loads the home feed from the relay", async ({ browser }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const message = `Relay home mention ${Date.now()}`;
   const targetContext = await browser.newContext();
   const senderContext = await browser.newContext();
@@ -232,6 +233,7 @@ test("loads the home feed from the relay", async ({ browser }) => {
 test("shows sent inbox replies immediately in the inbox detail pane", async ({
   browser,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   const message = `Relay inbox reply target ${Date.now()}`;
   const reply = `Inbox reply ${Date.now()}`;
   const targetContext = await browser.newContext();

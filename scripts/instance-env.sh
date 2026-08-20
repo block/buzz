@@ -5,6 +5,7 @@
 #   BUZZ_RELAY_PORT, BUZZ_RELAY_URL
 #   BUZZ_INSTANCE_SLUG, BUZZ_WORKTREE_LABEL, VITE_DEV_BRANCH (worktrees only)
 #   BUZZ_TAURI_CONFIG
+#   BUZZ_TAURI_IDENTIFIER (optional override for the Tauri bundle id)
 #   BUZZ_PRIVATE_KEY (worktrees only, when BUZZ_SHARE_IDENTITY=1)
 
 WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
@@ -92,6 +93,19 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
             BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev.${BUZZ_INSTANCE_SLUG}\",\"productName\":\"Buzz Dev (${BUZZ_WORKTREE_LABEL})\",\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
         fi
     fi
+fi
+
+# Optional override so a checkout can reopen another branch's app-data
+# directory (and its saved communities) without changing tauri.dev.conf.json.
+if [[ -n "${BUZZ_TAURI_IDENTIFIER:-}" ]]; then
+    BUZZ_TAURI_CONFIG="$(
+        BUZZ_TAURI_CONFIG="$BUZZ_TAURI_CONFIG" python3 -c '
+import json, os
+config = json.loads(os.environ["BUZZ_TAURI_CONFIG"])
+config["identifier"] = os.environ["BUZZ_TAURI_IDENTIFIER"]
+print(json.dumps(config, separators=(",", ":")))
+'
+    )"
 fi
 
 export BUZZ_TAURI_CONFIG

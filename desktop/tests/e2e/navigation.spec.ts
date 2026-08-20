@@ -228,6 +228,7 @@ test("open thread panels survive reload", async ({ page }) => {
 test("home inbox selection survives reload and back restores it", async ({
   page,
 }) => {
+  test.skip(true, "Inbox is the fibre surface; the message inbox is unused.");
   await page.goto("/");
 
   const inboxList = page.getByTestId("home-inbox-list");

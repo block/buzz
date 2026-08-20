@@ -821,7 +821,49 @@ async function seedPreviewFeaturesEnabled(page: Page) {
   );
 }
 
+const FIBRE_ENGINE_CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
+  "access-control-allow-headers": "content-type",
+  "content-type": "application/json",
+};
+
+/**
+ * Default empty fibre engine so `/` renders Inbox Zero without a live
+ * triage-service. Specs that need seeded fibres should `page.route` the
+ * same origin after `installMockBridge` so their handler wins.
+ */
+async function mockEmptyFibreEngine(page: Page) {
+  await page.route(
+    /http:\/\/(?:localhost|127\.0\.0\.1):8787\/.*/,
+    async (route) => {
+      if (route.request().method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: FIBRE_ENGINE_CORS });
+        return;
+      }
+      const url = new URL(route.request().url());
+      const empty = {
+        fibres: [],
+        done: [],
+        openCount: 0,
+        doneCount: 0,
+        clearedCount: 0,
+        ingested: 0,
+      };
+      if (url.pathname === "/health") {
+        await route.fulfill({
+          headers: FIBRE_ENGINE_CORS,
+          json: { status: "ok" },
+        });
+        return;
+      }
+      await route.fulfill({ headers: FIBRE_ENGINE_CORS, json: empty });
+    },
+  );
+}
+
 export async function installBridge(page: Page, options: BridgeOptions) {
+  await mockEmptyFibreEngine(page);
   const identity =
     options.mode === "relay"
       ? TEST_IDENTITIES[options.user ?? "tyler"]
