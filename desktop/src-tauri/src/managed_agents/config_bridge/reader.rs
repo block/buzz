@@ -29,6 +29,7 @@ pub(crate) fn read_config_surface(
             "goose" => super::goose::read_config_file().map(|c| (c, true)),
             "claude" => super::claude::read_config_file(claude_config_dir).map(|c| (c, true)),
             "codex" => super::codex::read_config_file().map(|c| (c, true)),
+            "opencode" => super::opencode::read_config_file().map(|c| (c, true)),
             "buzz-agent" => super::buzz_agent::read_config_file().map(|c| (c, true)),
             _ => None,
         })
@@ -227,6 +228,13 @@ fn config_file_path_for_runtime(
             return Some(dir.join("settings.json").to_string_lossy().into_owned());
         }
     }
+    // OpenCode's config location moves with `$OPENCODE_CONFIG` and
+    // `$XDG_CONFIG_HOME`, so the static metadata path would name the wrong file
+    // on those setups. Ask the reader where it actually looked.
+    if runtime.id == "opencode" {
+        return super::opencode::opencode_config_path()
+            .map(|path| path.to_string_lossy().into_owned());
+    }
     runtime.config_file_path.map(resolve_tilde)
 }
 
@@ -254,6 +262,10 @@ fn mcp_config_file_path_for_runtime(
         ),
         "codex" => {
             super::codex::codex_config_path().map(|path| path.to_string_lossy().into_owned())
+        }
+        // OpenCode declares MCP servers in the same file as everything else.
+        "opencode" => {
+            super::opencode::opencode_config_path().map(|path| path.to_string_lossy().into_owned())
         }
         _ => None,
     }

@@ -1780,6 +1780,34 @@ pub async fn run_prompt_task(
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
+
+    // Per-turn model routing (opt-in via BUZZ_ROUTING_POLICY; see routing.rs).
+    //
+    // Deliberately does NOT override a live `switch_model`: if the operator (or
+    // the desktop ModelPicker) explicitly pinned a model for this agent,
+    // `model_overridden` is set and a router silently changing it would make the
+    // UI lie about what is running. Explicit human choice outranks the policy.
+    //
+    // The decision is expressed as `desired_model`, which the existing
+    // session-creation path validates against the agent's advertised catalog and
+    // applies — so a policy naming a model the provider does not offer degrades
+    // to the agent default with a warning rather than failing the turn.
+    if !agent.model_overridden {
+        if let Some(policy) = crate::routing::Policy::from_env() {
+            let routed_text = prompt_text.as_deref().unwrap_or_default();
+            if let Some(decision) = policy.decide(routed_text).await {
+                if agent.desired_model.as_deref() != Some(decision.model.as_str()) {
+                    tracing::info!(
+                        target: "acp::routing",
+                        model = %decision.model,
+                        reason = ?decision.reason,
+                        "routing selected a model for this turn"
+                    );
+                    agent.desired_model = Some(decision.model);
+                }
+            }
+        }
+    }
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,

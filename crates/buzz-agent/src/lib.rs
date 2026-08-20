@@ -12,7 +12,7 @@ pub mod model_capabilities;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry};
+pub use catalog::{discover_databricks_models, discover_openrouter_models, ModelEntry};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -351,6 +351,24 @@ fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
     vec![ModelEntry { id: model, name }]
 }
 
+/// Return the configured OpenRouter model as a one-entry catalog for this response.
+///
+/// Deliberately separate from [`configured_model_fallback`]: that one resolves its
+/// label against the Databricks manifest, which would be the wrong registry for an
+/// OpenRouter id. OpenRouter ids are already human-readable (`vendor/model`), so the
+/// configured value serves as both id and label.
+///
+/// Like the Databricks fallback, this is never written to `models_cache` — a failed
+/// discovery must be retried by the next session rather than pinning degraded state
+/// for the process lifetime.
+fn configured_openrouter_fallback(model: &str) -> Vec<ModelEntry> {
+    let model = model.trim().to_string();
+    vec![ModelEntry {
+        id: model.clone(),
+        name: model,
+    }]
+}
+
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
     let p: SessionNewParams = match decode(params, "session/new") {
         Ok(p) => p,
@@ -445,6 +463,36 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                             "Databricks model catalog unavailable; using configured model"
                         );
                         configured_model_fallback(&app.cfg.model)
+                    }
+                };
+                models
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            // OpenRouter authenticates with a required static `OPENROUTER_API_KEY`
+            // (`Config::from_env` fails without one) and has no interactive OAuth
+            // path, so an auth failure here can never be recovered by a later
+            // `session/prompt`. That makes this the static-credential case the
+            // Databricks arm rejects on, with no OAuth branch to fall back to.
+            Provider::OpenRouter => {
+                let models = match resolve_models_catalog(
+                    &app.models_cache,
+                    discover_openrouter_models(&app.cfg),
+                )
+                .await
+                {
+                    Ok(models) => models,
+                    Err(error @ AgentError::LlmAuth(_)) => {
+                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
+                            .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "OpenRouter model catalog unavailable; using configured model"
+                        );
+                        configured_openrouter_fallback(&app.cfg.model)
                     }
                 };
                 models
@@ -1010,6 +1058,20 @@ mod tests {
 
         assert_eq!(result, discovered);
         assert_eq!(cache.get(), Some(&discovered));
+    }
+
+    /// Discovery failure must still leave the picker able to represent the model
+    /// the agent is actually running. Moved here from `catalog.rs` when the
+    /// provider-aware `discovery_failure_fallback` was removed upstream.
+    #[test]
+    fn openrouter_fallback_is_the_configured_model() {
+        assert_eq!(
+            crate::configured_openrouter_fallback("  openai/gpt-5.6-luna  "),
+            vec![ModelEntry {
+                id: "openai/gpt-5.6-luna".into(),
+                name: "openai/gpt-5.6-luna".into(),
+            }]
+        );
     }
 
     #[test]

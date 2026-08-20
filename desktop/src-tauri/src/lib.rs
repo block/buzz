@@ -55,13 +55,7 @@ use builderlab::*;
 #[doc(hidden)]
 pub use commands::print_agent_access_owner_only_probe_if_requested;
 use commands::*;
-use deep_link::{
-    acknowledge_pending_community_deep_link, acknowledge_pending_entity_deep_link,
-    acknowledge_pending_navigation_deep_link, clear_pending_navigation_deep_links,
-    handle_deep_link_url, take_pending_community_deep_link, take_pending_entity_deep_link,
-    take_pending_navigation_deep_link, PendingCommunityDeepLinks, PendingEntityDeepLinks,
-    PendingNavigationDeepLinks,
-};
+use deep_link::*;
 use huddle::{
     add_agent_to_huddle,
     audio_output::{get_audio_output_device, list_audio_output_devices, set_audio_output_device},
@@ -711,6 +705,8 @@ pub fn run() {
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,
+            get_agent_routing_policy,
+            set_agent_routing_policy,
             persist_agent_effort_level,
             get_global_agent_config,
             set_global_agent_config,

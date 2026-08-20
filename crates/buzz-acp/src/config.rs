@@ -728,6 +728,22 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+/// Canonical harness *class* for a spawn command — the coarse bucket a harness
+/// dispatcher compares against, stable across binary-name variants.
+/// UNWIRED (decline-gate caller reverted 2026-08-08); kept for the dispatcher.
+#[allow(dead_code)]
+pub(crate) fn harness_class(command: &str) -> String {
+    let id = normalize_agent_command_identity(command);
+    match id.as_str() {
+        "codex" | "codex-acp" => "codex".to_string(),
+        "opencode" | "opencode-acp" => "opencode".to_string(),
+        "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+            "claude".to_string()
+        }
+        _ => id, // goose, buzz-agent, hermes, custom -> class == identity
+    }
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -1673,6 +1689,14 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn harness_class_folds_variants() {
+        assert_eq!(harness_class("codex-acp"), "codex");
+        assert_eq!(harness_class("/usr/local/bin/opencode"), "opencode");
+        assert_eq!(harness_class("claude-code-acp"), "claude");
+        assert_eq!(harness_class("goose"), "goose");
     }
 
     #[test]

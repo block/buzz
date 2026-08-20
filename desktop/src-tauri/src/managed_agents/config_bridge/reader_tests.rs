@@ -956,3 +956,6 @@ fn numeric_max_tokens_inherits_from_global_env() {
 // ── Extended tests (split file to respect line-count ratchet) ────────────────
 #[path = "reader_tests_ext.rs"]
 mod ext;
+
+#[path = "reader_tests_opencode.rs"]
+mod opencode_tests;

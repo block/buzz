@@ -38,6 +38,36 @@ const presetIds = [...presetBlock[1].matchAll(/^\s{8}id: "([^"]+)",$/gm)].map(
   (match) => match[1],
 );
 
+// A bundled logo is also legitimate for a KNOWN_ACP_RUNTIMES entry. `opencode`
+// lives there rather than in PRESET_HARNESSES so it can carry a
+// `config_file_path`, but it still ships a mark keyed by id in PRESET_LOGOS.
+// Only the reverse direction consults this list — every *preset* must still have
+// a logo, while a known runtime is free to use a remote avatar instead.
+const KNOWN_RUNTIMES_RS =
+  "src-tauri/src/managed_agents/discovery/known_runtimes.rs";
+const knownRuntimesRs = readFileSync(
+  path.join(desktopRoot, KNOWN_RUNTIMES_RS),
+  "utf8",
+);
+
+// `pub(super)` is optional in the pattern: the table carries it today because
+// it lives in a submodule of `discovery`, and requiring the bare `const` form
+// is what silently broke this guard when the table was moved out of
+// discovery.rs.
+const runtimeBlock = knownRuntimesRs.match(
+  /(?:pub(?:\([^)]*\))?\s+)?const KNOWN_ACP_RUNTIMES: &\[KnownAcpRuntime\] = &\[([\s\S]*?)\n\];/,
+);
+assert.ok(
+  runtimeBlock,
+  `could not locate KNOWN_ACP_RUNTIMES in ${KNOWN_RUNTIMES_RS}`,
+);
+
+const knownRuntimeIds = [
+  ...runtimeBlock[1].matchAll(/^\s{8}id: "([^"]+)",$/gm),
+].map((match) => match[1]);
+
+const logoOwnerIds = [...new Set([...presetIds, ...knownRuntimeIds])];
+
 test("PRESET_HARNESSES parse found the preset ids", () => {
   // Guards the regex itself: a struct-field rename would otherwise silently
   // yield zero ids and make every assertion below vacuously pass.
@@ -70,14 +100,15 @@ for (const id of presetIds) {
   });
 }
 
-test("PRESET_LOGOS has no entries for unknown presets", () => {
+test("PRESET_LOGOS has no entries for unknown harnesses", () => {
   const unknown = Object.keys(PRESET_LOGOS).filter(
-    (id) => !presetIds.includes(id),
+    (id) => !logoOwnerIds.includes(id),
   );
   assert.deepEqual(
     unknown,
     [],
-    `PRESET_LOGOS maps ids the backend does not emit as presets: ${unknown.join(", ")}`,
+    `PRESET_LOGOS maps ids the backend emits as neither a preset nor a known ` +
+      `ACP runtime: ${unknown.join(", ")}`,
   );
 });
 

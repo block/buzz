@@ -595,6 +595,22 @@ type MockBridgeOptions = {
    * (`applyProbeResult` in whereToRunIntent.test.mjs).
    */
   backendProviderProbeDelayMs?: number;
+  /**
+   * Override the `get_agent_models` mock response — the catalog the
+   * ModelPicker reads on first open. Without it the bridge always returns an
+   * empty list with `supportsSwitching: false`, so the populated menu (and the
+   * model-switch path behind it) is unreachable.
+   */
+  agentModels?: {
+    models: Array<{
+      id: string;
+      name: string | null;
+      description?: string | null;
+    }>;
+    supportsSwitching: boolean;
+    agentDefaultModel?: string | null;
+    selectedModel?: string | null;
+  };
 };
 
 type BridgeOptions = {

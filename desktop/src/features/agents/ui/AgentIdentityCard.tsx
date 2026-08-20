@@ -12,6 +12,16 @@ type AgentIdentityCardProps = {
   dataTestId: string;
   label: string;
   modelLabel?: string | null;
+  /**
+   * Interactive replacement for `modelLabel`, in the same slot. Takes precedence
+   * when both are supplied.
+   *
+   * The label row lives under `pointer-events-none` so it cannot steal clicks
+   * from the card's full-bleed button overlay, so anything interactive here is
+   * wrapped in `pointer-events-auto` and stops propagation — otherwise the
+   * control would either be unclickable or would also open the profile panel.
+   */
+  modelControl?: ReactNode;
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
@@ -25,6 +35,7 @@ export function AgentIdentityCard({
   dataTestId,
   label,
   modelLabel,
+  modelControl,
   onClick,
   statusBadge,
 }: AgentIdentityCardProps) {
@@ -72,7 +83,21 @@ export function AgentIdentityCard({
         <span className="min-w-0 truncate font-semibold text-foreground tracking-normal">
           {label}
         </span>
-        {modelLabel ? (
+        {modelControl ? (
+          // Not a control: a propagation boundary. `modelControl` supplies its own
+          // interactive element; this span only stops the click from also reaching
+          // the card's full-bleed button overlay. It is never focused itself, and
+          // keyboard activation of the child fires a click that this same handler
+          // stops, so a key handler here would be dead code.
+          // biome-ignore lint/a11y/noStaticElementInteractions: see above
+          // biome-ignore lint/a11y/useKeyWithClickEvents: see above
+          <span
+            className="pointer-events-auto min-w-0"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {modelControl}
+          </span>
+        ) : modelLabel ? (
           <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
             {modelLabel}
           </span>

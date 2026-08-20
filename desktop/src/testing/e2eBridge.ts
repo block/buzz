@@ -608,6 +608,25 @@ type E2eConfig = {
       selectedModel?: string | null;
     };
     /**
+     * Override for `get_agent_models` — the catalog the ModelPicker reads.
+     *
+     * Mirrors `discoverAgentModels`. Without it `get_agent_models` always
+     * returns an empty list with `supportsSwitching: false`, so the picker can
+     * only ever be exercised in its "runtime default" empty state and the
+     * populated list (and therefore the switch path) is untestable in the
+     * browser harness.
+     */
+    agentModels?: {
+      models: Array<{
+        id: string;
+        name: string | null;
+        description?: string | null;
+      }>;
+      supportsSwitching: boolean;
+      agentDefaultModel?: string | null;
+      selectedModel?: string | null;
+    };
+    /**
      * When set, `discover_agent_models` throws with this message instead of
      * returning a catalog.
      */
@@ -8134,6 +8153,12 @@ let mockGlobalAgentConfig: {
   model: string | null;
   preferred_runtime?: string | null;
 } | null = null;
+/**
+ * Routing policies written through `set_agent_routing_policy`, keyed by pubkey.
+ * Opaque on purpose: the shape is the harness's, and the mock only has to hand
+ * back what it was given.
+ */
+const mockRoutingPolicies = new Map<string, unknown>();
 
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
@@ -10630,6 +10655,7 @@ export function maybeInstallE2eTauriMocks() {
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
+  mockRoutingPolicies.clear();
   resetMockRelayMembers(config);
   resetMockRelayAgents(config);
   resetMockManagedAgents(config);
@@ -13032,7 +13058,22 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetManagedAgentLog(
           payload as Parameters<typeof handleGetManagedAgentLog>[0],
         );
-      case "get_agent_models":
+      case "get_agent_models": {
+        const modelsOverride = activeConfig?.mock?.agentModels;
+        if (modelsOverride) {
+          return {
+            agentName: "mock-agent",
+            agentVersion: "0.0.0",
+            models: modelsOverride.models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              description: model.description ?? null,
+            })),
+            agentDefaultModel: modelsOverride.agentDefaultModel ?? null,
+            selectedModel: modelsOverride.selectedModel ?? null,
+            supportsSwitching: modelsOverride.supportsSwitching,
+          };
+        }
         return {
           agentName: "mock-agent",
           agentVersion: "0.0.0",
@@ -13041,6 +13082,7 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: false,
         };
+      }
       case "discover_agent_models": {
         const discoverError = activeConfig?.mock?.discoverAgentModelsError;
         if (discoverError) {
@@ -13148,6 +13190,32 @@ export function maybeInstallE2eTauriMocks() {
       case "get_agent_config_surface": {
         const configArgs = payload as { pubkey: string };
         return buildMockConfigSurface(configArgs.pubkey);
+      }
+      // Per-turn model routing. Kept in memory so the edit dialog's routing
+      // table round-trips inside a test the way it does against the real
+      // command — without a mock the editor's mount-time read would throw into
+      // its own error state and every Advanced-panel test would see it.
+      case "get_agent_routing_policy": {
+        const { pubkey } = payload as { pubkey: string };
+        return {
+          path: `/mock/agents/routing/${pubkey}.json`,
+          policy: mockRoutingPolicies.get(pubkey) ?? null,
+        };
+      }
+      case "set_agent_routing_policy": {
+        const { pubkey, policy } = payload as {
+          pubkey: string;
+          policy: unknown;
+        };
+        if (policy === null || policy === undefined) {
+          mockRoutingPolicies.delete(pubkey);
+        } else {
+          mockRoutingPolicies.set(pubkey, policy);
+        }
+        return {
+          path: `/mock/agents/routing/${pubkey}.json`,
+          policy: mockRoutingPolicies.get(pubkey) ?? null,
+        };
       }
       case "get_runtime_file_config": {
         const runtimeId = (payload as { runtimeId?: string } | null | undefined)

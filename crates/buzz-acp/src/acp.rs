@@ -2750,6 +2750,50 @@ mod tests {
         assert!(super::extract_model_config_options(&result).is_empty());
     }
 
+    /// Regression guard for the OpenRouter model-catalog seam.
+    ///
+    /// `switch_model` (kind:24200) resolves the requested model against the
+    /// `availableModels` a provider advertises in `session/new`. buzz-agent used to
+    /// advertise a single-entry catalog for every non-Databricks provider, so an
+    /// OpenRouter switch could never resolve. The payload below is the real shape
+    /// buzz-agent now returns for `BUZZ_AGENT_PROVIDER=openrouter` (trimmed): an
+    /// account-eligible, tools-capable slate.
+    #[test]
+    fn openrouter_catalog_resolves_a_switch_and_rejects_an_ineligible_model() {
+        let session_new = serde_json::json!({
+            "sessionId": "sess-openrouter",
+            "models": {
+                "currentModelId": "openai/gpt-5.6-luna",
+                "availableModels": [
+                    { "modelId": "openai/gpt-5.6-luna", "name": "OpenAI: GPT-5.6 Luna" },
+                    { "modelId": "openai/gpt-5.6-luna-pro", "name": "OpenAI: GPT-5.6 Luna Pro" },
+                    { "modelId": "z-ai/glm-5.2", "name": "Z.ai: GLM 5.2" },
+                    { "modelId": "deepseek/deepseek-v4-flash-0731", "name": "DeepSeek: DeepSeek V4 Flash 0731" },
+                ]
+            }
+        });
+
+        // A model in the advertised catalog resolves to a live set_model switch.
+        let method = super::resolve_model_switch_method(&session_new, "z-ai/glm-5.2")
+            .expect("a catalog model must resolve");
+        match method {
+            super::ModelSwitchMethod::SetModel { model_id } => {
+                assert_eq!(model_id, "z-ai/glm-5.2");
+            }
+            other => panic!("expected SetModel, got {other:?}"),
+        }
+
+        // A model absent from the catalog must NOT resolve. gpt-5.6-terra is the
+        // real case: it exists in OpenRouter's global catalog but is not on this
+        // account's eligibility allowlist, so requesting it returns HTTP 404.
+        // Refusing it here turns that into an up-front unsupported_model rather
+        // than a confusing mid-request failure.
+        assert!(
+            super::resolve_model_switch_method(&session_new, "openai/gpt-5.6-terra").is_none(),
+            "a model outside the advertised catalog must not resolve"
+        );
+    }
+
     #[test]
     fn extract_model_state_returns_models_object() {
         let result = serde_json::json!({
