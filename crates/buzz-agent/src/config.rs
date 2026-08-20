@@ -414,6 +414,11 @@ pub const HANDOFF_MIN_PROMPT_BUDGET_BYTES: usize = 4 * 1024;
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
+/// Default OpenAI-compatible endpoint for Ollama Cloud when
+/// `BUZZ_AGENT_PROVIDER=ollama-cloud` and `OPENAI_COMPAT_BASE_URL` is unset.
+/// See https://docs.ollama.com/cloud
+pub const OLLAMA_CLOUD_DEFAULT_BASE_URL: &str = "https://ollama.com/v1";
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Provider {
     Anthropic,
@@ -564,7 +569,10 @@ impl Config {
                     env("OPENAI_COMPAT_MODEL").as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
+                resolve_openai_base_url_for_provider(
+                    env("BUZZ_AGENT_PROVIDER").as_deref(),
+                    env("OPENAI_COMPAT_BASE_URL"),
+                ),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
             Provider::Databricks | Provider::DatabricksV2 => (
@@ -792,6 +800,28 @@ fn present_nonempty(v: Option<&str>) -> bool {
     v.map(str::trim).is_some_and(|s| !s.is_empty())
 }
 
+fn is_ollama_cloud_provider(requested: Option<&str>) -> bool {
+    requested
+        .map(str::trim)
+        .is_some_and(|s| {
+            let n = s.to_ascii_lowercase();
+            n == "ollama-cloud" || n == "ollama_cloud"
+        })
+}
+
+fn resolve_openai_base_url_for_provider(
+    requested_provider: Option<&str>,
+    base_url: Option<String>,
+) -> String {
+    base_url.unwrap_or_else(|| {
+        if is_ollama_cloud_provider(requested_provider) {
+            OLLAMA_CLOUD_DEFAULT_BASE_URL.to_owned()
+        } else {
+            "https://api.openai.com/v1".to_owned()
+        }
+    })
+}
+
 fn resolve_provider(
     requested: Option<&str>,
     anthropic_key: Option<&str>,
@@ -810,6 +840,13 @@ fn resolve_provider(
                 "openai" | "openai-compat" => Err(
                     "config: OPENAI_COMPAT_API_KEY required".into(),
                 ),
+                // Ollama Cloud is OpenAI-compatible; requires a real API key.
+                "ollama-cloud" | "ollama_cloud" if present_nonempty(openai_key) => {
+                    Ok(Provider::OpenAi)
+                }
+                "ollama-cloud" | "ollama_cloud" => Err(
+                    "config: OPENAI_COMPAT_API_KEY required for ollama-cloud".into(),
+                ),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
                 "openrouter" if present_nonempty(openrouter_key) => Ok(Provider::OpenRouter),
@@ -820,7 +857,7 @@ fn resolve_provider(
             }
         }
         None => Err(
-            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
+            "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, ollama-cloud, databricks)".into(),
         ),
     }
 }
@@ -1153,6 +1190,46 @@ mod tests {
     fn resolve_provider_unsupported_error_preserves_user_casing() {
         let err = resolve_provider(Some("OpenAIish"), None, None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
+    }
+
+    #[test]
+    fn resolve_provider_ollama_cloud_requires_api_key() {
+        let err = resolve_provider(Some("ollama-cloud"), None, None, None).unwrap_err();
+        assert!(
+            err.contains("OPENAI_COMPAT_API_KEY"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn resolve_provider_ollama_cloud_maps_to_openai() {
+        assert_eq!(
+            resolve_provider(Some("ollama-cloud"), None, Some("sk-test"), None).unwrap(),
+            Provider::OpenAi
+        );
+        assert_eq!(
+            resolve_provider(Some("ollama_cloud"), None, Some("sk-test"), None).unwrap(),
+            Provider::OpenAi
+        );
+    }
+
+    #[test]
+    fn ollama_cloud_default_base_url() {
+        assert_eq!(
+            resolve_openai_base_url_for_provider(Some("ollama-cloud"), None),
+            OLLAMA_CLOUD_DEFAULT_BASE_URL
+        );
+        assert_eq!(
+            resolve_openai_base_url_for_provider(Some("openai"), None),
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(
+            resolve_openai_base_url_for_provider(
+                Some("ollama-cloud"),
+                Some("https://custom.example/v1".into())
+            ),
+            "https://custom.example/v1"
+        );
     }
 
     #[test]
