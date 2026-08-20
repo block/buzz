@@ -1,13 +1,19 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import { ALargeSmall, Paperclip, X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import {
+  type ComposerAddressAgent,
+  ComposerMentionButton,
+  ComposerSendButton,
+} from "./ComposerAddressControls";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
+import type { ComposerAddressPrototype } from "./useComposerAddressPrototype";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -15,9 +21,13 @@ const presenceSpring = {
   stiffness: 400,
   damping: 28,
 } as const;
+const NO_ADDRESSED_AGENTS: readonly ComposerAddressAgent[] = [];
+const ignoreAddressRemoval = () => {};
 
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
+    addressedAgents = NO_ADDRESSED_AGENTS,
+    addressPrototype = "mention-button",
     composerDisabled,
     editor,
     extraActions,
@@ -33,8 +43,13 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
+    onRemoveAddressedAgent = ignoreAddressRemoval,
+    pulseVersionByPubkey,
     sendDisabled,
+    shakeVersionByPubkey,
   }: {
+    addressedAgents?: readonly ComposerAddressAgent[];
+    addressPrototype?: ComposerAddressPrototype;
     composerDisabled: boolean;
     editor: Editor | null;
     extraActions?: React.ReactNode;
@@ -50,7 +65,10 @@ export const MessageComposerToolbar = React.memo(
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
+    onRemoveAddressedAgent?: (pubkey: string) => void;
+    pulseVersionByPubkey?: Readonly<Record<string, number>>;
     sendDisabled: boolean;
+    shakeVersionByPubkey?: Readonly<Record<string, number>>;
   }) {
     return (
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
@@ -158,24 +176,15 @@ export const MessageComposerToolbar = React.memo(
                 exit={{ opacity: 0, x: -12 }}
                 transition={presenceSpring}
               >
-                {/* disableHoverableContent keeps tooltips from lingering over the editor. */}
-                <Tooltip disableHoverableContent>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label="Mention someone"
-                      data-testid="message-insert-mention"
-                      disabled={composerDisabled}
-                      onClick={onOpenMentionPicker}
-                      onMouseDown={onCaptureSelection}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <AtSign />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Mention someone</TooltipContent>
-                </Tooltip>
+                <ComposerMentionButton
+                  agents={addressedAgents}
+                  disabled={composerDisabled}
+                  onCaptureSelection={onCaptureSelection}
+                  onOpen={onOpenMentionPicker}
+                  pulseVersionByPubkey={pulseVersionByPubkey}
+                  shakeVersionByPubkey={shakeVersionByPubkey}
+                  showAgents={addressPrototype === "mention-button"}
+                />
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
@@ -231,23 +240,15 @@ export const MessageComposerToolbar = React.memo(
 
         <div className="flex items-center gap-2">
           {extraActions}
-          <Button
-            aria-label={isSending ? "Sending" : "Send message"}
-            className="rounded-full"
-            data-testid="send-message"
-            disabled={sendDisabled || isSending}
-            size="icon"
-            type="submit"
-          >
-            {isSending ? (
-              <span
-                aria-hidden
-                className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
-              />
-            ) : (
-              <ArrowUp aria-hidden />
-            )}
-          </Button>
+          <ComposerSendButton
+            agents={addressedAgents}
+            isSending={isSending}
+            onRemove={onRemoveAddressedAgent}
+            pulseVersionByPubkey={pulseVersionByPubkey}
+            sendDisabled={sendDisabled}
+            shakeVersionByPubkey={shakeVersionByPubkey}
+            showAgents={addressPrototype === "send-button"}
+          />
         </div>
       </div>
     );

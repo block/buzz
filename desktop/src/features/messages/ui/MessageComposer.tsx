@@ -45,7 +45,6 @@ import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
-import { ComposerAddressLocks } from "./ComposerAddressLocks";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
@@ -57,6 +56,7 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
 import { useAddressMentionPulse } from "./useAddressMentionPulse";
 import { useAlwaysAddressShortcut } from "./useAlwaysAddressShortcut";
+import { useComposerAddressPrototype } from "./useComposerAddressPrototype";
 import { useComposerMentionPicker } from "./useComposerMentionPicker";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
@@ -291,6 +291,7 @@ function MessageComposerImpl({
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
   const persistentAudience = usePersistentAgentAudience(audienceScope);
   const addressPulse = useAddressMentionPulse();
+  const addressPrototype = useComposerAddressPrototype();
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -471,6 +472,10 @@ function MessageComposerImpl({
     richText,
     setIsEmojiPickerOpen,
   });
+  const openMentionSettings = React.useCallback(
+    () => openMentionPicker(false),
+    [openMentionPicker],
+  );
   const handleAlwaysAddressShortcut = useAlwaysAddressShortcut({
     enabled: Boolean(audienceScope && editTarget == null),
     mentions,
@@ -845,6 +850,7 @@ function MessageComposerImpl({
               layoutMode === "standalone" &&
                 "backdrop-blur-md dark:backdrop-blur-xl",
             )}
+            data-address-prototype={addressPrototype}
             data-testid="message-composer"
             onDragEnter={ownsDropZone ? media.handleDragEnter : undefined}
             onDragLeave={ownsDropZone ? media.handleDragLeave : undefined}
@@ -916,20 +922,10 @@ function MessageComposerImpl({
             >
               {addressLockAnnouncement}
             </output>
-            {((lockedAgents.length > 0 && editTarget == null) ||
-              media.pendingImeta.length > 0 ||
+            {(media.pendingImeta.length > 0 ||
               media.queuedAttachments.length > 0 ||
               media.isUploading) && (
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                {lockedAgents.length > 0 && editTarget == null ? (
-                  <ComposerAddressLocks
-                    agents={lockedAgents}
-                    onOpenMentionMenu={() => openMentionPicker(false)}
-                    onRemove={persistentAudience.removePubkey}
-                    pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
-                    shakeVersionByPubkey={addressPulse.shakeVersionByPubkey}
-                  />
-                ) : null}
                 {media.pendingImeta.length > 0 ||
                 media.queuedAttachments.length > 0 ||
                 media.isUploading ? (
@@ -964,6 +960,8 @@ function MessageComposerImpl({
             </div>
 
             <ComposerDockToolbar
+              addressedAgents={editTarget == null ? lockedAgents : []}
+              addressPrototype={addressPrototype}
               layoutMode={layoutMode}
               composerDisabled={composerDisabled}
               editor={richText.editor}
@@ -978,9 +976,12 @@ function MessageComposerImpl({
               onEmojiSelect={insertEmoji}
               onFormattingToggle={handleFormattingToggle}
               onLinkButton={linkEditor.openFromToolbar}
-              onOpenMentionPicker={openMentionPicker}
+              onOpenMentionPicker={openMentionSettings}
               onPaperclip={handlePaperclipClick}
+              onRemoveAddressedAgent={persistentAudience.removePubkey}
+              pulseVersionByPubkey={addressPulse.pulseVersionByPubkey}
               sendDisabled={sendDisabled}
+              shakeVersionByPubkey={addressPulse.shakeVersionByPubkey}
             />
           </form>
         </div>

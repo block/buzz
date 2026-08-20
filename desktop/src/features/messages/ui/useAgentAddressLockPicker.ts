@@ -10,7 +10,7 @@ import type {
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import type { ComposerAddressLock } from "./ComposerAddressLocks";
+import type { ComposerAddressAgent } from "./ComposerAddressControls";
 import type { MentionSuggestion } from "./MentionAutocomplete";
 
 function buildMentionRemovalEdits(
@@ -74,7 +74,7 @@ export function useAgentAddressLockPicker({
   );
   const lockedAgentNamesRef = React.useRef(new Map<string, string>());
   const [announcement, setAnnouncement] = React.useState("");
-  const lockedAgents = React.useMemo<ComposerAddressLock[]>(
+  const lockedAgents = React.useMemo<ComposerAddressAgent[]>(
     () =>
       audience.pubkeys.map((pubkey) => {
         const normalized = normalizePubkey(pubkey);
@@ -184,8 +184,12 @@ export function useAgentAddressLockPicker({
   const selectMentionSuggestion = React.useCallback(
     (suggestion: MentionSuggestion) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
-      if (suggestion.isAgent && pubkey && lockedAgentPubkeys.has(pubkey)) {
+      if (suggestion.isAgent && pubkey && audienceScope) {
         consumeAddressSuggestion(suggestion, { removeInlineMentions: false });
+        if (!lockedAgentPubkeys.has(pubkey)) {
+          audience.addPubkey(pubkey);
+          setAnnouncement(`Always addressing ${suggestion.displayName}`);
+        }
         onPulseAddressLock(pubkey);
         return;
       }
@@ -195,6 +199,8 @@ export function useAgentAddressLockPicker({
     },
     [
       applyAutocompleteEdit,
+      audience.addPubkey,
+      audienceScope,
       consumeAddressSuggestion,
       lockedAgentPubkeys,
       mentions.insertMention,
