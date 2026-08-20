@@ -151,17 +151,17 @@ fn webp_contains_top_level_chunk(body: &[u8], target: &[u8; 4]) -> bool {
 }
 
 /// Return true when removing an APNG ICC profile would change color rendering.
-pub(crate) fn animated_png_uses_icc_profile(body: &[u8]) -> bool {
+pub fn animated_png_uses_icc_profile(body: &[u8]) -> bool {
     png_contains_chunk(body, b"iCCP")
 }
 
 /// Return true when removing an animated WebP ICC profile would change colors.
-pub(crate) fn animated_webp_uses_icc_profile(body: &[u8]) -> bool {
+pub fn animated_webp_uses_icc_profile(body: &[u8]) -> bool {
     webp_contains_top_level_chunk(body, b"ICCP")
 }
 
 /// Return true when an animated PNG relies on eXIf to rotate or mirror frames.
-pub(crate) fn animated_png_uses_exif_orientation(body: &[u8]) -> bool {
+pub fn animated_png_uses_exif_orientation(body: &[u8]) -> bool {
     if !body.starts_with(PNG_SIGNATURE) {
         return false;
     }
@@ -209,7 +209,7 @@ pub(crate) fn animated_png_uses_exif_orientation(body: &[u8]) -> bool {
 /// Structural metadata removal cannot bake this transform without decoding
 /// and re-encoding every frame, so callers must reject this uncommon case
 /// rather than silently changing how the animation renders.
-pub(crate) fn animated_webp_uses_exif_orientation(body: &[u8]) -> bool {
+pub fn animated_webp_uses_exif_orientation(body: &[u8]) -> bool {
     if body.len() < 12 || &body[..4] != b"RIFF" || &body[8..12] != b"WEBP" {
         return false;
     }
@@ -265,7 +265,7 @@ pub(crate) fn animated_webp_uses_exif_orientation(body: &[u8]) -> bool {
 
 /// Strip metadata-bearing ancillary chunks from a PNG without touching frame
 /// control or image data. Bytes after `IEND` are truncated.
-pub(crate) fn strip_animated_png_metadata(body: &[u8]) -> Option<Vec<u8>> {
+pub fn strip_animated_png_metadata(body: &[u8]) -> Option<Vec<u8>> {
     if !body.starts_with(PNG_SIGNATURE) {
         return None;
     }
@@ -360,7 +360,7 @@ fn strip_anmf_metadata(payload: &[u8]) -> Option<Vec<u8>> {
 /// Strip metadata chunks and flags from a WebP container while retaining all
 /// still/animated rendering chunks. RIFF padding is canonicalized to zero and
 /// the container length is rewritten after removals.
-pub(crate) fn strip_animated_webp_metadata(body: &[u8]) -> Option<Vec<u8>> {
+pub fn strip_animated_webp_metadata(body: &[u8]) -> Option<Vec<u8>> {
     if body.len() < 12 || &body[..4] != b"RIFF" || &body[8..12] != b"WEBP" {
         return None;
     }
@@ -418,7 +418,7 @@ pub(crate) fn strip_animated_webp_metadata(body: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::media::sanitize_image_for_upload;
+    use crate::sanitize_image_for_upload;
 
     fn png_chunk(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
         let mut chunk = Vec::new();
@@ -689,5 +689,32 @@ mod tests {
             "image/png"
         )
         .is_err());
+    }
+
+    /// A deliberate refusal must survive `prepare_for_upload`, not be swallowed
+    /// by its best-effort fallback.
+    ///
+    /// These two messages name exactly what is wrong with the image. Falling
+    /// back to the original bytes would replace them with the relay's generic
+    /// "contains metadata" 422, losing the only explanation the user gets.
+    #[test]
+    fn test_prepare_for_upload_propagates_deliberate_refusals() {
+        for (label, body) in [
+            (
+                "png orientation",
+                animated_png_with_orientation(6, TiffEndian::Little),
+            ),
+            (
+                "webp orientation",
+                animated_webp_with_orientation(6, TiffEndian::Little),
+            ),
+        ] {
+            let err = crate::prepare_for_upload(body)
+                .expect_err("{label}: deliberate refusal was swallowed");
+            assert!(
+                err.contains("cannot be uploaded without changing its appearance"),
+                "{label}: lost the specific reason, got: {err}",
+            );
+        }
     }
 }

@@ -975,6 +975,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "buzz-core",
+ "buzz-image",
  "buzz-persona",
  "buzz-sdk",
  "buzz-ws-client",
@@ -1120,12 +1121,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-image"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "infer",
+ "png",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
  "axum",
  "blurhash",
  "buzz-core",
+ "buzz-image",
  "bytes",
  "chrono",
  "futures-core",
