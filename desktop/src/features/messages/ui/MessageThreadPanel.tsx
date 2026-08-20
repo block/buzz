@@ -42,7 +42,8 @@ import {
   MessageThreadPanelHeader,
   ThreadMessageSkeleton,
 } from "./MessageThreadPanelSkeleton";
-import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
+import type { ThreadDepthGuideAction } from "./MessageRow";
+import { MessageThreadRow } from "./MessageThreadRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
@@ -591,7 +592,7 @@ export function MessageThreadPanel({
             data-testid="message-thread-head"
           >
             <div className="rounded-2xl">
-              <MessageRow
+              <MessageThreadRow
                 actionBarPlacement="inside"
                 channelId={channelId}
                 currentPubkey={currentPubkey}
@@ -599,7 +600,6 @@ export function MessageThreadPanel({
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                 isFollowingThread={isFollowingThread}
                 isUnread={isMessageUnreadById?.(threadHead.id)}
-                layoutVariant="thread-reply"
                 message={threadHead}
                 onDelete={
                   onDelete &&
@@ -725,7 +725,7 @@ export function MessageThreadPanel({
                       key={entry.message.renderKey ?? entry.message.id}
                     >
                       {showUnreadDivider ? <UnreadDivider /> : null}
-                      <MessageRow
+                      <MessageThreadRow
                         channelId={channelId}
                         currentPubkey={currentPubkey}
                         collapseDepthGuideActions={collapseDepthGuideActions}
@@ -753,7 +753,6 @@ export function MessageThreadPanel({
                         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                         isContinuation={isContinuation}
                         isUnread={isMessageUnreadById?.(entry.message.id)}
-                        layoutVariant="thread-reply"
                         message={entry.message}
                         onCollapseDepthGuide={handleCollapseDepthGuide}
                         onCollapseDepthGuideHoverChange={

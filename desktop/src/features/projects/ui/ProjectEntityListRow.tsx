@@ -133,6 +133,7 @@ export function ProjectEntityListRow({
   affiliation,
   affiliationTestId,
   affiliationTitle,
+  beforeDate,
   count,
   countSuffix,
   countTestId,
@@ -152,11 +153,14 @@ export function ProjectEntityListRow({
   title,
   titleAttr,
   titleIcon,
+  titleSecondary,
+  titleSecondaryTestId,
   trailing,
 }: {
   affiliation?: React.ReactNode;
   affiliationTestId?: string;
   affiliationTitle?: string;
+  beforeDate?: React.ReactNode;
   count?: number | null;
   countSuffix?: string;
   countTestId?: string;
@@ -179,6 +183,8 @@ export function ProjectEntityListRow({
   title: React.ReactNode;
   titleAttr?: string;
   titleIcon?: React.ReactNode;
+  titleSecondary?: string;
+  titleSecondaryTestId?: string;
   trailing?: React.ReactNode;
 }) {
   const projectSelection = useProjectSelection();
@@ -205,6 +211,7 @@ export function ProjectEntityListRow({
           "relative flex h-4 w-4 shrink-0 items-center justify-center",
           interactiveSlotClass,
         )}
+        data-testid="project-entity-leading-icon"
       >
         <span
           className={cn(
@@ -242,9 +249,28 @@ export function ProjectEntityListRow({
         )}
         data-projects-text-priority="primary"
       >
-        <span className="block truncate" data-testid="project-entity-title">
-          {title}
-        </span>
+        {titleSecondary ? (
+          <span className="flex min-w-0 items-baseline gap-2 overflow-hidden">
+            <span
+              className="max-w-full shrink-0 truncate"
+              data-testid="project-entity-title"
+            >
+              {title}
+            </span>
+            <span
+              className="min-w-0 flex-1 truncate text-left font-normal text-muted-foreground/65"
+              data-projects-text-priority="secondary"
+              data-testid={titleSecondaryTestId}
+              title={titleSecondary}
+            >
+              {titleSecondary}
+            </span>
+          </span>
+        ) : (
+          <span className="block truncate" data-testid="project-entity-title">
+            {title}
+          </span>
+        )}
       </span>
       {titleIcon ? (
         <span
@@ -285,14 +311,24 @@ export function ProjectEntityListRow({
       </span>
       {count != null ? (
         <span
-          className="flex w-12 shrink-0 items-center justify-end gap-1 text-xs text-muted-foreground/65"
+          className="grid w-12 shrink-0 grid-cols-[0.875rem_1fr] items-center gap-1 text-xs text-muted-foreground/65"
           data-projects-text-priority="secondary"
           data-testid={countTestId}
           title={countTitle}
         >
           <MessageSquare className="h-3.5 w-3.5" />
-          {count}
-          {countSuffix}
+          <span className="text-right tabular-nums">
+            {count}
+            {countSuffix}
+          </span>
+        </span>
+      ) : null}
+      {beforeDate ? (
+        <span
+          className="pointer-events-auto relative z-10 shrink-0"
+          data-testid="project-entity-before-date"
+        >
+          {beforeDate}
         </span>
       ) : null}
       {dateSeconds ? (

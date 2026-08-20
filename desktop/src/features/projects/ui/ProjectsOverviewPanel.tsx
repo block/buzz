@@ -139,10 +139,10 @@ export function ProjectsActivityIntro() {
         className="text-xl font-semibold tracking-tight text-foreground"
         data-testid="projects-page-header"
       >
-        Welcome to Activity
+        Projects Activity
       </h2>
       <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-        Keep up with commits, reviews, and tasks across your projects.
+        Keeping up with the community has never been easier—or mattered more.
       </p>
     </section>
   );

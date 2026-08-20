@@ -19,11 +19,7 @@ import { useRepositoryActivitySummariesQuery } from "@/features/projects/reposit
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
-import {
-  buildProjectSelectionAgentContext,
-  buildProjectsOverviewAgentContext,
-  type ProjectDetailAgentContext,
-} from "@/features/projects/lib/projectDetailAgentContext";
+import { buildProjectSelectionAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
 import {
   useMemberChannelIds,
@@ -115,6 +111,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { Button } from "@/shared/ui/button";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
+import { useProjectsOverviewAgentContext } from "./useProjectsOverviewAgentContext";
 
 const MANY_PROJECTS_THRESHOLD = 12;
 const PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX = 1024;
@@ -139,8 +136,6 @@ export function ProjectsView() {
       : storedFilter;
   });
   const [overviewPanelOpen, setOverviewPanelOpen] = React.useState(true);
-  const [selectionAgentContext, setSelectionAgentContext] =
-    React.useState<ProjectDetailAgentContext | null>(null);
   // Narrow layouts present the same context as a dismissible sheet instead of
   // the docked rail; the sheet starts closed so resizing never pops a modal.
   const [narrowContextOpen, setNarrowContextOpen] = React.useState(false);
@@ -242,22 +237,6 @@ export function ProjectsView() {
       writeStoredViewMode(nextViewMode);
     },
     [],
-  );
-
-  const handleFilterChange = React.useCallback(
-    (nextFilter: ProjectsFilter) => {
-      if (
-        nextFilter === "projects" &&
-        (repositoryScope === "buzz" || repositoryScope === "linked")
-      ) {
-        setRepositoryScope("all");
-        writeStoredRepositoryScope("all");
-      }
-      setSelectionAgentContext(null);
-      setFilter(nextFilter);
-      writeStoredFilter(nextFilter);
-    },
-    [repositoryScope],
   );
 
   const handleRepositoryScopeChange = React.useCallback(
@@ -487,6 +466,36 @@ export function ProjectsView() {
       return right.issue.updatedAt - left.issue.updatedAt;
     });
   }, [currentPubkey, issueScope, projectsWorkItemsQuery.data, sort]);
+  const {
+    agentContext: selectionAgentContext,
+    overviewContext: overviewAgentContext,
+    setAgentContext: setSelectionAgentContext,
+  } = useProjectsOverviewAgentContext({
+    filter,
+    issues: projectsWorkItemsQuery.data?.issues.items,
+    projects,
+    pullRequests: projectsWorkItemsQuery.data?.pullRequests.items,
+    snapshots: repoSnapshotsQuery.data?.snapshots,
+    visibleIssues,
+    visibleProjects,
+    visiblePullRequests,
+    visibleRepositories,
+  });
+  const handleFilterChange = React.useCallback(
+    (nextFilter: ProjectsFilter) => {
+      if (
+        nextFilter === "projects" &&
+        (repositoryScope === "buzz" || repositoryScope === "linked")
+      ) {
+        setRepositoryScope("all");
+        writeStoredRepositoryScope("all");
+      }
+      setSelectionAgentContext(null);
+      setFilter(nextFilter);
+      writeStoredFilter(nextFilter);
+    },
+    [repositoryScope, setSelectionAgentContext],
+  );
 
   // Route by the canonical `owner:dtag` project ID — a bare dtag is
   // ambiguous across owners (forks can share the same dtag).
@@ -837,11 +846,7 @@ export function ProjectsView() {
                         active={selectionAgentContext !== null}
                         onToggle={() =>
                           setSelectionAgentContext((context) =>
-                            context
-                              ? null
-                              : buildProjectsOverviewAgentContext(
-                                  projectsSectionTitle(filter),
-                                ),
+                            context ? null : overviewAgentContext,
                           )
                         }
                         sectionTitle={projectsSectionTitle(filter)}
@@ -935,7 +940,6 @@ export function ProjectsView() {
                 onClose={() => setSelectionAgentContext(null)}
                 onResetWidth={overviewAgentPanelWidth.onResetWidth}
                 onResizeStart={overviewAgentPanelWidth.onResizeStart}
-                sharedHeaderBackdrop
                 widthPx={overviewAgentPanelWidth.widthPx}
               />
             ) : null}

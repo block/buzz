@@ -46,6 +46,7 @@ import {
 } from "./ProjectRepositorySource";
 import { ProjectRepositoryManagement } from "./ProjectRepositoryManagement";
 import { ProjectWorkItemContextActions } from "./ProjectWorkItemContextActions";
+import { ProjectWorkItemCommunicationActions } from "./ProjectWorkItemCommunicationActions";
 import { ProjectWorkItemContextDetails } from "./ProjectWorkItemContextDetails";
 import { ProjectsSelectionCountMenu } from "./ProjectsSelectionCountMenu";
 import {
@@ -59,6 +60,7 @@ type ProjectRepositoryActionsPanelProps = {
   activeTab: string;
   canResetWidth: boolean;
   contributors: ProjectRepoContributor[];
+  contextItem?: ProjectSelectionItem | null;
   createIssuePending: boolean;
   detached?: boolean;
   files: ProjectRepoFile[];
@@ -179,6 +181,7 @@ export function ProjectRepositoryActionsPanel({
   activeTab,
   canResetWidth,
   contributors,
+  contextItem,
   createIssuePending,
   detached = false,
   files,
@@ -313,6 +316,12 @@ export function ProjectRepositoryActionsPanel({
               pullRequest={selectedPullRequest}
               repository={repository}
             />
+            {contextItem ? (
+              <ProjectWorkItemCommunicationActions
+                item={contextItem}
+                onChatWithAgent={onChatWithAgent}
+              />
+            ) : null}
             {branchScoped ? (
               <RepositoryPanelSection>
                 <div className="grid gap-0.5 [&_button]:-mx-2 [&_button]:h-7 [&_button]:w-[calc(100%+1rem)] [&_button]:max-w-none [&_button]:justify-start [&_button]:gap-3 [&_button]:rounded-md [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-2 [&_button]:text-left [&_button]:text-sm [&_button]:font-normal [&_button]:shadow-none [&_button]:hover:bg-muted/70 [&_button>svg:last-child]:ml-auto">

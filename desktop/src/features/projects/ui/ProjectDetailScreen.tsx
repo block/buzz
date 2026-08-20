@@ -48,6 +48,7 @@ import {
   buildProjectDetailAgentContext,
   type ProjectDetailAgentContext,
 } from "@/features/projects/lib/projectDetailAgentContext";
+import { projectDetailSelectionItem } from "@/features/projects/lib/projectDetailSelectionItem";
 import {
   projectRepoUnavailablePresentation,
   projectRepoUnavailableReason,
@@ -729,6 +730,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
         (commit) => commit.hash === selectedCommitHash,
       ) ?? null)
     : null;
+  const contextItem = projectDetailSelectionItem({
+    commit: selectedCommit,
+    issue: selectedIssue,
+    projectChannelId: project.projectChannelId,
+    projectId: project.id,
+    pullRequest: selectedPullRequest,
+    repository,
+  });
   const { activeTabCrumb, activeWorkItemCrumb, handleGoToProjectHome } =
     buildProjectDetailCrumbs({
       activeTab,
@@ -815,6 +824,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                   canResetWidth={activeRightPanelWidth.canReset}
                   contributors={displayedRepositoryContributors}
                   context={repositoryPanel.agentContext(agentPageContext)}
+                  contextItem={contextItem}
                   createIssuePending={createIssueMutation.isPending}
                   detachedRepository={detachedRepositoryPanel}
                   files={displayedRepositoryFiles}
@@ -822,6 +832,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                   issues={issuesQuery.data ?? []}
                   mode={repositoryPanel.mode}
                   onChatWithAgent={selectionChat}
+                  onClose={repositoryPanel.collapse}
                   onCreateTask={() => setCreateIssueRequestKey((k) => k + 1)}
                   onCreatePullRequest={() =>
                     setCreatePullRequestRequestKey((k) => k + 1)
@@ -838,7 +849,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                   repository={repository}
                   selectedIssue={selectedIssue}
                   selectedPullRequest={selectedPullRequest}
-                  sharedHeaderBackdrop={sharedHeaderBackdrop}
                   snapshot={displayedRepositorySnapshot}
                   sourceControls={filesSourceControls}
                   terminalTitle={projectTerminalLabel(hasLocalCheckout)}
