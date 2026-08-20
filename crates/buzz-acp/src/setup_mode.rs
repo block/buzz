@@ -342,6 +342,22 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
     tracing::info!("setup-mode: connected and subscribed to membership notifications");
 
+    let relay_trusted_pubkey = match relay.rest_client().fetch_nip11_relay_self().await {
+        Ok(Some(hex)) => Some(hex),
+        Ok(None) => {
+            tracing::warn!(
+                "setup-mode: relay NIP-11 has no self pubkey — workflow author attribution disabled"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                "setup-mode: failed to fetch relay NIP-11 identity ({error}) — workflow author attribution disabled"
+            );
+            None
+        }
+    };
+
     // Resolve owner for author-gate (same priority as normal mode).
     let startup_owner = crate::resolve_agent_owner(&config);
     let owner_cache = crate::OwnerCache::new(startup_owner);
@@ -428,7 +444,10 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // Apply the same author gate as normal mode so the nudge only goes
         // to authors the real agent would have answered. Same DM hardening:
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
-        let author_hex = buzz_event.event.pubkey.to_hex();
+        let author_hex = crate::workflow_author::inbound_author_hex(
+            &buzz_event.event,
+            relay_trusted_pubkey.as_deref(),
+        );
         let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
         let allowed = author_allowed(
             &config.respond_to,

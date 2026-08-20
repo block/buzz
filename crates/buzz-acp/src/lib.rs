@@ -11,6 +11,7 @@ mod queue;
 mod relay;
 mod setup_mode;
 mod usage;
+mod workflow_author;
 
 pub use usage::TurnUsage;
 
@@ -2001,6 +2002,25 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
+    let relay_trusted_pubkey = match relay.rest_client().fetch_nip11_relay_self().await {
+        Ok(Some(hex)) => {
+            tracing::info!("relay NIP-11 identity loaded for workflow author attribution");
+            Some(hex)
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "relay NIP-11 document has no self pubkey — workflow author attribution disabled (fail closed)"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                "failed to fetch relay NIP-11 identity ({error}) — workflow author attribution disabled (fail closed)"
+            );
+            None
+        }
+    };
+
     relay
         .subscribe_membership_notifications()
         .await
@@ -2852,7 +2872,10 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
+                                let author = workflow_author::inbound_author_hex(
+                                    &buzz_event.event,
+                                    relay_trusted_pubkey.as_deref(),
+                                );
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -2870,7 +2893,8 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %author,
+                                        signer = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -2889,7 +2913,10 @@ async fn tokio_main() -> Result<()> {
                             };
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
-                            let author_hex = buzz_event.event.pubkey.to_hex();
+                            let author_hex = workflow_author::inbound_author_hex(
+                                &buzz_event.event,
+                                relay_trusted_pubkey.as_deref(),
+                            );
                             let event_id_hex = buzz_event.event.id.to_hex();
                             // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
