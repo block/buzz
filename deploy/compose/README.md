@@ -59,3 +59,13 @@ $EDITOR .env
 curl -fsS "http://127.0.0.1:$(grep -E '^BUZZ_HTTP_PORT=' .env | cut -d= -f2-)/_liveness"
 ./run.sh status
 ```
+
+The repository also validates every supported Compose merge without starting
+containers:
+
+```bash
+./test.sh
+```
+
+This renders the base stack, the Caddy/TLS override, and the development
+override using only the placeholder values from `.env.example`.
