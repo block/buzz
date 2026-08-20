@@ -103,6 +103,11 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
         )
         .expect("valid git compaction duration bucket boundaries")
         .set_buckets_for_metric(
+            Matcher::Full("buzz_git_object_store_gc_scan_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git GC inventory duration bucket boundaries")
+        .set_buckets_for_metric(
             Matcher::Full("buzz_git_hydrate_bytes".to_owned()),
             &GIT_BYTES_BUCKETS,
         )
