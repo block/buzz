@@ -497,12 +497,16 @@ pub enum MessagesCmd {
     },
     /// Full-text search across messages
     #[command(
-        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
+        after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20\n  buzz messages search --channel <UUID> --query checkout"
     )]
     Search {
         /// Search query string (optional when --author is given)
         #[arg(long)]
         query: Option<String>,
+        /// Restrict results to one channel (UUID, from 'buzz channels list').
+        /// Omit to search every channel you can read.
+        #[arg(long)]
+        channel: Option<String>,
         /// Filter by author: 64-char hex pubkey, npub, or display name
         #[arg(long)]
         author: Option<String>,
