@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use nostr::EventId;
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
@@ -731,6 +732,13 @@ impl AgentPool {
 
     pub fn task_map_mut(&mut self) -> &mut HashMap<tokio::task::Id, TaskMeta> {
         &mut self.task_map
+    }
+
+    /// Whether the identified turn still owns the in-flight task for `channel_id`.
+    pub fn is_turn_in_flight(&self, channel_id: Uuid, turn_id: &str) -> bool {
+        self.task_map
+            .values()
+            .any(|meta| meta.channel_id == Some(channel_id) && meta.turn_id == turn_id)
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
@@ -1766,6 +1774,7 @@ fn send_prompt_result(
 ///
 /// The agent is ALWAYS returned — even on panic the `JoinSet` detects the
 /// abort and the caller uses `task_map` to recover the agent index.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_prompt_task(
     mut agent: OwnedAgent,
     batch: Option<FlushBatch>,
@@ -1773,6 +1782,7 @@ pub async fn run_prompt_task(
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+    typing_tx: Option<mpsc::UnboundedSender<(Uuid, String, crate::queue::ThreadTags)>>,
     turn_id: String,
 ) {
     // Is this a channel prompt or a heartbeat?
@@ -1850,7 +1860,12 @@ pub async fn run_prompt_task(
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
     let reaction_ids: Vec<String> = batch
         .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .map(|b| {
+            b.events
+                .iter()
+                .map(|be| crate::queue::reaction_target_id(&be.event))
+                .collect()
+        })
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
@@ -2333,12 +2348,41 @@ pub async fn run_prompt_task(
         };
         vec![text]
     } else if let Some(ref b) = batch {
+        // Resolve edit routing once inside the prompt task. This keeps the
+        // network lookup off the shared relay loop and gives typing, prompt,
+        // reply, reaction, and failure routing one authority.
+        let resolved_edit = match b.events.last() {
+            Some(event) => resolve_edit_routing(&event.event, &ctx.rest_client).await,
+            None => None,
+        };
+        if let (Some(tx), Some(event)) = (typing_tx.as_ref(), b.events.last()) {
+            if crate::queue::edit_target_id(&event.event).is_some() {
+                let scope = typing_scope_for_event(&event.event, resolved_edit.as_ref());
+                let _ = tx.send((b.channel_id, turn_id.clone(), scope));
+            }
+        }
+
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
         let channel_info = ctx.channel_info.resolve(b.channel_id).await;
 
         let conversation_context = if ctx.context_message_limit > 0 {
-            fetch_conversation_context(b, &channel_info, &ctx).await
+            match resolved_edit
+                .as_ref()
+                .and_then(|edit| edit.target_thread_tags.root_event_id.as_deref())
+            {
+                Some(root_id) => {
+                    fetch_thread_context(
+                        b.channel_id,
+                        root_id,
+                        ctx.context_message_limit,
+                        ctx.agent_keys.public_key(),
+                        &ctx.rest_client,
+                    )
+                    .await
+                }
+                None => fetch_conversation_context(b, &channel_info, &ctx).await,
+            }
         } else {
             None
         };
@@ -2396,6 +2440,7 @@ pub async fn run_prompt_task(
                 conversation_context: conversation_context.as_ref(),
                 conversation_context_had_delivered_events,
                 profile_lookup: profile_lookup.as_ref(),
+                resolved_edit: resolved_edit.as_ref(),
                 has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: standing.base_prompt,
                 system_prompt: standing.system_prompt,
@@ -3294,6 +3339,56 @@ fn conversation_context_delta(
             })
         }
     }
+}
+
+fn typing_scope_for_event(
+    event: &nostr::Event,
+    resolved_edit: Option<&crate::queue::ResolvedEdit>,
+) -> crate::queue::ThreadTags {
+    resolved_edit
+        .map(|edit| edit.target_thread_tags.clone())
+        .unwrap_or_else(|| crate::queue::parse_thread_tags(event))
+}
+
+/// Resolve a kind:40003 edit through its original event for reply routing.
+/// Failure deliberately falls back to the edit target id in `format_prompt`.
+pub(crate) async fn resolve_edit_routing(
+    event: &nostr::Event,
+    rest: &RestClient,
+) -> Option<crate::queue::ResolvedEdit> {
+    let target_event_id = crate::queue::edit_target_id(event)?;
+    let target_id = EventId::from_hex(&target_event_id).ok()?;
+    let filter = nostr::Filter::new().id(target_id).limit(1);
+    let response = match timeout(Duration::from_millis(2_000), rest.query(&[filter])).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event fetch failed: {error}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event fetch timed out");
+            return None;
+        }
+    };
+    let Some(raw) = response.as_array().and_then(|events| events.first()) else {
+        tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event was not returned");
+        return None;
+    };
+    let original = match serde_json::from_value::<nostr::Event>(raw.clone()) {
+        Ok(original) if original.id == target_id && original.verify().is_ok() => original,
+        Ok(_) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: original event failed id/signature verification");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(edit_event_id = %event.id, target_event_id, "edit routing: malformed original event: {error}");
+            return None;
+        }
+    };
+    Some(crate::queue::ResolvedEdit {
+        target_event_id,
+        target_thread_tags: crate::queue::parse_thread_tags(&original),
+    })
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.
@@ -4700,6 +4795,27 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
+    #[test]
+    fn edit_typing_scope_uses_resolved_original_thread() {
+        let target_id = "11".repeat(32);
+        let root_id = "22".repeat(32);
+        let edit = EventBuilder::new(Kind::Custom(40003), "edited request")
+            .tags([Tag::parse(["e", target_id.as_str()]).expect("edit target")])
+            .sign_with_keys(&Keys::generate())
+            .expect("signed edit");
+        let resolved = crate::queue::ResolvedEdit {
+            target_event_id: target_id,
+            target_thread_tags: ThreadTags {
+                root_event_id: Some(root_id.clone()),
+                parent_event_id: None,
+                mentioned_pubkeys: Vec::new(),
+            },
+        };
+
+        let scope = typing_scope_for_event(&edit, Some(&resolved));
+        assert_eq!(scope.root_event_id.as_deref(), Some(root_id.as_str()));
+    }
+
     fn test_mcp_server() -> McpServer {
         McpServer {
             name: "dev".into(),
@@ -6005,6 +6121,7 @@ done"#
                 Arc::clone(&ctx),
                 result_tx.clone(),
                 None,
+                None,
                 format!("turn-{turn}"),
             )
             .await;
@@ -6122,6 +6239,7 @@ done"#
                 None,
                 Arc::clone(&ctx),
                 result_tx.clone(),
+                None,
                 None,
                 format!("turn-{turn}"),
             )
@@ -6301,6 +6419,7 @@ done"#
                 Arc::clone(&ctx),
                 result_tx.clone(),
                 None,
+                None,
                 turn_id.into(),
             )
             .await;
@@ -6462,6 +6581,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             None,
             Arc::new(ctx),
             result_tx,
+            None,
             None,
             "next-turn".into(),
         )

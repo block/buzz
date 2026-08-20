@@ -2310,6 +2310,7 @@ async fn tokio_main() -> Result<()> {
     //      withheld event in `EventQueue::withheld_native_steer` until
     //      `IN_FLIGHT_DEADLINE_SECS` expires.
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+    let (typing_tx, mut typing_rx) = mpsc::unbounded_channel::<(Uuid, String, ThreadTags)>();
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
@@ -2384,6 +2385,7 @@ async fn tokio_main() -> Result<()> {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
+        Typing(Uuid, String, ThreadTags),
         Wake(u32, Result<AgentPool, String>),
     }
 
@@ -2459,7 +2461,7 @@ async fn tokio_main() -> Result<()> {
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -2511,7 +2513,7 @@ async fn tokio_main() -> Result<()> {
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
             for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
             {
                 typing_channels.insert(channel_id, thread_tags);
             }
@@ -2544,6 +2546,9 @@ async fn tokio_main() -> Result<()> {
                 // locked semantics (Eva + Max + Perci).
                 Some(ack_event) = steer_ack_rx.recv() => {
                     Some(PoolEvent::SteerAck(ack_event))
+                }
+                Some((channel_id, turn_id, scope)) = typing_rx.recv() => {
+                    Some(PoolEvent::Typing(channel_id, turn_id, scope))
                 }
                 Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
                     Some(PoolEvent::Wake(attempt, result))
@@ -2890,7 +2895,8 @@ async fn tokio_main() -> Result<()> {
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
-                            let event_id_hex = buzz_event.event.id.to_hex();
+                            let reaction_event_id =
+                                queue::reaction_target_id(&buzz_event.event);
                             // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
                             // clone is unconditional because we don't know
@@ -2916,7 +2922,7 @@ async fn tokio_main() -> Result<()> {
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
                                 let rc = ctx.rest_client.clone();
-                                let eid = event_id_hex.clone();
+                                let eid = reaction_event_id.clone();
                                 tokio::spawn(async move {
                                     pool::reaction_add(&rc, &eid, "👀").await;
                                 });
@@ -2967,7 +2973,7 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -3067,7 +3073,7 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3166,7 +3172,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3191,10 +3197,19 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
+            }
+            Some(PoolEvent::Typing(channel_id, turn_id, scope)) => {
+                record_typing_scope_if_current(
+                    &pool,
+                    &mut typing_channels,
+                    channel_id,
+                    &turn_id,
+                    scope,
+                );
             }
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
@@ -3346,7 +3361,7 @@ async fn tokio_main() -> Result<()> {
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &typing_tx, &mut last_activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3373,9 +3388,13 @@ async fn tokio_main() -> Result<()> {
                             "ready",
                             None,
                         );
-                        for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
-                        {
+                        for (channel_id, thread_tags) in dispatch_pending(
+                            &mut pool,
+                            &mut queue,
+                            &ctx,
+                            &typing_tx,
+                            &mut last_activity,
+                        ) {
                             typing_channels.insert(channel_id, thread_tags);
                         }
                     }
@@ -3703,11 +3722,28 @@ fn try_native_steer(
 
 // ── dispatch_pending ──────────────────────────────────────────────────────────
 
+fn record_typing_scope_if_current(
+    pool: &AgentPool,
+    typing_channels: &mut HashMap<Uuid, ThreadTags>,
+    channel_id: Uuid,
+    turn_id: &str,
+    scope: ThreadTags,
+) {
+    // Edit routing is resolved asynchronously inside the prompt task. Discard
+    // its scope if that exact turn has already completed (or been replaced);
+    // otherwise a result-before-typing schedule can resurrect an indicator
+    // with no remaining cleanup path.
+    if pool.is_turn_in_flight(channel_id, turn_id) {
+        typing_channels.insert(channel_id, scope);
+    }
+}
+
 /// Flush queued work to available agents.
 fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
+    typing_tx: &mpsc::UnboundedSender<(Uuid, String, ThreadTags)>,
     last_activity: &mut tokio::time::Instant,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
@@ -3717,11 +3753,11 @@ fn dispatch_pending(
             None => break,
         };
         let channel_id = batch.channel_id;
-        let typing_scope = batch
-            .events
-            .last()
-            .map(|event| queue::parse_thread_tags(&event.event))
-            .unwrap_or_default();
+        let typing_scope = batch.events.last().and_then(|event| {
+            queue::edit_target_id(&event.event)
+                .is_none()
+                .then(|| queue::parse_thread_tags(&event.event))
+        });
         let affinity_hit = pool.has_session_for(channel_id);
         let mut agent = match pool.try_claim(Some(channel_id)) {
             Some(a) => a,
@@ -3743,6 +3779,7 @@ fn dispatch_pending(
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
+        let typing_tx = typing_tx.clone();
 
         // Mid-turn non-cancelling steer seam: install the per-turn steer
         // receiver on the read loop so the main loop's mode-gate fork
@@ -3771,6 +3808,7 @@ fn dispatch_pending(
                 ctx_clone,
                 result_tx,
                 Some(control_rx),
+                Some(typing_tx),
                 task_turn_id,
             )
             .await;
@@ -3788,7 +3826,9 @@ fn dispatch_pending(
                 successful_steer_deliveries: HashSet::new(),
             },
         );
-        dispatched_channels.push((channel_id, typing_scope));
+        if let Some(scope) = typing_scope {
+            dispatched_channels.push((channel_id, scope));
+        }
         *last_activity = tokio::time::Instant::now();
     }
     tracing::debug!(
@@ -4406,6 +4446,7 @@ fn dispatch_heartbeat(
             Some(prompt_text),
             ctx_clone,
             result_tx,
+            None,
             None,
             task_turn_id,
         )
@@ -5200,6 +5241,44 @@ mod owner_control_command_tests {
         assert!(
             mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, None).is_none(),
             "owner-interrupt must not fire when the owner is unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_typing_scope_after_turn_completion_is_ignored() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let turn_id = "completed-edit-turn";
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: turn_id.into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        // Simulate the biased select consuming Result before the edit task's
+        // delayed Typing event. Result handling removes TaskMeta before the
+        // next select iteration receives the scope.
+        pool.task_map_mut().remove(&task_id);
+        let mut typing_channels = HashMap::new();
+        record_typing_scope_if_current(
+            &pool,
+            &mut typing_channels,
+            channel_id,
+            turn_id,
+            ThreadTags::default(),
+        );
+
+        assert!(
+            !typing_channels.contains_key(&channel_id),
+            "a completed turn must not resurrect its typing indicator"
         );
     }
 

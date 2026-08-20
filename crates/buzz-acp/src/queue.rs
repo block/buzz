@@ -332,10 +332,34 @@ impl EventQueue {
             }
         };
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
+        // Relay replay delivers stored events newest-first (`ORDER BY
+        // created_at DESC`). Establish chronological order before locating an
+        // edit boundary: partitioning the raw replay deque would otherwise
+        // dispatch a newer ordinary event before an older edit. Stable sort
+        // preserves delivery order for same-second events.
         let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
-        let mut events: Vec<BatchEvent> = queue
+        queue
+            .make_contiguous()
+            .sort_by_key(|event| event.event.created_at);
+
+        // Drain up to MAX_BATCH_EVENTS, but isolate edit events. Edit routing
+        // is resolved per dispatched prompt, so allowing an edit to share a
+        // batch with a later event would make the later event's reply anchor
+        // hide the edit's original-message anchor.
+        let max_drain = MAX_BATCH_EVENTS.min(queue.len());
+        let drain_count = if queue
+            .front()
+            .is_some_and(|event| edit_target_id(&event.event).is_some())
+        {
+            1
+        } else {
+            queue
+                .iter()
+                .take(max_drain)
+                .position(|event| edit_target_id(&event.event).is_some())
+                .unwrap_or(max_drain)
+        };
+        let events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(|qe| BatchEvent {
                 event: qe.event,
@@ -343,11 +367,6 @@ impl EventQueue {
                 received_at: qe.received_at,
             })
             .collect();
-        // Relay replay delivers stored events newest-first (`ORDER BY
-        // created_at DESC`), but batch consumers — `format_prompt` scope and
-        // reply-anchor selection — require the LAST event to be the newest.
-        // Stable sort: same-second events keep delivery order.
-        events.sort_by_key(|be| be.event.created_at);
 
         // Remove the queue entry if now empty.
         if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
@@ -536,15 +555,58 @@ impl EventQueue {
     /// merged prompt is framed correctly. On a double-cancel, the most recent
     /// reason wins.
     ///
-    /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
-    /// the generic queue — they are stored separately and merged by
-    /// `flush_next()`. No retry throttle, no backoff.
+    /// Cancelled batches normally remain separate for annotated merge framing.
+    /// If the interrupted work contains an edit, the complete interrupted
+    /// sequence instead returns to the ordinary queue so `flush_next()` can
+    /// preserve chronology and isolate the edit at its routing boundary.
+    /// No retry throttle or backoff is applied.
     pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
-        let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
+        let channel_id = batch.channel_id;
+        let mut cancelled = self
+            .cancelled_batches
+            .remove(&channel_id)
+            .unwrap_or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
-        entry.extend(batch.cancelled_events);
-        entry.extend(batch.events);
-        self.cancel_reasons.insert(batch.channel_id, reason);
+        cancelled.extend(batch.cancelled_events);
+        cancelled.extend(batch.events);
+
+        // Edit routing is defined per independently dispatched prompt. An edit
+        // that remains in `cancelled_events` would be merged with the later
+        // event that caused cancellation, and `format_prompt` would derive
+        // routing only from that later event. Restore the whole interrupted
+        // sequence to the ordinary queue instead; `flush_next`'s chronological
+        // sort and edit boundary then preserve both ordering and edit routing.
+        if cancelled
+            .iter()
+            .any(|event| edit_target_id(&event.event).is_some())
+        {
+            let queue = self.queues.entry(channel_id).or_default();
+            for event in cancelled.into_iter().rev() {
+                queue.push_front(QueuedEvent {
+                    channel_id,
+                    event: event.event,
+                    prompt_tag: event.prompt_tag,
+                    received_at: event.received_at,
+                });
+            }
+            let withheld = self
+                .withheld_native_steer
+                .get(&channel_id)
+                .map_or(0, Vec::len);
+            while queue.len().saturating_add(withheld) > MAX_PENDING_PER_CHANNEL {
+                queue.pop_back();
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    limit = MAX_PENDING_PER_CHANNEL,
+                    "cancelled edit requeue overflow — dropped newest queued event to enforce cap"
+                );
+            }
+            self.cancel_reasons.remove(&channel_id);
+            return;
+        }
+
+        self.cancelled_batches.insert(channel_id, cancelled);
+        self.cancel_reasons.insert(channel_id, reason);
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -653,25 +715,40 @@ impl EventQueue {
     ///
     /// Also clears any `retry_after` throttle for the channel.
     ///
-    /// Returns the event IDs of dropped events so the caller can clean up
-    /// any reactions (👀) that were added at queue-push time.
+    /// Returns the visible event IDs that own lifecycle reactions for every
+    /// dropped event so the caller can clean up any 👀 added at queue-push time.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
-        let ids = self
-            .queues
-            .remove(&channel_id)
-            .map(|q| q.into_iter().map(|e| e.event.id.to_hex()).collect())
-            .unwrap_or_default();
+        let mut ids: HashSet<String> = HashSet::new();
+        if let Some(events) = self.queues.remove(&channel_id) {
+            ids.extend(
+                events
+                    .into_iter()
+                    .map(|event| reaction_target_id(&event.event)),
+            );
+        }
+        if let Some(events) = self.cancelled_batches.remove(&channel_id) {
+            ids.extend(
+                events
+                    .into_iter()
+                    .map(|event| reaction_target_id(&event.event)),
+            );
+        }
+        if let Some(events) = self.withheld_native_steer.remove(&channel_id) {
+            ids.extend(
+                events
+                    .into_iter()
+                    .map(|event| reaction_target_id(&event.event)),
+            );
+        }
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
-        self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
-        self.withheld_native_steer.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
         // removing in_flight_channels would disable auto-expiry and leave a
         // wedged task permanently blocking the channel.
-        ids
+        ids.into_iter().collect()
     }
 
     /// Whether a prompt is currently in-flight for the given channel.
@@ -884,6 +961,26 @@ pub struct ThreadTags {
 /// NOTE: Only handles NIP-10 marker-based format (preferred). The deprecated
 /// positional format (no markers, `["e", id, relay_url]`) is not supported —
 /// Buzz always generates marker-based tags (see relay messages.rs:762-783).
+/// Return the original message id targeted by a kind:40003 edit event.
+///
+/// Edit events deliberately use a bare two-element `e` tag; this is not the
+/// deprecated positional NIP-10 thread format and must not be accepted by
+/// [`parse_thread_tags`] for other event kinds.
+pub fn edit_target_id(event: &Event) -> Option<String> {
+    (event.kind.as_u16() == 40003)
+        .then(|| {
+            event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("e"))
+                    .then(|| parts.get(1))
+                    .flatten()
+                    .and_then(|target| nostr::EventId::from_hex(target).ok())
+                    .map(|target| target.to_hex())
+            })
+        })
+        .flatten()
+}
+
 pub fn parse_thread_tags(event: &Event) -> ThreadTags {
     let mut root = None;
     let mut reply = None;
@@ -1444,6 +1541,23 @@ fn format_conversation_context(
     s
 }
 
+/// Event ID that should own lifecycle reactions for an inbound event.
+///
+/// Kind:40003 edits are auxiliary events that do not render as timeline rows,
+/// so their seen/working reactions belong on the visible original message.
+/// Prompt routing and reaction routing deliberately share `edit_target_id` as
+/// their semantic authority even when fetching the original event later fails.
+pub(crate) fn reaction_target_id(event: &Event) -> String {
+    edit_target_id(event).unwrap_or_else(|| event.id.to_hex())
+}
+
+/// Original-message routing recovered for a kind:40003 edit event.
+#[derive(Debug, Clone)]
+pub struct ResolvedEdit {
+    pub target_event_id: String,
+    pub target_thread_tags: ThreadTags,
+}
+
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
 #[derive(Default)]
 pub struct FormatPromptArgs<'a> {
@@ -1456,6 +1570,10 @@ pub struct FormatPromptArgs<'a> {
     /// live session had already received. Trigger-only context does not set it.
     pub conversation_context_had_delivered_events: bool,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
+    /// Routing derived by resolving a kind:40003 edit target. When present,
+    /// prompt scope and reply instructions use the original message rather
+    /// than the invisible edit auxiliary event.
+    pub resolved_edit: Option<&'a ResolvedEdit>,
     /// When true, base_prompt and system_prompt are delivered via the system
     /// role (session/new) and omitted from the user message. When false
     /// (legacy agents), they are injected as `[Base]` and `[System]` sections.
@@ -1577,7 +1695,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             return Vec::new();
         }
     };
-    let thread_tags = parse_thread_tags(&last_event.event);
+    let edit_target = edit_target_id(&last_event.event);
+    let resolved_edit = args.resolved_edit.filter(|_| edit_target.is_some());
+    // An edit's own bare `e` tag is not a thread tag. Route via the original
+    // message when it was fetched, or its target id as the safe fallback.
+    let thread_tags = resolved_edit
+        .map(|edit| edit.target_thread_tags.clone())
+        .unwrap_or_else(|| parse_thread_tags(&last_event.event));
+    let routing_event_id = resolved_edit
+        .map(|edit| edit.target_event_id.clone())
+        .or(edit_target.clone())
+        .unwrap_or_else(|| last_event.event.id.to_hex());
     let is_dm = args
         .channel_info
         .map(|ci| ci.channel_type == "dm")
@@ -1616,12 +1744,12 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         thread_tags
             .root_event_id
             .is_some()
-            .then(|| last_event.event.id.to_hex())
+            .then(|| routing_event_id.to_string())
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
             &thread_tags,
-            &last_event.event.id.to_hex(),
+            &routing_event_id,
             args.profile_lookup,
         )
     };
@@ -1634,6 +1762,16 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         args.conversation_context_had_delivered_events,
         reply_anchor.as_deref(),
     ));
+    if let Some(edit) = resolved_edit {
+        sections.push(format!(
+            "[Edit routing]\nTrigger is a kind:40003 edit event; original message ID: {}",
+            edit.target_event_id
+        ));
+    } else if let Some(target_id) = edit_target {
+        sections.push(format!(
+            "[Edit routing]\nTrigger is a kind:40003 edit event; original message ID: {target_id} (original event fetch failed; using target as reply anchor)"
+        ));
+    }
 
     // 3. Conversation context (thread or DM).
     if let Some(ctx) = args.conversation_context {
@@ -3920,6 +4058,33 @@ mod tests {
     }
 
     #[test]
+    fn test_drain_channel_returns_visible_edit_targets_including_withheld() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let queued_target = "77".repeat(32);
+        let withheld_target = "88".repeat(32);
+
+        let queued = QueuedEvent {
+            channel_id: ch,
+            event: edit_event(&queued_target),
+            received_at: Instant::now(),
+            prompt_tag: "test".into(),
+        };
+        let withheld = QueuedEvent {
+            channel_id: ch,
+            event: edit_event(&withheld_target),
+            received_at: Instant::now(),
+            prompt_tag: "test".into(),
+        };
+        q.push(queued);
+        q.withheld_native_steer.insert(ch, vec![withheld]);
+
+        let drained: HashSet<String> = q.drain_channel(ch).into_iter().collect();
+        assert_eq!(drained, HashSet::from([queued_target, withheld_target]));
+        assert!(q.withheld_native_steer.is_empty());
+    }
+
+    #[test]
     fn test_drain_channel_does_not_affect_other_channels() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch_a = Uuid::new_v4();
@@ -4079,6 +4244,46 @@ mod tests {
             2,
             "should have 2 cancelled events"
         );
+    }
+
+    #[test]
+    fn cancelled_edit_returns_to_queue_and_keeps_routing_boundary() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let target_id = "ab".repeat(32);
+        let edit = EventBuilder::new(Kind::Custom(40003), "edited request")
+            .tags([nostr::Tag::parse(["e", &target_id]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let edit_id = edit.id;
+        q.push(QueuedEvent {
+            channel_id: ch,
+            event: edit,
+            received_at: Instant::now(),
+            prompt_tag: "edit".into(),
+        });
+        let interrupted = q.flush_next().expect("edit should dispatch alone");
+
+        let later = make_queued(ch, "later request");
+        let later_id = later.event.id;
+        q.push(later);
+        q.requeue_as_cancelled(interrupted, CancelReason::Steer);
+        q.mark_complete(ch);
+
+        let restored_edit = q.flush_next().expect("cancelled edit should be restored");
+        assert_eq!(restored_edit.events.len(), 1);
+        assert_eq!(restored_edit.events[0].event.id, edit_id);
+        assert!(restored_edit.cancelled_events.is_empty());
+        assert_eq!(
+            edit_target_id(&restored_edit.events[0].event),
+            Some(target_id)
+        );
+
+        q.mark_complete(ch);
+        let later_batch = q.flush_next().expect("later request should remain queued");
+        assert_eq!(later_batch.events.len(), 1);
+        assert_eq!(later_batch.events[0].event.id, later_id);
+        assert!(later_batch.cancelled_events.is_empty());
     }
 
     #[test]
@@ -5114,6 +5319,110 @@ mod tests {
             q.in_flight_channels.contains(&ch),
             "ch must still be in-flight after has_flushable_work finds ch2 work"
         );
+    }
+
+    fn edit_event(target: &str) -> Event {
+        let keys = Keys::generate();
+        EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .tags([nostr::Tag::parse(["e", target]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    fn one_event_batch(event: Event) -> FlushBatch {
+        FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn edit_target_skips_malformed_e_tags_and_selects_first_valid_id() {
+        let valid_target = "ab".repeat(32);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(40003), "edited mention")
+            .tags([
+                nostr::Tag::parse(["e", "not-an-event-id"]).unwrap(),
+                nostr::Tag::parse(["e", &valid_target]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        assert_eq!(edit_target_id(&event), Some(valid_target));
+    }
+
+    #[test]
+    fn edit_of_top_level_anchors_original_message_in_rendered_prompt() {
+        let original_id = "11".repeat(32);
+        let edit = edit_event(&original_id);
+        let prompt = format_prompt(
+            &one_event_batch(edit),
+            &FormatPromptArgs {
+                resolved_edit: Some(&ResolvedEdit {
+                    target_event_id: original_id.clone(),
+                    target_thread_tags: ThreadTags::default(),
+                }),
+                ..Default::default()
+            },
+        )
+        .join("\n");
+        assert!(prompt.contains(&format!("--reply-to {original_id}")));
+        assert!(prompt.contains(&format!("original message ID: {original_id}")));
+    }
+
+    #[test]
+    fn edit_of_threaded_reply_anchors_original_thread_root_in_rendered_prompt() {
+        let original_id = "22".repeat(32);
+        let root_id = "33".repeat(32);
+        let prompt = format_prompt(
+            &one_event_batch(edit_event(&original_id)),
+            &FormatPromptArgs {
+                resolved_edit: Some(&ResolvedEdit {
+                    target_event_id: original_id,
+                    target_thread_tags: ThreadTags {
+                        root_event_id: Some(root_id.clone()),
+                        parent_event_id: Some("44".repeat(32)),
+                        mentioned_pubkeys: vec![],
+                    },
+                }),
+                ..Default::default()
+            },
+        )
+        .join("\n");
+        assert!(prompt.contains(&format!("--reply-to {root_id}")));
+    }
+
+    #[test]
+    fn edit_reactions_target_visible_original_message() {
+        let original_id = "66".repeat(32);
+        let edit = edit_event(&original_id);
+
+        assert_eq!(reaction_target_id(&edit), original_id);
+    }
+
+    #[test]
+    fn ordinary_event_reactions_target_the_event_itself() {
+        let event = EventBuilder::new(Kind::Custom(9), "mention")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+
+        assert_eq!(reaction_target_id(&event), event.id.to_hex());
+    }
+
+    #[test]
+    fn edit_fetch_failure_anchors_target_never_auxiliary_edit_event() {
+        let original_id = "55".repeat(32);
+        let edit = edit_event(&original_id);
+        let edit_id = edit.id.to_hex();
+        let prompt = format_prompt(&one_event_batch(edit), &FormatPromptArgs::default()).join("\n");
+        assert!(prompt.contains(&format!("--reply-to {original_id}")));
+        assert!(!prompt.contains(&format!("--reply-to {edit_id}")));
     }
 
     // ── F2 case 2.5: steer renewal is monotonic across repeated steers ───────
