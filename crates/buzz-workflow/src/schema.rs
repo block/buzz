@@ -100,6 +100,11 @@ pub enum ActionDef {
         /// Optional channel UUID override. Must be a valid UUID string.
         #[serde(default)]
         channel: Option<String>,
+        /// Reply to the triggering message in its thread instead of posting a
+        /// new top-level message. Only valid for message-based triggers, which
+        /// carry a triggering event to reply to.
+        #[serde(default)]
+        reply_in_thread: bool,
     },
     /// Send a direct message to a user.
     SendDm {
@@ -205,6 +210,34 @@ impl WorkflowDef {
                     "duplicate step id: {}",
                     step.id
                 )));
+            }
+        }
+
+        // `reply_in_thread` requires a triggering message to reply to. Schedule
+        // and webhook triggers have none, so reject the combination at
+        // definition time rather than failing silently at run time.
+        let trigger_has_message = matches!(
+            self.trigger,
+            TriggerDef::MessagePosted { .. }
+                | TriggerDef::ReactionAdded { .. }
+                | TriggerDef::DiffPosted { .. }
+        );
+        if !trigger_has_message {
+            for step in &self.steps {
+                if matches!(
+                    step.action,
+                    ActionDef::SendMessage {
+                        reply_in_thread: true,
+                        ..
+                    }
+                ) {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': reply_in_thread requires a message-based trigger \
+                         (message_posted, reaction_added, or diff_posted); \
+                         schedule and webhook triggers have no message to reply to",
+                        step.id
+                    )));
+                }
             }
         }
 
@@ -456,6 +489,78 @@ mod tests {
         let yaml = "name: Empty Schedule\ntrigger:\n  on: schedule\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n";
         let err = parse_yaml(yaml).unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn reply_in_thread_defaults_false_and_round_trips() {
+        // Absent field defaults to false.
+        let yaml = "name: Auto Reply\ntrigger:\n  on: message_posted\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n";
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        match &def.steps[0].action {
+            ActionDef::SendMessage {
+                reply_in_thread, ..
+            } => assert!(!reply_in_thread, "should default to false"),
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        // Explicit true parses, and survives a JSON round-trip.
+        let yaml = "name: Auto Reply\ntrigger:\n  on: message_posted\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n    reply_in_thread: true\n";
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        match &def.steps[0].action {
+            ActionDef::SendMessage {
+                reply_in_thread, ..
+            } => assert!(reply_in_thread),
+            other => panic!("unexpected action: {other:?}"),
+        }
+        let json = serde_json::to_string(&def).expect("serialize");
+        let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
+        assert!(matches!(
+            &reparsed.steps[0].action,
+            ActionDef::SendMessage {
+                reply_in_thread: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_reply_in_thread_on_message_triggers() {
+        for on in ["message_posted", "reaction_added", "diff_posted"] {
+            let yaml = format!(
+                "name: Auto Reply\ntrigger:\n  on: {on}\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n    reply_in_thread: true\n"
+            );
+            parse_yaml(&yaml)
+                .unwrap_or_else(|e| panic!("reply_in_thread should be valid on {on}: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_reply_in_thread_on_schedule_trigger() {
+        let yaml = "name: Bad\ntrigger:\n  on: schedule\n  cron: '0 9 * * 1-5'\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n    reply_in_thread: true\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(
+                    msg.contains("reply_in_thread"),
+                    "expected reply_in_thread in: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_reply_in_thread_on_webhook_trigger() {
+        let yaml = "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n    channel: 00000000-0000-0000-0000-000000000000\n    reply_in_thread: true\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn validate_allows_reply_in_thread_false_on_schedule() {
+        // Explicit `false` on a schedule trigger is fine — no message needed.
+        let yaml = "name: OK\ntrigger:\n  on: schedule\n  cron: '0 9 * * 1-5'\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n    reply_in_thread: false\n";
+        parse_yaml(yaml).expect("reply_in_thread: false on schedule should be valid");
     }
 
     #[test]

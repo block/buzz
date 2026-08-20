@@ -4,8 +4,11 @@ import { parse as parseYaml } from "yaml";
 
 import {
   formStateToYaml,
+  isThreadReplyEligibleTrigger,
   supportsMessageTextCondition,
+  withTriggerType,
   yamlToFormState,
+  DEFAULT_FORM_STATE,
 } from "./workflowFormTypes.ts";
 
 function accepted(yaml) {
@@ -23,6 +26,22 @@ function normalizeBackendDefaults(value) {
     }
   }
   return copy;
+}
+
+function sendMessageState(overrides) {
+  return {
+    ...DEFAULT_FORM_STATE,
+    name: "Auto Reply",
+    trigger: { on: "message_posted", filter: "trigger_is_reply == false" },
+    steps: [
+      {
+        id: "step_1",
+        action: "send_message",
+        text: "pre-written reply",
+        ...overrides,
+      },
+    ],
+  };
 }
 
 test("message-text conditions are limited to message-bearing triggers", () => {
@@ -195,4 +214,104 @@ test("values the Form serializer would normalize are refused", () => {
   ];
 
   for (const yaml of fixtures) assert.equal(yamlToFormState(yaml).ok, false);
+});
+
+test("reply_in_thread is emitted only when the checkbox is on", () => {
+  const withReply = formStateToYaml(sendMessageState({ replyInThread: true }));
+  assert.match(withReply, /reply_in_thread: true/);
+
+  const withoutReply = formStateToYaml(
+    sendMessageState({ replyInThread: false }),
+  );
+  assert.doesNotMatch(withoutReply, /reply_in_thread/);
+
+  const unset = formStateToYaml(sendMessageState({}));
+  assert.doesNotMatch(unset, /reply_in_thread/);
+});
+
+test("switching from Message Posted clears reply_in_thread before save", () => {
+  const messagePosted = sendMessageState({ replyInThread: true });
+
+  for (const triggerType of ["schedule", "webhook"]) {
+    const switched = withTriggerType(messagePosted, triggerType);
+    assert.equal(switched.trigger.on, triggerType);
+    assert.equal(switched.steps[0].replyInThread, false);
+    assert.doesNotMatch(formStateToYaml(switched), /reply_in_thread/);
+  }
+});
+
+test("an ineligible trigger cannot resurrect reply_in_thread through an action change", () => {
+  // Full repro: Message Posted → Send Message → enable Reply → switch action to
+  // Delay → switch trigger to an ineligible one → switch action back to Send
+  // Message. The action picker changes only `action` (a plain spread, mirrored
+  // here), so `withTriggerType` must clear the hidden flag on every step, not
+  // just the ones whose current action is send_message.
+  for (const triggerType of ["schedule", "webhook"]) {
+    const enabled = sendMessageState({ replyInThread: true });
+    const asDelay = {
+      ...enabled,
+      steps: [{ ...enabled.steps[0], action: "delay", duration: "5m" }],
+    };
+    const switched = withTriggerType(asDelay, triggerType);
+    const backToSend = {
+      ...switched,
+      steps: [{ ...switched.steps[0], action: "send_message" }],
+    };
+
+    assert.equal(backToSend.steps[0].replyInThread, false, triggerType);
+    assert.doesNotMatch(formStateToYaml(backToSend), /reply_in_thread/);
+  }
+});
+
+test("invalid reply_in_thread values are refused rather than normalized", () => {
+  const original = (yaml) => {
+    const result = yamlToFormState(yaml);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /YAML editor/);
+    return result;
+  };
+
+  // Non-boolean would be silently deleted on serialization.
+  const nonBoolean = `name: Coerced\ntrigger: { on: message_posted }\nsteps: [{ id: s1, action: send_message, text: hi, reply_in_thread: "yes" }]\n`;
+  assert.match(original(nonBoolean).error, /reply_in_thread must be a boolean/);
+
+  // true under an ineligible trigger would round-trip a backend-invalid definition.
+  for (const trigger of ["schedule, cron: '0 9 * * *'", "webhook"]) {
+    const yaml = `name: Ineligible\ntrigger: { on: ${trigger} }\nsteps: [{ id: s1, action: send_message, text: hi, reply_in_thread: true }]\n`;
+    assert.match(
+      original(yaml).error,
+      /reply_in_thread is not supported for (schedule|webhook) triggers/,
+    );
+  }
+});
+
+test("reply_in_thread eligibility follows trigger capability", () => {
+  assert.equal(isThreadReplyEligibleTrigger("message_posted"), true);
+  assert.equal(isThreadReplyEligibleTrigger("schedule"), false);
+  assert.equal(isThreadReplyEligibleTrigger("webhook"), false);
+});
+test("reply_in_thread round-trips YAML -> form -> YAML", () => {
+  const yaml = formStateToYaml(sendMessageState({ replyInThread: true }));
+  const parsed = yamlToFormState(yaml);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.state.steps[0].replyInThread, true);
+
+  const reserialized = formStateToYaml(parsed.state);
+  assert.match(reserialized, /reply_in_thread: true/);
+});
+
+test("absent reply_in_thread parses as false", () => {
+  const yaml = [
+    "name: No Reply",
+    "trigger:",
+    "  on: message_posted",
+    "steps:",
+    "  - id: step_1",
+    "    action: send_message",
+    "    text: hi",
+    "",
+  ].join("\n");
+  const parsed = yamlToFormState(yaml);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.state.steps[0].replyInThread, false);
 });

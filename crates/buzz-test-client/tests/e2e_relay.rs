@@ -2661,6 +2661,112 @@ async fn test_reply_ingest_pushes_live_thread_summary() {
     client.disconnect().await.expect("disconnect");
 }
 
+/// F3 (workflow path): a `message_posted` workflow whose `send_message` action
+/// has `reply_in_thread: true` posts a threaded reply to the triggering
+/// top-level message — and that relay-built reply must push the same live
+/// kind:39005 thread-summary overlay the human ingest path does, so desktops
+/// update the root's badge without refetching. Also exercises F2's semantics:
+/// the `trigger_is_reply == false` filter must fire on the top-level message.
+#[tokio::test]
+#[ignore]
+async fn test_workflow_reply_in_thread_pushes_live_thread_summary() {
+    let url = relay_url();
+    let http = relay_http_url();
+    let keys = Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+    let channel = create_test_channel(&keys).await;
+
+    // A message_posted workflow that replies in-thread, but only to NEW
+    // top-level messages (`trigger_is_reply == false`) — so it cannot recurse
+    // on the reply it just posted.
+    let yaml = "name: reply-bot\n\
+         description: F3 live probe\n\
+         trigger:\n\
+         \x20 on: message_posted\n\
+         \x20 filter: \"trigger_is_reply == false\"\n\
+         steps:\n\
+         \x20 - id: step1\n\
+         \x20   name: Reply\n\
+         \x20   action: send_message\n\
+         \x20   text: \"auto-reply\"\n\
+         \x20   reply_in_thread: true\n"
+        .to_string();
+    let def = EventBuilder::new(Kind::Custom(30620), yaml)
+        .tags([
+            Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+            Tag::parse(["h", channel.as_str()]).unwrap(),
+            Tag::parse(["name", "reply-bot"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign workflow def");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{http}/events"))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&def).unwrap())
+        .send()
+        .await
+        .expect("submit workflow def");
+    let body: serde_json::Value = resp.json().await.expect("parse def response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "workflow def not accepted: {body}"
+    );
+
+    // Live 39005 subscription for the channel, shaped like the desktop window
+    // store's.
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let sid = sub_id("wf-live-summary");
+    let filter = Filter::new()
+        .kind(Kind::Custom(39005))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    ws.subscribe(&sid, vec![filter]).await.expect("subscribe");
+    ws.collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    // Post a top-level message — the workflow fires and posts a threaded reply.
+    let root = EventBuilder::new(Kind::Custom(9), "trigger me")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign root");
+    let root_id = root.id;
+    let ok = ws.send_event(root).await.expect("send root");
+    assert!(ok.accepted, "root rejected: {}", ok.message);
+
+    // The workflow reply's 39005 overlay must arrive and target the root with a
+    // reply_count of 1 — proving the relay-built reply pushed the live summary.
+    let summary = loop {
+        match ws
+            .recv_event(Duration::from_secs(10))
+            .await
+            .expect("recv 39005 for workflow reply")
+        {
+            RelayMessage::Event { event, .. } if event.kind == Kind::Custom(39005) => break *event,
+            _ => continue,
+        }
+    };
+    let root_tag_val = summary
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+        .and_then(|t| t.content().map(str::to_string))
+        .expect("summary carries root e-tag");
+    assert_eq!(
+        root_tag_val,
+        root_id.to_hex(),
+        "workflow-reply summary targets the triggering top-level message as root"
+    );
+    let content: serde_json::Value = serde_json::from_str(&summary.content).expect("JSON");
+    assert_eq!(
+        content["reply_count"], 1,
+        "workflow threaded reply counted up: {content}"
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// Read a member's authoritative role from the relay-signed kind:39002 member
 /// list. The relay's own view of membership, not the client's — a kind:9000 can
 /// be `accepted` (stored) while its membership side effect fails, so asserting
