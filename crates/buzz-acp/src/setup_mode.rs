@@ -590,8 +590,8 @@ async fn handle_setup_membership(
 
 /// Build and publish a setup nudge reply to the triggering event.
 ///
-/// Threading: flat reply to the thread root if one exists; otherwise reply
-/// to the triggering event itself. P-tags the asker.
+/// Threading: flat reply to the thread root if one exists; otherwise post at
+/// the channel root. P-tags the asker.
 async fn publish_setup_nudge(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
@@ -613,11 +613,8 @@ async fn publish_setup_nudge(
             parent_event_id: root_id,
         })
     } else {
-        // Top-level event: reply to the triggering event.
-        Some(ThreadRef {
-            root_event_id: triggering_event.id,
-            parent_event_id: triggering_event.id,
-        })
+        // Top-level event: keep the nudge in the channel timeline.
+        None
     };
 
     let body = payload.nudge_body();
