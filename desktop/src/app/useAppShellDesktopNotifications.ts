@@ -164,20 +164,19 @@ export function useAppShellDesktopNotifications({
     if (!enabled) return;
     let isCancelled = false;
     let cleanup = () => {};
-    const enqueueDesktopNotificationAction =
-      createDesktopNotificationActivationQueue(
-        (target) => handleDesktopNotificationAction(target),
-        (error) => {
-          console.error("Failed to activate desktop notification", error);
-        },
-      );
+    const activationQueue = createDesktopNotificationActivationQueue(
+      (target) => handleDesktopNotificationAction(target),
+      (error) => {
+        console.error("Failed to activate desktop notification", error);
+      },
+    );
 
     void listenForDesktopNotificationActions((target) => {
       if (isCancelled) {
         return;
       }
 
-      enqueueDesktopNotificationAction(target);
+      activationQueue.enqueue(target);
     }).then((dispose) => {
       if (isCancelled) {
         dispose();
@@ -189,6 +188,7 @@ export function useAppShellDesktopNotifications({
 
     return () => {
       isCancelled = true;
+      activationQueue.cancel();
       cleanup();
     };
   }, [enabled]);

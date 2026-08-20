@@ -144,21 +144,34 @@ export function toSearchHit(
 export function createDesktopNotificationActivationQueue(
   activate: (target: DesktopNotificationTarget) => Promise<void>,
   onError?: (error: unknown) => void,
-): (target: DesktopNotificationTarget) => void {
+): {
+  cancel: () => void;
+  enqueue: (target: DesktopNotificationTarget) => void;
+} {
+  let isCancelled = false;
   let pending = Promise.resolve();
 
-  return (target) => {
-    // Preserve native click order when macOS drains multiple queued targets.
-    // Contain failures so one rejected navigation cannot poison later clicks.
-    pending = pending
-      .then(() => activate(target))
-      .catch((error) => {
-        try {
-          onError?.(error);
-        } catch {
-          // Reporting must not poison the activation queue either.
-        }
-      });
+  return {
+    cancel: () => {
+      isCancelled = true;
+    },
+    enqueue: (target) => {
+      // Preserve native click order when macOS drains multiple queued targets.
+      // Contain failures so one rejected navigation cannot poison later clicks.
+      pending = pending
+        .then(() => {
+          if (!isCancelled) {
+            return activate(target);
+          }
+        })
+        .catch((error) => {
+          try {
+            onError?.(error);
+          } catch {
+            // Reporting must not poison the activation queue either.
+          }
+        });
+    },
   };
 }
 

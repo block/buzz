@@ -36,7 +36,7 @@ test("shouldBounceForChannelNotification_allowsBroadcastReplies", () => {
 test("notification activation queue preserves click order", async () => {
   const calls = [];
   const resolvers = new Map();
-  const enqueue = createDesktopNotificationActivationQueue((target) => {
+  const queue = createDesktopNotificationActivationQueue((target) => {
     calls.push(`start:${target.channelId}`);
     return new Promise((resolve) => {
       resolvers.set(target.channelId, () => {
@@ -46,8 +46,8 @@ test("notification activation queue preserves click order", async () => {
     });
   });
 
-  enqueue({ channelId: "first", eventId: null, kind: null });
-  enqueue({ channelId: "second", eventId: null, kind: null });
+  queue.enqueue({ channelId: "first", eventId: null, kind: null });
+  queue.enqueue({ channelId: "second", eventId: null, kind: null });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, ["start:first"]);
 
@@ -58,10 +58,34 @@ test("notification activation queue preserves click order", async () => {
   resolvers.get("second")();
 });
 
+test("notification activation queue drops pending targets after cancellation", async () => {
+  const calls = [];
+  let resolveFirst;
+  const queue = createDesktopNotificationActivationQueue((target) => {
+    calls.push(target.channelId);
+    if (target.channelId === "first") {
+      return new Promise((resolve) => {
+        resolveFirst = resolve;
+      });
+    }
+    return Promise.resolve();
+  });
+
+  queue.enqueue({ channelId: "first", eventId: null, kind: null });
+  queue.enqueue({ channelId: "second", eventId: null, kind: null });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["first"]);
+
+  queue.cancel();
+  resolveFirst();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["first"]);
+});
+
 test("notification activation queue reports failures and continues", async () => {
   const calls = [];
   const errors = [];
-  const enqueue = createDesktopNotificationActivationQueue(
+  const queue = createDesktopNotificationActivationQueue(
     async (target) => {
       calls.push(target.channelId);
       if (target.channelId === "first") {
@@ -71,8 +95,8 @@ test("notification activation queue reports failures and continues", async () =>
     (error) => errors.push(error),
   );
 
-  enqueue({ channelId: "first", eventId: null, kind: null });
-  enqueue({ channelId: "second", eventId: null, kind: null });
+  queue.enqueue({ channelId: "first", eventId: null, kind: null });
+  queue.enqueue({ channelId: "second", eventId: null, kind: null });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(calls, ["first", "second"]);
