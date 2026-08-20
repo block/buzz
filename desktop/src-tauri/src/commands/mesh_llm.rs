@@ -219,7 +219,9 @@ async fn query_mesh_discovery_events_at(
     }
 }
 
-async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
+pub(super) async fn query_mesh_discovery_events(
+    state: &AppState,
+) -> Result<Vec<nostr::Event>, String> {
     query_mesh_discovery_events_at(state, &relay::relay_ws_url_with_override(state)).await
 }
 
@@ -788,19 +790,22 @@ pub async fn mesh_stop_node(
             .and_then(|runtime| runtime.start_request().relay_url.clone());
         (guard.take(), bound_relay_url)
     };
+    let disabled = MeshSharingConfig {
+        enabled: false,
+        start_on_next_launch: false,
+        model_id: String::new(),
+        max_vram_gb: None,
+        relay_url: None,
+    };
+    // Persist the user's intent before waiting for SDK cleanup. A cleanup error
+    // is diagnostic only: the handle is already detached, and restarting Buzz
+    // here makes a successful "turn off" action look like an app crash.
+    save_mesh_sharing_config(&app, &disabled)?;
     if let Some(runtime) = taken {
-        runtime.stop().await.map_err(|error| error.to_string())?;
+        if let Err(error) = runtime.stop().await {
+            eprintln!("buzz-mesh: stop cleanup incomplete: {error:#}");
+        }
     }
-    save_mesh_sharing_config(
-        &app,
-        &MeshSharingConfig {
-            enabled: false,
-            start_on_next_launch: false,
-            model_id: String::new(),
-            max_vram_gb: None,
-            relay_url: None,
-        },
-    )?;
     mesh_llm::publish_stopped_status_once_at(&app, bound_relay_url.as_deref(), "stop").await;
     Ok(mesh_llm::stopped_status())
 }

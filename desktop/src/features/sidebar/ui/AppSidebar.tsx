@@ -51,14 +51,13 @@ import type {
   CollapsibleSidebarGroup,
   CreateChannelKind,
 } from "@/features/sidebar/ui/AppSidebar.types";
-import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { SidebarFooterNotices } from "@/features/sidebar/ui/SidebarFooterNotices";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
 } from "@/features/sidebar/ui/sidebarLoadingSkeleton";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
-import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
@@ -869,26 +868,16 @@ export function AppSidebar({
           ) : null}
 
           <SidebarFooter>
-            {relayConnectionCard.showSidebarRelayConnectionCard &&
-            (isMobile ? openMobile : sidebarOpen) ? (
-              <SidebarRelayConnectionCard
-                className="mb-2"
-                isConnected={relayConnectionCard.isRelayConnectionSuccess}
-                isReconnectPending={relayConnectionCard.isRelayReconnectPending}
-                isWaitingOnReconnectHook={
-                  relayConnectionCard.isWaitingOnReconnectHook
-                }
-                onDismiss={relayConnectionCard.onDismissRelayConnectionCard}
-                onReconnect={relayConnectionCard.onReconnectRelay}
-              />
-            ) : null}
-            {showSidebarUpdateCard ? (
-              <div className="mb-2 group-data-[collapsible=icon]:hidden">
-                <SidebarUpdateCard
-                  onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
-                />
-              </div>
-            ) : null}
+            <SidebarFooterNotices
+              expanded={isMobile ? openMobile : sidebarOpen}
+              onDismissRelayConnectionCard={
+                relayConnectionCard.onDismissRelayConnectionCard
+              }
+              onDismissUpdateCard={() => setIsSidebarUpdateCardDismissed(true)}
+              onReconnectRelay={relayConnectionCard.onReconnectRelay}
+              relayConnectionCard={relayConnectionCard}
+              showUpdateCard={showSidebarUpdateCard}
+            />
             <HuddleProfileControl
               channels={channels}
               onHuddleEnded={onHuddleEnded}

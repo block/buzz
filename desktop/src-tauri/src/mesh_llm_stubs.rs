@@ -42,3 +42,18 @@ pub async fn mesh_installed_models(
 pub async fn mesh_model_catalog() -> CmdResult<serde_json::Value> {
     Err("mesh-llm feature not enabled".to_string())
 }
+
+#[tauri::command]
+pub async fn mesh_snapshot(_state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    Err("mesh-llm feature not enabled".to_string())
+}
+
+#[tauri::command]
+pub async fn mesh_live_view(_state: State<'_, AppState>) -> CmdResult<()> {
+    Err("mesh-llm feature is not enabled".to_string())
+}
+
+#[tauri::command]
+pub async fn mesh_experimental_catalog() -> CmdResult<()> {
+    Err("mesh-llm feature is not enabled in this build".into())
+}

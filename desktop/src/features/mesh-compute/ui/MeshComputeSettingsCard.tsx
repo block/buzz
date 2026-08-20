@@ -27,7 +27,7 @@ import type {
   MeshModelOption,
   MeshNodeStatus,
 } from "@/shared/api/tauriMesh";
-import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
+import { MeshExperimentalSection } from "./MeshExperimentalSection";
 import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { classifyModelRef } from "../classifyModelRef";
 import {
@@ -39,9 +39,13 @@ import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
 import { deriveMeshShareToggle } from "../shareToggleState";
 import { deriveServingIndicator } from "../servingUsage";
-
-const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
-const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
+import {
+  getShareComputeModel,
+  setShareComputeMaxVramGb,
+  setShareComputeModel,
+  useShareComputeMaxVramGb,
+  useShareComputeModel,
+} from "../shareComputePreferences";
 
 // Keep the Share compute controls visually and behaviorally aligned with the
 // agent configuration fields. This is intentionally the same shell used by
@@ -57,26 +61,6 @@ const SHARE_COMPUTE_REVEAL_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
-function readDraft(key: string): string {
-  try {
-    return window.localStorage.getItem(key) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function writeDraft(key: string, value: string): void {
-  try {
-    if (value === "") {
-      window.localStorage.removeItem(key);
-    } else {
-      window.localStorage.setItem(key, value);
-    }
-  } catch {
-    // Ignore unavailable/full storage; the input still works for this session.
-  }
-}
-
 /**
  * Settings → Compute → Share compute.
  *
@@ -84,19 +68,19 @@ function writeDraft(key: string, value: string): void {
  * group. User-facing copy describes the shared-compute behavior without
  * exposing implementation protocols or raw mesh controls.
  */
-export function MeshComputeSettingsCard() {
+export function MeshComputeSettingsCard({
+  hideHeader = false,
+}: {
+  hideHeader?: boolean;
+} = {}) {
   const shouldReduceMotion = useReducedMotion();
   const { status, error, refresh } = useMeshNodeStatus();
   const [installedModels, setInstalledModels] = React.useState<
     MeshModelOption[]
   >([]);
   const [catalog, setCatalog] = React.useState<MeshModelCatalog | null>(null);
-  const [modelInput, setModelInput] = React.useState(() =>
-    readDraft(MODEL_DRAFT_STORAGE_KEY),
-  );
-  const [maxVramGb, setMaxVramGb] = React.useState<string>(() =>
-    readDraft(MAX_VRAM_DRAFT_STORAGE_KEY),
-  );
+  const modelInput = useShareComputeModel();
+  const maxVramGb = useShareComputeMaxVramGb();
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
   const [actionInFlight, setActionInFlight] = React.useState(false);
@@ -140,11 +124,9 @@ export function MeshComputeSettingsCard() {
         const value = await meshModelCatalog();
         if (cancelled) return;
         setCatalog(value);
-        setModelInput((current) => {
-          if (current.trim() !== "" || !value.recommended) return current;
-          writeDraft(MODEL_DRAFT_STORAGE_KEY, value.recommended);
-          return value.recommended;
-        });
+        if (getShareComputeModel().trim() === "" && value.recommended) {
+          setShareComputeModel(value.recommended);
+        }
       } catch {
         // Non-fatal — picker just doesn't render.
       }
@@ -165,8 +147,7 @@ export function MeshComputeSettingsCard() {
       status.modelId &&
       status.modelId !== modelInput
     ) {
-      setModelInput(status.modelId);
-      writeDraft(MODEL_DRAFT_STORAGE_KEY, status.modelId);
+      setShareComputeModel(status.modelId);
     }
   }, [status?.state, status?.mode, status?.modelId, modelInput]);
 
@@ -226,10 +207,12 @@ export function MeshComputeSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
-      <SettingsSectionHeader
-        title="Share compute"
-        description="Share this machine with members of this relay so they can run agents here."
-      />
+      {hideHeader ? null : (
+        <SettingsSectionHeader
+          title="Share compute"
+          description="Provide compute to your Buzz community. More capacity can increase intelligence and availability of models for agents."
+        />
+      )}
 
       {error ? (
         <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -245,161 +228,154 @@ export function MeshComputeSettingsCard() {
         <DownloadProgressBar progress={downloadProgress} />
       ) : null}
 
-      <SettingsOptionGroup title="Sharing">
-        <div className="space-y-5 px-4 py-3">
-          <div className="flex min-w-0 items-start justify-between gap-6">
-            <div className="min-w-0">
-              <label
-                className="text-sm font-medium"
-                htmlFor="mesh-share-compute-toggle"
-              >
-                Share this machine
-              </label>
-              {!isSharing ? (
-                <StatusLine
-                  isConsuming={isConsuming}
-                  pendingAction={pendingAction}
-                  status={status}
-                />
-              ) : null}
-            </div>
-            <Switch
-              checked={isSharing}
-              data-testid="mesh-share-compute-toggle"
-              disabled={
-                // A serve node can always be stopped. An off node or consuming
-                // client can start sharing once a valid local model is selected.
-                // Unknown occupants remain protected from replacement.
-                actionInFlight ||
-                (isSharing
-                  ? false
-                  : slotOccupied && !isConsuming
-                    ? true
-                    : !canStart)
-              }
-              id="mesh-share-compute-toggle"
-              onCheckedChange={handleToggle}
-            />
-          </div>
-
-          <MeshModelPicker
-            catalog={catalog}
-            disabled={controlsDisabled}
-            installedModels={installedModels}
-            isCustomModelEditing={isCustomModelEditing}
-            model={modelInput}
-            onCustomModelEditingChange={setIsCustomModelEditing}
-            onModelChange={(next) => {
-              setModelInput(next);
-              writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
-            }}
-          />
-
-          <div className="pt-3">
-            <button
-              aria-expanded={advancedOpen}
-              className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              data-testid="mesh-share-compute-advanced-toggle"
-              onClick={() => setAdvancedOpen((current) => !current)}
-              type="button"
+      <div className="space-y-5">
+        <div className="flex min-w-0 items-start justify-between gap-6">
+          <div className="min-w-0">
+            <label
+              className="text-sm font-medium"
+              htmlFor="mesh-share-compute-toggle"
             >
-              <span>Advanced</span>
-              <ChevronDown
-                className={cn(
-                  "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
-                  advancedOpen && "rotate-180",
-                )}
+              Share this machine
+            </label>
+            {!isSharing ? (
+              <StatusLine
+                isConsuming={isConsuming}
+                pendingAction={pendingAction}
+                status={status}
               />
-            </button>
-            {advancedOpen ? (
-              <div className="mt-3 space-y-1.5">
-                <label className="text-sm font-medium" htmlFor="mesh-vram">
-                  Max VRAM (GB)
-                </label>
-                <AgentConfigTextInput
-                  data-testid="mesh-share-compute-vram"
-                  disabled={controlsDisabled}
-                  id="mesh-vram"
-                  inputMode="decimal"
-                  onChange={(e) => {
-                    const next = e.target.value;
-                    setMaxVramGb(next);
-                    writeDraft(MAX_VRAM_DRAFT_STORAGE_KEY, next);
-                  }}
-                  placeholder="No limit"
-                  usePersonaInputStyle
-                  value={maxVramGb}
-                />
-                {status?.consoleUrl ? (
-                  <p className="text-sm font-normal text-muted-foreground">
-                    Debug console:{" "}
-                    <a
-                      className="underline"
-                      href={status.consoleUrl}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      {status.consoleUrl}
-                    </a>
-                  </p>
-                ) : null}
-              </div>
             ) : null}
           </div>
-
-          <AnimatePresence initial={false}>
-            {showSharingControls ? (
-              <motion.div
-                animate={{ height: "auto", opacity: 1 }}
-                className="overflow-hidden"
-                data-testid="mesh-share-compute-options-motion"
-                exit={{ height: 0, opacity: 0 }}
-                initial={{ height: 0, opacity: 0 }}
-                key="mesh-share-compute-options"
-                transition={
-                  shouldReduceMotion
-                    ? { duration: 0 }
-                    : SHARE_COMPUTE_REVEAL_TRANSITION
-                }
-              >
-                <section
-                  className="space-y-1"
-                  data-testid="mesh-share-compute-sharing-status"
-                >
-                  <h3 className="text-sm font-medium">Status</h3>
-                  <div className="space-y-1 rounded-lg bg-muted/30 px-3 py-2">
-                    <StatusLine
-                      isConsuming={isConsuming}
-                      omitSharingVerb
-                      pendingAction={pendingAction}
-                      status={status}
-                    />
-                    {servingIndicator.show ? (
-                      <p
-                        className={
-                          servingIndicator.hasRemoteConsumers
-                            ? "text-2xs text-emerald-600 dark:text-emerald-400"
-                            : "text-2xs text-muted-foreground"
-                        }
-                        data-testid="mesh-serving-usage"
-                        title={servingIndicator.detail ?? undefined}
-                      >
-                        {servingIndicator.label}
-                        {servingIndicator.detail ? (
-                          <span className="text-muted-foreground">
-                            {" "}
-                            · {servingIndicator.detail}
-                          </span>
-                        ) : null}
-                      </p>
-                    ) : null}
-                  </div>
-                </section>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
+          <Switch
+            checked={isSharing}
+            data-testid="mesh-share-compute-toggle"
+            disabled={
+              // A serve node can always be stopped. An off node or consuming
+              // client can start sharing once a valid local model is selected.
+              // Unknown occupants remain protected from replacement.
+              actionInFlight ||
+              (isSharing
+                ? false
+                : slotOccupied && !isConsuming
+                  ? true
+                  : !canStart)
+            }
+            id="mesh-share-compute-toggle"
+            onCheckedChange={handleToggle}
+          />
         </div>
-      </SettingsOptionGroup>
+
+        <MeshModelPicker
+          catalog={catalog}
+          disabled={controlsDisabled}
+          installedModels={installedModels}
+          isCustomModelEditing={isCustomModelEditing}
+          model={modelInput}
+          onCustomModelEditingChange={setIsCustomModelEditing}
+          onModelChange={setShareComputeModel}
+        />
+
+        <div className="pt-3">
+          <button
+            aria-expanded={advancedOpen}
+            className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            data-testid="mesh-share-compute-advanced-toggle"
+            onClick={() => setAdvancedOpen((current) => !current)}
+            type="button"
+          >
+            <span>Advanced</span>
+            <ChevronDown
+              className={cn(
+                "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
+                advancedOpen && "rotate-180",
+              )}
+            />
+          </button>
+          {advancedOpen ? (
+            <div className="mt-3 space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="mesh-vram">
+                Max VRAM (GB)
+              </label>
+              <AgentConfigTextInput
+                data-testid="mesh-share-compute-vram"
+                disabled={controlsDisabled}
+                id="mesh-vram"
+                inputMode="decimal"
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setShareComputeMaxVramGb(next);
+                }}
+                placeholder="No limit"
+                usePersonaInputStyle
+                value={maxVramGb}
+              />
+
+              {/*
+                Nested one level deeper than the memory cap: capping memory is a
+                normal advanced adjustment, whereas a collective model changes
+                whether sharing starts at all. Two clicks to reach it is the
+                point.
+              */}
+              <MeshExperimentalSection
+                disabled={controlsDisabled}
+                onModelChange={setShareComputeModel}
+                selectedModel={modelInput}
+              />
+            </div>
+          ) : null}
+        </div>
+
+        <AnimatePresence initial={false}>
+          {showSharingControls ? (
+            <motion.div
+              animate={{ height: "auto", opacity: 1 }}
+              className="overflow-hidden"
+              data-testid="mesh-share-compute-options-motion"
+              exit={{ height: 0, opacity: 0 }}
+              initial={{ height: 0, opacity: 0 }}
+              key="mesh-share-compute-options"
+              transition={
+                shouldReduceMotion
+                  ? { duration: 0 }
+                  : SHARE_COMPUTE_REVEAL_TRANSITION
+              }
+            >
+              <section
+                className="space-y-1"
+                data-testid="mesh-share-compute-sharing-status"
+              >
+                <h3 className="text-sm font-medium">Sharing</h3>
+                <div className="space-y-1 rounded-lg bg-muted/30 px-3 py-2">
+                  <StatusLine
+                    isConsuming={isConsuming}
+                    omitSharingVerb
+                    pendingAction={pendingAction}
+                    status={status}
+                  />
+                  {servingIndicator.show ? (
+                    <p
+                      className={
+                        servingIndicator.hasRemoteConsumers
+                          ? "text-2xs text-emerald-600 dark:text-emerald-400"
+                          : "text-2xs text-muted-foreground"
+                      }
+                      data-testid="mesh-serving-usage"
+                      title={servingIndicator.detail ?? undefined}
+                    >
+                      {servingIndicator.label}
+                      {servingIndicator.detail ? (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          · {servingIndicator.detail}
+                        </span>
+                      ) : null}
+                    </p>
+                  ) : null}
+                </div>
+              </section>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </div>
     </section>
   );
 }
@@ -574,10 +550,7 @@ function MeshModelPicker({
           value={model}
         />
       ) : null}
-      <p
-        className="text-sm font-normal text-muted-foreground/70"
-        data-settings-subcopy
-      >
+      <p className="text-sm font-normal text-muted-foreground">
         {catalog
           ? `Recommended for this machine${catalog.gpuName ? ` (${catalog.gpuName}, ${catalog.vramDisplay} AI memory)` : ""}.`
           : "Choose a model or enter a model reference or local file."}{" "}

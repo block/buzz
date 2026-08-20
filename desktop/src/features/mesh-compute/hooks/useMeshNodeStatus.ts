@@ -20,28 +20,28 @@ export function useMeshNodeStatus(): {
 } {
   const [status, setStatus] = React.useState<MeshNodeStatus | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const requestSeq = React.useRef(0);
 
   const fetchOnce = React.useCallback(() => {
-    let cancelled = false;
+    const seq = ++requestSeq.current;
     (async () => {
       try {
         const value = await meshNodeStatus();
-        if (!cancelled) {
+        if (seq === requestSeq.current) {
           setStatus(value);
           setError(null);
         }
       } catch (err) {
-        if (!cancelled) {
+        if (seq === requestSeq.current) {
           setError(err instanceof Error ? err.message : String(err));
         }
       }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
-  React.useEffect(() => fetchOnce(), [fetchOnce]);
+  React.useEffect(() => {
+    fetchOnce();
+  }, [fetchOnce]);
 
   // Fast poll while in a transitioning state; slow poll while steady or off.
   React.useEffect(() => {
