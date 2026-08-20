@@ -10,6 +10,7 @@ use crate::managed_agents::{
     HarnessSource,
 };
 mod presets;
+mod registry_path;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
@@ -692,16 +693,12 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
         }
     }
 
-    // On Windows, also scan PATH for .cmd/.bat shims (npm globals).
+    // On Windows, scan PATH for .cmd/.bat shims (npm globals) and fall back
+    // to the registry PATH when the inherited process env is a stale
+    // snapshot (updater relaunches, services — see registry_path).
     #[cfg(windows)]
-    {
-        for basename in command_basenames(command).iter().skip(1) {
-            for candidate in path_candidates_from_env_raw(basename) {
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
+    if let Some(path) = registry_path::resolve_windows_fallbacks(&basenames) {
+        return Some(path);
     }
 
     if let Some(path) = find_via_login_shell(command) {
@@ -739,19 +736,6 @@ fn path_candidates_from_env(command: &str) -> Vec<PathBuf> {
         .map(|paths| {
             std::env::split_paths(&paths)
                 .map(|dir| dir.join(executable_basename(command)))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
-/// Like `path_candidates_from_env` but joins `basename` as-is (no `.exe` suffix).
-/// Used for `.cmd`/`.bat` shim resolution on Windows.
-#[cfg(windows)]
-fn path_candidates_from_env_raw(basename: &str) -> Vec<PathBuf> {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join(basename))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
