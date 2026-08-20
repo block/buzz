@@ -605,7 +605,7 @@ test("commit detail opens from the commits feed with a diff", async ({
   ).toBeVisible();
   await expect(
     firstCommitRow.getByTestId("project-commit-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   await waitForAnimations(page);
   await page.screenshot({
     fullPage: false,
@@ -618,12 +618,15 @@ test("commit detail opens from the commits feed with a diff", async ({
     .getByRole("button", { name: /Add Trello board workflow details/ })
     .click();
 
-  // Detail header: resolved author, subject, and hash.
-  await expect(page.getByText("Brain", { exact: true })).toBeVisible();
+  // Detail header: static descriptor, subject, and hash.
   await expect(
     page.getByRole("heading", { name: "Add Trello board workflow details" }),
   ).toBeVisible();
   const commitDetail = page.getByTestId("project-commit-detail");
+  const commitHeader = commitDetail.locator("header").first();
+  await expect(commitHeader).toContainText("Committed");
+  await expect(commitHeader).not.toContainText("Brain");
+  await expect(commitHeader.locator("img")).toHaveCount(0);
   await expect(commitDetail).toHaveCSS("max-width", "768px");
   await expect(
     commitDetail.getByRole("heading", {
@@ -680,7 +683,7 @@ test("commit detail opens from the commits feed with a diff", async ({
     .first()
     .getByRole("button", { name: /Add Trello board workflow details/ })
     .click();
-  await expect(page.getByText("Brain", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("project-commit-detail")).toBeVisible();
   await page
     .getByRole("navigation", { name: "Project breadcrumb" })
     .getByTestId("project-breadcrumb-repository")
@@ -793,7 +796,7 @@ test("pull request and issue feeds use compact work item rows", async ({
   ).toHaveText("0");
   await expect(
     prRows.first().getByTestId("project-pull-request-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   await expect(
     page.getByTestId("project-work-item-group-header").first(),
   ).toBeVisible();
@@ -849,7 +852,7 @@ test("pull request and issue feeds use compact work item rows", async ({
   ).toHaveText("0");
   await expect(
     issueRows.first().getByTestId("project-issue-row-date"),
-  ).toHaveClass(/text-muted-foreground\/70/);
+  ).toHaveClass(/text-muted-foreground\/55/);
   const taskCategoryBoxes = await taskCategoryCells.evaluateAll((cells) =>
     cells.slice(0, 5).map((cell) => {
       const box = cell.getBoundingClientRect();

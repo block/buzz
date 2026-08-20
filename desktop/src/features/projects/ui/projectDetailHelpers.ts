@@ -5,6 +5,13 @@ import type {
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
+export const PROJECT_REPOSITORY_SEARCH_KEYS = [
+  "repositoryId",
+  "issueId",
+  "pullRequestId",
+  "commitHash",
+] as const;
+
 export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
   files: "Files",
   activity: "Commits",
@@ -13,13 +20,6 @@ export const PROJECT_TAB_CRUMB_LABELS: Record<string, string> = {
   contributors: "Contributors",
   channels: "Channels",
 };
-
-export const PROJECT_REPOSITORY_SEARCH_KEYS = [
-  "repositoryId",
-  "issueId",
-  "pullRequestId",
-  "commitHash",
-] as const;
 
 export type ProjectDetailScreenProps = {
   commitHash?: string;

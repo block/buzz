@@ -10,6 +10,49 @@ import { TerminalPanelIcon } from "@/shared/ui/TerminalPanelIcon";
 
 export type ProjectRightPanelMode = "chat" | "repository";
 
+export function ProjectChatPanelControl({
+  collapsed,
+  mode,
+  onCollapse,
+  onExpand,
+  onModeChange,
+}: {
+  collapsed: boolean;
+  mode: ProjectRightPanelMode;
+  onCollapse: () => void;
+  onExpand: () => void;
+  onModeChange: (mode: ProjectRightPanelMode) => void;
+}) {
+  const chatOpen = !collapsed && mode === "chat";
+  return (
+    <Button
+      aria-label={chatOpen ? "Hide project chat" : "Show project chat"}
+      aria-pressed={chatOpen}
+      className="h-7 w-7 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+      data-testid="project-right-panel-chat-tab"
+      onClick={() => {
+        if (chatOpen) {
+          onCollapse();
+          return;
+        }
+        onModeChange("chat");
+        onExpand();
+      }}
+      size="icon"
+      title="Project chat"
+      type="button"
+      variant="ghost"
+    >
+      <MessageCircle
+        className={cn(
+          "h-4 w-4 transition-opacity duration-200 ease-linear",
+          chatOpen ? "opacity-100" : "opacity-60",
+        )}
+      />
+    </Button>
+  );
+}
+
 export function ProjectRightPanelControls({
   collapsed,
   mode,
@@ -28,58 +71,9 @@ export function ProjectRightPanelControls({
   const terminalPanel = useTerminalPanel();
   const terminalOpen = terminalPanel.mode !== "closed";
   const repositoryOpen = !collapsed && mode === "repository";
-  const chatOpen = !collapsed && mode === "chat";
 
   return (
     <div className="flex items-center gap-0.5">
-      <Button
-        aria-label={
-          repositoryOpen ? "Hide project context" : "Show project context"
-        }
-        aria-pressed={repositoryOpen}
-        className={cn(
-          "h-7 w-7 text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-          repositoryOpen && "bg-sidebar-accent text-sidebar-accent-foreground",
-        )}
-        data-testid="project-right-panel-repository-tab"
-        onClick={() => {
-          if (repositoryOpen) {
-            onCollapse();
-            return;
-          }
-          onModeChange("repository");
-          onExpand();
-        }}
-        size="icon"
-        title="Project context"
-        type="button"
-        variant="ghost"
-      >
-        <Info className="h-4 w-4" />
-      </Button>
-      <Button
-        aria-label={chatOpen ? "Hide project chat" : "Show project chat"}
-        aria-pressed={chatOpen}
-        className={cn(
-          "h-7 w-7 text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-          chatOpen && "bg-sidebar-accent text-sidebar-accent-foreground",
-        )}
-        data-testid="project-right-panel-chat-tab"
-        onClick={() => {
-          if (chatOpen) {
-            onCollapse();
-            return;
-          }
-          onModeChange("chat");
-          onExpand();
-        }}
-        size="icon"
-        title="Project chat"
-        type="button"
-        variant="ghost"
-      >
-        <MessageCircle className="h-4 w-4" />
-      </Button>
       <Button
         aria-label={terminalOpen ? "Hide Buzz Term" : "Open Buzz Term"}
         aria-pressed={terminalOpen}
@@ -99,6 +93,34 @@ export function ProjectRightPanelControls({
           className="w-[1.1rem]"
           data-testid="project-terminal-icon"
           open={terminalOpen}
+        />
+      </Button>
+      <Button
+        aria-label={
+          repositoryOpen ? "Hide project context" : "Show project context"
+        }
+        aria-pressed={repositoryOpen}
+        className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
+        data-testid="project-right-panel-repository-tab"
+        onClick={() => {
+          if (repositoryOpen) {
+            onCollapse();
+            return;
+          }
+          onModeChange("repository");
+          onExpand();
+        }}
+        size="icon"
+        title="Project context"
+        type="button"
+        variant="ghost"
+      >
+        <Info
+          className={cn(
+            "h-4 w-4 transition-opacity duration-200 ease-linear",
+            repositoryOpen ? "opacity-100" : "opacity-60",
+          )}
+          data-testid="project-right-panel-repository-icon"
         />
       </Button>
     </div>

@@ -26,6 +26,10 @@ import {
 } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
+import {
+  selectionItemFromProject,
+  type ProjectSelectionItem,
+} from "@/features/projects/lib/projectSelection";
 import { projectTerminalLabel } from "@/features/projects/ui/useOpenProjectTerminal";
 import { PROJECT_LIST_ROW_META_TEXT_CLASS } from "@/features/projects/ui/projectListRowStyles";
 import { cn } from "@/shared/lib/cn";
@@ -47,6 +51,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { ProjectEntityListRow } from "./ProjectEntityListRow";
+import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 
 function ProjectUpdatedLabel({
@@ -470,6 +475,7 @@ type ProjectItemProps = {
   project: Project;
   people: string[];
   profiles?: UserProfileLookup;
+  selectionRangeItems?: ProjectSelectionItem[];
   summary: ProjectActivitySummary | undefined;
   repositoryUnavailableReason?: ProjectRepoUnavailableReason;
   hasLocal: boolean;
@@ -495,30 +501,41 @@ export function ProjectGridCard({
 }: ProjectItemProps) {
   return (
     <Card
-      className="group relative flex min-h-44 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
+      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
       data-projects-grid-card
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
       <div className="pointer-events-none relative z-10 flex min-h-0 flex-1 flex-col">
-        <div className="flex min-w-0 items-center justify-between gap-3 px-4 pt-3">
-          <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-start justify-between gap-3 px-4 pt-3">
+          <div className="flex min-w-0 flex-1 items-start gap-2">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
               <Folders className="h-4.5 w-4.5 text-muted-foreground" />
             </span>
-            <span className="min-w-0 truncate text-sm font-semibold text-foreground">
-              {project.name}
-            </span>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {project.repositoryAddresses.length}{" "}
-              {project.repositoryAddresses.length === 1
-                ? "repository"
-                : "repositories"}
-            </span>
-            <StatusPill status={project.status} />
-            <RepositoryUnavailableIndicator
-              reason={repositoryUnavailableReason}
-            />
+            <div className="min-w-0 flex-1">
+              <span
+                className="block break-words text-sm font-semibold leading-5 text-foreground"
+                data-projects-text-priority="primary"
+                data-testid="project-grid-card-name"
+              >
+                {project.name}
+              </span>
+              <div
+                className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
+                data-projects-text-priority="secondary"
+              >
+                <span>
+                  {project.repositoryAddresses.length}{" "}
+                  {project.repositoryAddresses.length === 1
+                    ? "repository"
+                    : "repositories"}
+                </span>
+                <StatusPill status={project.status} />
+                <RepositoryUnavailableIndicator
+                  reason={repositoryUnavailableReason}
+                />
+              </div>
+            </div>
           </div>
           <div className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-1">
             <ProjectUpdatedLabel
@@ -537,7 +554,13 @@ export function ProjectGridCard({
           </div>
         </div>
 
-        <p className="line-clamp-2 min-h-10 px-4 py-2 text-sm text-muted-foreground">
+        <p
+          className={cn(
+            PROJECT_GRID_CARD_BODY_CLASS,
+            "mx-4 my-2 text-muted-foreground",
+          )}
+          data-testid="projects-grid-card-body"
+        >
           {project.description || "A shared space for internal git work."}
         </p>
 
@@ -561,6 +584,7 @@ export function ProjectListRow({
   project,
   people,
   profiles,
+  selectionRangeItems,
   summary,
   repositoryUnavailableReason,
   hasLocal,
@@ -571,6 +595,13 @@ export function ProjectListRow({
   onOpenTerminal,
 }: ProjectItemProps) {
   const repositoryCount = project.repositoryAddresses.length;
+  const selectionItem = selectionItemFromProject({
+    channelId: project.projectChannelId,
+    id: project.id,
+    owner: project.owner,
+    shareLink: projectShareLink(project),
+    title: project.name,
+  });
   return (
     <ProjectEntityListRow
       affiliation={`${repositoryCount} ${
@@ -586,6 +617,11 @@ export function ProjectListRow({
       people={people}
       peopleTestId="projects-row-people"
       profiles={profiles}
+      selection={
+        selectionRangeItems
+          ? { item: selectionItem, rangeItems: selectionRangeItems }
+          : undefined
+      }
       testId={`project-row-${project.dtag}`}
       title={
         <span className="flex min-w-0 items-center gap-2">

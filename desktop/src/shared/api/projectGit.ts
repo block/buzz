@@ -354,6 +354,18 @@ export async function getProjectRepoSyncStatus(input: {
   return fromRawProjectRepoSyncStatus(status);
 }
 
+export async function openProjectRepositoryFolder(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl: string;
+}): Promise<void> {
+  await invokeTauri("open_project_repository_folder", {
+    reposDir: input.reposDir ?? null,
+    projectDtag: input.projectDtag,
+    cloneUrl: input.cloneUrl,
+  });
+}
+
 type RawProjectTerminalResult = {
   path: string;
   cloned: boolean;
