@@ -193,7 +193,7 @@ void main() {
     testWidgets('opens local file links through an authenticated download', (
       tester,
     ) async {
-      const url = 'https://relay.example/media/planning.ics';
+      const url = 'https://relay.example/media/report.pdf';
       String? openedUrl;
       Map<String, String>? openedHeaders;
       String? openedFilename;
@@ -204,7 +204,7 @@ void main() {
 
       await tester.pumpWidget(
         _testable(
-          const MessageContent(content: '[Planning.ics]($url)'),
+          const MessageContent(content: '[report.pdf]($url)'),
           overrides: [
             mediaGetAuthServiceProvider.overrideWithValue(auth),
             openDownloadedFileProvider.overrideWithValue((
@@ -220,11 +220,11 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Planning.ics'));
+      await tester.tap(find.text('report.pdf'));
       await tester.pump();
 
       expect(openedUrl, url);
-      expect(openedFilename, 'Planning.ics');
+      expect(openedFilename, 'report.pdf');
       expect(openedHeaders?['Authorization'], startsWith('Nostr '));
     });
 

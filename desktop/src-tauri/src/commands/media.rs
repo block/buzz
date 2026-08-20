@@ -14,7 +14,6 @@ use super::media_transcode::{
     transcode_heic_path_to_jpeg_bytes_with_cancellation,
 };
 use super::media_upload_progress::{emit_media_upload_phase, send_upload_attempt, UploadAttempt};
-pub(crate) use super::media_validation::{detect_and_validate_mime, sanitize_filename};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobDescriptor {
@@ -112,6 +111,78 @@ fn fd_real_path(file: &std::fs::File) -> Result<std::path::PathBuf, String> {
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn fd_real_path(_file: &std::fs::File) -> Result<std::path::PathBuf, String> {
     Err("fd_real_path not supported on this platform".to_string())
+}
+
+/// MIME types blocked from upload — mirrors the server's generic-file deny-list.
+///
+/// Active-content XSS carriers (JS, SVG) and native executables. Other types,
+/// including HTML, are accepted as downloads; un-sniffable files fall back to
+/// `application/octet-stream`. XHTML remains blocked in lockstep with the relay.
+const BLOCKED_MIME: &[&str] = &[
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary",
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive",
+    "application/x-apple-diskimage",
+];
+
+const MAX_CALENDAR_BYTES: u64 = 10 * 1024 * 1024;
+
+fn calendar_upload_metadata(filename: Option<&str>) -> Option<(&'static str, &'static str)> {
+    filename
+        .and_then(|name| std::path::Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ics"))
+        .then_some(("text/calendar", "ics"))
+}
+
+fn sanitize_calendar_filename(name: &str) -> String {
+    let basename = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = basename
+        .get(..basename.len().saturating_sub(4))
+        .unwrap_or_default();
+    let mut sanitized = String::new();
+    for character in stem.chars().filter(|character| !character.is_control()) {
+        if sanitized.len() + character.len_utf8() > 255 - ".ics".len() {
+            break;
+        }
+        sanitized.push(character);
+    }
+    let sanitized = sanitized.trim();
+    format!(
+        "{}.ics",
+        if sanitized.is_empty() {
+            "calendar"
+        } else {
+            sanitized
+        }
+    )
+}
+
+/// Sanitize a filename for use as a display label in the imeta `filename` field.
+///
+/// Strips any directory components (keeps only the final path segment), removes
+/// control characters, and bounds length to 255. Mirrors the relay's filename
+/// validation so a sanitized name always passes ingest. Returns a fallback when
+/// the result would be empty.
+pub(crate) fn sanitize_filename(name: &str) -> String {
+    // Keep only the final path segment — defend against `../` and absolute paths
+    // regardless of separator style.
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
+    let cleaned: String = base.chars().filter(|c| !c.is_control()).take(255).collect();
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Return true when a PNG/WebP payload declares animation.
@@ -260,6 +331,16 @@ pub(crate) fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec
     }
 }
 
+pub(crate) fn detect_and_validate_mime(body: &[u8]) -> Result<String, String> {
+    let mime = infer::get(body)
+        .map(|t| t.mime_type().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if BLOCKED_MIME.contains(&mime.as_str()) {
+        return Err(format!("unsupported file type: {mime}"));
+    }
+    Ok(mime)
+}
+
 /// Lifetime of a Blossom `t=get` read token. Ten minutes keeps a token alive
 /// across a video's range-request stream while staying well inside the
 /// server's `created_at` freshness window (3600s, matching upload).
@@ -363,12 +444,12 @@ pub(crate) async fn upload_image_bytes(
     body: Vec<u8>,
     state: &AppState,
 ) -> Result<BlobDescriptor, String> {
-    let mime = detect_and_validate_mime(&body, None)?;
+    let mime = detect_and_validate_mime(&body)?;
     if !mime.starts_with("image/") {
         return Err("profile avatar must be an image".to_string());
     }
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, state, None, None).await
+    do_upload(body, &mime, state, None, None, None).await
 }
 
 async fn do_upload(
@@ -377,9 +458,9 @@ async fn do_upload(
     state: &AppState,
     progress: Option<(tauri::AppHandle, String)>,
     cancellation: Option<&CancellationToken>,
+    file_extension: Option<&str>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
-    let extension = (mime == "text/calendar").then_some("ics");
 
     // Video uploads get a 1-hour auth window to survive slow connections;
     // images use 5 minutes. Must match the server-side max_age_secs values
@@ -409,23 +490,23 @@ async fn do_upload(
             url: format!("{base_url}/upload"),
             auth_header: &auth_header,
             mime,
-            extension,
             sha256: &sha256,
+            file_extension,
             body: body.clone(),
             progress: progress.as_ref(),
             cancellation,
         },
     )
     .await?;
-    if should_retry_legacy_upload(resp.status()) {
+    if file_extension.is_none() && should_retry_legacy_upload(resp.status()) {
         resp = send_upload_attempt(
             state,
             UploadAttempt {
                 url: format!("{base_url}/media/upload"),
                 auth_header: &auth_header,
                 mime,
-                extension,
                 sha256: &sha256,
+                file_extension: None,
                 body,
                 progress: progress.as_ref(),
                 cancellation,
@@ -455,6 +536,13 @@ pub async fn upload_media(
 ) -> Result<BlobDescriptor, String> {
     let path = std::path::Path::new(&file_path);
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let calendar_metadata =
+        calendar_upload_metadata(path.file_name().and_then(|name| name.to_str()));
+    if calendar_metadata.is_some()
+        && file.metadata().map_err(|error| error.to_string())?.len() > MAX_CALENDAR_BYTES
+    {
+        return Err("calendar file exceeds 10 MiB".to_string());
+    }
 
     let fd_path = fd_real_path(&file)?;
     let canonical_temp = std::env::temp_dir()
@@ -474,12 +562,13 @@ pub async fn upload_media(
         let _ = std::fs::remove_file(&fd_path);
     }
 
-    let mime = detect_and_validate_mime(
-        &body,
-        path.file_name().and_then(|filename| filename.to_str()),
-    )?;
+    let (mime, file_extension) = if let Some((mime, extension)) = calendar_metadata {
+        (mime.to_string(), Some(extension))
+    } else {
+        (detect_and_validate_mime(&body)?, None)
+    };
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, &state, None, None).await
+    do_upload(body, &mime, &state, None, None, file_extension).await
 }
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
@@ -498,6 +587,13 @@ async fn process_picked_path(
     // Pin the inode by opening the fd BEFORE spawn_blocking. This prevents a
     // local attacker from swapping the file between dialog return and read.
     let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let calendar_metadata =
+        calendar_upload_metadata(path.file_name().and_then(|name| name.to_str()));
+    if calendar_metadata.is_some()
+        && file.metadata().map_err(|error| error.to_string())?.len() > MAX_CALENDAR_BYTES
+    {
+        return Err("calendar file exceeds 10 MiB".to_string());
+    }
 
     // Extension hint for HEIC detection — some HEIC files from non-Apple
     // tooling carry brands outside HEIC_BRANDS, but the `.heic`/`.heif`
@@ -549,10 +645,11 @@ async fn process_picked_path(
         .await
         .map_err(|e| format!("transcode task failed: {e}"))??;
 
-    let mime = detect_and_validate_mime(
-        &body,
-        path.file_name().and_then(|filename| filename.to_str()),
-    )?;
+    let (mime, file_extension) = if let Some((mime, extension)) = calendar_metadata {
+        (mime.to_string(), Some(extension))
+    } else {
+        (detect_and_validate_mime(&body)?, None)
+    };
     let body = sanitize_image_for_upload(body, &mime)?;
 
     // Image-only surfaces (e.g. "Send feedback"): reject anything that didn't
@@ -563,18 +660,21 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state, progress, None).await?;
+    let mut descriptor = do_upload(body, &mime, state, progress, None, file_extension).await?;
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", state, None, None).await {
+        match do_upload(poster, "image/jpeg", state, None, None, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 
-    descriptor.filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(sanitize_filename);
+    descriptor.filename = path.file_name().and_then(|n| n.to_str()).map(|name| {
+        if calendar_metadata.is_some() {
+            sanitize_calendar_filename(name)
+        } else {
+            sanitize_filename(name)
+        }
+    });
 
     Ok(descriptor)
 }
@@ -604,8 +704,8 @@ pub async fn pick_and_upload_media(
     use tauri_plugin_dialog::DialogExt;
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    // No filter — the allowlist and size caps are enforced by
-    // `detect_and_validate_mime` and authoritatively by the relay.
+    // No filter — accept any file. The deny-list (active content + executables)
+    // and size caps are enforced by `detect_and_validate_mime` and the relay.
     app.dialog().file().pick_files(move |paths| {
         let _ = tx.send(paths);
     });
@@ -676,6 +776,11 @@ pub(super) async fn upload_media_bytes_inner(
         return Err("empty upload".to_string());
     }
 
+    let calendar_metadata = calendar_upload_metadata(filename.as_deref());
+    if calendar_metadata.is_some() && data.len() as u64 > MAX_CALENDAR_BYTES {
+        return Err("calendar file exceeds 10 MiB".to_string());
+    }
+
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err("upload cancelled".to_string());
     }
@@ -733,7 +838,11 @@ pub(super) async fn upload_media_bytes_inner(
         (data, None)
     };
 
-    let mime = detect_and_validate_mime(&body, filename.as_deref())?;
+    let (mime, file_extension) = if let Some((mime, extension)) = calendar_metadata {
+        (mime.to_string(), Some(extension))
+    } else {
+        (detect_and_validate_mime(&body)?, None)
+    };
     let body = sanitize_image_for_upload(body, &mime)?;
 
     // Upload video first, then poster (best-effort).
@@ -741,17 +850,24 @@ pub(super) async fn upload_media_bytes_inner(
     if cancellation.is_some_and(CancellationToken::is_cancelled) {
         return Err("upload cancelled".to_string());
     }
-    let mut descriptor = do_upload(body, &mime, &state, progress, cancellation).await?;
+    let mut descriptor =
+        do_upload(body, &mime, &state, progress, cancellation, file_extension).await?;
 
     emit_media_upload_phase(&app, progress_id.as_deref(), "finishing");
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", &state, None, cancellation).await {
+        match do_upload(poster, "image/jpeg", &state, None, cancellation, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 
-    descriptor.filename = filename.as_deref().map(sanitize_filename);
+    descriptor.filename = filename.as_deref().map(|name| {
+        if calendar_metadata.is_some() {
+            sanitize_calendar_filename(name)
+        } else {
+            sanitize_filename(name)
+        }
+    });
 
     Ok(descriptor)
 }
@@ -761,6 +877,16 @@ pub(super) async fn upload_media_bytes_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_upload_metadata_uses_ics_extension_only() {
+        assert_eq!(
+            calendar_upload_metadata(Some("Planning.ICS")),
+            Some(("text/calendar", "ics"))
+        );
+        assert_eq!(calendar_upload_metadata(Some("Planning.txt")), None);
+        assert_eq!(calendar_upload_metadata(None), None);
+    }
 
     #[test]
     fn test_extract_server_authority_default_ports() {
@@ -834,6 +960,50 @@ mod tests {
     fn test_sign_blossom_get_auth_header_invalid_base_url() {
         let keys = Keys::generate();
         assert!(sign_blossom_get_auth_header(&keys, "not-a-url", 600).is_err());
+    }
+
+    #[test]
+    fn test_detect_and_validate_mime_jpeg() {
+        // Minimal JPEG: SOI + EOI
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0];
+        assert_eq!(detect_and_validate_mime(&jpeg).unwrap(), "image/jpeg");
+    }
+
+    #[test]
+    fn test_detect_and_validate_mime_accepts_text_as_octet_stream() {
+        // Plain text has no magic bytes — infer returns None, so it's accepted
+        // as opaque binary (served as a download). This is the common Slack case.
+        let text = b"hello world";
+        assert_eq!(
+            detect_and_validate_mime(text).unwrap(),
+            "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn test_detect_and_validate_mime_accepts_html_as_inert_download() {
+        let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
+        assert_eq!(detect_and_validate_mime(html).unwrap(), "text/html");
+    }
+
+    #[test]
+    fn test_detect_and_validate_mime_still_rejects_executable() {
+        let elf = [b"\x7fELF".as_slice(), &[0u8; 60]].concat();
+        assert!(detect_and_validate_mime(&elf).is_err());
+    }
+
+    #[test]
+    fn test_blocked_mime_keeps_active_content_and_executables() {
+        for kept in [
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "application/javascript",
+            "text/javascript",
+            "application/x-executable",
+            "application/x-mach-binary",
+        ] {
+            assert!(BLOCKED_MIME.contains(&kept), "{kept} must stay blocked");
+        }
     }
 
     #[test]

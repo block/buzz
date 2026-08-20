@@ -199,17 +199,6 @@ test("formatImetaMediaLine: generic mime → [filename](url) link", () => {
   );
 });
 
-test("formatImetaMediaLine: calendar mime → named download link", () => {
-  assert.equal(
-    formatImetaMediaLine({
-      url: "https://b/calendar.ics",
-      type: "text/calendar",
-      filename: "Planning.ics",
-    }),
-    "\n[Planning.ics](https://b/calendar.ics)",
-  );
-});
-
 test("formatImetaMediaLine: spoiler option does not wrap generic files", () => {
   assert.equal(
     formatImetaMediaLine(

@@ -29,7 +29,6 @@ buzz-relay-mesh = { workspace = true }
 async-trait = "0.1"
 postcard = { workspace = true }
 axum = { workspace = true }
-http-body-util = "0.1"
 tokio = { workspace = true }
 # `io` (ReaderStream) is needed to stream git subprocess stdout straight into
 # the HTTP response body — see api::git::transport read-path streaming. The

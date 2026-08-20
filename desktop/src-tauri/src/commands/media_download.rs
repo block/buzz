@@ -59,14 +59,6 @@ fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_downloaded_file(bytes: &[u8], filename: &str) -> Result<String, String> {
-    detect_and_validate_mime(bytes, Some(filename))
-}
-
-#[cfg(test)]
-#[path = "media_download_calendar_tests.rs"]
-mod calendar_tests;
-
 /// Download an image from a URL and save it via a native save-file dialog.
 #[tauri::command]
 pub async fn download_image(
@@ -99,7 +91,7 @@ pub async fn download_image(
     let bytes = fetch_blob_bytes(&url, &state).await?;
 
     // Validate the downloaded content is actually a supported media type.
-    detect_and_validate_mime(&bytes, None)?;
+    detect_and_validate_mime(&bytes)?;
 
     save_bytes_with_dialog(&app, &filename, "Images", &[&ext], &bytes).await
 }
@@ -137,9 +129,10 @@ pub async fn download_file(
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
 
-    // Text calendars have no magic signature, so their strict validator needs
-    // the sanitized `.ics` label supplied by the message's validated imeta.
-    validate_downloaded_file(&bytes, &filename)?;
+    // Reuse the upload-side allow/deny policy: rejects executables, HTML, and
+    // other types the relay would never have accepted, while permitting the
+    // arbitrary `application/octet-stream` / text payloads that uploads allow.
+    detect_and_validate_mime(&bytes)?;
 
     // Generic filter: an arbitrary attachment is not necessarily an image.
     let extensions: Vec<&str> = ext.as_deref().into_iter().collect();
@@ -168,7 +161,7 @@ pub async fn fetch_media_bytes(
     validate_download_url(&url, &relay_base)?;
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
-    detect_and_validate_mime(&bytes, None)?;
+    detect_and_validate_mime(&bytes)?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -191,7 +184,7 @@ pub async fn copy_image_to_clipboard(
     validate_download_url(&url, &relay_base)?;
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
-    detect_and_validate_mime(&bytes, None)?;
+    detect_and_validate_mime(&bytes)?;
 
     let img =
         image::load_from_memory(&bytes).map_err(|e| format!("failed to decode image: {e}"))?;

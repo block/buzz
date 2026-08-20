@@ -13,7 +13,6 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 import 'animated_image_sanitizer.dart';
-import 'calendar_attachment.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
@@ -64,7 +63,8 @@ const _allowedImageMimeTypes = {
 };
 const _allowedVideoMimeTypes = {'video/mp4'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
-const _maxDocumentSizeBytes = 10 * 1024 * 1024; // 10MB
+const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
+const _maxCalendarSizeBytes = 10 * 1024 * 1024; // 10MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
@@ -421,7 +421,7 @@ class MediaUploadService {
     return uploadVideo(pickedVideo);
   }
 
-  /// Opens the system document picker for an allowlisted attachment.
+  /// Opens the system document picker for a generic file attachment.
   Future<XFile?> pickAttachmentFile() async {
     final pickAttachmentFile = _pickAttachmentFile;
     if (pickAttachmentFile == null) {
@@ -430,7 +430,7 @@ class MediaUploadService {
     return pickAttachmentFile();
   }
 
-  /// Uploads [pickedFile] as an allowlisted non-preview document.
+  /// Uploads [pickedFile] as a size-limited generic attachment.
   Future<BlobDescriptor> uploadFile(
     XFile pickedFile, {
     ValueChanged<double>? onProgress,
@@ -441,26 +441,29 @@ class MediaUploadService {
     if (length == 0) {
       throw Exception('File is empty.');
     }
-    final filename = safeAttachmentFilename(pickedFile.name);
-    if (!hasCalendarExtension(filename)) {
-      throw Exception('unsupported file type');
-    }
-    if (length > _maxDocumentSizeBytes) {
+    final isCalendar = _hasCalendarExtension(pickedFile.name);
+    final maxBytes = isCalendar ? _maxCalendarSizeBytes : _maxFileSizeBytes;
+    if (length > maxBytes) {
       throw Exception(
-        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 10MB.',
+        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). '
+        'Maximum is ${maxBytes ~/ 1024 ~/ 1024}MB.',
       );
     }
     final bytes = await pickedFile.readAsBytes();
-    validateCalendarBytes(bytes);
     _throwIfCancelled(cancellationToken);
     final descriptor = await _uploadPreparedBytes(
       bytes,
-      mimeType: 'text/calendar',
-      fileExtension: 'ics',
+      mimeType: isCalendar ? 'text/calendar' : 'application/octet-stream',
+      allowGenericFile: true,
+      fileExtension: isCalendar ? 'ics' : null,
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    return descriptor.withFilename(filename);
+    return descriptor.withFilename(
+      isCalendar
+          ? _safeCalendarAttachmentFilename(pickedFile.name)
+          : _safeAttachmentFilename(pickedFile.name),
+    );
   }
 
   Future<BlobDescriptor?> pickAndUploadFile() async {
@@ -496,14 +499,15 @@ class MediaUploadService {
   Future<BlobDescriptor> _uploadPreparedBytes(
     Uint8List bytes, {
     required String mimeType,
+    bool allowGenericFile = false,
     String? fileExtension,
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
     _throwIfCancelled(cancellationToken);
-    if (!_allowedImageMimeTypes.contains(mimeType) &&
-        !_allowedVideoMimeTypes.contains(mimeType) &&
-        !(mimeType == 'text/calendar' && fileExtension == 'ics')) {
+    if (!allowGenericFile &&
+        !_allowedImageMimeTypes.contains(mimeType) &&
+        !_allowedVideoMimeTypes.contains(mimeType)) {
       throw Exception('unsupported file type: $mimeType');
     }
 
@@ -517,12 +521,13 @@ class MediaUploadService {
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    if (response.statusCode == HttpStatus.notFound ||
-        response.statusCode == HttpStatus.methodNotAllowed) {
+    if (fileExtension == null &&
+        (response.statusCode == HttpStatus.notFound ||
+            response.statusCode == HttpStatus.methodNotAllowed)) {
       response = await _sendUploadRequest(
         bytes: bytes,
         mimeType: mimeType,
-        fileExtension: fileExtension,
+        fileExtension: null,
         sha256: sha256,
         path: _legacyMediaUploadPath,
         onProgress: onProgress,
@@ -694,6 +699,57 @@ class MediaUploadService {
     }
     return sanitizedBytes;
   }
+}
+
+String _safeAttachmentFilename(String filename) {
+  final segments = filename.split(RegExp(r'[/\\]'));
+  final basename = segments.isEmpty ? '' : segments.last;
+  final sanitized = StringBuffer();
+  var byteLength = 0;
+
+  for (final rune in basename.runes) {
+    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
+      continue;
+    }
+
+    final character = String.fromCharCode(rune);
+    final characterByteLength = utf8.encode(character).length;
+    if (byteLength + characterByteLength > 255) break;
+
+    sanitized.write(character);
+    byteLength += characterByteLength;
+  }
+
+  final safeBasename = sanitized.toString().trim();
+  return safeBasename.isEmpty ? 'file' : safeBasename;
+}
+
+bool _hasCalendarExtension(String filename) {
+  return filename.toLowerCase().endsWith('.ics');
+}
+
+String _safeCalendarAttachmentFilename(String filename) {
+  final segments = filename.split(RegExp(r'[/\\]'));
+  final basename = segments.isEmpty ? '' : segments.last;
+  final stem = basename.length >= 4
+      ? basename.substring(0, basename.length - 4)
+      : '';
+  final sanitized = StringBuffer();
+  var byteLength = 0;
+
+  for (final rune in stem.runes) {
+    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
+      continue;
+    }
+    final character = String.fromCharCode(rune);
+    final characterByteLength = utf8.encode(character).length;
+    if (byteLength + characterByteLength > 255 - '.ics'.length) break;
+    sanitized.write(character);
+    byteLength += characterByteLength;
+  }
+
+  final safeStem = sanitized.toString().trim();
+  return '${safeStem.isEmpty ? 'calendar' : safeStem}.ics';
 }
 
 Stream<List<int>> _uploadByteStream(

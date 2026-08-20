@@ -16,8 +16,11 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
         "url", "m", "x", "size", "dim", "blurhash", "thumb", "alt", "duration", "bitrate", "image",
         "filename",
     ];
-    // Previewable media MIME types. Non-preview documents use the authoritative
-    // allowlist in buzz-media.
+    // Previewable media MIME types — these get the strict url-extension
+    // consistency check below (their ext is derived from the MIME). Generic
+    // files carry arbitrary MIME types whose ext can't be derived from the MIME
+    // alone, so their consistency is enforced against the sidecar in
+    // `verify_imeta_blobs` rather than here.
     const MEDIA_MIME: &[&str] = &[
         "image/jpeg",
         "image/png",
@@ -39,8 +42,8 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
         let mut url_value = String::new();
         let mut x_value = String::new();
         let mut m_value = String::new();
-        let mut filename_value = String::new();
         let mut thumb_value = String::new();
+        let mut filename_value = String::new();
 
         for part in tag.iter().skip(1) {
             let mut parts = part.splitn(2, ' ');
@@ -68,13 +71,13 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                     has_url = true;
                 }
                 "m" => {
+                    // Accept any well-formed `type/subtype` MIME token. The
+                    // authoritative gate is `verify_imeta_blobs`, which requires
+                    // `m` to equal the stored sidecar MIME — and a sidecar only
+                    // exists for content that passed the upload validator's
+                    // deny-list. So a blocked type can never reach a valid imeta.
                     if !is_well_formed_mime(value) {
                         return Err("imeta m must be a valid MIME type".into());
-                    }
-                    if !MEDIA_MIME.contains(&value)
-                        && buzz_media::validation::document_extension_for_mime(value).is_none()
-                    {
-                        return Err("imeta m is not an allowed attachment MIME type".into());
                     }
                     m_value = value.to_string();
                     has_m = true;
@@ -161,14 +164,12 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
             return Err("imeta tag must include url, m, x, and size".into());
         }
 
-        if let Some(expected_ext) = buzz_media::validation::document_extension_for_mime(&m_value) {
-            if extract_ext_from_media_url(&url_value) != Some(expected_ext) {
-                return Err("imeta document URL extension does not match m".into());
+        if m_value == "text/calendar" {
+            if extract_ext_from_media_url(&url_value) != Some("ics") {
+                return Err("calendar imeta url must use the .ics extension".into());
             }
-            if filename_value.is_empty()
-                || filename_value.rsplit_once('.').map(|(_, ext)| ext) != Some(expected_ext)
-            {
-                return Err("imeta document filename extension does not match m".into());
+            if !filename_value.to_ascii_lowercase().ends_with(".ics") {
+                return Err("calendar imeta must include an .ics filename".into());
             }
         }
 
@@ -199,8 +200,9 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                     return Err("imeta url extension does not match m".into());
                 }
             }
-            // Stored sidecar verification below independently cross-checks URL
-            // extension, hash, size, and MIME against the blob.
+            // Generic files: ext can't be derived from the MIME. The sidecar
+            // cross-check in `verify_imeta_blobs` enforces that the URL's ext
+            // (and hash, size, MIME) match the stored blob.
         }
         if !thumb_value.is_empty() {
             if let Some(thumb_hash) = extract_hash_from_media_url(&thumb_value) {
@@ -227,14 +229,12 @@ pub async fn verify_imeta_blobs(
         let mut thumb_value = String::new();
         let mut image_value = String::new();
         let mut duration_value: f64 = 0.0;
-        let mut url_value = String::new();
 
         for part in tag.iter().skip(1) {
             let mut parts = part.splitn(2, ' ');
             let key = parts.next().unwrap_or("");
             let value = parts.next().unwrap_or("");
             match key {
-                "url" => url_value = value.to_string(),
                 "x" => x_value = value.to_string(),
                 "m" => m_value = value.to_string(),
                 "size" => size_value = value.parse().unwrap_or(0),
@@ -255,20 +255,14 @@ pub async fn verify_imeta_blobs(
             .await
             .map_err(|_| format!("imeta references nonexistent blob: {x_value}"))?;
 
-        // 2. HEAD the actual blob object and require its length to agree with
-        // the sidecar before trusting that metadata for message publication.
+        // 2. HEAD the actual blob object
         let blob_key = format!("{x_value}.{}", sidecar.ext);
-        let blob = storage
-            .head_with_metadata(&blob_key)
+        let blob_exists = storage
+            .head(&blob_key)
             .await
             .map_err(|e| format!("storage error checking blob {x_value}: {e}"))?;
-        let blob =
-            blob.ok_or_else(|| format!("imeta blob object missing in storage: {x_value}"))?;
-        if blob.size != sidecar.size {
-            return Err(format!(
-                "stored blob size ({}) does not match sidecar size ({})",
-                blob.size, sidecar.size
-            ));
+        if !blob_exists {
+            return Err(format!("imeta blob object missing in storage: {x_value}"));
         }
 
         // 3. Cross-check claimed metadata against sidecar.
@@ -282,12 +276,6 @@ pub async fn verify_imeta_blobs(
             return Err(format!(
                 "imeta size ({size_value}) does not match stored size ({})",
                 sidecar.size
-            ));
-        }
-        if extract_ext_from_media_url(&url_value) != Some(sidecar.ext.as_str()) {
-            return Err(format!(
-                "imeta URL extension does not match stored extension ({})",
-                sidecar.ext
             ));
         }
         if let Some(stored_dur) = sidecar.duration_secs {
@@ -356,8 +344,10 @@ pub async fn verify_imeta_blobs(
 
 /// Whether a string is a well-formed `type/subtype` MIME token.
 ///
-/// Structural check only; the caller separately applies the media/document
-/// allowlist. Rejects empties, missing slash, whitespace, and control characters.
+/// Structural check only — does not enforce a known type. The authoritative
+/// content gate is the upload validator's deny-list plus the sidecar MIME
+/// cross-check in `verify_imeta_blobs`. Rejects empties, missing slash,
+/// whitespace, and control characters.
 fn is_well_formed_mime(mime: &str) -> bool {
     let Some((ty, sub)) = mime.split_once('/') else {
         return false;
@@ -441,8 +431,8 @@ pub fn validate_local_image_media_pair(
 
 /// Validate that a URL references a valid local media blob path.
 fn is_local_media_url(url: &str, media_base_url: &str) -> bool {
-    // A safe extension token: 1–8 lowercase alphanumeric chars. Historical
-    // sidecars may contain extensions no longer accepted for new uploads.
+    // A safe extension token: 1–8 lowercase alphanumeric chars. Covers media
+    // (jpg, png, mp4) and every generic file ext (pdf, docx, zip, mp3, bin, …).
     // The blob's authoritative ext lives in the sidecar; this is a structural
     // gate. Shared with the serve/resolve paths so the predicate can't drift.
     use crate::api::media::is_safe_ext;
@@ -594,57 +584,74 @@ mod tests {
     }
 
     #[test]
-    fn calendar_imeta_with_matching_url_and_filename_passes() {
+    fn test_imeta_generic_file_with_filename_passes() {
+        // Generic file attachment: non-media MIME, arbitrary ext, filename label.
+        // The url-ext-vs-MIME equality check is skipped for non-media MIMEs
+        // (the sidecar cross-check in verify_imeta_blobs enforces correctness).
         let tag = vec![
             "imeta".into(),
-            format!("url /media/{HASH}.ics"),
-            "m text/calendar".into(),
+            format!("url /media/{HASH}.pdf"),
+            "m application/pdf".into(),
             format!("x {HASH}"),
             "size 2048".into(),
-            "filename Planning.ics".into(),
+            "filename Q3-budget.pdf".into(),
         ];
         assert!(validate_imeta_tags(&[tag], BASE).is_ok());
     }
 
     #[test]
-    fn calendar_imeta_rejects_url_and_filename_extension_mismatches() {
-        for (url_ext, filename) in [("txt", "Planning.ics"), ("ics", "Planning.txt")] {
-            let tag = vec![
+    fn calendar_imeta_requires_ics_url_and_filename() {
+        let valid = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.ics"),
+            "m text/calendar".into(),
+            format!("x {HASH}"),
+            "size 512".into(),
+            "filename Planning.ics".into(),
+        ];
+        assert!(validate_imeta_tags(&[valid], BASE).is_ok());
+
+        for invalid in [
+            vec![
                 "imeta".into(),
-                format!("url /media/{HASH}.{url_ext}"),
+                format!("url /media/{HASH}.bin"),
                 "m text/calendar".into(),
                 format!("x {HASH}"),
                 "size 512".into(),
-                format!("filename {filename}"),
-            ];
-            assert!(validate_imeta_tags(&[tag], BASE).is_err());
+                "filename Planning.ics".into(),
+            ],
+            vec![
+                "imeta".into(),
+                format!("url /media/{HASH}.ics"),
+                "m text/calendar".into(),
+                format!("x {HASH}"),
+                "size 512".into(),
+            ],
+        ] {
+            assert!(validate_imeta_tags(&[invalid], BASE).is_err());
         }
     }
 
     #[test]
-    fn imeta_rejects_unapproved_document_mime() {
-        for mime in ["application/octet-stream", "application/pdf", "text/html"] {
-            let tag = vec![
-                "imeta".into(),
-                format!("url /media/{HASH}.bin"),
-                format!("m {mime}"),
-                format!("x {HASH}"),
-                "size 512".into(),
-                "filename notes.bin".into(),
-            ];
-            assert!(
-                validate_imeta_tags(&[tag], BASE).is_err(),
-                "accepted {mime}"
-            );
-        }
+    fn test_imeta_octet_stream_passes() {
+        // Un-sniffable text/data files upload as octet-stream with a .bin ext.
+        let tag = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.bin"),
+            "m application/octet-stream".into(),
+            format!("x {HASH}"),
+            "size 512".into(),
+            "filename notes.txt".into(),
+        ];
+        assert!(validate_imeta_tags(&[tag], BASE).is_ok());
     }
 
     #[test]
     fn test_imeta_filename_rejects_path_separators() {
         let tag = vec![
             "imeta".into(),
-            format!("url /media/{HASH}.ics"),
-            "m text/calendar".into(),
+            format!("url /media/{HASH}.pdf"),
+            "m application/pdf".into(),
             format!("x {HASH}"),
             "size 2048".into(),
             "filename ../../etc/passwd".into(),

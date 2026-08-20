@@ -11,10 +11,8 @@ use std::time::{Duration, Instant};
 
 use axum::http::header;
 use axum::{
-    body::Body,
     extract::{FromRequestParts, Path, State},
-    http::{request::Parts, HeaderMap, Request, StatusCode},
-    middleware::Next,
+    http::{request::Parts, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -48,9 +46,32 @@ enum UploadRouteMode {
     LegacyMedia,
 }
 
-fn should_stream_as_video(sniff: &[u8]) -> bool {
-    infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
-        || buzz_media::looks_like_iso_bmff(sniff)
+fn should_stream_as_video(sniff: &[u8], signals_calendar: bool) -> bool {
+    !signals_calendar
+        && (infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
+            || buzz_media::looks_like_iso_bmff(sniff))
+}
+
+fn calendar_upload_hints(headers: &HeaderMap) -> Option<buzz_media::FileUploadHints> {
+    let declared_mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let extension = headers
+        .get("x-buzz-file-extension")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    (declared_mime.as_deref() == Some("text/calendar") || extension.as_deref() == Some("ics"))
+        .then_some(buzz_media::FileUploadHints {
+            declared_mime,
+            extension,
+        })
 }
 
 fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
@@ -298,61 +319,6 @@ fn serving_lease_lost(error: anyhow::Error) -> MediaError {
     MediaError::ServiceUnavailable
 }
 
-fn document_upload_hints(headers: &HeaderMap) -> (Option<String>, Option<String>) {
-    let declared_mime = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    let extension = headers
-        .get("x-buzz-file-extension")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase);
-    (declared_mime, extension)
-}
-
-fn is_document_upload(headers: &HeaderMap) -> bool {
-    let (declared_mime, extension) = document_upload_hints(headers);
-    declared_mime
-        .as_deref()
-        .and_then(buzz_media::validation::document_extension_for_mime)
-        .is_some()
-        || extension
-            .as_deref()
-            .is_some_and(|extension| extension == "ics")
-}
-
-/// Apply the separately bounded document class before the upload handler reads
-/// the body. `Content-Length` requests are rejected without polling the body;
-/// chunked requests receive a streaming limit that stops polling at the cap.
-pub(crate) async fn limit_document_upload_body(
-    mut request: Request<Body>,
-    next: Next,
-    limit: usize,
-) -> Response {
-    if request.uri().path() != "/upload" || !is_document_upload(request.headers()) {
-        return next.run(request).await;
-    }
-
-    if request
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > limit)
-    {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
-
-    let body = std::mem::replace(request.body_mut(), Body::empty());
-    *request.body_mut() = Body::new(http_body_util::Limited::new(body, limit));
-    next.run(request).await
-}
-
 /// PUT `/upload` or the temporary media-only `/media/upload` alias.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
@@ -376,9 +342,10 @@ pub async fn upload_blob(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUpload,
     headers: HeaderMap,
-    body: Body,
+    body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
     let attribution = upload_attribution(&state, &auth, &headers).await;
+    let calendar_hints = calendar_upload_hints(&headers);
 
     let serving_write =
         buzz_deletion::acquire_serving_write(&state.db, auth.tenant.community(), "media_upload")
@@ -404,114 +371,102 @@ pub async fn upload_blob(
                 sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
                 replay_chunks.push(chunk);
             }
-            Some(Err(error)) => {
-                if is_document_upload(&headers) {
-                    let max = buzz_media::validation::max_document_bytes_for_upload(
-                        state.config.media.max_file_bytes,
-                    ) as u64;
-                    return Err(MediaError::FileTooLarge { size: 0, max });
-                }
-                return Err(MediaError::Io(error.to_string()));
-            }
+            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
             None => break,
         }
     }
     let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
-    let document_upload = is_document_upload(&headers);
 
     serving_write.verify().await.map_err(serving_lease_lost)?;
 
     let mut descriptor = serving_write
         .protect(async {
-            Ok(if !document_upload && should_stream_as_video(&sniff) {
-                // Video path: stream body directly to disk — never fully buffered in RAM.
-                let content_length = headers
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok());
-                buzz_media::process_video_upload(
-                    &state.media_storage,
-                    &state.config.media,
-                    &auth.tenant,
-                    &auth.auth_event,
-                    replay,
-                    content_length,
-                    attribution,
-                )
-                .await?
-            } else {
-                // Buffered path: a declared document signal takes precedence over
-                // sniffed media bytes so MIME/extension/content disagreement is rejected.
-                // Ordinary images still go through thumbnailing when no document signal
-                // is present; validated documents are served as downloads.
-                let max = if document_upload {
-                    buzz_media::validation::max_document_bytes_for_upload(
-                        state.config.media.max_file_bytes,
-                    ) as u64
+            Ok(
+                if should_stream_as_video(&sniff, calendar_hints.is_some()) {
+                    // Video path: stream body directly to disk — never fully buffered in RAM.
+                    let content_length = headers
+                        .get("content-length")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok());
+                    buzz_media::process_video_upload(
+                        &state.media_storage,
+                        &state.config.media,
+                        &auth.tenant,
+                        &auth.auth_event,
+                        replay,
+                        content_length,
+                        attribution,
+                    )
+                    .await?
                 } else {
-                    state
-                        .config
-                        .media
-                        .max_image_bytes
-                        .max(state.config.media.max_file_bytes)
-                };
-                let bytes =
-                    axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
-                        .await
-                        .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
+                    // Non-video path: buffer the body (bounded by the larger of the image
+                    // and generic-file caps), then decide image-vs-generic by sniffed MIME.
+                    // Images go through the thumbnailing pipeline; non-media attachments
+                    // (docs, archives, text, data) take the generic file path and are
+                    // served as downloads. Recognized audio/video cannot fall through it.
+                    let max = if calendar_hints.is_some() {
+                        state
+                            .config
+                            .media
+                            .max_file_bytes
+                            .min(buzz_media::validation::MAX_CALENDAR_BYTES)
+                    } else {
+                        state
+                            .config
+                            .media
+                            .max_image_bytes
+                            .max(state.config.media.max_file_bytes)
+                    };
+                    let bytes =
+                        axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
+                            .await
+                            .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
 
-                let is_image = matches!(
-                    infer::get(&bytes).map(|t| t.mime_type()),
-                    Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
-                );
-
-                if document_upload {
-                    let (declared_mime, extension) = document_upload_hints(&headers);
-                    buzz_media::process_file_upload(
-                        &state.media_storage,
-                        &state.config.media,
-                        &auth.tenant,
-                        &auth.auth_event,
-                        buzz_media::DocumentUploadHints {
-                            declared_mime,
-                            extension,
-                        },
-                        bytes,
-                        attribution,
-                    )
-                    .await?
-                } else if is_image {
-                    buzz_media::process_upload(
-                        &state.media_storage,
-                        &state.config.media,
-                        &auth.tenant,
-                        &auth.auth_event,
-                        bytes,
-                        attribution,
-                    )
-                    .await?
-                } else if auth.route_mode == UploadRouteMode::LegacyMedia {
-                    let mime = infer::get(&bytes)
-                        .map(|kind| kind.mime_type().to_string())
-                        .unwrap_or_else(|| "application/octet-stream".to_string());
-                    return Err(MediaError::DisallowedContentType(mime));
-                } else {
-                    let (declared_mime, extension) = document_upload_hints(&headers);
-                    buzz_media::process_file_upload(
-                        &state.media_storage,
-                        &state.config.media,
-                        &auth.tenant,
-                        &auth.auth_event,
-                        buzz_media::DocumentUploadHints {
-                            declared_mime,
-                            extension,
-                        },
-                        bytes,
-                        attribution,
-                    )
-                    .await?
-                }
-            })
+                    if let Some(hints) = calendar_hints {
+                        if auth.route_mode == UploadRouteMode::LegacyMedia {
+                            return Err(MediaError::DisallowedContentType("text/calendar".into()));
+                        }
+                        buzz_media::process_file_upload_with_hints(
+                            &state.media_storage,
+                            &state.config.media,
+                            &auth.tenant,
+                            &auth.auth_event,
+                            bytes,
+                            attribution,
+                            hints,
+                        )
+                        .await?
+                    } else if matches!(
+                        infer::get(&bytes).map(|t| t.mime_type()),
+                        Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
+                    ) {
+                        buzz_media::process_upload(
+                            &state.media_storage,
+                            &state.config.media,
+                            &auth.tenant,
+                            &auth.auth_event,
+                            bytes,
+                            attribution,
+                        )
+                        .await?
+                    } else if auth.route_mode == UploadRouteMode::LegacyMedia {
+                        let mime = infer::get(&bytes)
+                            .map(|kind| kind.mime_type().to_string())
+                            .unwrap_or_else(|| "application/octet-stream".to_string());
+                        return Err(MediaError::DisallowedContentType(mime));
+                    } else {
+                        buzz_media::process_file_upload(
+                            &state.media_storage,
+                            &state.config.media,
+                            &auth.tenant,
+                            &auth.auth_event,
+                            bytes,
+                            attribution,
+                        )
+                        .await?
+                    }
+                },
+            )
         })
         .await
         .map_err(|error| {
@@ -533,7 +488,7 @@ pub async fn upload_blob(
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" | "text/calendar" => {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" => {
             &descriptor.mime_type
         }
         _ => "other",
@@ -647,7 +602,8 @@ fn blob_cache_control() -> &'static str {
 /// resolve paths always compare the requested ext against it. This check is a
 /// cheap structural gate to reject obviously hostile path segments (traversal,
 /// overlong, non-alphanumeric) before any storage lookup. Accepts 1–8 lowercase
-/// alphanumeric chars, covering media, allowlisted documents, and historical sidecars.
+/// alphanumeric chars, which covers every extension the generic file path emits
+/// (jpg, png, mp4, pdf, docx, xlsx, tar, 7z, mp3, flac, json, bin, …).
 pub(crate) fn is_safe_ext(ext: &str) -> bool {
     !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9'))
 }
@@ -774,7 +730,7 @@ pub(crate) async fn serve_blob_for_tenant(
         sidecar_mime
     };
 
-    // Images and video render inline; documents force download. This is the
+    // Images and video render inline; generic files force download. This is the
     // primary defence for non-previewable types — combined with `nosniff` and
     // `CSP: default-src 'none'`, an attachment disposition prevents an uploaded
     // file from ever executing or rendering as active content in the client.
@@ -953,11 +909,6 @@ pub async fn head_blob(
     };
 
     let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
-    let disposition = if buzz_media::serve_inline(&content_type) {
-        "inline"
-    } else {
-        "attachment"
-    };
     match state.media_storage.head_with_metadata(&key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
@@ -968,9 +919,6 @@ pub async fn head_blob(
                     ("content-length", size_str.as_str()),
                     ("accept-ranges", "bytes"),
                     ("cache-control", cache_control),
-                    ("content-disposition", disposition),
-                    ("content-security-policy", "default-src 'none'"),
-                    ("x-content-type-options", "nosniff"),
                 ],
             )
                 .into_response())
@@ -1035,14 +983,30 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn calendar_hints_require_calendar_validation_before_media_routing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "text/calendar; charset=utf-8".parse().unwrap(),
+        );
+        headers.insert("x-buzz-file-extension", "ICS".parse().unwrap());
+
+        let hints = calendar_upload_hints(&headers).expect("calendar hints");
+        assert_eq!(hints.declared_mime.as_deref(), Some("text/calendar"));
+        assert_eq!(hints.extension.as_deref(), Some("ics"));
+
+        headers.remove("x-buzz-file-extension");
+        let mismatched =
+            calendar_upload_hints(&headers).expect("MIME alone still signals calendar");
+        assert_eq!(mismatched.extension, None);
+    }
 
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
-        middleware,
-        routing::put,
     };
     use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
     use tower::ServiceExt;
@@ -1084,96 +1048,8 @@ mod tests {
     fn proprietary_iso_bmff_brand_still_uses_video_pipeline() {
         let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
         assert!(infer::get(bytes).is_none());
-        assert!(should_stream_as_video(bytes));
-    }
-
-    #[test]
-    fn calendar_upload_hints_normalize_declared_mime_and_extension() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            "Text/Calendar; charset=utf-8".parse().unwrap(),
-        );
-        headers.insert("x-buzz-file-extension", "ICS".parse().unwrap());
-
-        assert_eq!(
-            document_upload_hints(&headers),
-            (Some("text/calendar".to_string()), Some("ics".to_string()))
-        );
-    }
-
-    fn document_limit_test_router(limit: usize) -> axum::Router {
-        async fn consume(body: Body) -> StatusCode {
-            match axum::body::to_bytes(body, usize::MAX).await {
-                Ok(_) => StatusCode::OK,
-                Err(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            }
-        }
-
-        axum::Router::new()
-            .route("/upload", put(consume))
-            .layer(middleware::from_fn(move |request, next| {
-                limit_document_upload_body(request, next, limit)
-            }))
-    }
-
-    #[tokio::test]
-    async fn calendar_transport_limit_rejects_content_length_without_polling_body() {
-        let consumed = Arc::new(AtomicUsize::new(0));
-        let stream_consumed = Arc::clone(&consumed);
-        let body = Body::from_stream(futures_util::stream::once(async move {
-            stream_consumed.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"not consumed"))
-        }));
-        let limit = buzz_media::validation::max_document_bytes_for_upload(100 * 1024 * 1024);
-        let request = Request::builder()
-            .method("PUT")
-            .uri("/upload")
-            .header(header::CONTENT_TYPE, "text/calendar")
-            .header("x-buzz-file-extension", "ics")
-            .header(header::CONTENT_LENGTH, limit + 1)
-            .body(body)
-            .expect("request");
-
-        let response = document_limit_test_router(limit)
-            .oneshot(request)
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(consumed.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn calendar_transport_limit_stops_stream_before_full_body_is_consumed() {
-        const CHUNK_BYTES: usize = 1024 * 1024;
-        const TOTAL_CHUNKS: usize = 20;
-
-        let consumed = Arc::new(AtomicUsize::new(0));
-        let stream_consumed = Arc::clone(&consumed);
-        let stream = futures_util::stream::iter((0..TOTAL_CHUNKS).map(move |_| {
-            stream_consumed.fetch_add(1, Ordering::SeqCst);
-            Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b'A'; CHUNK_BYTES]))
-        }));
-        let limit = buzz_media::validation::max_document_bytes_for_upload(100 * 1024 * 1024);
-        let request = Request::builder()
-            .method("PUT")
-            .uri("/upload")
-            .header(header::CONTENT_TYPE, "text/calendar")
-            .header("x-buzz-file-extension", "ics")
-            .body(Body::from_stream(stream))
-            .expect("request");
-
-        let response = document_limit_test_router(limit)
-            .oneshot(request)
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(
-            consumed.load(Ordering::SeqCst) < TOTAL_CHUNKS,
-            "the route must stop polling once the document limit is crossed"
-        );
+        assert!(should_stream_as_video(bytes, false));
+        assert!(!should_stream_as_video(bytes, true));
     }
 
     async fn test_state() -> Arc<AppState> {
@@ -1407,9 +1283,10 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_media_path_accepts_structurally_safe_exts() {
-        // Path validation accepts safe tokens because historical sidecars may
-        // carry them; the current upload allowlist lives in buzz-media.
+    fn test_validate_media_path_accepts_generic_exts() {
+        // Path validation now accepts any safe ext token — the deny-list for
+        // dangerous *content* lives in the upload validator, not here. The
+        // sidecar ext comparison is the authoritative check at serve time.
         assert!(validate_media_path(&format!("{VALID_HASH}.pdf")).is_ok());
         assert!(validate_media_path(&format!("{VALID_HASH}.docx")).is_ok());
         assert!(validate_media_path(&format!("{VALID_HASH}.zip")).is_ok());

@@ -22,7 +22,10 @@ pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
 pub use storage::{BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage};
 pub use types::BlobDescriptor;
-pub use upload::{process_file_upload, process_upload, process_video_upload, DocumentUploadHints};
+pub use upload::{
+    process_file_upload, process_file_upload_with_hints, process_upload, process_video_upload,
+    FileUploadHints,
+};
 pub use upload_record::{
     parse_port, parse_public_ip, upload_record_key, UploadAttribution, UploadNetworkInfo,
     UploadRecord, UPLOAD_RECORD_VERSION,

@@ -571,21 +571,20 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
-fn format_attachment_markdown(descriptor: &crate::client::BlobDescriptor) -> String {
-    if descriptor.mime_type.starts_with("video/") {
-        return format!("![video]({})", descriptor.url);
+fn calendar_attachment_metadata(
+    file_path: &str,
+    descriptor: &crate::client::BlobDescriptor,
+) -> Option<(String, String)> {
+    if descriptor.mime_type != "text/calendar" {
+        return None;
     }
-    if descriptor.mime_type.starts_with("image/") {
-        return format!("![image]({})", descriptor.url);
-    }
-    let label = descriptor
-        .filename
-        .as_deref()
-        .unwrap_or("file")
+    let filename = crate::client::sanitize_calendar_filename(file_path);
+    let label = filename
         .replace('\\', "\\\\")
         .replace('[', "\\[")
         .replace(']', "\\]");
-    format!("[{label}]({})", descriptor.url)
+    let markdown = format!("[{label}]({})", descriptor.url);
+    Some((filename, markdown))
 }
 
 pub async fn cmd_send_message(
@@ -635,9 +634,21 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        media_content.push('\n');
-        media_content.push_str(&format_attachment_markdown(&desc));
+        let mut imeta = crate::client::build_imeta_tag(&desc);
+        if let Some((filename, markdown)) = calendar_attachment_metadata(file_path, &desc) {
+            imeta.push(format!("filename {filename}"));
+            media_content.push('\n');
+            media_content.push_str(&markdown);
+        } else if desc.mime_type.starts_with("video/") {
+            media_content.push_str("\n![video](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else {
+            media_content.push_str("\n![image](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        }
+        media_tags.push(imeta);
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1005,7 +1016,7 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        event_mention_pubkeys, find_root_from_tags, format_attachment_markdown,
+        calendar_attachment_metadata, event_mention_pubkeys, find_root_from_tags,
         match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
     };
@@ -1019,7 +1030,7 @@ mod tests {
     const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     #[test]
-    fn calendar_attachment_is_a_named_download_link() {
+    fn calendar_attachment_uses_named_download_markdown_and_imeta() {
         let descriptor = crate::client::BlobDescriptor {
             url: "https://relay.example/media/abc.ics".to_string(),
             sha256: "a".repeat(64),
@@ -1030,14 +1041,15 @@ mod tests {
             blurhash: None,
             thumb: None,
             duration: None,
-            filename: Some("Planning.ics".to_string()),
         };
+        let (filename, markdown) =
+            calendar_attachment_metadata(r"folder\Planning[1].ics", &descriptor).unwrap();
+
+        assert_eq!(filename, "Planning[1].ics");
         assert_eq!(
-            format_attachment_markdown(&descriptor),
-            "[Planning.ics](https://relay.example/media/abc.ics)"
+            markdown,
+            r"[Planning\[1\].ics](https://relay.example/media/abc.ics)"
         );
-        assert!(crate::client::build_imeta_tag(&descriptor)
-            .contains(&"filename Planning.ics".to_string()));
     }
 
     // Three real pubkeys (lowercase 64-char hex) used by parse_member_pubkeys tests.
