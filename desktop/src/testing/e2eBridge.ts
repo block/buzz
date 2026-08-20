@@ -13714,6 +13714,29 @@ export function maybeInstallE2eTauriMocks() {
         if (canvasReadError) {
           throw new Error(canvasReadError);
         }
+        if (isRelayMode(activeConfig)) {
+          const channelId = (payload as { channelId?: string }).channelId;
+          if (!channelId) {
+            throw new Error("get_canvas requires channelId");
+          }
+          const events = await relayQuery(activeConfig, [
+            { kinds: [40100], "#h": [channelId], limit: 1 },
+          ]);
+          const event = events[0];
+          return event
+            ? {
+                content: event.content,
+                event_id: event.id,
+                updated_at: event.created_at,
+                author: event.pubkey,
+              }
+            : {
+                content: "",
+                event_id: null,
+                updated_at: null,
+                author: null,
+              };
+        }
         // Return the no-canvas success shape — content null means no canvas set.
         return { content: null, updated_at: null, author: null };
       }

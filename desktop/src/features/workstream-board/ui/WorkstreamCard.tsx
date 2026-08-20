@@ -1,12 +1,15 @@
+import * as React from "react";
 import { Hash } from "lucide-react";
 
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { useCanvasQuery } from "@/features/channels/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { parseWorkstreamPullRequestReferences } from "@/features/workstream-board/lib/workstreamPullRequestStatus";
 import { buildWorkstreamCardViewModel } from "@/features/workstream-board/lib/workstreamCardViewModel";
+import { WorkstreamPullRequests } from "@/features/workstream-board/ui/WorkstreamPullRequests";
+import { WorkstreamWorkingIndicator } from "@/features/workstream-board/ui/WorkstreamWorkingIndicator";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { WorkstreamWorkingIndicator } from "@/features/workstream-board/ui/WorkstreamWorkingIndicator";
 
 type WorkstreamCardProps = {
   activeWorking?: ActiveChannelTurnSummary;
@@ -27,6 +30,13 @@ export function WorkstreamCard({
     isLoading: canvasQuery.isLoading,
     isError: canvasQuery.isError,
   });
+  const references = React.useMemo(
+    () =>
+      viewModel.status === "ready"
+        ? parseWorkstreamPullRequestReferences(viewModel.card.pullRequests)
+        : [],
+    [viewModel],
+  );
 
   return (
     <div
@@ -72,6 +82,9 @@ export function WorkstreamCard({
                     </span>
                   ))}
                 </div>
+              ) : null}
+              {references.length > 0 ? (
+                <WorkstreamPullRequests references={references} />
               ) : null}
             </div>
           </>
