@@ -396,18 +396,23 @@ class Driver:
         return response
 
     def close(self) -> None:
+        shutdown_error: BaseException | None = None
         if self.process.poll() is None:
             try:
                 self.request("shutdown")
-            except Exception:
-                self.process.terminate()
+            except BaseException as exc:
+                shutdown_error = exc
         for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
             if stream:
                 stream.close()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
+        cleanup_errors = terminate_and_reap(self.process, "native driver", timeout_seconds=5)
+        if cleanup_errors:
+            detail = "; ".join(cleanup_errors)
+            if shutdown_error:
+                detail = f"shutdown failed: {shutdown_error}; {detail}"
+            raise HarnessError(detail) from shutdown_error
+        if shutdown_error and not isinstance(shutdown_error, Exception):
+            raise shutdown_error
 
 
 def doctor(require_permissions: bool = False) -> dict[str, Any]:
@@ -623,7 +628,7 @@ def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: 
                 return process, app_binary, process.pid
             time.sleep(0.25)
         raise HarnessError("timed out waiting for native Buzz process")
-    except Exception as exc:
+    except BaseException as exc:
         cleanup_errors = terminate_and_reap(process, "Tauri launcher")
         if cleanup_errors:
             raise HarnessError(f"{exc}; {'; '.join(cleanup_errors)}") from exc

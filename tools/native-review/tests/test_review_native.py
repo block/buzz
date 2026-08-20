@@ -311,6 +311,89 @@ class JourneyTests(unittest.TestCase):
             [15, 15],
         )
 
+    def test_launch_interruption_reaps_child_before_propagating(self):
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            (run_dir / "logs").mkdir()
+            secret_path = run_dir / "identity.key"
+            secret_path.write_text("1" * 64)
+            app_binary = run_dir / "buzz-desktop"
+            app_binary.write_bytes(b"binary")
+            fixture = {
+                "secret_path": str(secret_path),
+                "identity_pubkey": "2" * 64,
+            }
+            isolation = review_native.isolation_manifest(
+                "run", "ws://127.0.0.1:3030"
+            )
+            with mock.patch.object(review_native.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(review_native, "run", side_effect=KeyboardInterrupt), \
+                 mock.patch.object(review_native, "scrubbed_environment", return_value={"PATH": "/usr/bin"}):
+                with self.assertRaises(KeyboardInterrupt):
+                    review_native.build_and_launch(
+                        run_dir, isolation, fixture, "http://127.0.0.1/probe",
+                        "token", app_binary
+                    )
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=15)
+        process.kill.assert_not_called()
+
+    def test_driver_close_kills_and_reaps_term_ignoring_child(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            review_native.subprocess.TimeoutExpired("native-driver", 5),
+            0,
+        ]
+        driver = review_native.Driver.__new__(review_native.Driver)
+        driver.process = process
+        with mock.patch.object(driver, "request", side_effect=RuntimeError("shutdown failed")):
+            with self.assertRaisesRegex(
+                review_native.HarnessError,
+                "native driver required SIGKILL",
+            ):
+                driver.close()
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in process.wait.call_args_list],
+            [5, 5],
+        )
+
+    def test_driver_close_reports_post_kill_wait_timeout(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = review_native.subprocess.TimeoutExpired(
+            "native-driver", 5
+        )
+        driver = review_native.Driver.__new__(review_native.Driver)
+        driver.process = process
+        with mock.patch.object(driver, "request", side_effect=RuntimeError("shutdown failed")):
+            with self.assertRaisesRegex(
+                review_native.HarnessError,
+                "native driver remained alive after SIGKILL",
+            ):
+                driver.close()
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.wait.call_count, 2)
+
+    def test_driver_close_reaps_before_propagating_interruption(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        driver = review_native.Driver.__new__(review_native.Driver)
+        driver.process = process
+        with mock.patch.object(driver, "request", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                driver.close()
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+        process.kill.assert_not_called()
+
     def test_final_wait_timeout_is_reported(self):
         process = mock.Mock()
         process.poll.return_value = None
