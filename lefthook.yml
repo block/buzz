@@ -26,10 +26,14 @@
 #   Git only runs it for `git commit` and `git merge` — other flows need their own
 #   flag: `git rebase --signoff`, `git cherry-pick -s`.
 #
-# `rc` points `lefthook install` at `bin/.lefthookrc`, which sets `LEFTHOOK_BIN`
-# to the Hermit-pinned `bin/lefthook` (2.1.3). The generated `.git/hooks/*`
-# dispatchers source it before their `$LEFTHOOK_BIN`-first lookup, so a push from
-# any worktree runs the pinned binary even when a different lefthook is on PATH.
+# `rc` points `lefthook install` at `bin/.lefthookrc`, which the generated
+# `.git/hooks/*` dispatchers source before their `$LEFTHOOK_BIN`-first lookup. It
+# (1) sets `LEFTHOOK_BIN` to the Hermit-pinned `bin/lefthook` (2.1.3) so a push
+# from any worktree runs the pinned binary even when a different lefthook is on
+# PATH, and (2) prepends the repo's Hermit `bin/` to `PATH` so every lane
+# subprocess (`just mobile-check` -> flutter/dart, etc.) resolves the pinned
+# toolchain regardless of the invoking shell — the hook self-pins, so a Homebrew
+# flutter/dart ahead on PATH can no longer cause false lane failures.
 rc: bin/.lefthookrc
 
 pre-commit:
