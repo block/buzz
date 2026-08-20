@@ -54,6 +54,7 @@ mod project_git_file_content;
 mod project_git_merge_error;
 mod project_git_push;
 mod project_git_recipient_notes;
+mod project_git_types;
 mod project_git_workflow;
 mod project_repo_paths;
 mod project_terminal;

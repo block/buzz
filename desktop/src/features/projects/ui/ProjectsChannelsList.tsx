@@ -1,4 +1,4 @@
-import { Hash } from "lucide-react";
+import { FolderKanban, Hash } from "lucide-react";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -9,19 +9,16 @@ import {
   collectProjectRelatedChannelRows,
   projectRelatedChannelRowKey,
 } from "@/features/projects/lib/projectRelatedChannels";
+import { selectionItemFromChannel } from "@/features/projects/lib/projectSelection";
 import { listRowDescription } from "@/features/projects/lib/projectsViewHelpers";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { ProjectEntityListRow } from "./ProjectEntityListRow";
+import { ProjectSelectableGroup } from "./ProjectSelectableGroup";
 
 function lastMessageAtSeconds(value: string | null | undefined) {
   if (!value) return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? Math.floor(ms / 1_000) : null;
-}
-
-function affiliationLabel(projectName: string, repositoryName: string | null) {
-  if (!repositoryName || repositoryName === projectName) return projectName;
-  return `${projectName} · ${repositoryName}`;
 }
 
 export function ProjectsChannelsList({ projects }: { projects: Project[] }) {
@@ -67,6 +64,47 @@ export function ProjectsChannelsList({ projects }: { projects: Project[] }) {
     enabled: participantPubkeys.length > 0,
   });
   const profiles = profilesQuery.data?.profiles;
+  const selectionItemsByRowKey = React.useMemo(() => {
+    const items = new Map<
+      string,
+      ReturnType<typeof selectionItemFromChannel>
+    >();
+    for (const row of rows) {
+      const channel = channelsById.get(row.channelId);
+      const name = channel?.name ?? row.channelId.slice(0, 8);
+      const rowKey = projectRelatedChannelRowKey(row);
+      const item = selectionItemFromChannel({
+        channelId: row.channelId,
+        people: channel?.participantPubkeys ?? channel?.participants ?? [],
+        title: `#${name}`,
+      });
+      items.set(rowKey, { ...item, id: `${item.id}:${rowKey}` });
+    }
+    return items;
+  }, [channelsById, rows]);
+  const rangeItems = React.useMemo(
+    () => [...selectionItemsByRowKey.values()],
+    [selectionItemsByRowKey],
+  );
+  const groups = React.useMemo(() => {
+    const grouped = new Map<
+      string,
+      { projectId: string; projectName: string; rows: typeof rows }
+    >();
+    for (const row of rows) {
+      const existing = grouped.get(row.projectId);
+      if (existing) {
+        existing.rows.push(row);
+        continue;
+      }
+      grouped.set(row.projectId, {
+        projectId: row.projectId,
+        projectName: row.projectName,
+        rows: [row],
+      });
+    }
+    return [...grouped.values()];
+  }, [rows]);
 
   if (channelsQuery.isLoading && rows.length === 0) {
     return <BuzzLoadingState label="Loading project channels" />;
@@ -81,55 +119,80 @@ export function ProjectsChannelsList({ projects }: { projects: Project[] }) {
   }
 
   return (
-    <ul
-      className="divide-y divide-border/60"
-      data-testid="projects-channels-list"
-    >
-      {rows.map((row) => {
-        const channel = channelsById.get(row.channelId);
-        const name = channel?.name ?? row.channelId.slice(0, 8);
-        const lastActivityAt = lastMessageAtSeconds(channel?.lastMessageAt);
-        const affiliation = affiliationLabel(
-          row.projectName,
-          row.repositoryName,
-        );
-        const people =
-          channel?.participantPubkeys ?? channel?.participants ?? [];
-        return (
-          <li key={projectRelatedChannelRowKey(row)}>
-            <ProjectEntityListRow
-              affiliation={
-                <span data-testid="project-channel-project">
-                  <span data-testid="project-channel-repository">
-                    {affiliation}
-                  </span>
-                </span>
-              }
-              affiliationTitle={affiliation}
-              count={channel?.memberCount}
-              countTestId="project-channel-message-count"
-              countTitle={
-                channel
-                  ? `${channel.memberCount} ${
-                      channel.memberCount === 1 ? "member" : "members"
-                    }`
-                  : undefined
-              }
-              dateSeconds={lastActivityAt}
-              dateTestId="project-channel-row-date"
-              description={listRowDescription(channel?.description, name)}
-              icon={<Hash className="h-3.5 w-3.5 text-muted-foreground/70" />}
-              onClick={() => void goChannel(row.channelId)}
-              people={people}
-              peopleTestId="project-channel-participants"
-              profiles={profiles}
-              testId="project-channel-row"
-              title={`#${name}`}
-              titleAttr={`Open #${name}`}
-            />
-          </li>
-        );
-      })}
-    </ul>
+    <div className="space-y-2" data-testid="projects-channels-list">
+      {groups.map((group) => (
+        <ProjectSelectableGroup
+          count={group.rows.length}
+          groupKey={group.projectId}
+          headerTestId="projects-channel-project-group-header"
+          icon={<FolderKanban className="h-4 w-4" />}
+          items={group.rows.flatMap((row) => {
+            const item = selectionItemsByRowKey.get(
+              projectRelatedChannelRowKey(row),
+            );
+            return item ? [item] : [];
+          })}
+          key={group.projectId}
+          label={group.projectName}
+          labelTestId="project-channel-project"
+          testId="projects-channel-project-group"
+        >
+          <ul className="space-y-0.5">
+            {group.rows.map((row) => {
+              const rowKey = projectRelatedChannelRowKey(row);
+              const channel = channelsById.get(row.channelId);
+              const name = channel?.name ?? row.channelId.slice(0, 8);
+              const lastActivityAt = lastMessageAtSeconds(
+                channel?.lastMessageAt,
+              );
+              const repositoryLabel =
+                row.repositoryName?.trim() || "Project channel";
+              const people =
+                channel?.participantPubkeys ?? channel?.participants ?? [];
+              const selectionItem = selectionItemsByRowKey.get(rowKey);
+              return (
+                <li key={rowKey}>
+                  <ProjectEntityListRow
+                    affiliation={
+                      <span data-testid="project-channel-repository">
+                        {repositoryLabel}
+                      </span>
+                    }
+                    affiliationTitle={`${group.projectName} · ${repositoryLabel}`}
+                    count={channel?.memberCount}
+                    countTestId="project-channel-message-count"
+                    countTitle={
+                      channel
+                        ? `${channel.memberCount} ${
+                            channel.memberCount === 1 ? "member" : "members"
+                          }`
+                        : undefined
+                    }
+                    dateSeconds={lastActivityAt}
+                    dateTestId="project-channel-row-date"
+                    description={listRowDescription(channel?.description, name)}
+                    icon={
+                      <Hash className="h-3.5 w-3.5 text-muted-foreground/70" />
+                    }
+                    onClick={() => void goChannel(row.channelId)}
+                    people={people}
+                    peopleTestId="project-channel-participants"
+                    profiles={profiles}
+                    selection={
+                      selectionItem
+                        ? { item: selectionItem, rangeItems }
+                        : undefined
+                    }
+                    testId="project-channel-row"
+                    title={`#${name}`}
+                    titleAttr={`Open #${name}`}
+                  />
+                </li>
+              );
+            })}
+          </ul>
+        </ProjectSelectableGroup>
+      ))}
+    </div>
   );
 }
