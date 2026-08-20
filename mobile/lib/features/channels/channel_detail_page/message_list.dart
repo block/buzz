@@ -341,8 +341,8 @@ class _MessageList extends HookConsumerWidget {
         await itemScrollController.scrollTo(
           index: 0,
           alignment: latestAlignment(),
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
+          duration: jumpToLatestScrollDuration,
+          curve: jumpToLatestScrollCurve,
         );
         if (context.mounted && !hasUserScrolled.value) {
           isAtLatest.value = true;
@@ -882,49 +882,14 @@ class _MessageList extends HookConsumerWidget {
             right: 0,
             bottom: navigationBottomInset + Grid.xs,
             child: Center(
-              child: AnimatedSwitcher(
-                key: const ValueKey('channel-jump-to-latest-switcher'),
-                duration: MediaQuery.disableAnimationsOf(context)
-                    ? Duration.zero
-                    : const Duration(milliseconds: 180),
-                reverseDuration: MediaQuery.disableAnimationsOf(context)
-                    ? Duration.zero
-                    : const Duration(milliseconds: 160),
-                switchInCurve: Curves.easeOutCubic,
-                switchOutCurve: Curves.easeInCubic,
-                transitionBuilder: (child, animation) => FadeTransition(
-                  opacity: animation,
-                  child: ScaleTransition(
-                    scale: _JumpToLatestScaleAnimation(animation),
-                    alignment: Alignment.bottomCenter,
-                    child: child,
-                  ),
-                ),
-                child: !isJumpToLatestVisible.value
-                    ? const SizedBox.shrink(
-                        key: ValueKey('channel-jump-to-latest-hidden'),
-                      )
-                    : JumpToLatestButton(
-                        key: const ValueKey('channel-jump-to-latest'),
-                        onPressed: scrollToLatest,
-                      ),
+              child: JumpToLatestSwitcher(
+                id: 'channel',
+                visible: isJumpToLatestVisible.value,
+                onPressed: scrollToLatest,
               ),
             ),
           ),
       ],
     );
   }
-}
-
-class _JumpToLatestScaleAnimation extends Animation<double>
-    with AnimationWithParentMixin<double> {
-  @override
-  final Animation<double> parent;
-
-  _JumpToLatestScaleAnimation(this.parent);
-
-  @override
-  double get value => parent.status == AnimationStatus.reverse
-      ? parent.value
-      : 0.92 + (0.08 * parent.value);
 }

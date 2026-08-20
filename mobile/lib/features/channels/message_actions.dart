@@ -29,6 +29,7 @@ import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
+import 'message_action_backdrop_state.dart';
 import 'reaction_row.dart';
 import 'recent_emoji_provider.dart';
 import '../../shared/read_state/message_read_state.dart';
@@ -41,11 +42,18 @@ import 'timeline_message.dart';
 part 'message_actions/reaction_popover.dart';
 part 'message_actions/quick_reaction_row.dart';
 part 'message_actions/message_action_popover.dart';
+part 'message_actions/message_action_popover_widgets.dart';
 part 'message_actions/message_reaction_tray.dart';
 
 /// Preview length for reminder targets — matches desktop's
 /// `msg.body.slice(0, 100)`.
 const _reminderPreviewLength = 100;
+const _messageActionBackdropBlurSigma = 20.0;
+const _messageActionBackdropTintOpacity = 0.10;
+final _messageActionBackdropFilter = ImageFilter.blur(
+  sigmaX: _messageActionBackdropBlurSigma,
+  sigmaY: _messageActionBackdropBlurSigma,
+);
 
 /// Presents the actions for [message] as an anchored popover when both
 /// [anchorRect] and [captureAnchorSnapshot] are supplied, otherwise as a sheet.
