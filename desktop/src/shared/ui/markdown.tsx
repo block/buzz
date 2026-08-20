@@ -1275,15 +1275,15 @@ export function createMarkdownComponents(
       onOpenMessageLink,
       onImportSnapshotFromUrl,
       relayOrigin,
+      resolveChannelReferences,
       snapshotSharedBy,
     } = useMarkdownRuntime();
     if (!interactive) {
       return <span className="font-medium text-current">{children}</span>;
     }
 
-    // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the
-    // image lightbox button inside an anchor. Keep the image as the lightbox
-    // trigger and suppress the parent link activation for block media.
+    // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the image lightbox button inside an anchor.
+    // Keep the image as the lightbox trigger and suppress the parent link activation for block media.
     if (hasBlockMedia(React.Children.toArray(children))) {
       return <>{children}</>;
     }
@@ -1333,8 +1333,7 @@ export function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so
-    // clicks navigate in-app instead of opening the URL in the OS browser.
+    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so clicks navigate in-app instead of opening the URL in the OS browser.
     if (href) {
       if (parseChannelLink(href).ok) {
         return (
@@ -1359,6 +1358,7 @@ export function createMarkdownComponents(
               interactive={interactive}
               link={messageLinkTarget.link}
               onOpenMessageLink={onOpenMessageLink}
+              resolveChannelReference={resolveChannelReferences}
             />
           );
         }
@@ -1681,7 +1681,8 @@ export function createMarkdownComponents(
     }: {
       children?: React.ReactNode;
     }) {
-      const { channels, onOpenMessageLink } = useMarkdownRuntime();
+      const { channels, onOpenMessageLink, resolveChannelReferences } =
+        useMarkdownRuntime();
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1694,6 +1695,7 @@ export function createMarkdownComponents(
           interactive={interactive}
           link={parsed.value}
           onOpenMessageLink={onOpenMessageLink}
+          resolveChannelReference={resolveChannelReferences}
         />
       );
     },

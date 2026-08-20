@@ -84,6 +84,9 @@ let useChannelReferences;
 let useOpenAgentActivity;
 let useReminderSources;
 let DiscussionChannelsPanel;
+let createMarkdownComponents;
+let renderCachedMarkdown;
+let MarkdownRuntimeContext;
 let relayAgentsQueryKey;
 let createMemoryHistory;
 let createRootRoute;
@@ -241,6 +244,13 @@ before(async () => {
   ));
   ({ DiscussionChannelsPanel } = await import(
     "@/features/projects/ui/DiscussionChannels.tsx"
+  ));
+  ({ createMarkdownComponents } = await import("@/shared/ui/markdown.tsx"));
+  ({ renderCachedMarkdown } = await import(
+    "@/shared/ui/markdown/nodeCache.ts"
+  ));
+  ({ MarkdownRuntimeContext } = await import(
+    "@/shared/ui/markdown/runtimeContext.ts"
   ));
   ({
     createMemoryHistory,
@@ -419,6 +429,93 @@ async function mountWithRouter(client, Component) {
     },
   };
 }
+
+async function mountMarkdownReference(client, content, variant) {
+  const markdown = renderCachedMarkdown({
+    components: createMarkdownComponents(true, false),
+    content,
+    variant,
+  });
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      React.createElement(
+        QueryClientProvider,
+        { client },
+        React.createElement(
+          CommunitiesProvider,
+          null,
+          React.createElement(
+            MarkdownRuntimeContext.Provider,
+            {
+              value: {
+                channels: [],
+                onOpenChannel: () => {},
+                onOpenEntityLink: () => {},
+                onOpenMessageLink: () => {},
+                relayOrigin: null,
+                resolveChannelReferences: true,
+              },
+            },
+            markdown,
+          ),
+        ),
+      ),
+    );
+  });
+  return {
+    container,
+    async settle() {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    },
+    async unmount() {
+      await act(async () => root.unmount());
+      client.clear();
+      container.remove();
+    },
+  };
+}
+
+test("markdown message links resolve private destinations without a directory scan", async () => {
+  const channelId = "private-markdown-channel";
+  const messageId = "e".repeat(64);
+  const link = `buzz://message?channel=${channelId}&id=${messageId}`;
+  const renderPaths = [
+    ["CommonMark autolink", `<${link}>`],
+    ["bare message-link node", link],
+  ];
+
+  for (const [path, content] of renderPaths) {
+    const client = createClient();
+    ipc.detail = async (id) =>
+      rawDetail(rawChannel({ id, name: "private", visibility: "private" }));
+    const mounted = await mountMarkdownReference(
+      client,
+      content,
+      `private-message-link-${path}`,
+    );
+    await mounted.settle();
+
+    assert.deepEqual(ipc.detailCalls, [channelId], path);
+    assert.equal(ipc.directoryCalls, 0, path);
+    assert.equal(
+      mounted.container.querySelector("[data-message-link] button"),
+      null,
+      `${path} private destination must be inert`,
+    );
+    assert.equal(
+      mounted.container.querySelector("[data-message-link] [data-buzz-link]"),
+      null,
+      `${path} private destination must not render a clickable pill`,
+    );
+    await mounted.unmount();
+    ipc.reset();
+  }
+});
 
 test("multi-id references dedupe cold ids and share the single-id query cache", async () => {
   const client = createClient();
