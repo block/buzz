@@ -369,7 +369,7 @@ Every implementation MUST run these normative negative cases:
 | Authority | Unbracketed or non-RFC-5952 IPv6, uppercase host, trailing dot, or missing port denies before MAC comparison. |
 | Peer | Textual `::ffff:192.0.2.128`, padded IPv4, uppercase/noncanonical IPv6, or whitespace denies before MAC comparison. |
 | Proof | `0x00`, `0xff`, unknown stock code, or private code without a shared configured contract denies. |
-| Body | Known and unknown lengths `0`, `limit-1`, and `limit` may proceed only after EOF; `limit+1`, disconnect before EOF, aggregate-quota exhaustion, or any post-snapshot transform denies with no replay or authoritative mutation. |
+| Body | Known and unknown lengths `0`, `limit-1`, and `limit` may proceed only after EOF; `limit+1`, disconnect before EOF, aggregate-quota exhaustion, or any post-snapshot substitution of the protected octets denies with no replay or authoritative mutation. |
 | Replay | Concurrent final admissions of one valid envelope commit at most one; preparation and failed final admission consume none; secret rotation does not create a new nonce namespace. |
 | Fallback | Direct ingress, mixed evidence, and failed HMAC never retry as `client-attached` or another adapter. |
 

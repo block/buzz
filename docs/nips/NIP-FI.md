@@ -570,7 +570,7 @@ policy revision. NIP-FI-CONF defines evidence and mutation-adequacy rules.
 | `FI-TRACE-CURRENT-STATUS-REVOKED` | Revocation, including one racing final admission, closes authority within the advertised tested bound. |
 | `FI-TRACE-CURRENT-STATUS-STALE` | Inactive/ambiguous status denies; an issuer, subject, or session-identifier mismatch denies; expiry equality, outage, delayed events, and changed status versions cannot mint or extend a witness. |
 | `FI-TRACE-CAPABILITY-REVOCATION` | Removal of a revocation-bounded external capability projection from authoritative local policy closes prepared evidence and lease use within the declared bound; assertion-only projection cannot satisfy this oracle. |
-| `FI-TRACE-BODY-BINDING` | Exact complete relevant body passes; absent/duplicate/mutated/partial/transformed payload variants deny without effects; a payload tag on an irrelevant-body operation validates identically and denies on duplication or mismatch. |
+| `FI-TRACE-BODY-BINDING` | Exact complete relevant body passes; absent/duplicate/mutated/partial/substituted payload variants deny without effects; a payload tag on an irrelevant-body operation validates identically and denies on duplication or mismatch. |
 | `FI-TRACE-BODY-BOUNDS` | Oversized, over-quota, and pre-EOF variants deny with bounded work, cleanup, and no effects. |
 | `FI-TRACE-DOMAIN-SPOOF` | Client routing and forwarded authority cannot replace server-owned context. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch denies with no mutation and the private-state response. |
@@ -602,10 +602,9 @@ binding is durable server state rather than a per-token claim: a stolen
 assertion cannot reach an enrolled identity without its key, and revocation is
 a local fact rather than a token-lifetime race. One identity, one key per
 domain is stricter than WebAuthn's many-credentials-per-account model because
-the Nostr key is itself the public identity; a second device holds or remotely
-uses the same key, or the binding is rotated to it, rather than enrolling a
-second binding. Two contract identities plus explicit dependency versions exist
-because folding a mutable key snapshot into policy identity would make benign
+the Nostr key is itself the public identity; additional devices do not create
+additional active bindings. Two contract identities plus explicit dependency
+versions exist because folding a mutable key snapshot into policy identity would make benign
 rotation change policy lineage, while omitting it would let evidence under a
 removed key survive. Denial responses deliberately collapse the conditions that
 RFC 6750 error codes distinguish. `trusted-proxy-hmac-v2` in NIP-FI-EDGE is a
