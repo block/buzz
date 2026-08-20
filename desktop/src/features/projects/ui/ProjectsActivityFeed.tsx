@@ -405,12 +405,13 @@ function ActivityCard({
         {selectionItem && selection ? (
           <span
             className={cn(
-              "mt-0.5 flex w-4 shrink-0 justify-center opacity-0 group-hover:opacity-100",
+              "mt-0.5 flex w-4 shrink-0 justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
               showSelectControl && "opacity-100",
             )}
           >
             <ProjectEntitySelectControl
               checked={selected}
+              label={`Select ${selectionItem.title}`}
               onToggle={({ shiftKey }) =>
                 selection.toggle(selectionItem, {
                   rangeItems,

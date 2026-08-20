@@ -1,11 +1,22 @@
 import {
   type ProjectSelectionItem,
-  projectSelectionTitle,
+  type ProjectSelectionKind,
+  projectSelectionNoun,
 } from "./projectSelection.ts";
 
 const PROJECT_PAGE_CONTEXT_MARKER = "Current Buzz project page:";
 const MAX_OVERVIEW_CONTEXT_ITEMS = 200;
 const MAX_OVERVIEW_CONTEXT_FIELD_LENGTH = 180;
+const MAX_SELECTION_CONTEXT_ITEMS = 100;
+const MAX_SELECTION_CONTEXT_CHARS = 16_000;
+const PROJECT_SELECTION_KINDS = new Set<ProjectSelectionKind>([
+  "channel",
+  "commit",
+  "project",
+  "repository",
+  "review",
+  "task",
+]);
 
 export type ProjectsOverviewAgentContextItem = {
   detail?: string | null;
@@ -59,6 +70,7 @@ export type ProjectDetailAgentContext = {
     ProjectSelectionItem,
     "id" | "kind" | "shareLink" | "title"
   >[];
+  selectionTotal?: number;
   view: string;
   workItem?: {
     id: string;
@@ -88,19 +100,15 @@ export function buildProjectsOverviewAgentContext(
 export function buildProjectSelectionAgentContext(
   items: ProjectSelectionItem[],
 ): ProjectDetailAgentContext {
-  const kind = items[0]?.kind ?? "project";
+  const selection = boundedProjectSelection(items);
   return {
     projectName: "Projects",
-    repoAddress: `selection:${kind}`,
+    repoAddress: `selection:${selection.kind}`,
     repositoryName: "Selected items",
-    selection: items.map(({ id, kind: itemKind, shareLink, title }) => ({
-      id,
-      kind: itemKind,
-      shareLink,
-      title,
-    })),
+    selection: selection.items,
+    selectionTotal: selection.total,
     source: "remote",
-    view: projectSelectionTitle(items),
+    view: selection.title,
   };
 }
 
@@ -108,15 +116,35 @@ export function withProjectSelectionAgentContext(
   context: ProjectDetailAgentContext,
   items: ProjectSelectionItem[],
 ): ProjectDetailAgentContext {
+  const selection = boundedProjectSelection(items);
   return {
     ...context,
-    selection: items.map(({ id, kind, shareLink, title }) => ({
-      id,
-      kind,
-      shareLink,
-      title,
-    })),
-    view: projectSelectionTitle(items),
+    selection: selection.items,
+    selectionTotal: selection.total,
+    view: selection.title,
+  };
+}
+
+function boundedProjectSelection(items: ProjectSelectionItem[]) {
+  const validItems = items.filter((item): item is ProjectSelectionItem =>
+    PROJECT_SELECTION_KINDS.has(item.kind),
+  );
+  const kind = validItems[0]?.kind ?? "project";
+  const total = validItems.length;
+  return {
+    items: validItems
+      .slice(0, MAX_SELECTION_CONTEXT_ITEMS)
+      .map(({ id, kind: itemKind, shareLink, title }) => ({
+        id: normalizedPromptValue(id, 200) ?? "",
+        kind: itemKind,
+        shareLink: shareLink
+          ? normalizedPromptValue(shareLink, 400)
+          : shareLink,
+        title: normalizedPromptValue(title, 160) ?? "",
+      })),
+    kind,
+    title: total > 0 ? `${total} ${projectSelectionNoun(kind, total)}` : "",
+    total,
   };
 }
 
@@ -218,10 +246,36 @@ export function projectDetailAgentContextBlock(
     }
   }
   if (context.selection?.length) {
-    lines.push(`- Selection: ${context.view}`);
+    const selectionTotal = Math.max(
+      context.selectionTotal ?? context.selection.length,
+      context.selection.length,
+    );
+    const selectionKind = context.selection[0]?.kind ?? "project";
+    const selectionTitle = `${selectionTotal} ${projectSelectionNoun(
+      selectionKind,
+      selectionTotal,
+    )}`;
+    lines.push(
+      `- Selection: ${
+        context.selection.length < selectionTotal
+          ? `${context.selection.length} of ${selectionTitle}`
+          : selectionTitle
+      }`,
+    );
+    let selectionChars = 0;
+    let serializedItems = 0;
     for (const item of context.selection) {
+      const line = `  - ${item.kind}: ${untrustedPromptValue(
+        item.title,
+      )} (${untrustedPromptValue(item.shareLink || item.id, 400)})`;
+      if (selectionChars + line.length > MAX_SELECTION_CONTEXT_CHARS) break;
+      lines.push(line);
+      selectionChars += line.length;
+      serializedItems += 1;
+    }
+    if (serializedItems < selectionTotal) {
       lines.push(
-        `  - ${item.kind}: ${item.title} (${item.shareLink || item.id})`,
+        `  - ${selectionTotal - serializedItems} additional selected items were omitted.`,
       );
     }
   }
@@ -250,12 +304,23 @@ export function projectDetailAgentContextBlock(
   return lines.join("\n");
 }
 
-function overviewContextField(value: string | null | undefined) {
+function normalizedPromptValue(
+  value: string | null | undefined,
+  maxChars: number,
+) {
   return value
-    ?.replace(/[\r\n\t]+/g, " ")
+    ?.replace(
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point
+      /[\u0000-\u001f\u007f\u2028\u2029]+/g,
+      " ",
+    )
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, MAX_OVERVIEW_CONTEXT_FIELD_LENGTH);
+    .slice(0, maxChars);
+}
+
+function overviewContextField(value: string | null | undefined) {
+  return normalizedPromptValue(value, MAX_OVERVIEW_CONTEXT_FIELD_LENGTH);
 }
 
 export function stripProjectDetailAgentContext(content: string) {

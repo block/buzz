@@ -1683,7 +1683,20 @@ test("selecting overview list rows switches the context pod to the cluster", asy
 
   const rows = page.locator('[data-testid^="projects-issue-row-"]');
   await expect(rows.first()).toBeVisible();
-  await rows.nth(0).getByTestId("projects-row-select").click();
+  const firstRowTitle = (
+    (await rows.first().getByTestId("project-entity-title").textContent()) ?? ""
+  ).trim();
+  const firstRowSelect = rows.first().getByRole("checkbox", {
+    name: `Select ${firstRowTitle}`,
+  });
+  await rows.first().getByRole("button").first().focus();
+  await page.keyboard.press("Tab");
+  await expect(firstRowSelect).toBeFocused();
+  await expect(firstRowSelect.locator("..").locator("..")).toHaveCSS(
+    "opacity",
+    "1",
+  );
+  await page.keyboard.press("Space");
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
     "1 task",
   );
@@ -1743,6 +1756,77 @@ test("selecting overview list rows switches the context pod to the cluster", asy
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
     "Tasks",
   );
+});
+
+test("repository changes discard captured selection context before agent sends", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await addProjectToSidebar(page, "buzz");
+  await page.getByTestId("sidebar-project-repository-buzz").click();
+  await page.getByRole("tab", { name: "Tasks", exact: true }).click();
+
+  const selectedRow = page.getByTestId("project-issue-row").first();
+  const selectedTitle = (
+    (await selectedRow
+      .locator('[data-projects-text-priority="primary"]')
+      .textContent()) ?? ""
+  ).trim();
+  await selectedRow
+    .getByRole("checkbox", { name: `Select ${selectedTitle}` })
+    .click();
+  await page.getByTestId("projects-selection-chat-agent").click();
+  const agentPanel = page.getByTestId("project-agent-chat-panel");
+  await expect(agentPanel).toBeVisible();
+  await expect(
+    agentPanel.getByText(selectedTitle, { exact: true }),
+  ).toBeVisible();
+
+  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+  await expect(page).toHaveURL(/repositoryId=.*relay-tools/);
+  await expect(agentPanel).toBeVisible();
+  await expect(
+    agentPanel.getByTestId("projects-agent-selection-toggle"),
+  ).toHaveCount(0);
+
+  const prompt = "Explain the current repository.";
+  const composer = agentPanel.getByTestId("message-composer");
+  await composer.locator('[contenteditable="true"]').fill(prompt);
+  await composer.getByRole("button", { name: "Send message" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate((prefix) => {
+        const sent = window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+          (entry) =>
+            entry.command === "send_channel_message" &&
+            typeof entry.payload === "object" &&
+            entry.payload !== null &&
+            "content" in entry.payload &&
+            typeof entry.payload.content === "string" &&
+            entry.payload.content.startsWith(prefix),
+        );
+        return (sent?.payload as { content?: string } | undefined)?.content;
+      }, prompt),
+    )
+    .toContain('Repository: "relay-tools"');
+  const sentContent = await page.evaluate(
+    (prefix) =>
+      (
+        window.__BUZZ_E2E_COMMAND_PAYLOADS__?.find(
+          (entry) =>
+            entry.command === "send_channel_message" &&
+            typeof entry.payload === "object" &&
+            entry.payload !== null &&
+            "content" in entry.payload &&
+            typeof entry.payload.content === "string" &&
+            entry.payload.content.startsWith(prefix),
+        )?.payload as { content?: string } | undefined
+      )?.content ?? "",
+    prompt,
+  );
+  expect(sentContent).not.toContain(selectedTitle);
 });
 
 test("overview work-item lists prioritize titles and place icons after them", async ({

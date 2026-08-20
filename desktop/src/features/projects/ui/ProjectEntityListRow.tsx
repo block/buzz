@@ -96,7 +96,7 @@ export function ProjectEntitySelectControl({
   return (
     <label
       className={cn(
-        "pointer-events-auto relative flex h-3.5 w-3.5 shrink-0 cursor-pointer items-center justify-center rounded-xs border",
+        "pointer-events-auto relative flex h-3.5 w-3.5 shrink-0 cursor-pointer items-center justify-center rounded-xs border focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-1",
         checked || indeterminate
           ? "border-primary bg-primary text-primary-foreground"
           : "border-muted-foreground/55 bg-background",
@@ -209,7 +209,7 @@ export function ProjectEntityListRow({
         <span
           className={cn(
             "flex items-center justify-center",
-            selection && "group-hover:opacity-0",
+            selection && "group-hover:opacity-0 group-focus-within:opacity-0",
             showSelectControl && "opacity-0",
           )}
         >
@@ -218,12 +218,13 @@ export function ProjectEntityListRow({
         {selection && projectSelection ? (
           <span
             className={cn(
-              "absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100",
+              "absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100",
               showSelectControl && "opacity-100",
             )}
           >
             <ProjectEntitySelectControl
               checked={selected}
+              label={`Select ${selection.item.title}`}
               onToggle={({ shiftKey }) =>
                 projectSelection.toggle(selection.item, {
                   rangeItems: selection.rangeItems,

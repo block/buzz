@@ -216,7 +216,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const [repoSource, setRepoSource] = React.useState<"remote" | "local">(
     "remote",
   );
-  const repositoryPanel = useProjectRepositoryPanel();
+  const repositoryPanel = useProjectRepositoryPanel(
+    `${repository?.id ?? ""}:${activeTab}:${selectedPullRequestId ?? ""}:${selectedIssueId ?? ""}:${selectedCommitHash ?? ""}`,
+  );
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(
     repository,
     activeBranch,

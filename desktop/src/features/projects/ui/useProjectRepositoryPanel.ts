@@ -33,10 +33,12 @@ function initialMode(): ProjectRightPanelMode {
   }
 }
 
-export function useProjectRepositoryPanel() {
+export function useProjectRepositoryPanel(ownerKey: string) {
   const [collapsed, setCollapsedState] = React.useState(initialCollapsed);
-  const [selectionAgentContext, setSelectionAgentContext] =
-    React.useState<ProjectDetailAgentContext | null>(null);
+  const [selectionAgentContext, setSelectionAgentContext] = React.useState<{
+    context: ProjectDetailAgentContext;
+    ownerKey: string;
+  } | null>(null);
   const [mode, setModeState] =
     React.useState<ProjectRightPanelMode>(initialMode);
   const setCollapsed = React.useCallback((nextCollapsed: boolean) => {
@@ -62,20 +64,28 @@ export function useProjectRepositoryPanel() {
       // Persistence is best-effort; the in-memory panel mode still works.
     }
   }, []);
+  React.useEffect(() => {
+    setSelectionAgentContext((current) =>
+      current?.ownerKey === ownerKey ? current : null,
+    );
+  }, [ownerKey]);
   const openSelectionChat = React.useCallback(
     (context: ProjectDetailAgentContext, items: ProjectSelectionItem[]) => {
       setMode("chat");
-      setSelectionAgentContext(
-        withProjectSelectionAgentContext(context, items),
-      );
+      setSelectionAgentContext({
+        context: withProjectSelectionAgentContext(context, items),
+        ownerKey,
+      });
       setCollapsed(false);
     },
-    [setCollapsed, setMode],
+    [ownerKey, setCollapsed, setMode],
   );
 
   return {
     agentContext: (fallback: ProjectDetailAgentContext) =>
-      selectionAgentContext ?? fallback,
+      selectionAgentContext?.ownerKey === ownerKey
+        ? selectionAgentContext.context
+        : fallback,
     collapse: React.useCallback(() => setCollapsed(true), [setCollapsed]),
     collapsed,
     expand: React.useCallback(() => setCollapsed(false), [setCollapsed]),

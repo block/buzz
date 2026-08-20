@@ -52,12 +52,13 @@ export function ProjectWorkItemRow({
       {selection && projectSelection ? (
         <span
           className={cn(
-            "flex h-4 w-4 shrink-0 items-center justify-center opacity-0 group-hover/work-item:opacity-100",
+            "flex h-4 w-4 shrink-0 items-center justify-center opacity-0 group-hover/work-item:opacity-100 group-focus-within/work-item:opacity-100",
             showSelectControl && "opacity-100",
           )}
         >
           <ProjectEntitySelectControl
             checked={selected}
+            label={`Select ${selection.item.title}`}
             onToggle={({ shiftKey }) =>
               projectSelection.toggle(selection.item, {
                 rangeItems: selection.rangeItems,
