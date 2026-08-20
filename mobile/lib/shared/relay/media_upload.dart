@@ -13,6 +13,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 import 'animated_image_sanitizer.dart';
+import 'calendar_attachment.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
@@ -440,8 +441,8 @@ class MediaUploadService {
     if (length == 0) {
       throw Exception('File is empty.');
     }
-    final filename = _safeAttachmentFilename(pickedFile.name);
-    if (!_hasCalendarExtension(filename)) {
+    final filename = safeAttachmentFilename(pickedFile.name);
+    if (!hasCalendarExtension(filename)) {
       throw Exception('unsupported file type');
     }
     if (length > _maxDocumentSizeBytes) {
@@ -450,7 +451,7 @@ class MediaUploadService {
       );
     }
     final bytes = await pickedFile.readAsBytes();
-    _validateCalendarBytes(bytes);
+    validateCalendarBytes(bytes);
     _throwIfCancelled(cancellationToken);
     final descriptor = await _uploadPreparedBytes(
       bytes,
@@ -692,63 +693,6 @@ class MediaUploadService {
       throw Exception('failed to sanitize image for upload');
     }
     return sanitizedBytes;
-  }
-}
-
-String _safeAttachmentFilename(String filename) {
-  final segments = filename.split(RegExp(r'[/\\]'));
-  final basename = segments.isEmpty ? '' : segments.last;
-  final preserveCalendarExtension = _hasCalendarExtension(basename);
-  final source = preserveCalendarExtension
-      ? basename.substring(0, basename.length - '.ics'.length)
-      : basename;
-  final byteLimit = preserveCalendarExtension ? 255 - '.ics'.length : 255;
-  final sanitized = StringBuffer();
-  var byteLength = 0;
-
-  for (final rune in source.runes) {
-    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
-      continue;
-    }
-
-    final character = String.fromCharCode(rune);
-    final characterByteLength = utf8.encode(character).length;
-    if (byteLength + characterByteLength > byteLimit) break;
-
-    sanitized.write(character);
-    byteLength += characterByteLength;
-  }
-
-  final safeBasename = sanitized.toString().trim();
-  if (preserveCalendarExtension) {
-    return '${safeBasename.isEmpty ? 'calendar' : safeBasename}.ics';
-  }
-  return safeBasename.isEmpty ? 'file' : safeBasename;
-}
-
-bool _hasCalendarExtension(String filename) {
-  return filename.toLowerCase().endsWith('.ics');
-}
-
-void _validateCalendarBytes(Uint8List bytes) {
-  late final String text;
-  try {
-    text = utf8.decode(bytes);
-  } on FormatException {
-    throw Exception('invalid calendar file: expected UTF-8 text');
-  }
-  if (bytes.contains(0)) {
-    throw Exception('invalid calendar file: NUL bytes are not allowed');
-  }
-  final lines = text
-      .split(RegExp(r'\r?\n'))
-      .map((line) => line.trim())
-      .where((line) => line.isNotEmpty)
-      .toList(growable: false);
-  if (lines.isEmpty ||
-      lines.first.toUpperCase() != 'BEGIN:VCALENDAR' ||
-      lines.last.toUpperCase() != 'END:VCALENDAR') {
-    throw Exception('invalid calendar file: missing VCALENDAR envelope');
   }
 }
 

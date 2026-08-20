@@ -18,6 +18,14 @@ const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "i
 /// uploads. Keep a hard ceiling even when an operator raises `max_file_bytes`.
 const MAX_CALENDAR_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Return the transport/body-buffer ceiling for allowlisted document uploads.
+///
+/// Documents remain bounded by the operator's generic file limit, but calendars
+/// also retain a non-configurable 10 MiB safety ceiling.
+pub fn max_document_bytes_for_upload(max_file_bytes: u64) -> usize {
+    max_file_bytes.min(MAX_CALENDAR_BYTES) as usize
+}
+
 const MP4_BRANDS: &[[u8; 4]] = &[
     *b"isom", *b"iso2", *b"iso3", *b"iso4", *b"iso5", *b"iso6", *b"iso7", *b"iso8", *b"iso9",
     *b"mp41", *b"mp42", *b"avc1", *b"dash", *b"M4V ",
@@ -107,7 +115,7 @@ fn validate_calendar_content(
         return Err(MediaError::DisallowedContentType(declared_mime.to_string()));
     }
 
-    let max = config.max_file_bytes.min(MAX_CALENDAR_BYTES);
+    let max = max_document_bytes_for_upload(config.max_file_bytes) as u64;
     if bytes.len() as u64 > max {
         return Err(MediaError::FileTooLarge {
             size: bytes.len() as u64,

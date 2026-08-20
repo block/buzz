@@ -36,6 +36,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .media
         .max_image_bytes
         .max(state.config.media.max_video_bytes) as usize;
+    let document_body_limit =
+        buzz_media::validation::max_document_bytes_for_upload(state.config.media.max_file_bytes);
     let media_router = Router::new()
         .route("/upload", put(api::media::upload_blob))
         .route("/media/upload", put(api::media::upload_blob))
@@ -43,6 +45,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/media/{sha256_ext}",
             get(api::media::get_blob).head(api::media::head_blob),
         )
+        .layer(middleware::from_fn(move |request, next| {
+            api::media::limit_document_upload_body(request, next, document_body_limit)
+        }))
         .layer(RequestBodyLimitLayer::new(media_body_limit))
         .with_state(state.clone());
 

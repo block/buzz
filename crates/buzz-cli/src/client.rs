@@ -129,10 +129,9 @@ fn detect_upload_mime_and_extension(
 }
 
 fn sanitize_attachment_filename(file_path: &str) -> String {
-    let basename = std::path::Path::new(file_path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("file");
+    // Treat both separator styles as path boundaries on every platform so the
+    // emitted imeta filename always satisfies the relay's cross-platform gate.
+    let basename = file_path.rsplit(['/', '\\']).next().unwrap_or("file");
     let preserve_calendar_extension = basename.to_ascii_lowercase().ends_with(".ics");
     let source = if preserve_calendar_extension {
         &basename[..basename.len() - ".ics".len()]
@@ -594,6 +593,29 @@ mod media_download_tests {
             detect_upload_mime_and_extension("Planning.ics", bytes).unwrap(),
             ("text/calendar".to_string(), Some("ics".to_string()))
         );
+    }
+
+    #[test]
+    fn calendar_imeta_filename_removes_both_path_separator_styles() {
+        let filename = sanitize_attachment_filename(r"Planning\\draft.ics");
+        let descriptor = BlobDescriptor {
+            url: "https://relay.example/media/abc.ics".to_string(),
+            sha256: "abc".to_string(),
+            size: 42,
+            mime_type: "text/calendar".to_string(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: Some(filename.clone()),
+        };
+        let imeta = build_imeta_tag(&descriptor);
+
+        assert!(!filename.contains(['/', '\\']));
+        assert!(filename.ends_with(".ics"));
+        assert!(filename.len() <= 255);
+        assert!(imeta.contains(&format!("filename {filename}")));
     }
 }
 

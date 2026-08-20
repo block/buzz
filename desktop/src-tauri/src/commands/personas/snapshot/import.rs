@@ -951,7 +951,7 @@ mod import_avatar_tests {
         assert!(data_url.len() > 256 * 1024);
 
         let avatar = materialize_import_avatar(Some(&data_url), None, |bytes| async move {
-            let mime = crate::commands::media::detect_and_validate_mime(&bytes)?;
+            let mime = crate::commands::media::detect_and_validate_mime(&bytes, None)?;
             assert_eq!(mime, "image/png");
             let sanitized = crate::commands::media::sanitize_image_for_upload(bytes, &mime)?;
             image::load_from_memory(&sanitized).map_err(|error| error.to_string())?;

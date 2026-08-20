@@ -11,8 +11,10 @@ use std::time::{Duration, Instant};
 
 use axum::http::header;
 use axum::{
+    body::Body,
     extract::{FromRequestParts, Path, State},
-    http::{request::Parts, HeaderMap, StatusCode},
+    http::{request::Parts, HeaderMap, Request, StatusCode},
+    middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
@@ -313,6 +315,44 @@ fn document_upload_hints(headers: &HeaderMap) -> (Option<String>, Option<String>
     (declared_mime, extension)
 }
 
+fn is_document_upload(headers: &HeaderMap) -> bool {
+    let (declared_mime, extension) = document_upload_hints(headers);
+    declared_mime
+        .as_deref()
+        .and_then(buzz_media::validation::document_extension_for_mime)
+        .is_some()
+        || extension
+            .as_deref()
+            .is_some_and(|extension| extension == "ics")
+}
+
+/// Apply the separately bounded document class before the upload handler reads
+/// the body. `Content-Length` requests are rejected without polling the body;
+/// chunked requests receive a streaming limit that stops polling at the cap.
+pub(crate) async fn limit_document_upload_body(
+    mut request: Request<Body>,
+    next: Next,
+    limit: usize,
+) -> Response {
+    if request.uri().path() != "/upload" || !is_document_upload(request.headers()) {
+        return next.run(request).await;
+    }
+
+    if request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > limit)
+    {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+
+    let body = std::mem::replace(request.body_mut(), Body::empty());
+    *request.body_mut() = Body::new(http_body_util::Limited::new(body, limit));
+    next.run(request).await
+}
+
 /// PUT `/upload` or the temporary media-only `/media/upload` alias.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
@@ -336,7 +376,7 @@ pub async fn upload_blob(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUpload,
     headers: HeaderMap,
-    body: axum::body::Body,
+    body: Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
     let attribution = upload_attribution(&state, &auth, &headers).await;
 
@@ -364,7 +404,15 @@ pub async fn upload_blob(
                 sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
                 replay_chunks.push(chunk);
             }
-            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
+            Some(Err(error)) => {
+                if is_document_upload(&headers) {
+                    let max = buzz_media::validation::max_document_bytes_for_upload(
+                        state.config.media.max_file_bytes,
+                    ) as u64;
+                    return Err(MediaError::FileTooLarge { size: 0, max });
+                }
+                return Err(MediaError::Io(error.to_string()));
+            }
             None => break,
         }
     }
@@ -394,11 +442,17 @@ pub async fn upload_blob(
                 // Non-video path: buffer the body (bounded by the larger image/document
                 // cap), then decide image-vs-document by sniffed MIME. Images go through
                 // thumbnailing; allowlisted documents are served as downloads.
-                let max = state
-                    .config
-                    .media
-                    .max_image_bytes
-                    .max(state.config.media.max_file_bytes);
+                let max = if is_document_upload(&headers) {
+                    buzz_media::validation::max_document_bytes_for_upload(
+                        state.config.media.max_file_bytes,
+                    ) as u64
+                } else {
+                    state
+                        .config
+                        .media
+                        .max_image_bytes
+                        .max(state.config.media.max_file_bytes)
+                };
                 let bytes =
                     axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
                         .await
@@ -964,11 +1018,14 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
+        middleware,
+        routing::put,
     };
     use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
     use tower::ServiceExt;
@@ -1025,6 +1082,80 @@ mod tests {
         assert_eq!(
             document_upload_hints(&headers),
             (Some("text/calendar".to_string()), Some("ics".to_string()))
+        );
+    }
+
+    fn document_limit_test_router(limit: usize) -> axum::Router {
+        async fn consume(body: Body) -> StatusCode {
+            match axum::body::to_bytes(body, usize::MAX).await {
+                Ok(_) => StatusCode::OK,
+                Err(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            }
+        }
+
+        axum::Router::new()
+            .route("/upload", put(consume))
+            .layer(middleware::from_fn(move |request, next| {
+                limit_document_upload_body(request, next, limit)
+            }))
+    }
+
+    #[tokio::test]
+    async fn calendar_transport_limit_rejects_content_length_without_polling_body() {
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let stream_consumed = Arc::clone(&consumed);
+        let body = Body::from_stream(futures_util::stream::once(async move {
+            stream_consumed.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"not consumed"))
+        }));
+        let limit = buzz_media::validation::max_document_bytes_for_upload(100 * 1024 * 1024);
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/upload")
+            .header(header::CONTENT_TYPE, "text/calendar")
+            .header("x-buzz-file-extension", "ics")
+            .header(header::CONTENT_LENGTH, limit + 1)
+            .body(body)
+            .expect("request");
+
+        let response = document_limit_test_router(limit)
+            .oneshot(request)
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(consumed.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn calendar_transport_limit_stops_stream_before_full_body_is_consumed() {
+        const CHUNK_BYTES: usize = 1024 * 1024;
+        const TOTAL_CHUNKS: usize = 20;
+
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let stream_consumed = Arc::clone(&consumed);
+        let stream = futures_util::stream::iter((0..TOTAL_CHUNKS).map(move |_| {
+            stream_consumed.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b'A'; CHUNK_BYTES]))
+        }));
+        let limit = buzz_media::validation::max_document_bytes_for_upload(100 * 1024 * 1024);
+        let request = Request::builder()
+            .method("PUT")
+            .uri("/upload")
+            .header(header::CONTENT_TYPE, "text/calendar")
+            .header("x-buzz-file-extension", "ics")
+            .body(Body::from_stream(stream))
+            .expect("request");
+
+        let response = document_limit_test_router(limit)
+            .oneshot(request)
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            consumed.load(Ordering::SeqCst) < TOTAL_CHUNKS,
+            "the route must stop polling once the document limit is crossed"
         );
     }
 
