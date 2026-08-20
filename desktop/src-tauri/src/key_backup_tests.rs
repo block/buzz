@@ -233,7 +233,11 @@ fn generated_passphrase_respects_word_count_and_separator() {
         WORDLIST.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(words.len(), 1296, "EFF short wordlist 2.0 has 1296 words");
 
-    for (count, separator) in [(3, "-"), (4, "-"), (6, " "), (5, "."), (10, "")] {
+    // "-" is deliberately absent: the wordlist contains "yo-yo", so splitting
+    // a phrase on "-" yields an extra part whenever that word is drawn (a
+    // ~0.5% flake per run). `generated_passphrase_clamps_word_count` below
+    // documents the same trap; the join logic itself is separator-agnostic.
+    for (count, separator) in [(3, "|"), (4, "|"), (6, " "), (5, "."), (10, "")] {
         let phrase = generate_passphrase(count, separator).unwrap();
         if separator.is_empty() {
             // No separator to split on; length gate below still applies.
