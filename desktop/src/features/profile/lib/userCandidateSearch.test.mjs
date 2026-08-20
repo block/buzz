@@ -161,3 +161,58 @@ test("getKeyboardSearchSelection ignores stale ranked results", () => {
     null,
   );
 });
+
+test("rankUserCandidatesBySearch prefers exact human display names over crowded agent names", () => {
+  const humanAviz = makeUser({
+    displayName: "Aviz",
+    pubkey: "221c47e3",
+  });
+  const agentMatches = Array.from({ length: 8 }, (_, index) =>
+    makeUser({
+      displayName: `Aviz-Agent-${index}`,
+      isAgent: true,
+      pubkey: `agent${index}`,
+    }),
+  );
+
+  const candidates = [humanAviz, ...agentMatches].filter((user) => !user.isAgent);
+
+  const ranked = rankUserCandidatesBySearch({
+    candidates,
+    getLabel: (user) => user.displayName ?? user.pubkey,
+    limit: 50,
+    query: "Aviz",
+  });
+
+  assert.equal(ranked[0]?.displayName, "Aviz");
+  assert.equal(ranked.length, 1);
+});
+
+test("rankUserCandidatesBySearch keeps exact human matches ahead of agents when both are included", () => {
+  const humanAviz = makeUser({
+    displayName: "Aviz",
+    pubkey: "221c47e3",
+  });
+  const avizAgent = makeUser({
+    displayName: "Aviz-Agent",
+    isAgent: true,
+    pubkey: "agent-aviz",
+  });
+  const otherAgents = Array.from({ length: 8 }, (_, index) =>
+    makeUser({
+      displayName: `Aviz-Agent-${index}`,
+      isAgent: true,
+      pubkey: `agent${index}`,
+    }),
+  );
+
+  const ranked = rankUserCandidatesBySearch({
+    candidates: [humanAviz, avizAgent, ...otherAgents],
+    getLabel: (user) => user.displayName ?? user.pubkey,
+    limit: 50,
+    query: "aviz",
+  });
+
+  assert.equal(ranked[0]?.displayName, "Aviz");
+  assert.ok(ranked.some((user) => user.displayName === "Aviz-Agent"));
+});

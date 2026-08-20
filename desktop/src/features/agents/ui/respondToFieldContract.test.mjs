@@ -75,3 +75,37 @@ test("primary respond-to copy does not expose implementation jargon", () => {
     assert.doesNotMatch(primaryFieldSource, new RegExp(jargon));
   }
 });
+
+test("allowlist search fetches a larger page so exact human matches are not crowded out", () => {
+  assert.match(respondToFieldSource, /ALLOWLIST_SEARCH_LIMIT = 50/);
+  assert.match(
+    respondToFieldSource,
+    /useUserSearchQuery\(deferredQuery, \{[\s\S]*limit: ALLOWLIST_SEARCH_LIMIT/,
+  );
+});
+
+test("allowlist search includes agents and re-ranks like persona share recipients", () => {
+  assert.doesNotMatch(respondToFieldSource, /!user\.isAgent/);
+  assert.match(respondToFieldSource, /rankUserCandidatesBySearch\(/);
+});
+
+test("allowlist search labels agents so they are distinguishable from humans", () => {
+  assert.match(
+    respondToFieldSource,
+    /user\.isAgent \? `Agent · \$\{detail\}` : detail/,
+  );
+});
+
+test("allowlist search ranks exact human matches ahead of similarly named agents", () => {
+  const searchResultsBlock = respondToFieldSource.slice(
+    respondToFieldSource.indexOf("const searchResults = React.useMemo"),
+    respondToFieldSource.indexOf("const pasteParsed = React.useMemo"),
+  );
+
+  assert.doesNotMatch(searchResultsBlock, /!user\.isAgent/);
+  assert.match(searchResultsBlock, /rankUserCandidatesBySearch\(/);
+  assert.match(
+    searchResultsBlock,
+    /getLabel: formatSearchUserName,\s*\n\s*limit: ALLOWLIST_SEARCH_LIMIT/,
+  );
+});
