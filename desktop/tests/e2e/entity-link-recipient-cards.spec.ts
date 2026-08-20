@@ -261,7 +261,9 @@ test("reopening the same entity link reapplies its workspace state", async ({
   await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");
 
   await emitEntityLink(prLink);
-  const prHeading = page.getByRole("heading", { name: PR_SUBJECT });
+  const prHeading = page
+    .getByTestId("project-pull-request-detail")
+    .getByRole("heading", { name: PR_SUBJECT });
   await expect(prHeading).toBeVisible();
   await breadcrumb.getByRole("button", { name: "Review", exact: true }).click();
   await expect(prHeading).toHaveCount(0);
@@ -269,7 +271,9 @@ test("reopening the same entity link reapplies its workspace state", async ({
   await expect(prHeading).toBeVisible();
 
   await emitEntityLink(issueLink);
-  const issueHeading = page.getByRole("heading", { name: ISSUE_SUBJECT });
+  const issueHeading = page
+    .getByTestId("project-issue-detail")
+    .getByRole("heading", { name: ISSUE_SUBJECT });
   await expect(issueHeading).toBeVisible();
   await breadcrumb.getByRole("button", { name: "Tasks", exact: true }).click();
   await expect(issueHeading).toHaveCount(0);
