@@ -22,6 +22,15 @@ class AgentCredential:
 
 
 @dataclass(frozen=True, slots=True)
+class DirectoryIdentity:
+    """One public, benchmark-seeded identity discoverable through Buzz."""
+
+    name: str
+    role: str
+    pubkey: str
+
+
+@dataclass(frozen=True, slots=True)
 class TrialHandle:
     """Provisioned Buzz resources owned by one Harbor trial."""
 
@@ -39,6 +48,9 @@ class TrialHandle:
     # identity and the harness run. ``relay_ws_url`` is the view from the
     # agents' runtime (the task container). Empty means both views coincide.
     user_relay_url: str = ""
+    # Additive Buzz-native task context. Directory entries contain no secrets.
+    task_name: str = ""
+    directory: tuple[DirectoryIdentity, ...] = ()
 
 
 @runtime_checkable
@@ -51,6 +63,7 @@ class TrialProvisioner(Protocol):
         trial_id: str,
         manifest: ExperimentManifest,
         channel_label: str | None = None,
+        task_name: str | None = None,
     ) -> TrialHandle: ...
 
     def teardown(self, handle: TrialHandle) -> None: ...

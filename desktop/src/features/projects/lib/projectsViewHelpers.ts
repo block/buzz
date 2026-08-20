@@ -24,6 +24,7 @@ export type ProjectsFilter =
   | "local"
   | "projects"
   | "repositories"
+  | "channels"
   | "prs"
   | "issues"
   | "agents"
@@ -87,6 +88,7 @@ export function readStoredFilter(): ProjectsFilter {
       value === "local" ||
       value === "projects" ||
       value === "repositories" ||
+      value === "channels" ||
       value === "prs" ||
       value === "issues" ||
       value === "agents" ||
@@ -234,6 +236,24 @@ export function markdownToPlainText(input: string): string {
       // Inline code — keep the inner text.
       .replace(/`([^`]+)`/g, "$1")
   );
+}
+
+/** One-line list subtitle. Empty, whitespace-only, and title-duplicate bodies stay hidden. */
+export function listRowDescription(
+  value: string | null | undefined,
+  title?: string,
+): string | undefined {
+  const text = markdownToPlainText(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length === 0) return undefined;
+  if (
+    title &&
+    text.localeCompare(title.trim(), undefined, { sensitivity: "accent" }) === 0
+  ) {
+    return undefined;
+  }
+  return text;
 }
 
 export function formatCreatedDate(createdAt: number) {
