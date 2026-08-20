@@ -30,11 +30,6 @@ import { cn } from "@/shared/lib/cn";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
-  AuxiliaryPanelHeader,
-  AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelTitle,
-} from "@/shared/layout/AuxiliaryPanel";
-import {
   THREAD_PANEL_COLUMN_CLASS,
   THREAD_PANEL_COMPOSER_GUTTER_CLASS,
   THREAD_PANEL_MESSAGE_GUTTER_CLASS,
@@ -44,7 +39,10 @@ import { Separator } from "@/shared/ui/separator";
 import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
-import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
+import {
+  MessageThreadPanelHeader,
+  ThreadMessageSkeleton,
+} from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
@@ -202,7 +200,10 @@ export function MessageThreadPanel({
   isHuddleTranscript = false,
   layout = "standalone",
   editTarget,
+  enterMotion,
   headerLeading,
+  headerTitle,
+  headerTitleAriaLabel,
   isSending,
   isFocusMode,
   isSinglePanelView = false,
@@ -212,6 +213,9 @@ export function MessageThreadPanel({
   onCancelReply,
   onClose,
   onCancelJob,
+  onHeaderTitleClick,
+  onResetWidth,
+  onResizeStart,
   onDelete,
   onEdit,
   onEditLastOwnMessage,
@@ -240,6 +244,10 @@ export function MessageThreadPanel({
   threadTypingPubkeys,
   activityAccessoryContent,
   activityAccessoryVisible,
+  canResetWidth,
+  splitPaneClamp,
+  showBackButton,
+  testId = "message-thread-panel",
   widthPx,
   transparentChrome = false,
   autoSendDraftKey = null,
@@ -957,39 +965,34 @@ export function MessageThreadPanel({
     </>
   );
 
-  const threadHeaderContent = (
-    <>
-      <AuxiliaryPanelHeaderGroup
-        backButtonAriaLabel="Back to conversation"
-        backButtonTestId="message-thread-back"
-        // A focus drawer only sets `isSinglePanelView` to fill its container's
-        // width — it isn't the narrow single-column view, and it has the scrimmed
-        // sliver as its way back, so it takes no back control of its own. The
-        // narrow view still needs one.
-        leading={headerLeading}
-        onBack={isSinglePanelView && !isFocusMode ? onClose : undefined}
-      >
-        <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
-      </AuxiliaryPanelHeaderGroup>
-    </>
-  );
-
   return (
     <VideoReviewNavigationProvider>
       <AuxiliaryPanel
+        canResetWidth={canResetWidth}
         className="relative"
-        // The focus drawer animates itself; a second slide here would compound.
-        enterMotion={!isFocusMode}
+        enterMotion={enterMotion ?? !isFocusMode}
         footer={threadFooter}
         header={
           isHuddleTranscript ? undefined : (
-            <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+            <MessageThreadPanelHeader
+              headerLeading={headerLeading}
+              headerTitle={headerTitle}
+              headerTitleAriaLabel={headerTitleAriaLabel}
+              isFocusMode={isFocusMode}
+              isSinglePanelView={isSinglePanelView}
+              onClose={onClose}
+              onHeaderTitleClick={onHeaderTitleClick}
+              showBackButton={showBackButton}
+            />
           )
         }
         isSinglePanelView={isSinglePanelView}
         layout={layout}
         onClose={onClose}
-        testId="message-thread-panel"
+        onResetWidth={onResetWidth}
+        onResizeStart={onResizeStart}
+        splitPaneClamp={splitPaneClamp}
+        testId={testId}
         transparentChrome={transparentChrome}
         widthPx={widthPx}
       >

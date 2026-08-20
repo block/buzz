@@ -45,7 +45,11 @@ import {
   WelcomeComposerGuidanceLayer,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import { useWelcomeComposerBanner } from "@/features/channels/ui/useWelcomeComposerBanner";
-import { mentionsKnownAgent } from "@/features/channels/ui/ChannelPane.helpers";
+import {
+  channelTimelineEmptyDescription,
+  channelTimelineEmptyTitle,
+  mentionsKnownAgent,
+} from "@/features/channels/ui/ChannelPane.helpers";
 import { HuddleStartingView, HuddleTranscriptIntro } from "@/features/huddle";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";

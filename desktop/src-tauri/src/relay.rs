@@ -84,6 +84,12 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
     trimmed.to_string()
 }
 
+mod scope;
+pub use scope::{
+    assert_expected_relay_scope, assert_expected_signer, bind_expected_relay_scope,
+    bind_expected_signer, ScopedWorkspaceRelay,
+};
+
 pub fn relay_api_base_url() -> String {
     if let Some(base) = configured_env_var("BUZZ_RELAY_HTTP") {
         return base.trim_end_matches('/').to_string();
@@ -537,7 +543,8 @@ pub use get::get_relay_json;
 
 mod submit;
 pub use submit::{
-    submit_event, submit_event_at_with_keys, submit_signed_event_at_with_keys, SubmitEventResponse,
+    submit_event, submit_event_at_created_at, submit_event_at_with_keys,
+    submit_event_with_keys_created_at, submit_signed_event_at_with_keys, SubmitEventResponse,
 };
 
 /// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.

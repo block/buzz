@@ -323,6 +323,31 @@ fn profile_needs_sync_when_missing() {
     assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
 }
 
+// ── resolve_reconcile_relay: deferred-task relay pinning ────────────────────
+
+#[test]
+fn pinned_reconcile_relay_wins_over_a_post_switch_workspace() {
+    // Round-8 P1: the fire-and-forget reconciliation spawned by a scoped
+    // start may execute after an A→B community switch. The pinned relay —
+    // captured while A was the validated workspace — must win over the
+    // workspace read at execution time, so the kind:0 query/publish can
+    // never land on B under A's authorization.
+    let relay = resolve_reconcile_relay(
+        Some("wss://tenant-a.example"),
+        "",                       // never-pinned record
+        "wss://tenant-b.example", // the switch landed before execution
+    );
+    assert_eq!(relay, "wss://tenant-a.example");
+}
+
+#[test]
+fn unpinned_reconcile_relay_resolves_the_execution_time_workspace() {
+    // No tenant boundary: legacy behavior — follow the live workspace via
+    // effective_agent_relay_url (which ignores the record pin by design).
+    let relay = resolve_reconcile_relay(None, "wss://stale-pin.example", "wss://tenant-b.example");
+    assert_eq!(relay, "wss://tenant-b.example");
+}
+
 #[test]
 fn profile_needs_sync_when_missing_even_without_expected_avatar() {
     assert!(profile_needs_sync(None, "Duncan", None));

@@ -177,6 +177,22 @@ export async function getProjectRepoSnapshot(input: {
   return fromRawProjectRepoSnapshot(snapshot);
 }
 
+export async function getProjectRepoFileContent(input: {
+  cloneUrl: string;
+  defaultBranch?: string | null;
+  targetRef?: string | null;
+  targetCommit?: string | null;
+  path: string;
+}): Promise<string | null> {
+  return invokeTauri<string | null>("get_project_repo_file_content", {
+    cloneUrl: input.cloneUrl,
+    defaultBranch: input.defaultBranch ?? null,
+    targetRef: input.targetRef ?? null,
+    targetCommit: input.targetCommit ?? null,
+    path: input.path,
+  });
+}
+
 export async function getProjectRepoDiff(input: {
   cloneUrl: string;
   defaultBranch?: string | null;
@@ -263,6 +279,20 @@ export async function getProjectLocalRepoSnapshot(input: {
     path: localSnapshot.path,
     snapshot: fromRawProjectRepoSnapshot(localSnapshot.snapshot),
   };
+}
+
+export async function getProjectLocalRepoFileContent(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl?: string | null;
+  path: string;
+}): Promise<string | null> {
+  return invokeTauri<string | null>("get_project_local_repo_file_content", {
+    reposDir: input.reposDir ?? null,
+    projectDtag: input.projectDtag,
+    cloneUrl: input.cloneUrl ?? null,
+    path: input.path,
+  });
 }
 
 export async function listProjectLocalRepositories(input: {

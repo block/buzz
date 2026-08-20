@@ -136,7 +136,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
   if (rootResult.status === "rejected") {
     throw rootResult.reason instanceof Error
       ? rootResult.reason
-      : new Error("Could not load project issues and pull requests.");
+      : new Error("Could not load project tasks and reviews.");
   }
 
   const updateEvents =
