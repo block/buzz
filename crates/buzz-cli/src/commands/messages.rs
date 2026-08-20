@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
@@ -147,6 +149,341 @@ fn resolve_names_to_pubkeys(
         }
     }
     Ok(resolved)
+}
+
+struct MessageEditTarget {
+    channel_id: Uuid,
+    content: String,
+    media_tags: Vec<Vec<String>>,
+}
+
+/// Resolve the target message context needed to publish an edit.
+///
+/// Kind 40003 edit events carry the *complete* current attachment set as
+/// `imeta` tags and content. A CLI text edit therefore has to carry forward
+/// both the latest `imeta` tags and their Markdown references, otherwise
+/// receivers either interpret the edit as intentionally clearing all
+/// attachments or retain attachments that the renderer can no longer display.
+async fn resolve_message_edit_target(
+    client: &BuzzClient,
+    event_id: &str,
+) -> Result<MessageEditTarget, CliError> {
+    let original_filter = serde_json::json!({
+        "ids": [event_id],
+        "limit": 1
+    });
+    let raw = client.query(&original_filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let event = events
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| CliError::Other(format!("event {event_id} not found")))?;
+    let mut target = message_edit_target_from_event(event, event_id)?;
+
+    let edit_filter = serde_json::json!({
+        "kinds": [40003],
+        "#h": [target.channel_id.to_string()],
+        "#e": [event_id],
+        "limit": 1
+    });
+    let raw = client.query(&edit_filter).await?;
+    let edits: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let edits = edits
+        .as_array()
+        .ok_or_else(|| CliError::Other("query response is not an array".into()))?;
+    apply_latest_edit_state(&mut target, edits.first())?;
+
+    Ok(target)
+}
+
+fn message_edit_target_from_event(
+    event: &serde_json::Value,
+    event_id: &str,
+) -> Result<MessageEditTarget, CliError> {
+    let tags = event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .ok_or_else(|| CliError::Other("event missing 'tags' field".into()))?;
+
+    let mut channel_id = None;
+    for tag in tags {
+        let Some(parts) = tag.as_array() else {
+            continue;
+        };
+        if parts.first().and_then(|v| v.as_str()) == Some("h") && channel_id.is_none() {
+            if let Some(uuid_str) = parts.get(1).and_then(|v| v.as_str()) {
+                channel_id = Some(Uuid::parse_str(uuid_str).map_err(|_| {
+                    CliError::Other(format!("event h-tag is not a valid UUID: {uuid_str}"))
+                })?);
+            }
+        }
+    }
+
+    let channel_id = channel_id.ok_or_else(|| {
+        CliError::Other(format!(
+            "event {event_id} has no h-tag — cannot determine channel"
+        ))
+    })?;
+    let content = event
+        .get("content")
+        .and_then(|content| content.as_str())
+        .ok_or_else(|| CliError::Other("event missing 'content' field".into()))?;
+    Ok(MessageEditTarget {
+        channel_id,
+        content: content.to_string(),
+        media_tags: media_tags_from_event(event)?,
+    })
+}
+
+fn media_tags_from_event(event: &serde_json::Value) -> Result<Vec<Vec<String>>, CliError> {
+    let tags = event
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .ok_or_else(|| CliError::Other("event missing 'tags' field".into()))?;
+
+    Ok(tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_array()?;
+            if parts.first().and_then(|v| v.as_str()) != Some("imeta") {
+                return None;
+            }
+            parts
+                .iter()
+                .map(|part| part.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
+        .collect())
+}
+
+fn apply_latest_edit_state(
+    target: &mut MessageEditTarget,
+    latest_edit: Option<&serde_json::Value>,
+) -> Result<(), CliError> {
+    if let Some(edit) = latest_edit {
+        let media_tags = media_tags_from_event(edit)?;
+        let content = edit
+            .get("content")
+            .and_then(|content| content.as_str())
+            .ok_or_else(|| CliError::Other("edit event missing 'content' field".into()))?;
+        target.media_tags = media_tags;
+        target.content = content.to_string();
+    }
+    Ok(())
+}
+
+struct AttachmentMetadata<'a> {
+    url: &'a str,
+    mime_type: &'a str,
+    filename: Option<&'a str>,
+}
+
+fn imeta_field<'a>(tag: &'a [String], name: &str) -> Option<&'a str> {
+    tag.iter().skip(1).find_map(|field| {
+        let (field_name, value) = field.split_once(' ')?;
+        (field_name == name && !value.is_empty()).then_some(value)
+    })
+}
+
+fn attachment_metadata(media_tags: &[Vec<String>]) -> Vec<AttachmentMetadata<'_>> {
+    media_tags
+        .iter()
+        .filter_map(|tag| {
+            let url = imeta_field(tag, "url")?;
+            Some(AttachmentMetadata {
+                url,
+                mime_type: imeta_field(tag, "m").unwrap_or("image/jpeg"),
+                filename: imeta_field(tag, "filename"),
+            })
+        })
+        .collect()
+}
+
+fn attachment_reference_url(line: &str) -> Option<&str> {
+    let mut reference = line.trim();
+    if reference.starts_with("||") && reference.ends_with("||") && reference.len() >= 4 {
+        reference = &reference[2..reference.len() - 2];
+    }
+
+    let url = if let Some(rest) = reference.strip_prefix("![image](") {
+        rest.strip_suffix(')')?
+    } else if let Some(rest) = reference.strip_prefix("![video](") {
+        rest.strip_suffix(')')?
+    } else {
+        if !reference.starts_with('[') || !reference.ends_with(')') {
+            return None;
+        }
+        let separator = reference.rfind("](")?;
+        &reference[separator + 2..reference.len() - 1]
+    };
+
+    (!url.is_empty()
+        && !url
+            .chars()
+            .any(|character| character.is_whitespace() || character == ')'))
+    .then_some(url)
+}
+
+fn trailing_spoiler_start(
+    lines: &[&str],
+    closing_delimiter: usize,
+    attachment_urls: &HashSet<&str>,
+) -> Option<usize> {
+    let mut index = closing_delimiter;
+    let mut has_matching_media = false;
+    while index > 0 {
+        index -= 1;
+        let line = lines[index];
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.trim() == "||" {
+            return has_matching_media.then_some(index);
+        }
+
+        let url = attachment_reference_url(line)?;
+        if !attachment_urls.contains(url)
+            || !(line.trim().starts_with("![image](") || line.trim().starts_with("![video]("))
+        {
+            return None;
+        }
+        has_matching_media = true;
+    }
+    None
+}
+
+fn trailing_attachment_references(
+    content: &str,
+    attachment_urls: &HashSet<&str>,
+) -> Option<String> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut start = lines.len();
+    let mut has_attachment = false;
+
+    while start > 0 {
+        let line = lines[start - 1];
+        if line.trim().is_empty() {
+            start -= 1;
+            continue;
+        }
+        if line.trim() == "||" {
+            if let Some(spoiler_start) = trailing_spoiler_start(&lines, start - 1, attachment_urls)
+            {
+                start = spoiler_start;
+                has_attachment = true;
+                continue;
+            }
+        }
+        if attachment_reference_url(line).is_some_and(|url| attachment_urls.contains(url)) {
+            start -= 1;
+            has_attachment = true;
+            continue;
+        }
+        break;
+    }
+
+    if !has_attachment {
+        return None;
+    }
+    let mut end = lines.len();
+    while start < end && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    while end > start && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+    Some(lines[start..end].join("\n"))
+}
+
+fn referenced_attachment_urls<'a>(
+    content: &str,
+    attachment_urls: &HashSet<&'a str>,
+) -> HashSet<&'a str> {
+    content
+        .lines()
+        .filter_map(attachment_reference_url)
+        .filter_map(|url| attachment_urls.get(url).copied())
+        .collect()
+}
+
+fn canonical_attachment_reference(metadata: &AttachmentMetadata<'_>) -> String {
+    let lower_filename = metadata.filename.map(str::to_ascii_lowercase);
+    let is_snapshot = lower_filename
+        .as_deref()
+        .is_some_and(|name| name.ends_with(".agent.png") || name.ends_with(".team.png"));
+
+    if metadata.mime_type.starts_with("video/") {
+        return format!("![video]({})", metadata.url);
+    }
+    if metadata.mime_type.starts_with("image/") && !is_snapshot {
+        return format!("![image]({})", metadata.url);
+    }
+
+    let label = metadata
+        .filename
+        .or_else(|| {
+            metadata
+                .url
+                .rsplit('/')
+                .next()
+                .filter(|tail| !tail.is_empty())
+        })
+        .unwrap_or("file");
+    let mut escaped_label = String::with_capacity(label.len());
+    for character in label.chars() {
+        if matches!(character, '\\' | '[' | ']') {
+            escaped_label.push('\\');
+        }
+        escaped_label.push(character);
+    }
+    format!("[{escaped_label}]({})", metadata.url)
+}
+
+fn build_edit_content(
+    new_content: &str,
+    current_content: &str,
+    media_tags: &[Vec<String>],
+    clear_attachments: bool,
+) -> String {
+    if clear_attachments || media_tags.is_empty() {
+        return new_content.to_string();
+    }
+
+    let metadata = attachment_metadata(media_tags);
+    let attachment_urls: HashSet<&str> = metadata.iter().map(|entry| entry.url).collect();
+    if attachment_urls.is_empty() {
+        return new_content.to_string();
+    }
+
+    let already_referenced = referenced_attachment_urls(new_content, &attachment_urls);
+    let mut appended_urls = already_referenced.clone();
+    let mut references = Vec::new();
+
+    if already_referenced.is_empty() {
+        if let Some(existing_references) =
+            trailing_attachment_references(current_content, &attachment_urls)
+        {
+            appended_urls.extend(referenced_attachment_urls(
+                &existing_references,
+                &attachment_urls,
+            ));
+            references.push(existing_references);
+        }
+    }
+
+    for entry in metadata {
+        if appended_urls.insert(entry.url) {
+            references.push(canonical_attachment_reference(&entry));
+        }
+    }
+
+    if references.is_empty() {
+        new_content.to_string()
+    } else {
+        format!("{new_content}\n{}", references.join("\n"))
+    }
 }
 
 /// Resolve mention text against the channel membership snapshot.
@@ -816,16 +1153,33 @@ pub async fn cmd_edit_message(
     client: &BuzzClient,
     event_id: &str,
     content: &str,
+    clear_attachments: bool,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
     validate_content_size(content)?;
 
-    // Resolve channel_id from the event's h-tag
-    let channel_uuid = resolve_channel_id(client, event_id).await?;
+    let target = resolve_message_edit_target(client, event_id).await?;
     let target_eid = parse_event_id(event_id)?;
+    let final_content = build_edit_content(
+        content,
+        &target.content,
+        &target.media_tags,
+        clear_attachments,
+    );
+    validate_content_size(&final_content)?;
+    let media_tags: &[Vec<String>] = if clear_attachments {
+        &[]
+    } else {
+        target.media_tags.as_slice()
+    };
 
-    let builder = buzz_sdk::build_edit(channel_uuid, target_eid, content)
-        .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
+    let builder = buzz_sdk::build_edit_with_media_tags(
+        target.channel_id,
+        target_eid,
+        &final_content,
+        media_tags,
+    )
+    .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
 
@@ -928,7 +1282,11 @@ pub async fn dispatch(
             )
             .await
         }
-        MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::Edit {
+            event,
+            content,
+            clear_attachments,
+        } => cmd_edit_message(client, &event, &content, clear_attachments).await,
         MessagesCmd::Delete {
             event,
             action_id,
@@ -992,15 +1350,26 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
     use super::{
-        event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        apply_latest_edit_state, build_edit_content, cmd_edit_message, event_mention_pubkeys,
+        find_root_from_tags, match_profiles_by_name, merge_message_mentions,
+        message_edit_target_from_event, missing_members, normalize_explicit_mentions,
+        parse_member_pubkeys, resolve_names_to_pubkeys,
     };
+    use crate::client::BuzzClient;
+    use axum::body::Bytes;
+    use axum::routing::post;
+    use axum::{Json, Router};
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
+    use nostr::Keys;
     use serde_json::json;
+    use tokio::net::TcpListener;
+    use uuid::Uuid;
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1309,6 +1678,428 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .unwrap();
         assert_eq!(event_mention_pubkeys(&event), vec![PK_VALID_A]);
+    }
+
+    #[test]
+    fn message_edit_target_preserves_original_imeta_tags() {
+        let channel = Uuid::new_v4();
+        let event = json!({
+            "content": "original\n![image](https://relay.example/media/a.png)\n[report.pdf](https://relay.example/media/b.pdf)",
+            "tags": [
+                ["h", channel.to_string()],
+                ["p", PK_VALID_A],
+                [
+                    "imeta",
+                    "url https://relay.example/media/a.png",
+                    "m image/png",
+                    "x aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "size 42"
+                ],
+                [
+                    "imeta",
+                    "url https://relay.example/media/b.pdf",
+                    "m application/pdf",
+                    "x bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "size 84",
+                    "filename report.pdf"
+                ],
+            ],
+        });
+
+        let target = message_edit_target_from_event(&event, ID_A).unwrap();
+
+        assert_eq!(target.channel_id, channel);
+        assert_eq!(
+            target.content,
+            "original\n![image](https://relay.example/media/a.png)\n[report.pdf](https://relay.example/media/b.pdf)"
+        );
+        assert_eq!(
+            target.media_tags,
+            vec![
+                vec![
+                    "imeta",
+                    "url https://relay.example/media/a.png",
+                    "m image/png",
+                    "x aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "size 42",
+                ],
+                vec![
+                    "imeta",
+                    "url https://relay.example/media/b.pdf",
+                    "m application/pdf",
+                    "x bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "size 84",
+                    "filename report.pdf",
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn message_edit_target_returns_empty_media_set_for_text_only_message() {
+        let channel = Uuid::new_v4();
+        let event = json!({
+            "content": "text only",
+            "tags": [
+                ["h", channel.to_string()],
+                ["p", PK_VALID_A],
+            ],
+        });
+
+        let target = message_edit_target_from_event(&event, ID_A).unwrap();
+
+        assert_eq!(target.channel_id, channel);
+        assert_eq!(target.content, "text only");
+        assert!(target.media_tags.is_empty());
+    }
+
+    #[test]
+    fn message_edit_target_keeps_cleared_attachments_cleared() {
+        let channel = Uuid::new_v4();
+        let original = json!({
+            "content": "original\n![image](https://relay.example/media/a.png)",
+            "tags": [
+                ["h", channel.to_string()],
+                [
+                    "imeta",
+                    "url https://relay.example/media/a.png",
+                    "m image/png",
+                    "x aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "size 42"
+                ],
+            ],
+        });
+        let clear_edit = json!({
+            "content": "attachments cleared",
+            "tags": [
+                ["h", channel.to_string()],
+                ["e", ID_A],
+            ],
+        });
+        let mut target = message_edit_target_from_event(&original, ID_A).unwrap();
+
+        apply_latest_edit_state(&mut target, Some(&clear_edit)).unwrap();
+
+        assert_eq!(target.content, "attachments cleared");
+        assert!(target.media_tags.is_empty());
+    }
+
+    #[test]
+    fn message_edit_target_preserves_latest_replacement_attachments() {
+        let channel = Uuid::new_v4();
+        let original = json!({
+            "content": "original\n![image](https://relay.example/media/a.png)",
+            "tags": [
+                ["h", channel.to_string()],
+                [
+                    "imeta",
+                    "url https://relay.example/media/a.png",
+                    "m image/png",
+                    "x aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "size 42"
+                ],
+            ],
+        });
+        let replacement_edit = json!({
+            "content": "replacement\n[report.pdf](https://relay.example/media/b.pdf)",
+            "tags": [
+                ["h", channel.to_string()],
+                ["e", ID_A],
+                [
+                    "imeta",
+                    "url https://relay.example/media/b.pdf",
+                    "m application/pdf",
+                    "x bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "size 84",
+                    "filename report.pdf"
+                ],
+            ],
+        });
+        let mut target = message_edit_target_from_event(&original, ID_A).unwrap();
+
+        apply_latest_edit_state(&mut target, Some(&replacement_edit)).unwrap();
+
+        assert_eq!(
+            target.content,
+            "replacement\n[report.pdf](https://relay.example/media/b.pdf)"
+        );
+        assert_eq!(
+            target.media_tags,
+            vec![vec![
+                "imeta",
+                "url https://relay.example/media/b.pdf",
+                "m application/pdf",
+                "x bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "size 84",
+                "filename report.pdf",
+            ]]
+        );
+    }
+
+    #[test]
+    fn edit_content_preserves_trailing_attachment_references() {
+        let media_tags = vec![
+            vec![
+                "imeta".into(),
+                "url https://relay.example/media/a.png".into(),
+                "m image/png".into(),
+            ],
+            vec![
+                "imeta".into(),
+                "url https://relay.example/media/b.pdf".into(),
+                "m application/pdf".into(),
+                "filename machine-name.pdf".into(),
+            ],
+        ];
+        let current_content = concat!(
+            "original text\n",
+            "![image](https://relay.example/media/a.png)\n",
+            "[Quarterly report](https://relay.example/media/b.pdf)"
+        );
+
+        let content = build_edit_content("edited text", current_content, &media_tags, false);
+
+        assert_eq!(
+            content,
+            concat!(
+                "edited text\n",
+                "![image](https://relay.example/media/a.png)\n",
+                "[Quarterly report](https://relay.example/media/b.pdf)"
+            )
+        );
+    }
+
+    #[test]
+    fn edit_content_clear_does_not_preserve_attachment_references() {
+        let media_tags = vec![vec![
+            "imeta".into(),
+            "url https://relay.example/media/a.png".into(),
+            "m image/png".into(),
+        ]];
+        let current_content = "original\n![image](https://relay.example/media/a.png)";
+
+        let content = build_edit_content("edited text", current_content, &media_tags, true);
+
+        assert_eq!(content, "edited text");
+    }
+
+    #[test]
+    fn edit_content_does_not_duplicate_caller_supplied_reference() {
+        let media_tags = vec![vec![
+            "imeta".into(),
+            "url https://relay.example/media/a.png".into(),
+            "m image/png".into(),
+        ]];
+        let reference = "![image](https://relay.example/media/a.png)";
+
+        let content = build_edit_content(
+            &format!("edited text\n{reference}"),
+            &format!("original\n{reference}"),
+            &media_tags,
+            false,
+        );
+
+        assert_eq!(content, format!("edited text\n{reference}"));
+    }
+
+    #[test]
+    fn edit_content_synthesizes_missing_reference_from_imeta() {
+        let media_tags = vec![
+            vec![
+                "imeta".into(),
+                "url https://relay.example/media/a.mp4".into(),
+                "m video/mp4".into(),
+            ],
+            vec![
+                "imeta".into(),
+                "url https://relay.example/media/a%5D.team.png".into(),
+                "m image/png".into(),
+                "filename a].team.png".into(),
+            ],
+        ];
+
+        let content =
+            build_edit_content("edited text", "body without references", &media_tags, false);
+
+        assert_eq!(
+            content,
+            concat!(
+                "edited text\n",
+                "![video](https://relay.example/media/a.mp4)\n",
+                "[a\\].team.png](https://relay.example/media/a%5D.team.png)"
+            )
+        );
+    }
+
+    #[test]
+    fn edit_content_preserves_trailing_block_spoiler() {
+        let media_tags = vec![vec![
+            "imeta".into(),
+            "url https://relay.example/media/a.png".into(),
+            "m image/png".into(),
+        ]];
+        let current_content = concat!(
+            "original\n",
+            "||\n",
+            "![image](https://relay.example/media/a.png)\n",
+            "||"
+        );
+
+        let content = build_edit_content("edited text", current_content, &media_tags, false);
+
+        assert_eq!(
+            content,
+            concat!(
+                "edited text\n",
+                "||\n",
+                "![image](https://relay.example/media/a.png)\n",
+                "||"
+            )
+        );
+    }
+
+    #[test]
+    fn edit_content_uses_latest_replacement_reference() {
+        let original_tags = vec![vec![
+            "imeta".into(),
+            "url https://relay.example/media/a.png".into(),
+            "m image/png".into(),
+        ]];
+        let replacement_tags = vec![vec![
+            "imeta".into(),
+            "url https://relay.example/media/b.pdf".into(),
+            "m application/pdf".into(),
+            "filename replacement.pdf".into(),
+        ]];
+        let original_content = "original\n![image](https://relay.example/media/a.png)";
+        let replacement_content =
+            "replacement\n[Replacement label](https://relay.example/media/b.pdf)";
+
+        let content =
+            build_edit_content("edited text", replacement_content, &replacement_tags, false);
+
+        assert_eq!(
+            content,
+            "edited text\n[Replacement label](https://relay.example/media/b.pdf)"
+        );
+        assert!(!content.contains("a.png"));
+        assert_ne!(
+            build_edit_content("edited text", original_content, &original_tags, false),
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_command_submits_latest_attachment_state_and_references() {
+        let channel = Uuid::new_v4();
+        let query_calls = Arc::new(AtomicUsize::new(0));
+        let query_bodies = Arc::new(Mutex::new(Vec::new()));
+        let submitted_event = Arc::new(Mutex::new(None));
+
+        let query_route = {
+            let query_calls = query_calls.clone();
+            let query_bodies = query_bodies.clone();
+            let channel = channel.to_string();
+            move |body: Bytes| {
+                let query_calls = query_calls.clone();
+                let query_bodies = query_bodies.clone();
+                let channel = channel.clone();
+                async move {
+                    query_bodies
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice::<serde_json::Value>(&body).unwrap());
+                    let call = query_calls.fetch_add(1, Ordering::SeqCst);
+                    let event = if call == 0 {
+                        json!({
+                            "id": ID_A,
+                            "content": "original\n![image](https://relay.example/media/a.png)",
+                            "tags": [
+                                ["h", channel],
+                                [
+                                    "imeta",
+                                    "url https://relay.example/media/a.png",
+                                    "m image/png"
+                                ]
+                            ]
+                        })
+                    } else {
+                        json!({
+                            "id": ID_B,
+                            "kind": 40003,
+                            "content": "replacement\n[Latest label](https://relay.example/media/b.pdf)",
+                            "tags": [
+                                ["h", channel],
+                                ["e", ID_A],
+                                [
+                                    "imeta",
+                                    "url https://relay.example/media/b.pdf",
+                                    "m application/pdf",
+                                    "filename machine-name.pdf"
+                                ]
+                            ]
+                        })
+                    };
+                    Json(json!([event]))
+                }
+            }
+        };
+        let events_route = {
+            let submitted_event = submitted_event.clone();
+            move |Json(event): Json<serde_json::Value>| {
+                let submitted_event = submitted_event.clone();
+                async move {
+                    *submitted_event.lock().unwrap() = Some(event);
+                    Json(json!({
+                        "event_id": ID_B,
+                        "accepted": true,
+                        "message": ""
+                    }))
+                }
+            }
+        };
+        let app = Router::new()
+            .route("/query", post(query_route))
+            .route("/events", post(events_route));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client =
+            BuzzClient::new(format!("http://{address}"), Keys::generate(), None, None).unwrap();
+
+        cmd_edit_message(&client, ID_A, "final text", false)
+            .await
+            .unwrap();
+
+        let query_bodies = query_bodies.lock().unwrap();
+        assert_eq!(query_bodies.len(), 2);
+        assert_eq!(query_bodies[0], json!([{ "ids": [ID_A], "limit": 1 }]));
+        assert_eq!(
+            query_bodies[1],
+            json!([{
+                "kinds": [40003],
+                "#h": [channel.to_string()],
+                "#e": [ID_A],
+                "limit": 1
+            }])
+        );
+        drop(query_bodies);
+
+        let event = submitted_event.lock().unwrap().clone().unwrap();
+        assert_eq!(event["kind"], 40003);
+        assert_eq!(
+            event["content"],
+            "final text\n[Latest label](https://relay.example/media/b.pdf)"
+        );
+        let tags = event["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|tag| {
+            tag.as_array().is_some_and(|parts| {
+                parts.first().and_then(|value| value.as_str()) == Some("imeta")
+                    && parts.get(1).and_then(|value| value.as_str())
+                        == Some("url https://relay.example/media/b.pdf")
+            })
+        }));
+        assert!(!event.to_string().contains("/media/a.png"));
     }
 
     // ---- match_profiles_by_name (author resolution for `messages search --author`) ----

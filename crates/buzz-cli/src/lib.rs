@@ -443,6 +443,9 @@ pub enum MessagesCmd {
         /// New message content
         #[arg(long)]
         content: String,
+        /// Intentionally remove all existing attachments from the edited message
+        #[arg(long, default_value_t = false)]
+        clear_attachments: bool,
     },
     /// Delete a message by event ID
     Delete {

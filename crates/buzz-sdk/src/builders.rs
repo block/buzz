@@ -391,11 +391,28 @@ pub fn build_edit(
     target_event_id: nostr::EventId,
     new_content: &str,
 ) -> Result<EventBuilder, SdkError> {
+    build_edit_with_media_tags(channel_id, target_event_id, new_content, &[])
+}
+
+/// Build an edit event targeting an existing message (kind 40003), carrying
+/// the full current attachment set as NIP-92 `imeta` tags.
+///
+/// Receivers treat the edit event's `imeta` tags as the complete replacement
+/// attachment set for the target message. Callers that edit text without
+/// intentionally changing attachments should therefore pass the target
+/// message's existing `imeta` tags here.
+pub fn build_edit_with_media_tags(
+    channel_id: Uuid,
+    target_event_id: nostr::EventId,
+    new_content: &str,
+    media_tags: &[Vec<String>],
+) -> Result<EventBuilder, SdkError> {
     check_content(new_content, 64 * 1024)?;
-    let tags = vec![
+    let mut tags = vec![
         tag(&["h", &channel_id.to_string()])?,
         tag(&["e", &target_event_id.to_hex()])?,
     ];
+    imeta_tags(media_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), new_content).tags(tags))
 }
 
@@ -2724,7 +2741,45 @@ mod tests {
         let eid = event_id();
         let ev = sign(build_edit(cid, eid, "new content").unwrap());
         assert_eq!(ev.kind.as_u16(), 40003);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
         assert!(has_tag(&ev, "e", &eid.to_hex()));
+        assert!(tag_values(&ev, "imeta").is_empty());
+    }
+
+    #[test]
+    fn edit_with_media_tags_carries_attachment_set() {
+        let cid = uuid();
+        let eid = event_id();
+        let media_tags = vec![
+            vec![
+                "imeta".to_string(),
+                "url https://relay.example/media/a.png".to_string(),
+                "m image/png".to_string(),
+                "x aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "size 42".to_string(),
+            ],
+            vec![
+                "imeta".to_string(),
+                "url https://relay.example/media/b.pdf".to_string(),
+                "m application/pdf".to_string(),
+                "x bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "size 84".to_string(),
+            ],
+        ];
+        let ev = sign(build_edit_with_media_tags(cid, eid, "new content", &media_tags).unwrap());
+
+        assert_eq!(ev.kind.as_u16(), 40003);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "e", &eid.to_hex()));
+        assert_eq!(tag_values(&ev, "imeta").len(), 2);
+        assert!(ev.tags.iter().any(|tag| tag.as_slice()
+            == [
+                "imeta",
+                "url https://relay.example/media/a.png",
+                "m image/png",
+                "x aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size 42",
+            ]));
     }
 
     #[test]
