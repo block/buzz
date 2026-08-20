@@ -429,6 +429,20 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
 }
 
 #[test]
+fn last_message_filter_covers_all_human_visible_activity_kinds() {
+    let filter = last_message_filter("forum-1");
+
+    assert_eq!(
+        filter,
+        serde_json::json!({
+            "kinds": [9, 40002, 45001, 45003],
+            "#h": ["forum-1"],
+            "limit": 1
+        })
+    );
+}
+
+#[test]
 fn last_message_filters_stay_within_relay_channel_cap() {
     let filters: Vec<serde_json::Value> = (0..257)
         .map(|index| serde_json::json!({"#h": [format!("channel-{index}")]}))

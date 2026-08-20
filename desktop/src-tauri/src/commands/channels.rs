@@ -14,6 +14,9 @@ const DIRECTORY_PAGE_SIZE: usize = 500;
 // Keep this aligned with the relay's aggregate explicit-`#h` request bound.
 // Each filter carries one channel so the relay can use its channel_id index.
 const LAST_MESSAGE_QUERY_CHANNEL_BATCH_SIZE: usize = 128;
+// Human-visible channel activity that drives sidebar Recent ordering. Keep this
+// aligned with desktop/src/shared/constants/kinds.ts::CHANNEL_MESSAGE_EVENT_KINDS.
+const CHANNEL_RECENCY_EVENT_KINDS: [u16; 4] = [9, 40002, 45001, 45003];
 const STARTER_CHANNEL_NAMESPACE: uuid::Uuid = uuid::uuid!("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0");
 
 struct StarterChannelSpec {
@@ -150,6 +153,14 @@ fn compute_channels_hash(channels: &[ChannelInfo]) -> String {
 
 // ── Core fetch implementation ─────────────────────────────────────────────────
 
+fn last_message_filter(channel_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": CHANNEL_RECENCY_EVENT_KINDS,
+        "#h": [channel_id],
+        "limit": 1
+    })
+}
+
 fn last_message_filter_batches(filters: &[serde_json::Value]) -> Vec<&[serde_json::Value]> {
     filters
         .chunks(LAST_MESSAGE_QUERY_CHANNEL_BATCH_SIZE)
@@ -175,7 +186,7 @@ async fn query_last_messages(
 /// - Phase 1 (parallel): member-chain (kind:39002→kind:39000), open directory
 ///   (kind:39000 all-open), and hidden-DM snapshot (kind:30622).
 /// - Phase 2 (parallel): member counts (kind:39002 batch) and last-message
-///   timestamps (bounded per-channel kind:9/40002 batches). Member-count
+///   timestamps (bounded per-channel human-visible activity batches). Member-count
 ///   failures degrade to zero; timestamp failures abort so cached recency is
 ///   never replaced by a false authoritative empty result.
 async fn fetch_channels(state: &AppState) -> Result<Vec<ChannelInfo>, String> {
@@ -333,13 +344,7 @@ async fn fetch_channels(state: &AppState) -> Result<Vec<ChannelInfo>, String> {
     if !all_channel_ids.is_empty() {
         let last_msg_filters: Vec<serde_json::Value> = all_channel_ids
             .iter()
-            .map(|id| {
-                serde_json::json!({
-                    "kinds": [9, 40002],
-                    "#h": [id],
-                    "limit": 1
-                })
-            })
+            .map(|id| last_message_filter(id))
             .collect();
 
         // Bind both filter arrays before the join so their lifetimes cover

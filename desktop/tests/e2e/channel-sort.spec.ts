@@ -64,6 +64,22 @@ async function emitMockMessage(
   );
 }
 
+function forumNames(page: Page) {
+  return page
+    .getByTestId("forum-list")
+    .locator("[data-testid^='channel-']")
+    .evaluateAll((nodes) =>
+      nodes
+        .map((n) => n.getAttribute("data-testid") ?? "")
+        .filter(
+          (id) =>
+            !id.startsWith("channel-unread") &&
+            !id.startsWith("channel-working"),
+        )
+        .map((id) => id.replace(/^channel-/, "")),
+    );
+}
+
 function streamNames(page: Page) {
   return page
     .getByTestId("stream-list")
@@ -185,26 +201,30 @@ test.describe("per-group channel sort", () => {
       .toEqual(["all-replies", "deep-history"]);
 
     // …while Forums (unset) stays alphabetical.
-    const forumNames = await page
-      .getByTestId("forum-list")
-      .locator("[data-testid^='channel-']")
-      .evaluateAll((nodes) =>
-        nodes
-          .map((n) => n.getAttribute("data-testid") ?? "")
-          .filter(
-            (id) =>
-              !id.startsWith("channel-unread") &&
-              !id.startsWith("channel-working"),
-          )
-          .map((id) => id.replace(/^channel-/, "")),
-      );
-    const sortedForums = [...forumNames].sort((a, b) => a.localeCompare(b));
-    expect(forumNames).toEqual(sortedForums);
+    const forumOrder = await forumNames(page);
+    const sortedForums = [...forumOrder].sort((a, b) => a.localeCompare(b));
+    expect(forumOrder).toEqual(sortedForums);
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/04-independent-groups.png` });
   });
 
-  test("04 — DM group has its own sort trigger", async ({ page }) => {
+  test("04 — Forum Recent survives authoritative reload", async ({ page }) => {
+    await seedSortState(page, { forums: "recent" });
+    await installMockBridge(page);
+    await openApp(page);
+
+    await expect
+      .poll(async () => (await forumNames(page)).slice(0, 2))
+      .toEqual(["watercooler", "announcements"]);
+
+    await page.reload();
+    await expect(page.getByTestId("forum-list")).toBeVisible();
+    await expect
+      .poll(async () => (await forumNames(page)).slice(0, 2))
+      .toEqual(["watercooler", "announcements"]);
+  });
+
+  test("05 — DM group has its own sort trigger", async ({ page }) => {
     await installMockBridge(page);
     await openApp(page);
 
