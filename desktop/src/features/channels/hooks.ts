@@ -44,12 +44,16 @@ import { mergeConcurrentChannelRecency } from "@/features/channels/lib/channelRe
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 import { useCommunities } from "@/features/communities/useCommunities";
-import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
 import {
   inspectChannelSnapshot,
   type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
+import { canAddChannelMembers } from "@/features/channels/lib/channelMemberAdmission";
+import {
+  CHANNEL_MEMBERS_STALE_TIME_MS,
+  channelMembersQueryKey,
+} from "@/features/channels/rosterFreshness";
 
 export const channelsQueryKey = ["channels"] as const;
 /** Keeps focused polling at the established one-minute cadence. */
@@ -69,8 +73,6 @@ export const channelsFocusRefetchPolicy = {
 const channelsSnapshotPairKey = ["channels", "_snapshot-pair"] as const;
 const channelDetailQueryKey = (channelId: string) =>
   ["channels", channelId, "detail"] as const;
-const channelMembersQueryKey = (channelId: string) =>
-  ["channels", channelId, "members"] as const;
 const channelTypeOrder = {
   stream: 0,
   forum: 1,
@@ -628,7 +630,7 @@ export function useChannelMembersQuery(
 
       return getChannelMembers(channelId);
     },
-    staleTime: 30_000,
+    staleTime: CHANNEL_MEMBERS_STALE_TIME_MS,
   });
 }
 
