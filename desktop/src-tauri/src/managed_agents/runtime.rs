@@ -535,7 +535,7 @@ pub fn spawn_agent_child(
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
-    command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+    super::set_agent_args_env(&mut command, agent_args);
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
             command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
