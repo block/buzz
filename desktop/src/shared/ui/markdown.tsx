@@ -1377,8 +1377,8 @@ export function createMarkdownComponents(
       // anchor (renders as a normal external link).
     }
 
-    // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones
-    // fall through to the default anchor.
+    // `buzz://pr|issue|repo?…` entity links navigate in-app; the url transform
+    // parses them strictly, so a malformed one arrives blank and renders inert.
     const entityAnchor = renderEntityLinkAnchor({
       children,
       href,
