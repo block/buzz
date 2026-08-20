@@ -1,3 +1,4 @@
+import * as React from "react";
 import type { ObserverEvent } from "./agentSessionTypes";
 import { describeRawEvent } from "./agentSessionTranscript";
 import { observerEventScrollId } from "./agentSessionPanelLayout";
@@ -6,17 +7,18 @@ import { useTranscriptTimestampsEnabled } from "./transcriptTimestampPreference"
 
 export function RawEventRail({ events }: { events: ObserverEvent[] }) {
   const showTimestamps = useTranscriptTimestampsEnabled();
+  const displayEvents = React.useMemo(() => [...events].reverse(), [events]);
 
   return (
     <section className="flex min-h-0 w-full flex-col text-foreground">
       <div className="min-h-0 flex-1">
-        {events.length === 0 ? (
+        {displayEvents.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">
             No raw events yet.
           </p>
         ) : (
           <div className="space-y-2">
-            {events.map((event) => (
+            {displayEvents.map((event) => (
               <details
                 className="group rounded-md border border-border/55 bg-muted/25 px-2.5 py-1.5 transition-colors open:bg-muted/35"
                 data-message-id={observerEventScrollId(event)}
