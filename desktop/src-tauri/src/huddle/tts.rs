@@ -279,6 +279,7 @@ impl Drop for TtsPipeline {
 
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn tts_worker(
     model_dir: PathBuf,
     voice_state: WorkerVoiceState,

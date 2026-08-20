@@ -349,6 +349,7 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stt_worker(
     model_dir: PathBuf,
     audio_rx: Receiver<Vec<u8>>,
