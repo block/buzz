@@ -86,6 +86,39 @@ fn normalized_speaker_level(level_dbov: i8) -> f32 {
     ((f32::from(level_dbov) + 60.0) / 48.0).clamp(0.0, 1.0)
 }
 
+fn update_remote_release_deadline(
+    peer: u8,
+    is_dtx: bool,
+    remote_floor_owners: &std::collections::HashSet<u8>,
+    deadlines: &mut std::collections::HashMap<u8, tokio::time::Instant>,
+    now: tokio::time::Instant,
+) {
+    if !is_dtx {
+        deadlines.remove(&peer);
+    } else if remote_floor_owners.contains(&peer) {
+        deadlines
+            .entry(peer)
+            .or_insert(now + REMOTE_RELEASE_DEBOUNCE);
+    }
+}
+
+fn release_expired_remote_floors(
+    now: tokio::time::Instant,
+    owners: &mut std::collections::HashSet<u8>,
+    deadlines: &mut std::collections::HashMap<u8, tokio::time::Instant>,
+    human_floor: &HumanFloor,
+) {
+    let released: Vec<u8> = deadlines
+        .iter()
+        .filter_map(|(peer, deadline)| (*deadline <= now).then_some(*peer))
+        .collect();
+    for peer in released {
+        deadlines.remove(&peer);
+        owners.remove(&peer);
+        human_floor.leave_remote(peer);
+    }
+}
+
 fn should_recover_playout(depth: usize, currently_recovering: bool) -> bool {
     if currently_recovering {
         depth > PLAYOUT_QUEUE_RECOVERY_END
@@ -188,6 +221,7 @@ pub(crate) async fn run_playout_recv_loop(
     let mut speaker_levels: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
     let mut remote_release_deadlines: std::collections::HashMap<u8, tokio::time::Instant> =
         std::collections::HashMap::new();
+    let mut remote_floor_owners: std::collections::HashSet<u8> = std::collections::HashSet::new();
     let mut frame_counts: std::collections::HashMap<u8, u16> = std::collections::HashMap::new();
     let mut last_frame_reset = tokio::time::Instant::now();
 
@@ -251,9 +285,12 @@ pub(crate) async fn run_playout_recv_loop(
                 }
             }
             _ = speaker_tick.tick() => {
-                let now = tokio::time::Instant::now();
-                let released: Vec<u8> = remote_release_deadlines.iter().filter_map(|(peer, deadline)| (*deadline <= now).then_some(*peer)).collect();
-                for peer in released { remote_release_deadlines.remove(&peer); human_floor.leave_remote(peer); }
+                release_expired_remote_floors(
+                    tokio::time::Instant::now(),
+                    &mut remote_floor_owners,
+                    &mut remote_release_deadlines,
+                    &human_floor,
+                );
                 if let Some(ref app) = app_handle {
                     use tauri::Emitter;
                     let pubkeys: Vec<String> = active_indices
@@ -310,16 +347,20 @@ pub(crate) async fn run_playout_recv_loop(
                         // by an idle peer to keep the codec alive — they
                         // don't mean the peer is speaking, and shouldn't
                         // make their tile flash for the 500 ms speaker tick.
+                        update_remote_release_deadline(
+                            peer_idx,
+                            is_dtx,
+                            &remote_floor_owners,
+                            &mut remote_release_deadlines,
+                            tokio::time::Instant::now(),
+                        );
                         if !is_dtx {
-                            remote_release_deadlines.remove(&peer_idx);
                             active_indices.insert(peer_idx);
                             let level = normalized_speaker_level(header.level_dbov);
                             speaker_levels
                                 .entry(peer_idx)
                                 .and_modify(|current| *current = current.max(level))
                                 .or_insert(level);
-                        } else if human_floor.is_blocked() {
-                            remote_release_deadlines.insert(peer_idx, tokio::time::Instant::now() + REMOTE_RELEASE_DEBOUNCE);
                         }
 
                         // Track remote speech independently of TTS liveness so a
@@ -364,6 +405,7 @@ pub(crate) async fn run_playout_recv_loop(
                             *count = count.saturating_add(1);
                             if *count >= REMOTE_SPEECH_THRESHOLD {
                                 human_floor.enter_remote(peer_idx);
+                                remote_floor_owners.insert(peer_idx);
                                 if tts_active.load(Ordering::Acquire) {
                                     tts_cancel.store(true, Ordering::Release);
                                 }
@@ -392,6 +434,7 @@ pub(crate) async fn run_playout_recv_loop(
                                                     peers.remove(&key);
                                                     frame_counts.remove(&key);
                                                     remote_release_deadlines.remove(&key);
+                                                    remote_floor_owners.remove(&key);
                                                     human_floor.leave_remote(key);
                                                     active_indices.remove(&key);
                                                     speaker_levels.remove(&key);
@@ -416,7 +459,16 @@ pub(crate) async fn run_playout_recv_loop(
                                             replacement.get(idx) == index_to_pubkey.get(idx)
                                         };
                                         peers.retain(|idx, _| identity_unchanged(idx));
-                                        for idx in index_to_pubkey.keys().filter(|idx| !identity_unchanged(idx)).copied().collect::<Vec<_>>() { human_floor.leave_remote(idx); remote_release_deadlines.remove(&idx); }
+                                        for idx in index_to_pubkey
+                                            .keys()
+                                            .filter(|idx| !identity_unchanged(idx))
+                                            .copied()
+                                            .collect::<Vec<_>>()
+                                        {
+                                            human_floor.leave_remote(idx);
+                                            remote_release_deadlines.remove(&idx);
+                                            remote_floor_owners.remove(&idx);
+                                        }
                                         frame_counts.retain(|idx, _| identity_unchanged(idx));
                                         active_indices.retain(identity_unchanged);
                                         speaker_levels.retain(|idx, _| identity_unchanged(idx));
@@ -429,6 +481,7 @@ pub(crate) async fn run_playout_recv_loop(
                                         index_to_pubkey.remove(&key);
                                         frame_counts.remove(&key);
                                         remote_release_deadlines.remove(&key);
+                                        remote_floor_owners.remove(&key);
                                         human_floor.leave_remote(key);
                                         active_indices.remove(&key);
                                         speaker_levels.remove(&key);
@@ -466,6 +519,50 @@ pub(crate) async fn run_playout_recv_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_dtx_does_not_extend_remote_floor_deadline() {
+        let peer = 7;
+        let started = tokio::time::Instant::now();
+        let owners = std::collections::HashSet::from([peer]);
+        let mut deadlines = std::collections::HashMap::new();
+
+        update_remote_release_deadline(peer, true, &owners, &mut deadlines, started);
+        let armed = deadlines[&peer];
+        for elapsed_ms in [100, 200, 300, 400] {
+            update_remote_release_deadline(
+                peer,
+                true,
+                &owners,
+                &mut deadlines,
+                started + std::time::Duration::from_millis(elapsed_ms),
+            );
+        }
+
+        assert_eq!(deadlines[&peer], armed);
+        assert!(armed <= started + REMOTE_RELEASE_DEBOUNCE);
+
+        let human_floor = HumanFloor::new();
+        human_floor.enter_remote(peer);
+        let mut owners = owners;
+        release_expired_remote_floors(armed, &mut owners, &mut deadlines, &human_floor);
+        assert!(!human_floor.is_blocked());
+        assert!(owners.is_empty());
+        assert!(deadlines.is_empty());
+    }
+
+    #[test]
+    fn dtx_from_non_owner_does_not_arm_remote_floor_deadline() {
+        let mut deadlines = std::collections::HashMap::new();
+        update_remote_release_deadline(
+            7,
+            true,
+            &std::collections::HashSet::new(),
+            &mut deadlines,
+            tokio::time::Instant::now(),
+        );
+        assert!(deadlines.is_empty());
+    }
 
     #[test]
     fn speaker_level_maps_conversational_range() {

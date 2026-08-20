@@ -238,6 +238,7 @@ impl PlaybackCoordinator {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn human_floor_blocked(&self) -> bool {
         let state = self.lock();
         state.human_floor.local || !state.human_floor.remote.is_empty()

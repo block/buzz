@@ -32,6 +32,7 @@ impl HumanFloor {
         Arc::clone(&self.playback)
     }
 
+    #[cfg(test)]
     pub(crate) fn is_blocked(&self) -> bool {
         self.playback.human_floor_blocked()
     }
