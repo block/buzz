@@ -1049,11 +1049,6 @@ impl Config {
 mod tests {
     use super::*;
 
-    // Mutex to serialize tests that mutate environment variables.
-    // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
-    // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Look up against a fixed set, standing in for process env.
     fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
         move |name| {
@@ -1109,7 +1104,7 @@ mod tests {
 
     #[test]
     fn defaults_are_valid() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let _env = crate::test_env::EnvGuard::new();
         let config = Config::from_env().expect("default config");
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
@@ -1161,23 +1156,15 @@ mod tests {
 
     #[test]
     fn s3_addressing_style_env_accepts_virtual_and_rejects_invalid_values() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
-
-        std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "virtual");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_S3_ADDRESSING_STYLE", "virtual");
         let configured = Config::from_env()
             .expect("virtual style config")
             .media
             .s3_addressing_style;
 
-        std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "auto");
+        env.set_now("BUZZ_S3_ADDRESSING_STYLE", "auto");
         let invalid = Config::from_env();
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", value);
-        } else {
-            std::env::remove_var("BUZZ_S3_ADDRESSING_STYLE");
-        }
 
         assert_eq!(configured, buzz_media::config::S3AddressingStyle::Virtual);
         assert!(matches!(
@@ -1192,20 +1179,13 @@ mod tests {
     fn s3_addressing_style_env_rejects_non_unicode_values() {
         use std::os::unix::ffi::OsStringExt;
 
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
-        std::env::set_var(
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now(
             "BUZZ_S3_ADDRESSING_STYLE",
             std::ffi::OsString::from_vec(vec![0xff]),
         );
 
         let invalid = Config::from_env();
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", value);
-        } else {
-            std::env::remove_var("BUZZ_S3_ADDRESSING_STYLE");
-        }
 
         assert!(matches!(
             invalid,
@@ -1216,23 +1196,15 @@ mod tests {
 
     #[test]
     fn redis_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
-
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_REDIS_POOL_SIZE", "32");
         let overridden = Config::from_env().expect("config").redis_pool_size;
 
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "0");
+        env.set_now("BUZZ_REDIS_POOL_SIZE", "0");
         let zero = Config::from_env().expect("config").redis_pool_size;
 
-        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "not-a-number");
+        env.set_now("BUZZ_REDIS_POOL_SIZE", "not-a-number");
         let junk = Config::from_env().expect("config").redis_pool_size;
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_REDIS_POOL_SIZE", value);
-        } else {
-            std::env::remove_var("BUZZ_REDIS_POOL_SIZE");
-        }
 
         assert_eq!(overridden, 32);
         assert_eq!(zero, 16, "zero must fall back to the default");
@@ -1241,23 +1213,15 @@ mod tests {
 
     #[test]
     fn db_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_DB_POOL_SIZE");
-
-        std::env::set_var("BUZZ_DB_POOL_SIZE", "80");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_DB_POOL_SIZE", "80");
         let overridden = Config::from_env().expect("config").db_pool_size;
 
-        std::env::set_var("BUZZ_DB_POOL_SIZE", "0");
+        env.set_now("BUZZ_DB_POOL_SIZE", "0");
         let zero = Config::from_env().expect("config").db_pool_size;
 
-        std::env::set_var("BUZZ_DB_POOL_SIZE", "not-a-number");
+        env.set_now("BUZZ_DB_POOL_SIZE", "not-a-number");
         let junk = Config::from_env().expect("config").db_pool_size;
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_DB_POOL_SIZE", value);
-        } else {
-            std::env::remove_var("BUZZ_DB_POOL_SIZE");
-        }
 
         assert_eq!(overridden, 80);
         assert_eq!(zero, 50, "zero must fall back to the default");
@@ -1266,26 +1230,18 @@ mod tests {
 
     #[test]
     fn db_read_pool_size_env_override_and_invalid_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_DB_READ_POOL_SIZE");
-
-        std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove_now("BUZZ_DB_READ_POOL_SIZE");
         let unset = Config::from_env().expect("config").db_read_pool_size;
 
-        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "40");
+        env.set_now("BUZZ_DB_READ_POOL_SIZE", "40");
         let overridden = Config::from_env().expect("config").db_read_pool_size;
 
-        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "0");
+        env.set_now("BUZZ_DB_READ_POOL_SIZE", "0");
         let zero = Config::from_env().expect("config").db_read_pool_size;
 
-        std::env::set_var("BUZZ_DB_READ_POOL_SIZE", "not-a-number");
+        env.set_now("BUZZ_DB_READ_POOL_SIZE", "not-a-number");
         let junk = Config::from_env().expect("config").db_read_pool_size;
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_DB_READ_POOL_SIZE", value);
-        } else {
-            std::env::remove_var("BUZZ_DB_READ_POOL_SIZE");
-        }
 
         assert_eq!(unset, None, "unset must inherit the writer pool sizing");
         assert_eq!(overridden, Some(40));
@@ -1295,23 +1251,16 @@ mod tests {
 
     #[test]
     fn read_database_url_unset_or_blank_is_none() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("READ_DATABASE_URL");
+        let mut env = crate::test_env::EnvGuard::new();
 
-        std::env::remove_var("READ_DATABASE_URL");
+        env.remove_now("READ_DATABASE_URL");
         let unset = Config::from_env().expect("config").read_database_url;
 
-        std::env::set_var("READ_DATABASE_URL", "   ");
+        env.set_now("READ_DATABASE_URL", "   ");
         let blank = Config::from_env().expect("config").read_database_url;
 
-        std::env::set_var("READ_DATABASE_URL", "postgres://buzz:pw@replica:5432/buzz"); // sadscan:disable np.postgres.1
+        env.set_now("READ_DATABASE_URL", "postgres://buzz:pw@replica:5432/buzz"); // sadscan:disable np.postgres.1
         let set = Config::from_env().expect("config").read_database_url;
-
-        if let Some(value) = previous {
-            std::env::set_var("READ_DATABASE_URL", value);
-        } else {
-            std::env::remove_var("READ_DATABASE_URL");
-        }
 
         assert_eq!(unset, None, "unset READ_DATABASE_URL must disable routing");
         assert_eq!(blank, None, "blank READ_DATABASE_URL must disable routing");
@@ -1323,39 +1272,30 @@ mod tests {
 
     #[test]
     fn replica_read_max_age_defaults_off_and_rejects_junk() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        let previous_old = std::env::var_os("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
-        std::env::remove_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
+        let mut env = crate::test_env::EnvGuard::new();
 
-        std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
+        env.remove_now("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
+
+        env.remove_now("BUZZ_REPLICA_READ_MAX_AGE_MS");
         let unset = Config::from_env().expect("config").replica_read_max_age_ms;
 
-        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "1000");
+        env.set_now("BUZZ_REPLICA_READ_MAX_AGE_MS", "1000");
         let set = Config::from_env().expect("config").replica_read_max_age_ms;
 
-        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "0");
+        env.set_now("BUZZ_REPLICA_READ_MAX_AGE_MS", "0");
         let zero = Config::from_env().expect("config").replica_read_max_age_ms;
 
-        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "soon");
+        env.set_now("BUZZ_REPLICA_READ_MAX_AGE_MS", "soon");
         let junk = Config::from_env();
 
         // The retired seconds-denominated name must be a hard startup
         // error even alongside a valid new-name value: silently ignoring
         // it (or honouring it) would mean 1000x the intended budget.
-        std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", "1000");
-        std::env::set_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS", "5");
+        env.set_now("BUZZ_REPLICA_READ_MAX_AGE_MS", "1000");
+        env.set_now("BUZZ_REPLICA_HEAD_MAX_AGE_SECS", "5");
         let old_name = Config::from_env();
 
-        std::env::remove_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_REPLICA_READ_MAX_AGE_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_REPLICA_READ_MAX_AGE_MS");
-        }
-        if let Some(value) = previous_old {
-            std::env::set_var("BUZZ_REPLICA_HEAD_MAX_AGE_SECS", value);
-        }
+        env.remove_now("BUZZ_REPLICA_HEAD_MAX_AGE_SECS");
 
         assert_eq!(unset, 0, "replica read routing must default off");
         assert_eq!(set, 1000);
@@ -1375,39 +1315,32 @@ mod tests {
 
     #[test]
     fn drain_jitter_defaults_off_and_rejects_junk() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_DRAIN_JITTER_MS");
+        let mut env = crate::test_env::EnvGuard::new();
 
-        std::env::remove_var("BUZZ_DRAIN_JITTER_MS");
+        env.remove_now("BUZZ_DRAIN_JITTER_MS");
         let unset = Config::from_env().expect("config").drain_jitter_ms;
 
-        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "20000");
+        env.set_now("BUZZ_DRAIN_JITTER_MS", "20000");
         let set = Config::from_env().expect("config").drain_jitter_ms;
 
-        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "60000");
+        env.set_now("BUZZ_DRAIN_JITTER_MS", "60000");
         let capped = Config::from_env().expect("config").drain_jitter_ms;
 
-        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "0");
+        env.set_now("BUZZ_DRAIN_JITTER_MS", "0");
         let zero = Config::from_env().expect("config").drain_jitter_ms;
 
-        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "soon");
+        env.set_now("BUZZ_DRAIN_JITTER_MS", "soon");
         let junk = Config::from_env();
 
-        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "");
+        env.set_now("BUZZ_DRAIN_JITTER_MS", "");
         let empty = Config::from_env()
             .expect("empty is a valid kill switch")
             .drain_jitter_ms;
 
-        std::env::set_var("BUZZ_DRAIN_JITTER_MS", "   ");
+        env.set_now("BUZZ_DRAIN_JITTER_MS", "   ");
         let blank = Config::from_env()
             .expect("whitespace-only is a valid kill switch")
             .drain_jitter_ms;
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_DRAIN_JITTER_MS", value);
-        } else {
-            std::env::remove_var("BUZZ_DRAIN_JITTER_MS");
-        }
 
         assert_eq!(unset, 0, "drain jitter must default off");
         assert_eq!(set, MAX_DRAIN_JITTER_MS);
@@ -1429,30 +1362,20 @@ mod tests {
 
     #[test]
     fn audit_logging_defaults_on_and_accepts_explicit_off() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
-        std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        let mut env = crate::test_env::EnvGuard::new();
+
+        env.remove_now("BUZZ_AUDIT_ENABLED");
         assert!(parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
-        std::env::set_var("BUZZ_AUDIT_ENABLED", "false");
+        env.set_now("BUZZ_AUDIT_ENABLED", "false");
         assert!(!parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
-        } else {
-            std::env::remove_var("BUZZ_AUDIT_ENABLED");
-        }
     }
 
     #[test]
     fn audit_logging_rejects_invalid_boolean() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
-        std::env::set_var("BUZZ_AUDIT_ENABLED", "sometimes");
+        let mut env = crate::test_env::EnvGuard::new();
+
+        env.set_now("BUZZ_AUDIT_ENABLED", "sometimes");
         let result = parse_bool("BUZZ_AUDIT_ENABLED", true);
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
-        } else {
-            std::env::remove_var("BUZZ_AUDIT_ENABLED");
-        }
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref message))
@@ -1462,15 +1385,10 @@ mod tests {
 
     #[test]
     fn join_policy_age_attestation_rejects_invalid_boolean() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_AGE_ATTESTATION_REQUIRED");
-        std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", "sometimes");
+        let mut env = crate::test_env::EnvGuard::new();
+
+        env.set_now("BUZZ_AGE_ATTESTATION_REQUIRED", "sometimes");
         let result = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED");
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", value);
-        } else {
-            std::env::remove_var("BUZZ_AGE_ATTESTATION_REQUIRED");
-        }
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref message))
@@ -1480,16 +1398,13 @@ mod tests {
 
     #[test]
     fn rate_limits_can_be_overridden() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
-        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
-        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
+        env.set_now("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
+        env.set_now("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
 
         let config = Config::from_env().expect("config");
 
-        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
-        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN");
-        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
         assert_eq!(config.auth.rate_limits.human_messages_per_min, 1001);
         assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
         assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
@@ -1497,10 +1412,9 @@ mod tests {
 
     #[test]
     fn rate_limit_overrides_reject_zero() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "0");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "0");
         let result = Config::from_env();
-        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
 
         assert!(matches!(
             result,
@@ -1511,18 +1425,16 @@ mod tests {
 
     #[test]
     fn relay_operator_pubkeys_parse_dedupe_and_normalize() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var(
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now(
             "RELAY_OPERATOR_PUBKEYS",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
-        std::env::set_var(
+        env.set_now(
             "RELAY_OPERATOR_API_ORIGIN",
             "http://buzz.mesh.bb-production.com",
         );
         let config = Config::from_env().expect("config");
-        std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
-        std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
 
         assert_eq!(
             config.relay_operator_pubkeys,
@@ -1535,10 +1447,9 @@ mod tests {
 
     #[test]
     fn relay_operator_pubkeys_invalid_entry_is_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("RELAY_OPERATOR_PUBKEYS", "not-a-pubkey");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("RELAY_OPERATOR_PUBKEYS", "not-a-pubkey");
         let result = Config::from_env();
-        std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
 
         assert!(matches!(
             result,
@@ -1548,14 +1459,13 @@ mod tests {
 
     #[test]
     fn relay_operator_pubkeys_require_api_origin() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var(
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now(
             "RELAY_OPERATOR_PUBKEYS",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
-        std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
+        env.remove_now("RELAY_OPERATOR_API_ORIGIN");
         let result = Config::from_env();
-        std::env::remove_var("RELAY_OPERATOR_PUBKEYS");
 
         assert!(matches!(
             result,
@@ -1565,10 +1475,9 @@ mod tests {
 
     #[test]
     fn relay_operator_api_origin_rejects_paths() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("RELAY_OPERATOR_API_ORIGIN", "https://buzz.example/operator");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("RELAY_OPERATOR_API_ORIGIN", "https://buzz.example/operator");
         let result = Config::from_env();
-        std::env::remove_var("RELAY_OPERATOR_API_ORIGIN");
 
         assert!(matches!(
             result,
@@ -1578,9 +1487,8 @@ mod tests {
 
     #[test]
     fn push_gateway_defaults_to_buzz_and_can_be_disabled() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
-        std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.remove_now("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         let config = Config::from_env().expect("default config");
         assert_eq!(
             config
@@ -1590,15 +1498,9 @@ mod tests {
             Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
         );
 
-        std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
+        env.set_now("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
         let config = Config::from_env().expect("disabled push config");
         assert!(config.push_gateway_delivery_url.is_none());
-
-        if let Some(value) = previous {
-            std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
-        } else {
-            std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
-        }
     }
 
     #[test]
@@ -1619,10 +1521,9 @@ mod tests {
 
     #[test]
     fn invalid_push_gateway_timeout_is_not_silently_defaulted() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS", "99");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_PUSH_GATEWAY_TIMEOUT_MS", "99");
         let result = Config::from_env();
-        std::env::remove_var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS");
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref message))
@@ -1632,10 +1533,9 @@ mod tests {
 
     #[test]
     fn invalid_push_executor_key_id_is_rejected() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_PUSH_EXECUTOR_KEY_ID", "");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_PUSH_EXECUTOR_KEY_ID", "");
         let result = Config::from_env();
-        std::env::remove_var("BUZZ_PUSH_EXECUTOR_KEY_ID");
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref message))
@@ -1645,10 +1545,9 @@ mod tests {
 
     #[test]
     fn huddle_audio_available_can_be_disabled_for_horizontal_scaling() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_HUDDLE_AUDIO_AVAILABLE", "false");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_HUDDLE_AUDIO_AVAILABLE", "false");
         let config = Config::from_env().expect("config");
-        std::env::remove_var("BUZZ_HUDDLE_AUDIO_AVAILABLE");
         assert!(
             !config.huddle_audio_available,
             "BUZZ_HUDDLE_AUDIO_AVAILABLE=false must disable huddle audio (multi-pod deployments)"
@@ -1665,17 +1564,16 @@ mod tests {
 
     #[test]
     fn pairing_relay_url_accepts_websocket_urls_and_rejects_http() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_PAIRING_RELAY_URL", "wss://pairing.buzz.xyz");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_PAIRING_RELAY_URL", "wss://pairing.buzz.xyz");
         let config = Config::from_env().expect("config");
         assert_eq!(
             config.pairing_relay_url.as_deref(),
             Some("wss://pairing.buzz.xyz")
         );
 
-        std::env::set_var("BUZZ_PAIRING_RELAY_URL", "https://pairing.buzz.xyz");
+        env.set_now("BUZZ_PAIRING_RELAY_URL", "https://pairing.buzz.xyz");
         let result = Config::from_env();
-        std::env::remove_var("BUZZ_PAIRING_RELAY_URL");
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_PAIRING_RELAY_URL")
@@ -1684,16 +1582,15 @@ mod tests {
 
     #[test]
     fn max_frame_bytes_can_be_configured() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_MAX_FRAME_BYTES", "262144");
+        let mut env = crate::test_env::EnvGuard::new();
+        env.set_now("BUZZ_MAX_FRAME_BYTES", "262144");
         let config = Config::from_env().expect("config");
-        std::env::remove_var("BUZZ_MAX_FRAME_BYTES");
         assert_eq!(config.max_frame_bytes, 262_144);
     }
 
     #[test]
     fn git_repo_path_is_created_if_missing() {
-        let _guard = ENV_MUTEX.lock().unwrap();
+        let mut env = crate::test_env::EnvGuard::new();
         // Pick a path under temp_dir that definitely doesn't exist yet.
         let base = std::env::temp_dir().join(format!(
             "buzz-test-git-repo-path-{}-{}",
@@ -1706,9 +1603,8 @@ mod tests {
         let nested = base.join("nested").join("repos");
         assert!(!nested.exists(), "test precondition: path must not exist");
 
-        std::env::set_var("BUZZ_GIT_REPO_PATH", &nested);
+        env.set_now("BUZZ_GIT_REPO_PATH", &nested);
         let result = Config::from_env();
-        std::env::remove_var("BUZZ_GIT_REPO_PATH");
 
         let config = result.expect("config should self-bootstrap missing git_repo_path");
         assert_eq!(config.git_repo_path, nested);
