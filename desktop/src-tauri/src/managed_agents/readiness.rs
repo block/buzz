@@ -82,7 +82,7 @@ pub(crate) struct EffectiveAgentEnv {
 //
 // A single owned type that fully describes what a spawn would run.  Produced
 // by `resolve_effective_harness_descriptor` and consumed by spawn_agent_child,
-// spawn_config_hash, build_managed_agent_summary, get_agent_models, and
+// spawn_snapshot, build_managed_agent_summary, get_agent_models, and
 // agent_readiness — so the harness-definition lookup and arg/env resolution
 // happen exactly once, in one place.
 
@@ -1051,19 +1051,16 @@ mod tests {
             thinking_env_var: None,
             max_tokens_env_var: None,
             context_limit_env_var: None,
+            max_rounds_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
         }
     }
 
-    /// Returns the absolute path of the currently-running test binary as a
-    /// `&'static str`.  Host-portable stand-in for a "present" binary:
-    /// the path is absolute so `find_command` resolves it via `path.exists()`
-    /// rather than searching `PATH`, and the file always exists on the host.
-    ///
-    /// The tiny allocation is intentionally leaked — this runs at most once per
-    /// test process and the process exits immediately after tests complete.
+    /// Returns the absolute path of the currently-running test binary as a `&'static str`.
+    /// Host-portable stand-in for a "present" binary: absolute path so `find_command` resolves
+    /// it via `path.exists()`. Leaked allocation is intentional — process exits after tests.
     fn present_binary_str() -> &'static str {
         let path = std::env::current_exe().expect("current_exe must be available in tests");
         Box::leak(path.to_string_lossy().into_owned().into_boxed_str())
@@ -1246,6 +1243,7 @@ mod tests {
             thinking_env_var: None,
             max_tokens_env_var: None,
             context_limit_env_var: None,
+            max_rounds_env_var: None,
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
@@ -1467,9 +1465,8 @@ mod tests {
 
     #[test]
     fn resolve_effective_agent_env_user_env_wins_over_structured_fields() {
-        // A record whose env_vars explicitly set provider/model must win over
-        // any baked defaults. In OSS test builds the baked map is empty, so
-        // this test validates the user-env layer is present in the output.
+        // User env_vars must win over baked defaults; in OSS builds baked map is empty,
+        // so this validates the user-env layer is present in the output.
         let mut env_vars = BTreeMap::new();
         env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
         env_vars.insert(
@@ -1505,6 +1502,7 @@ mod tests {
             runtime_pid: None,
             backend: Default::default(),
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: None,
             persona_team_dir: None,
@@ -1532,6 +1530,7 @@ mod tests {
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,
             relay_mesh: None,
+            effort_level: None,
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");
@@ -1547,8 +1546,6 @@ mod tests {
             Some("claude-opus-4-5")
         );
     }
-
-    // ── provider-specific model fallback tests ────────────────────────────
 
     #[test]
     fn buzz_agent_databricks_v2_with_databricks_model_but_no_buzz_agent_model_is_ready() {

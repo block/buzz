@@ -29,11 +29,38 @@ pub struct RelayMember {
 
 /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
 pub async fn is_relay_member(pool: &PgPool, community: CommunityId, pubkey: &str) -> Result<bool> {
+    let mut conn = pool.acquire().await?;
+    is_relay_member_on(&mut conn, community, pubkey).await
+}
+
+/// [`is_relay_member`] on a specific session — the replica-routing path runs
+/// the lookup on the exact reader connection whose heartbeat observation
+/// proved fence coverage.
+pub(crate) async fn is_relay_member_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<bool> {
     let row = sqlx::query("SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2")
         .bind(community.as_uuid())
         .bind(pubkey)
-        .fetch_optional(pool)
+        .fetch_optional(conn)
         .await?;
+    Ok(row.is_some())
+}
+
+/// Returns `true` if any member of `community` holds the `admin` or `owner`
+/// role. Open relays don't *enforce* the roster, but startup
+/// (`bootstrap_owner`) and operator provisioning still populate it — this is
+/// how the workspace-profile gate detects whether a steward exists.
+pub async fn has_admin_or_owner(pool: &PgPool, community: CommunityId) -> Result<bool> {
+    let row = sqlx::query(
+        "SELECT 1 FROM relay_members \
+         WHERE community_id = $1 AND role IN ('admin', 'owner') LIMIT 1",
+    )
+    .bind(community.as_uuid())
+    .fetch_optional(pool)
+    .await?;
     Ok(row.is_some())
 }
 

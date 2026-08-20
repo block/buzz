@@ -1,25 +1,100 @@
 part of '../settings_page.dart';
 
 class _ConnectionSection extends ConsumerWidget {
-  const _ConnectionSection();
+  const _ConnectionSection({required this.identityRecoveryPageBuilder});
+
+  final WidgetBuilder identityRecoveryPageBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final config = ref.watch(relayConfigProvider);
+    final authState = ref.watch(authProvider).value;
     final nsec = config.nsec;
+    final community = authState?.community;
 
     return AppListCard(
       label: 'Connection',
+      verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           icon: LucideIcons.server,
           title: 'Connected to',
           subtitle: config.baseUrl,
         ),
-        if (nsec != null && nsec.isNotEmpty) _IdentityRow(nsec: nsec),
+        if (nsec != null && nsec.isNotEmpty && community != null) ...[
+          _IdentityRow(nsec: nsec),
+          AppListRow(
+            icon: LucideIcons.scanQrCode,
+            title: 'Send identity to desktop',
+            subtitle: 'Scan a recovery code shown by Buzz Desktop',
+            trailing: const _RowChevron(),
+            onTap: () async {
+              final pairing = ref.read(pairingProvider.notifier);
+              final authorized = await pairing.authorizeIdentityExport(
+                community: community,
+              );
+              if (!authorized) {
+                if (!context.mounted) return;
+                final message = ref.read(pairingProvider).errorMessage;
+                if (message != null) {
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text(message)));
+                }
+                return;
+              }
+
+              try {
+                if (!context.mounted) return;
+                final resumed = await _waitForResumedFrame();
+                if (!resumed) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Buzz did not return to the foreground. Try again.',
+                        ),
+                      ),
+                    );
+                  }
+                  return;
+                }
+                if (!context.mounted) return;
+                await Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: identityRecoveryPageBuilder),
+                );
+              } finally {
+                pairing.reset();
+              }
+            },
+          ),
+        ],
       ],
     );
   }
+}
+
+const _resumeWaitTimeout = Duration(seconds: 5);
+
+Future<bool> _waitForResumedFrame() async {
+  final binding = WidgetsBinding.instance;
+  if (binding.lifecycleState != AppLifecycleState.resumed) {
+    final resumed = Completer<void>();
+    final listener = AppLifecycleListener(
+      onResume: () {
+        if (!resumed.isCompleted) resumed.complete();
+      },
+    );
+    try {
+      await resumed.future.timeout(_resumeWaitTimeout);
+    } on TimeoutException {
+      return false;
+    } finally {
+      listener.dispose();
+    }
+  }
+  await binding.endOfFrame;
+  return true;
 }
 
 /// Destructive, so it gets a container of its own rather than sitting at the
@@ -30,6 +105,7 @@ class _RemoveCommunitySection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return AppListCard(
+      verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           icon: LucideIcons.logOut,
@@ -73,7 +149,7 @@ class _IdentityRow extends StatelessWidget {
 }
 
 void _confirmRemoveCommunity(BuildContext context, WidgetRef ref) {
-  showDialog<void>(
+  showBuzzDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: const Text('Remove Community'),

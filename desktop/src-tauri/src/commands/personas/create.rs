@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        apply_persona_behavior, load_personas, save_personas, try_regenerate_nest, AgentDefinition,
-        CatalogSource, CreatePersonaRequest,
+        apply_persona_behavior, load_personas, save_personas, try_regenerate_nest,
+        validate_agent_definition_text, AgentDefinition, CatalogSource, CreatePersonaRequest,
     },
     util::now_iso,
 };
@@ -25,7 +25,10 @@ pub async fn create_persona(
         let state = app.state::<AppState>();
         let display_name = trim_required(&input.display_name, "Display name")?;
         // System prompt optional: core memory is auto-injected. Empty is valid.
-        let system_prompt = input.system_prompt.trim().to_string();
+        // Preserve it byte-for-byte: shared/import review surfaces show this
+        // exact string before the ACP harness executes it.
+        let system_prompt = input.system_prompt.clone();
+        validate_agent_definition_text(&display_name, &system_prompt)?;
         let avatar_url = trim_optional(input.avatar_url);
         let runtime = trim_optional(input.runtime);
         let model = trim_optional(input.model);

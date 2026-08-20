@@ -9,6 +9,7 @@ import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
 import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
 import type { ResolvedPos } from "@tiptap/pm/model";
 
+import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
 import {
   hasPrimaryShortcutModifier,
   isMacPlatform,
@@ -28,6 +29,8 @@ import {
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
+import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
+import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
   CodeBlockAfterHardBreak,
@@ -36,6 +39,9 @@ import {
 } from "./codeBlockExtensions";
 import type { ComposerSubmitShortcut } from "./composerSubmitShortcut";
 import { SpoilerMark } from "./spoilerMark";
+import { createComposerLinkPasteHandler } from "./composerMessageLinkNode";
+import type { ComposerMessageLinkChannel } from "./useComposerMessageLinks";
+import { useComposerMessageLinks } from "./useComposerMessageLinks";
 
 function hardBreakLineBounds($from: ResolvedPos) {
   const parentStart = $from.start();
@@ -76,11 +82,12 @@ export type AutocompleteEdit = {
 
 export type RichTextEditorOptions = {
   placeholder?: string;
-  onUpdate?: (info: { text: string; cursor: number }) => void;
+  onUpdate?: (info: ReturnType<typeof buildPreviewUpdate>) => void;
   editable?: boolean;
   mentionNames?: string[];
   agentMentionNames?: string[];
   channelNames?: string[];
+  messageLinkChannels?: readonly ComposerMessageLinkChannel[];
   /** Known custom-emoji set; used to render `:shortcode:` inline as images. */
   customEmoji?: CustomEmoji[];
   /** Called by the active submit shortcut. Handled inside Tiptap's extension
@@ -281,6 +288,7 @@ export function useRichTextEditor({
   mentionNames,
   agentMentionNames,
   channelNames,
+  messageLinkChannels,
   customEmoji,
   onSubmit,
   onEditLastOwnMessage,
@@ -318,6 +326,7 @@ export function useRichTextEditor({
   // Custom-emoji atom node wiring (config + src re-resolve). Kept in a sibling
   // hook so this file stays focused on generic editor setup.
   const customEmojiWiring = useComposerCustomEmoji(customEmoji);
+  const messageLinkWiring = useComposerMessageLinks(messageLinkChannels);
 
   const editor = useEditor(
     {
@@ -480,6 +489,7 @@ export function useRichTextEditor({
         SpoilerMark,
         MentionHighlightExtension,
         customEmojiWiring.extension,
+        messageLinkWiring.extension,
         Placeholder.configure({
           placeholder: () => placeholderRef.current ?? "Write a message…",
         }),
@@ -512,10 +522,21 @@ export function useRichTextEditor({
         }),
       ],
       editorProps: {
+        handleDOMEvents: {
+          paste: (view, event) =>
+            parseSnapshotClipboardHtml(
+              (event as ClipboardEvent).clipboardData?.getData("text/html") ??
+                "",
+            )
+              ? false
+              : createComposerLinkPasteHandler(
+                  messageLinkWiring.resolveChannelName,
+                )(view, event as ClipboardEvent),
+        },
         attributes: {
           autocapitalize: "none",
           autocorrect: "off",
-          class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
+          class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-message font-normal tracking-normal text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
           spellcheck: "true",
         },
@@ -555,6 +576,39 @@ export function useRichTextEditor({
                 TextSelection.create(view.state.doc, position),
               ),
             );
+            return true;
+          }
+
+          // Cmd+Shift+V / Ctrl+Shift+V → paste the clipboard's plain-text
+          // representation. Embedded webviews permission-gate the browser
+          // clipboard API differently across operating systems, so packaged
+          // builds read through the native arboard command. Browser builds use
+          // navigator.clipboard as a fallback. Feed the result through
+          // ProseMirror's paste pipeline with clipboardData populated so its
+          // plain-text observers keep normal paste behavior.
+          if (
+            event.key.toLowerCase() === "v" &&
+            hasPrimaryShortcutModifier(event) &&
+            event.shiftKey &&
+            !event.altKey &&
+            !event.repeat &&
+            !event.isComposing
+          ) {
+            event.preventDefault();
+            void readTextFromSystemClipboard()
+              .then((text) => {
+                const clipboardData = new DataTransfer();
+                clipboardData.setData("text/plain", text);
+                view.pasteText(
+                  text,
+                  new ClipboardEvent("paste", { clipboardData }),
+                );
+              })
+              .catch(() => {
+                // The key is already consumed. Letting a delayed native paste
+                // race the asynchronous read could duplicate or unexpectedly
+                // format content.
+              });
             return true;
           }
 
@@ -611,11 +665,9 @@ export function useRichTextEditor({
         // still available through `getMarkdown()` for send/draft boundaries;
         // per-keystroke consumers only need textarea-shaped plain text for
         // autocomplete and empty/non-empty state.
-        const projection = buildPlainTextProjection(ed.state.doc);
-        onUpdateRef.current?.({
-          cursor: projection.mapPMToTextOffset(ed.state.selection.anchor),
-          text: projection.text,
-        });
+        onUpdateRef.current?.(
+          buildPreviewUpdate(ed.state.doc, ed.state.selection.anchor),
+        );
       },
     },
     [],
@@ -689,6 +741,11 @@ export function useRichTextEditor({
     customEmojiWiring.syncEmojiSrc(editor);
   }, [editor, customEmojiWiring.syncEmojiSrc]);
 
+  React.useEffect(() => {
+    if (!editor) return;
+    messageLinkWiring.syncChannelNames(editor);
+  }, [editor, messageLinkWiring.syncChannelNames]);
+
   const getMarkdown = React.useCallback((): string => {
     if (!editor) return "";
     return getMarkdownFromEditor(editor);
@@ -711,17 +768,26 @@ export function useRichTextEditor({
     [editor],
   );
 
-  const setContentAndFocusEnd = React.useCallback(
-    (markdown: string) => {
+  /**
+   * Replace the editor document with literal plain text and focus its end.
+   *
+   * Unlike markdown `setContent`, this preserves trailing whitespace. The
+   * transaction is marked as programmatic so authored-update observers do not
+   * reconcile against the intermediate post-send restoration.
+   */
+  const restorePlainTextAndFocusEnd = React.useCallback(
+    (text: string) => {
       if (!editor) return;
-      // The caller already synchronizes composer state. Keep this programmatic
-      // restoration out of user-edit observers (autocomplete/reconciliation),
-      // then move selection in the same command chain.
-      editor
-        .chain()
-        .setContent(markdown, { emitUpdate: false })
-        .focus("end")
-        .run();
+      const paragraph = editor.schema.nodes.paragraph.create(
+        null,
+        text ? editor.schema.text(text) : undefined,
+      );
+      const tr = editor.state.tr
+        .replaceWith(0, editor.state.doc.content.size, paragraph)
+        .setMeta("preventUpdate", true);
+      tr.setSelection(TextSelection.atEnd(tr.doc));
+      editor.view.dispatch(tr);
+      editor.view.focus();
     },
     [editor],
   );
@@ -919,7 +985,7 @@ export function useRichTextEditor({
     isEmpty,
     clearContent,
     setContent,
-    setContentAndFocusEnd,
+    restorePlainTextAndFocusEnd,
     focus,
     focusEnd,
     focusPreserve,

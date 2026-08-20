@@ -8,7 +8,11 @@ import {
   useComposerSubmitShortcut,
   type ComposerSubmitShortcut,
 } from "@/features/messages/lib/composerSubmitShortcut";
-import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import {
+  SettingsOptionGroup,
+  SettingsOptionGroupList,
+  SettingsOptionRow,
+} from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 const MOD_ENTER_SHORTCUT: KeyboardShortcut = {
@@ -139,43 +143,39 @@ export function KeyboardShortcutsCard() {
         description="All available keyboard shortcuts."
       />
 
-      <div className="space-y-4">
+      <SettingsOptionGroupList>
         {[...categories.entries()].map(([category, shortcuts]) => (
-          <div key={category}>
-            <h2 className="mb-2 text-lg font-semibold tracking-tight">
-              {category}
-            </h2>
-            <SettingsOptionGroup>
-              {category === "Messages" ? (
-                <ComposerSubmitShortcutRow
-                  sendWithModEnter={sendWithModEnter}
+          <SettingsOptionGroup key={category} title={category}>
+            {category === "Messages" ? (
+              <ComposerSubmitShortcutRow sendWithModEnter={sendWithModEnter} />
+            ) : null}
+            {shortcuts.map((shortcut) => (
+              <SettingsOptionRow
+                className="min-h-12 px-3 py-2"
+                key={shortcut.id}
+              >
+                <div className="min-w-0 flex-1">
+                  <span className="text-sm font-medium text-foreground">
+                    {shortcut.label}
+                  </span>
+                  <span
+                    className="ml-2 text-muted-foreground/70"
+                    data-settings-subcopy
+                  >
+                    {shortcut.description}
+                  </span>
+                </div>
+                <KeyCombo
+                  shortcut={getShortcutForDisplay(
+                    shortcut,
+                    composerSubmitShortcut,
+                  )}
                 />
-              ) : null}
-              {shortcuts.map((shortcut) => (
-                <SettingsOptionRow
-                  className="min-h-12 px-3 py-2"
-                  key={shortcut.id}
-                >
-                  <div className="min-w-0 flex-1">
-                    <span className="text-sm font-medium text-foreground">
-                      {shortcut.label}
-                    </span>
-                    <span className="ml-2 text-muted-foreground">
-                      {shortcut.description}
-                    </span>
-                  </div>
-                  <KeyCombo
-                    shortcut={getShortcutForDisplay(
-                      shortcut,
-                      composerSubmitShortcut,
-                    )}
-                  />
-                </SettingsOptionRow>
-              ))}
-            </SettingsOptionGroup>
-          </div>
+              </SettingsOptionRow>
+            ))}
+          </SettingsOptionGroup>
         ))}
-      </div>
+      </SettingsOptionGroupList>
     </section>
   );
 }

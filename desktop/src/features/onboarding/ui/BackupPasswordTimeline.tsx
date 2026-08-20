@@ -46,6 +46,66 @@ const TIMELINE_BOTTOM_DOT_TRANSITIONS = TIMELINE_CONNECTOR_DOTS.map(
   }),
 );
 
+export function BackupFileUnlockPreview() {
+  const reduceMotion = useReducedMotion() ?? false;
+
+  return (
+    <div
+      aria-hidden
+      className="mx-auto flex w-[min(28rem,calc(100vw-5rem))] flex-col items-center text-foreground/75"
+      data-testid="backup-file-unlock-preview"
+    >
+      <TimelineDots
+        reduceMotion={reduceMotion}
+        transitions={TIMELINE_TOP_DOT_TRANSITIONS}
+      />
+      <div
+        className="flex items-center justify-center gap-2 py-1"
+        data-testid="backup-file-key-dots"
+      >
+        {BACKUP_KEY_DOTS.map((dot) => (
+          <span
+            className="block size-2 rounded-full bg-foreground/85"
+            key={`preview-${dot}`}
+          />
+        ))}
+      </div>
+      <TimelineDots
+        reduceMotion={reduceMotion}
+        transitions={TIMELINE_BOTTOM_DOT_TRANSITIONS}
+      />
+      <LockOpen
+        className="size-9"
+        data-testid="backup-file-unlock-preview-icon"
+      />
+    </div>
+  );
+}
+
+function TimelineDots({
+  reduceMotion,
+  transitions,
+}: {
+  reduceMotion: boolean;
+  transitions: ReadonlyArray<
+    typeof TIMELINE_DOT_TRANSITION & { delay: number }
+  >;
+}) {
+  return (
+    <div className="my-3 flex h-12 flex-col items-center justify-between">
+      {TIMELINE_CONNECTOR_DOTS.map((dot, index) => (
+        <motion.span
+          animate={reduceMotion ? undefined : TIMELINE_DOT_PULSE}
+          className="block size-1.5 rounded-full bg-foreground/65"
+          initial={reduceMotion ? false : TIMELINE_DOT_INITIAL}
+          key={dot}
+          transition={reduceMotion ? undefined : transitions[index]}
+        />
+      ))}
+    </div>
+  );
+}
+
 /**
  * Decorative timeline shared by backup creation and encrypted-backup restore.
  * Backup creation reads key → password → lock; restore reads encrypted file →

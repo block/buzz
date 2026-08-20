@@ -9,6 +9,7 @@ import type {
   ProjectRepoPushResult,
   ProjectRepoSnapshot,
   ProjectRepoSyncStatus,
+  RelayEvent,
 } from "@/shared/api/types";
 import { invokeTauri, TauriInvokeError } from "@/shared/api/tauri";
 
@@ -176,6 +177,22 @@ export async function getProjectRepoSnapshot(input: {
   return fromRawProjectRepoSnapshot(snapshot);
 }
 
+export async function getProjectRepoFileContent(input: {
+  cloneUrl: string;
+  defaultBranch?: string | null;
+  targetRef?: string | null;
+  targetCommit?: string | null;
+  path: string;
+}): Promise<string | null> {
+  return invokeTauri<string | null>("get_project_repo_file_content", {
+    cloneUrl: input.cloneUrl,
+    defaultBranch: input.defaultBranch ?? null,
+    targetRef: input.targetRef ?? null,
+    targetCommit: input.targetCommit ?? null,
+    path: input.path,
+  });
+}
+
 export async function getProjectRepoDiff(input: {
   cloneUrl: string;
   defaultBranch?: string | null;
@@ -262,6 +279,20 @@ export async function getProjectLocalRepoSnapshot(input: {
     path: localSnapshot.path,
     snapshot: fromRawProjectRepoSnapshot(localSnapshot.snapshot),
   };
+}
+
+export async function getProjectLocalRepoFileContent(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl?: string | null;
+  path: string;
+}): Promise<string | null> {
+  return invokeTauri<string | null>("get_project_local_repo_file_content", {
+    reposDir: input.reposDir ?? null,
+    projectDtag: input.projectDtag,
+    cloneUrl: input.cloneUrl ?? null,
+    path: input.path,
+  });
 }
 
 export async function listProjectLocalRepositories(input: {
@@ -596,6 +627,45 @@ export async function signProjectPullRequestReviewRequest(input: {
   await invokeTauri<void>("sign_project_pull_request_review_request", {
     input,
   });
+}
+
+export async function publishProjectOwnerAnnouncement(input: {
+  targetOwner: string;
+  kind: number;
+  content: string;
+  createdAt?: number;
+  tags: string[][];
+}): Promise<{ event: RelayEvent; publicationError: string | null }> {
+  const result = await invokeTauri<{
+    event: string;
+    publication_error: string | null;
+  }>("publish_project_owner_announcement", { input });
+  return {
+    event: JSON.parse(result.event) as RelayEvent,
+    publicationError: result.publication_error,
+  };
+}
+
+export async function signProjectIssueAssignment(input: {
+  targetOwner: string;
+  repoAddress: string;
+  issueId: string;
+  assignees: string[];
+  assigneeLabel: string;
+  createdAt: number;
+}): Promise<void> {
+  await invokeTauri<void>("sign_project_issue_assignment", { input });
+}
+
+export async function signProjectIssueUnassignment(input: {
+  targetOwner: string;
+  repoAddress: string;
+  issueId: string;
+  assignees: string[];
+  assigneeLabel: string;
+  createdAt: number;
+}): Promise<void> {
+  await invokeTauri<void>("sign_project_issue_unassignment", { input });
 }
 
 export async function signProjectPullRequestStatus(input: {

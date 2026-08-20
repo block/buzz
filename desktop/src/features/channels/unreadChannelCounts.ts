@@ -78,6 +78,19 @@ export function countUnreadObservedEvents(
   return count;
 }
 
+export function hasUnreadTopLevelObservedEvent(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): boolean {
+  if (!eventsById) return false;
+  for (const event of eventsById.values()) {
+    if (event.rootId !== null) continue;
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) return true;
+  }
+  return false;
+}
+
 export function countUnreadBadgeObservedEvents(
   eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
   getReadAt: (event: ObservedUnreadEvent) => number | null,

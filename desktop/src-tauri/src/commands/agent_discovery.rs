@@ -1,14 +1,7 @@
-use tauri::State;
-
-use crate::{
-    app_state::AppState,
-    managed_agents::{
-        command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
-        DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
-        RelayAgentInfo, DEFAULT_ACP_COMMAND,
-    },
-    nostr_convert,
-    relay::query_relay,
+use crate::managed_agents::{
+    command_availability, is_npm_global_install, AcpRuntimeCatalogEntry,
+    DiscoverManagedAgentPrereqsRequest, InstallRuntimeResult, ManagedAgentPrereqsInfo,
+    DEFAULT_ACP_COMMAND,
 };
 
 mod post_install_verification;
@@ -21,25 +14,13 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 }
 
 /// Returns the adapter install commands that `install_acp_runtime_blocking` would
-/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or
-/// `None` if none was found).
+/// run for `runtime_id` given a resolved adapter binary at `adapter_path` (or `None` if not found).
+/// Returns `None` when no install is needed; `Some(cmds)` when adapter is missing or outdated.
 ///
-/// Returns `None` when no install is needed (adapter is present and current).
-/// Returns `Some(cmds)` when the adapter is missing or (for codex) below its
-/// minimum supported version.
-///
-/// For the codex **outdated** case the returned sequence is a two-step
-/// reinstall: first uninstall the old `@zed-industries/codex-acp` package
-/// (idempotent — exit 0 when absent), then install the new
-/// `@agentclientprotocol/codex-acp`.  This is required because both packages
-/// install a global binary named `codex-acp`, and npm ≥7 refuses to overwrite
-/// a bin file owned by a different package with `EEXIST`.
-///
-/// For the **missing** case the catalog's `adapter_install_commands` are used
-/// as-is (no prior package to remove).
-///
-/// This is a pure planning function: it never spawns a process.  Tests use it to
-/// assert the correct install command is selected without touching real npm.
+/// For the codex **outdated** case, returns a two-step reinstall: uninstall `@zed-industries/codex-acp`
+/// then install `@agentclientprotocol/codex-acp` (npm ≥7 refuses to overwrite a bin from another pkg).
+/// For the **missing** case, catalog's `adapter_install_commands` are used as-is.
+/// Pure planning function: never spawns a process. Tests use it to assert commands without real npm.
 pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
@@ -167,7 +148,6 @@ pub async fn save_custom_harness(
     Ok(AcpRuntimeCatalogEntry {
         id: definition.id,
         label: definition.label,
-        // Security: no user-supplied avatar URL in catalog entries.
         avatar_url: String::new(),
         availability,
         command: command_opt,
@@ -177,6 +157,9 @@ pub async fn save_custom_harness(
         model_env_var: None,
         provider_env_var: None,
         thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
         install_hint: definition.install_hint,
         install_instructions_url: definition.install_instructions_url,
         can_auto_install: false,
@@ -186,8 +169,8 @@ pub async fn save_custom_harness(
         auth_status: AuthStatus::NotApplicable,
         login_hint: None,
         source: HarnessSource::Custom,
-        // Carry definition env back so the edit form can read and preserve it.
         definition_env: definition.env,
+        max_parallelism: crate::managed_agents::harness_max_parallelism(&definition.command),
     })
 }
 
@@ -333,10 +316,7 @@ fn install_acp_runtime_blocking(
     // For the codex runtime, "found" is not enough — the resolved binary must also
     // pass the 1.x version gate. An outdated 0.16.x adapter must be overwritten by
     // the new npm install so the CODEX_CONFIG spawn contract works correctly.
-    let adapter_path = runtime
-        .commands
-        .iter()
-        .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+    let adapter_path = resolve_adapter_path(runtime.commands, runtime.adapter_install_commands);
     let adapter_probe_path = crate::managed_agents::readiness::cli_probe::augmented_path();
     if let Some(cmds) = plan_adapter_install(
         runtime_id,
@@ -1020,7 +1000,7 @@ use install_report::InstallReporter;
 mod managed_node;
 use managed_node::{
     ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,
-    npm_eacces_hint,
+    npm_eacces_hint, resolve_adapter_path,
 };
 
 #[tauri::command]
@@ -1050,30 +1030,30 @@ pub async fn discover_managed_agent_prereqs(
     .map_err(|e| format!("spawn_blocking failed: {e}"))
 }
 
-#[tauri::command]
-pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
-    // Query kind:10100 agent profile events from the relay.
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [10100],
-        })],
-    )
-    .await?;
-
-    // The convert helper returns `{"agents": [...]}`. Extract and re-deserialize
-    // into the strongly-typed `Vec<RelayAgentInfo>` the frontend expects.
-    let value = nostr_convert::agents_from_events(&events);
-    let agents = value
-        .get("agents")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    serde_json::from_value(agents).map_err(|e| format!("agent parse failed: {e}"))
-}
+mod relay_directory;
+#[cfg(test)]
+use relay_directory::advance_relay_cursor;
+pub use relay_directory::{list_relay_agents, revalidate_relay_agents};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_directory_cursor_uses_timestamp_and_event_id() {
+        use nostr::{EventBuilder, Keys, Kind, Timestamp};
+
+        let event = EventBuilder::new(Kind::Custom(30177), "{}")
+            .custom_created_at(Timestamp::from(42))
+            .sign_with_keys(&Keys::generate())
+            .expect("sign cursor event");
+        let mut filter = serde_json::json!({"kinds": [30177]});
+
+        advance_relay_cursor(&mut filter, std::slice::from_ref(&event));
+
+        assert_eq!(filter["until"], 42);
+        assert_eq!(filter["before_id"], event.id.to_hex());
+    }
 
     // ── is_npm_global_install ─────────────────────────────────────────────────
 
@@ -1741,7 +1721,7 @@ mod tests {
     #[test]
     fn test_powershell_command_argv_exact() {
         // Catalog format: body wrapped in one outer double-quote pair (Bash-layer serialization).
-        let body = "irm https://chatgpt.com/codex/install.ps1 | iex";
+        let body = "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-codex.ps1'; Invoke-RestMethod https://chatgpt.com/codex/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE";
         let cmd = super::install_powershell_command(&format!(
             r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "{body}""#
         ));
@@ -1771,12 +1751,12 @@ mod tests {
         );
     }
 
-    /// Claude Code catalog command (discovery.rs:107) must dequote to the bare pipeline.
+    /// Claude Code catalog command must dequote to the two-step download-then-execute body.
     #[cfg(windows)]
     #[test]
     fn test_powershell_command_claude_catalog_dequoted() {
         let cmd = super::install_powershell_command(
-            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex""#,
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-claude.ps1'; Invoke-RestMethod https://claude.ai/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE""#,
         );
         assert_eq!(
             cmd.get_args()
@@ -1787,22 +1767,22 @@ mod tests {
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "irm https://claude.ai/install.ps1 | iex",
+                "$ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-claude.ps1'; Invoke-RestMethod https://claude.ai/install.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE",
             ],
             "Claude catalog command must be dequoted correctly"
         );
     }
 
-    /// Goose Windows catalog command (discovery.rs:78) must dequote to a bare pipeline
-    /// with a literal `$env:` prefix — no backslash before the dollar sign.
-    /// This proves the `\$` → `$` escape fix: post-#2750 the spawn is native and
+    /// Goose Windows catalog command must dequote to the two-step download-then-execute body
+    /// with the `$env:CONFIGURE` prefix intact — no backslash before the dollar sign.
+    /// This proves the `\$` → `$` contract: post-#2750 the spawn is native and
     /// PowerShell receives the body verbatim, so a residual `\` would produce
     /// `\$env:CONFIGURE='false'` which is a malformed statement.
     #[cfg(windows)]
     #[test]
     fn test_powershell_command_goose_catalog_dequoted() {
         let cmd = super::install_powershell_command(
-            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex""#,
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; $ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-goose.ps1'; Invoke-RestMethod https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE""#,
         );
         assert_eq!(
             cmd.get_args()
@@ -1813,7 +1793,7 @@ mod tests {
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex",
+                "$env:CONFIGURE='false'; $ErrorActionPreference='Stop'; $installer=Join-Path $env:TEMP 'buzz-install-goose.ps1'; Invoke-RestMethod https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 -OutFile $installer; & $installer; exit $LASTEXITCODE",
             ],
             "Goose catalog command must dequote with bare $env: (no backslash before $)"
         );
