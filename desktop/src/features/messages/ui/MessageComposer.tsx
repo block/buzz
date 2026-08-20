@@ -877,7 +877,11 @@ function MessageComposerImpl({
           ) : null}
           <form
             className={cn(
-              "relative z-10 isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:supports-[backdrop-filter]:bg-background/55 sm:px-4",
+              // `border-input`, not `border-border`: the composer shell is an
+              // input affordance rather than decorative chrome, so it must keep
+              // an edge at low interface contrast. The two tokens carry the
+              // same value in every theme, so this is a no-op elsewhere.
+              "relative z-10 isolate rounded-2xl border border-input/50 bg-background/80 px-3 pb-2 pt-3 shadow-none supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:supports-[backdrop-filter]:bg-background/55 sm:px-4",
               layoutMode === "standalone" &&
                 "backdrop-blur-md dark:backdrop-blur-xl",
             )}

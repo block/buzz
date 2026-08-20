@@ -1,3 +1,15 @@
 {
-  "extends": ["../biome.json"]
+  "extends": ["../biome.json"],
+  "overrides": [
+    {
+      "includes": ["src/shared/styles/globals/contrast.css"],
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noImportantStyles": "off"
+          }
+        }
+      }
+    }
+  ]
 }
