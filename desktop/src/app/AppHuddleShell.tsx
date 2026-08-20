@@ -8,6 +8,12 @@ import { cn } from "@/shared/lib/cn";
 
 type AppHuddleShellProps = {
   children: React.ReactNode;
+  /**
+   * Optional full-width bar pinned below the rail + content row (edge-to-edge
+   * at the bottom of the app surface). Used for the global shortcut status
+   * bar. Lifts with the surface when a huddle drawer opens.
+   */
+  bottomBar?: React.ReactNode;
   currentPubkey?: string;
   isCompanionOpen: boolean;
   isDrawerOpen: boolean;
@@ -44,6 +50,7 @@ function HuddleShortcutHandler({ children }: HuddleShortcutHandlerProps) {
 
 export function AppHuddleShell({
   children,
+  bottomBar,
   currentPubkey,
   isCompanionOpen,
   isDrawerOpen,
@@ -81,7 +88,7 @@ export function AppHuddleShell({
             />
             <div
               className={cn(
-                "buzz-huddle-app-surface z-10 flex min-h-0 flex-row overflow-hidden bg-background",
+                "buzz-huddle-app-surface z-10 flex min-h-0 flex-col overflow-hidden bg-background",
                 isDrawerOpen &&
                   (isRoom
                     ? "buzz-huddle-app-surface-room-open"
@@ -89,7 +96,10 @@ export function AppHuddleShell({
               )}
             >
               <BuzzTheme.GradientLayer />
-              {children}
+              <div className="flex min-h-0 flex-1 flex-row overflow-hidden">
+                {children}
+              </div>
+              {bottomBar}
             </div>
             {isRoom || !isCompanionOpen ? (
               <div className="buzz-huddle-drawer-slot absolute inset-x-0 bottom-0 z-[2] h-(--buzz-huddle-drawer-height)">
