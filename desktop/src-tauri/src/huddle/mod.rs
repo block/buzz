@@ -32,6 +32,7 @@ mod human_floor;
 pub mod jitter;
 #[cfg(test)]
 mod latency_bench;
+mod local_barge_in;
 pub mod models;
 pub mod pipeline;
 pub mod playout;

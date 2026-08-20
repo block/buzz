@@ -32,7 +32,7 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::human_floor::HumanFloor;
+use super::{human_floor::HumanFloor, local_barge_in};
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
@@ -207,54 +207,6 @@ const VAD_HANGOVER_FRAMES: usize = 6;
 /// silence/room-noise blips from reaching Parakeet and becoming hallucinated
 /// transcript text while still preserving short replies such as "yes".
 const MIN_VOICED_FRAMES: usize = 12;
-
-/// Consecutive 16 ms VAD-positive frames required to restore local barge-in
-/// on acoustically coupled output. The prior implementation shipped 20 frames
-/// after 5 frames caused speaker-bleed self-cancellation (`b29c8cdaa^`).
-const COUPLED_BARGE_IN_FRAMES: usize = 20;
-
-#[derive(Debug, Default)]
-struct LocalBargeIn {
-    acquired_floor: bool,
-    coupled_positive_frames: usize,
-}
-
-impl LocalBargeIn {
-    fn observe(
-        &mut self,
-        probability: f32,
-        confirmed_onset: bool,
-        human_floor: &HumanFloor,
-        output_device: Option<&str>,
-    ) {
-        if self.acquired_floor {
-            return;
-        }
-        let sustained_coupled = self.track_sustained_coupled(probability);
-
-        let route_isolated = super::audio_output::output_route_is_isolated(output_device);
-        if !confirmed_onset && !sustained_coupled {
-            return;
-        }
-        self.acquired_floor = human_floor.enter_local(route_isolated, sustained_coupled);
-    }
-
-    fn track_sustained_coupled(&mut self, probability: f32) -> bool {
-        if probability > VAD_ONSET_THRESHOLD {
-            self.coupled_positive_frames = self.coupled_positive_frames.saturating_add(1);
-        } else {
-            self.coupled_positive_frames = 0;
-        }
-        self.coupled_positive_frames >= COUPLED_BARGE_IN_FRAMES
-    }
-
-    fn release(&mut self, human_floor: &HumanFloor) {
-        if self.acquired_floor {
-            human_floor.leave_local();
-        }
-        *self = Self::default();
-    }
-}
 
 #[derive(Debug, PartialEq, Eq)]
 enum VadFrameAction {
@@ -473,7 +425,7 @@ fn stt_worker(
     // computed at. Valid only while no new voiced frame has arrived since.
     let speculative_enabled = stt_speculative_decode();
     let mut speculative: Option<(String, usize)> = None;
-    let mut local_barge_in_state = LocalBargeIn::default();
+    let mut local_barge_in_state = local_barge_in::LocalBargeIn::default();
 
     // ── 5. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
@@ -609,7 +561,7 @@ fn process_16k_samples(
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
     human_floor: &HumanFloor,
-    local_barge_in_state: &mut LocalBargeIn,
+    local_barge_in_state: &mut local_barge_in::LocalBargeIn,
     output_device: Option<&str>,
 ) {
     let (speculative_enabled, speculative) = speculative;
@@ -631,13 +583,14 @@ fn process_16k_samples(
             endpoint.process_frame(frame, prob, accepts_audio, flush_allowed, flush_frames);
         // Open-mic VAD semantics also apply when a PTT-mode user manually
         // opens the mic. A held shortcut keeps its explicit key-down cancel.
-        let local_barge_in = local_barge_in_enabled(ptt_active.is_some(), manually_open, ptt_held);
+        let local_barge_in = local_barge_in::enabled(ptt_active.is_some(), manually_open, ptt_held);
         if local_barge_in {
             local_barge_in_state.observe(
                 prob,
                 action == VadFrameAction::ConfirmedOnset,
                 human_floor,
                 output_device,
+                VAD_ONSET_THRESHOLD,
             );
         } else {
             local_barge_in_state.release(human_floor);
@@ -748,15 +701,6 @@ fn has_enough_voiced_audio(voiced_frames: usize) -> bool {
     voiced_frames >= MIN_VOICED_FRAMES
 }
 
-/// Whether local audio should use VAD barge-in for this frame.
-///
-/// This currently matches `vad_flush_allowed`, but the two decisions are kept
-/// separate deliberately: one assigns cancellation ownership and the other
-/// controls utterance endpointing.
-fn local_barge_in_enabled(ptt_mode: bool, manually_open: bool, ptt_held: bool) -> bool {
-    !ptt_mode || (manually_open && !ptt_held)
-}
-
 /// Whether a silence run may end the current utterance and flush it to STT.
 ///
 /// Pure VAD mode (no shortcut configured) always allows pause flushing. When
@@ -787,40 +731,12 @@ use super::drain_until_shutdown;
 #[cfg(test)]
 mod tests {
     use super::{
-        has_enough_voiced_audio, local_barge_in_enabled, vad_flush_allowed, LocalBargeIn,
-        VadEndpoint, VadFrameAction, COUPLED_BARGE_IN_FRAMES, MIN_VOICED_FRAMES,
+        has_enough_voiced_audio, vad_flush_allowed, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
         SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
     };
 
     fn frame(value: f32) -> Vec<f32> {
         vec![value; VAD_FRAME_SAMPLES]
-    }
-
-    #[test]
-    fn manual_open_mic_enables_vad_barge_in_in_ptt_mode() {
-        assert!(local_barge_in_enabled(true, true, false));
-        assert!(!local_barge_in_enabled(true, false, false));
-        assert!(!local_barge_in_enabled(true, true, true));
-        assert!(local_barge_in_enabled(false, false, false));
-    }
-
-    #[test]
-    fn coupled_barge_in_requires_twenty_consecutive_positive_frames() {
-        let mut barge_in = LocalBargeIn::default();
-        for _ in 0..COUPLED_BARGE_IN_FRAMES - 1 {
-            assert!(!barge_in.track_sustained_coupled(0.9));
-        }
-        assert!(barge_in.track_sustained_coupled(0.9));
-    }
-
-    #[test]
-    fn coupled_barge_in_debounce_resets_on_a_non_speech_frame() {
-        let mut barge_in = LocalBargeIn::default();
-        for _ in 0..COUPLED_BARGE_IN_FRAMES - 1 {
-            assert!(!barge_in.track_sustained_coupled(0.9));
-        }
-        assert!(!barge_in.track_sustained_coupled(0.1));
-        assert!(!barge_in.track_sustained_coupled(0.9));
     }
 
     #[test]
