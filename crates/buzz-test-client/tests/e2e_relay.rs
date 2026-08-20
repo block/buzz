@@ -2661,6 +2661,101 @@ async fn test_reply_ingest_pushes_live_thread_summary() {
     client.disconnect().await.expect("disconnect");
 }
 
+#[tokio::test]
+#[ignore]
+async fn test_redundant_join_re_emits_group_discovery_events() {
+    let url = relay_url();
+    let owner = Keys::generate();
+    let joiner = Keys::generate();
+    seed_relay_owner(&owner).await;
+    let channel_id = create_test_channel(&owner).await;
+
+    let mut client = BuzzTestClient::connect(&url, &joiner)
+        .await
+        .expect("connect and authenticate");
+
+    // Subscribe to kind:39002 (group members) for this channel.
+    let members_sid = sub_id("members-redundant");
+    let members_filter = Filter::new()
+        .kind(Kind::Custom(39002))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), channel_id.as_str());
+    client
+        .subscribe(&members_sid, vec![members_filter])
+        .await
+        .expect("subscribe to members");
+    let historical = client
+        .collect_until_eose(&members_sid, Duration::from_secs(5))
+        .await
+        .expect("collect historical members");
+    let first_members_id = historical
+        .iter()
+        .find(|e| {
+            e.tags
+                .iter()
+                .any(|t| t.as_slice().first().map(String::as_str) == Some("d")
+                    && t.as_slice().get(1).map(String::as_str) == Some(channel_id.as_str()))
+        })
+        .map(|e| e.id.to_hex());
+
+    // First join — adds the joiner as a member.
+    let join_event = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&joiner)
+        .expect("sign join");
+    let ok = client
+        .send_event(join_event)
+        .await
+        .expect("send first join");
+    assert!(ok.accepted, "first join rejected: {}", ok.message);
+
+    // Wait for the 39002 emitted after the first join.
+    let first_live = client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("receive 39002 after first join");
+    let first_live_id = match first_live {
+        RelayMessage::Event { event, .. } => {
+            assert_eq!(event.kind, Kind::Custom(39002));
+            event.id.to_hex()
+        }
+        other => panic!("expected 39002 EVENT after first join, got: {other:?}"),
+    };
+    assert_ne!(
+        Some(first_live_id.as_str()),
+        first_members_id.as_deref(),
+        "39002 after first join should be a fresh event"
+    );
+
+    // Redundant join — already a member, should still re-emit 39002.
+    let redundant_join = EventBuilder::new(Kind::Custom(9021), "")
+        .tags([Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&joiner)
+        .expect("sign redundant join");
+    let ok = client
+        .send_event(redundant_join)
+        .await
+        .expect("send redundant join");
+    assert!(ok.accepted, "redundant join rejected: {}", ok.message);
+
+    let second_live = client
+        .recv_event(Duration::from_secs(5))
+        .await
+        .expect("receive 39002 after redundant join");
+    let second_live_id = match second_live {
+        RelayMessage::Event { event, .. } => {
+            assert_eq!(event.kind, Kind::Custom(39002));
+            event.id.to_hex()
+        }
+        other => panic!("expected 39002 EVENT after redundant join, got: {other:?}"),
+    };
+    assert_ne!(
+        second_live_id, first_live_id,
+        "redundant join should emit a fresh 39002 event, not reuse the first"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
 /// Read a member's authoritative role from the relay-signed kind:39002 member
 /// list. The relay's own view of membership, not the client's — a kind:9000 can
 /// be `accepted` (stored) while its membership side effect fails, so asserting

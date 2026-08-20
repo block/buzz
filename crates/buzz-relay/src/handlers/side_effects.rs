@@ -1965,6 +1965,10 @@ async fn handle_join_request(
         .await?
     {
         info!(channel = %channel_id, "kind:9021 join — already a member, skipping");
+        // Re-emit discovery events so the client can reconcile its membership state.
+        if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
+            warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed on redundant join");
+        }
         return Ok(());
     }
 
