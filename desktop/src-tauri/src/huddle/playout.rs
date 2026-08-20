@@ -30,6 +30,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_util::sync::CancellationToken;
 
+use super::human_floor::HumanFloor;
 use super::jitter::{PeerJitterBuffer, SAMPLE_RATE_HZ};
 use super::relay_api::{WsStream, REMOTE_SPEECH_THRESHOLD};
 use super::wire::{FrameHeader, FLAG_DTX, V2_HEADER_LEN};
@@ -42,6 +43,7 @@ const SPEAKER_TICK_MS: u64 = 500;
 const SPEAKER_LEVEL_TICK_MS: u64 = 50;
 /// Per-peer arrival window for the TTS interrupt frame counter.
 const FRAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+const REMOTE_RELEASE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 /// Playout clock: NetEq emits 10 ms frames, so we tick at 10 ms.
 const PLAYOUT_TICK_MS: u64 = 10;
 
@@ -171,6 +173,7 @@ pub(crate) async fn run_playout_recv_loop(
     initial_peers: Vec<(u8, String)>,
     tts_active: Arc<AtomicBool>,
     tts_cancel: Arc<AtomicBool>,
+    human_floor: HumanFloor,
 ) {
     use rodio::buffer::SamplesBuffer;
     use std::num::NonZero;
@@ -183,9 +186,10 @@ pub(crate) async fn run_playout_recv_loop(
         initial_peers.into_iter().collect();
     let mut active_indices: std::collections::HashSet<u8> = std::collections::HashSet::new();
     let mut speaker_levels: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
+    let mut remote_release_deadlines: std::collections::HashMap<u8, tokio::time::Instant> =
+        std::collections::HashMap::new();
     let mut frame_counts: std::collections::HashMap<u8, u16> = std::collections::HashMap::new();
     let mut last_frame_reset = tokio::time::Instant::now();
-    let mut tts_was_active = false;
 
     let mut speaker_tick = tokio::time::interval(std::time::Duration::from_millis(SPEAKER_TICK_MS));
     speaker_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -247,6 +251,9 @@ pub(crate) async fn run_playout_recv_loop(
                 }
             }
             _ = speaker_tick.tick() => {
+                let now = tokio::time::Instant::now();
+                let released: Vec<u8> = remote_release_deadlines.iter().filter_map(|(peer, deadline)| (*deadline <= now).then_some(*peer)).collect();
+                for peer in released { remote_release_deadlines.remove(&peer); human_floor.leave_remote(peer); }
                 if let Some(ref app) = app_handle {
                     use tauri::Emitter;
                     let pubkeys: Vec<String> = active_indices
@@ -304,22 +311,20 @@ pub(crate) async fn run_playout_recv_loop(
                         // don't mean the peer is speaking, and shouldn't
                         // make their tile flash for the 500 ms speaker tick.
                         if !is_dtx {
+                            remote_release_deadlines.remove(&peer_idx);
                             active_indices.insert(peer_idx);
                             let level = normalized_speaker_level(header.level_dbov);
                             speaker_levels
                                 .entry(peer_idx)
                                 .and_modify(|current| *current = current.max(level))
                                 .or_insert(level);
+                        } else if human_floor.is_blocked() {
+                            remote_release_deadlines.insert(peer_idx, tokio::time::Instant::now() + REMOTE_RELEASE_DEBOUNCE);
                         }
 
-                        // TTS interrupt frame counter — reset on TTS rising edge.
-                        let tts_now = tts_active.load(Ordering::Acquire);
-                        if tts_now && !tts_was_active {
-                            frame_counts.clear();
-                            last_frame_reset = tokio::time::Instant::now();
-                        }
-                        tts_was_active = tts_now;
-
+                        // Track remote speech independently of TTS liveness so a
+                        // human who starts while output is idle still owns the
+                        // floor and rejects delayed synthesis.
                         let slot = match peers.entry(peer_idx) {
                             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                             std::collections::hash_map::Entry::Vacant(e) => {
@@ -347,11 +352,10 @@ pub(crate) async fn run_playout_recv_loop(
                             slot.last_packet_at = tokio::time::Instant::now();
                         }
 
-                        // Count remote-speech frame arrivals for the TTS
-                        // interrupt. DTX/comfort frames don't count — they
-                        // mean the peer is silent, just keeping the codec
-                        // state alive.
-                        if tts_now && !is_dtx {
+                        // Count remote-speech frame arrivals for floor onset.
+                        // DTX/comfort frames don't count — they mean the peer
+                        // is silent, just keeping the codec state alive.
+                        if !is_dtx {
                             if last_frame_reset.elapsed() >= FRAME_WINDOW {
                                 frame_counts.clear();
                                 last_frame_reset = tokio::time::Instant::now();
@@ -359,7 +363,10 @@ pub(crate) async fn run_playout_recv_loop(
                             let count = frame_counts.entry(peer_idx).or_insert(0);
                             *count = count.saturating_add(1);
                             if *count >= REMOTE_SPEECH_THRESHOLD {
-                                tts_cancel.store(true, Ordering::Release);
+                                human_floor.enter_remote(peer_idx);
+                                if tts_active.load(Ordering::Acquire) {
+                                    tts_cancel.store(true, Ordering::Release);
+                                }
                             }
                         }
                     }
@@ -384,6 +391,8 @@ pub(crate) async fn run_playout_recv_loop(
                                                 {
                                                     peers.remove(&key);
                                                     frame_counts.remove(&key);
+                                                    remote_release_deadlines.remove(&key);
+                                                    human_floor.leave_remote(key);
                                                     active_indices.remove(&key);
                                                     speaker_levels.remove(&key);
                                                 }
@@ -407,6 +416,7 @@ pub(crate) async fn run_playout_recv_loop(
                                             replacement.get(idx) == index_to_pubkey.get(idx)
                                         };
                                         peers.retain(|idx, _| identity_unchanged(idx));
+                                        for idx in index_to_pubkey.keys().filter(|idx| !identity_unchanged(idx)).copied().collect::<Vec<_>>() { human_floor.leave_remote(idx); remote_release_deadlines.remove(&idx); }
                                         frame_counts.retain(|idx, _| identity_unchanged(idx));
                                         active_indices.retain(identity_unchanged);
                                         speaker_levels.retain(|idx, _| identity_unchanged(idx));
@@ -418,6 +428,8 @@ pub(crate) async fn run_playout_recv_loop(
                                         let key = idx as u8;
                                         index_to_pubkey.remove(&key);
                                         frame_counts.remove(&key);
+                                        remote_release_deadlines.remove(&key);
+                                        human_floor.leave_remote(key);
                                         active_indices.remove(&key);
                                         speaker_levels.remove(&key);
                                         // Dropping Player detaches its queue from the
@@ -441,6 +453,7 @@ pub(crate) async fn run_playout_recv_loop(
         }
     }
 
+    human_floor.clear_remote();
     if let Some(ref app) = app_handle {
         use tauri::Emitter;
         let _ = app.emit(

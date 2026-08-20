@@ -28,6 +28,7 @@ pub mod agent_voice;
 pub mod agents;
 pub mod audio_output;
 mod commands;
+mod human_floor;
 pub mod jitter;
 #[cfg(test)]
 mod latency_bench;
@@ -42,6 +43,8 @@ pub mod state;
 pub mod stt;
 pub mod transcription;
 pub mod tts;
+#[path = "tts_playback.rs"]
+mod tts_playback;
 pub mod tts_settings;
 mod tts_voice_import;
 mod tts_voice_registry;

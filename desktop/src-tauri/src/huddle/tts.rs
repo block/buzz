@@ -46,6 +46,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::human_floor::HumanFloor;
 use super::pocket::{
     load_text_to_speech, load_voice_style, DEFAULT_VOICE, SAMPLE_RATE, VOICE_FILE_EXT,
 };
@@ -53,10 +54,8 @@ use super::preprocessing::preprocess_for_tts;
 
 #[path = "tts_voice_transition.rs"]
 mod voice_transition;
+use super::tts_playback::*;
 use voice_transition::*;
-#[path = "tts_playback.rs"]
-mod playback;
-use playback::*;
 #[path = "tts_startup.rs"]
 mod startup;
 use startup::await_worker_startup;
@@ -153,6 +152,7 @@ pub struct TtsPipeline {
     /// Kept alive here so the Arc isn't dropped — the worker holds a clone.
     #[allow(dead_code)]
     cancel: Arc<AtomicBool>,
+    human_floor: HumanFloor,
     /// Internal cancellation used only for voice changes. Kept separate so a
     /// concurrent human barge-in always clears every queued message.
     voice_cancel: Arc<AtomicBool>,
@@ -185,6 +185,7 @@ impl TtsPipeline {
         model_dir: PathBuf,
         tts_active: Arc<AtomicBool>,
         cancel: Arc<AtomicBool>,
+        human_floor: HumanFloor,
         voice: &str,
         output_device: Option<String>,
         activity_app: Option<tauri::AppHandle>,
@@ -196,6 +197,7 @@ impl TtsPipeline {
 
         let shutdown_worker = Arc::clone(&shutdown);
         let cancel_worker = Arc::clone(&cancel);
+        let worker_human_floor = human_floor.clone();
         let voice_cancel = Arc::new(AtomicBool::new(false));
         let worker_voice_cancel = Arc::clone(&voice_cancel);
         let tts_active_worker = Arc::clone(&tts_active);
@@ -227,6 +229,7 @@ impl TtsPipeline {
                         worker_voice_change_ack,
                     ),
                     text_rx,
+                    worker_human_floor,
                     (
                         tts_active_worker,
                         shutdown_worker,
@@ -249,6 +252,7 @@ impl TtsPipeline {
             tts_active,
             shutdown,
             cancel,
+            human_floor,
             voice_cancel,
             voice,
             voice_generation,
@@ -279,6 +283,7 @@ fn tts_worker(
     model_dir: PathBuf,
     voice_state: WorkerVoiceState,
     text_rx: mpsc::Receiver<QueuedText>,
+    human_floor: HumanFloor,
     control_state: WorkerControlState,
     output_device: Option<String>,
     activity_app: Option<tauri::AppHandle>,
@@ -377,10 +382,11 @@ fn tts_worker(
         }
     };
 
-    // One coordinator owns the current Player and every operation on it.
-    // Cancellation replaces its queue while the output stream and mixer stay
-    // alive, preserving cross-item pipelining without exposing Player handles.
-    let playback = Arc::new(PlaybackCoordinator::new(sink_handle.mixer()));
+    // One coordinator owns the current Player, floor state, and every operation.
+    // It was allocated with the huddle state so onset and playback share the
+    // same serialization boundary even before the TTS worker starts.
+    let playback = human_floor.playback();
+    playback.bind_mixer(sink_handle.mixer());
     playback_probe.install(Arc::clone(&playback));
 
     // Prime the audio output stream with a short silent buffer.
@@ -445,7 +451,8 @@ fn tts_worker(
     let append_audio = |prepared: PreparedModelAudio,
                         route_id: u64,
                         speaker_pubkey: Option<&str>,
-                        speaker_generation: u64| {
+                        speaker_generation: u64,
+                        floor_epoch: u64| {
         let sample_count = prepared.sample_count;
         let chunk_index = prepared.chunk_index;
         let activity = speaker_pubkey.map(|pubkey| {
@@ -454,7 +461,8 @@ fn tts_worker(
         let accepted = playback.append_if(
             SamplesBuffer::new(channels, rate, prepared.buffer),
             |player_empty| {
-                if cancel.load(Ordering::Acquire)
+                if !human_floor.permits(floor_epoch)
+                    || cancel.load(Ordering::Acquire)
                     || voice_cancel.load(Ordering::Acquire)
                     || shutdown.load(Ordering::Acquire)
                 {
@@ -641,7 +649,12 @@ fn tts_worker(
         let raw_text = queued_text.text;
         let speaker_pubkey = queued_text.speaker_pubkey;
         let speaker_generation = queued_text.speaker_generation;
+        let floor_epoch = queued_text.floor_epoch;
         let route_id = queued_text.route_id;
+        if !human_floor.permits(floor_epoch) {
+            eprintln!("buzz-desktop: tts stage=queue status=dropped reason=human_floor route_id={route_id}");
+            continue;
+        }
         eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
 
         // If playback already drained while we were waiting for this item,
@@ -751,6 +764,7 @@ fn tts_worker(
                             route_id,
                             speaker_pubkey.as_deref(),
                             speaker_generation,
+                            floor_epoch,
                         ) {
                             return false;
                         }
@@ -832,6 +846,7 @@ fn tts_worker(
                                 route_id,
                                 speaker_pubkey.as_deref(),
                                 speaker_generation,
+                                floor_epoch,
                             ) {
                                 synthesis_outcome = "cancelled";
                                 break 'playback_chunks;
@@ -860,6 +875,7 @@ fn tts_worker(
                     route_id,
                     speaker_pubkey.as_deref(),
                     speaker_generation,
+                    floor_epoch,
                 ) {
                     synthesis_outcome = "cancelled";
                     break 'playback_chunks;

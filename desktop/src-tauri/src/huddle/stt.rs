@@ -32,6 +32,8 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
+use super::human_floor::HumanFloor;
+
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
 /// Bounded audio queue capacity.
@@ -62,11 +64,11 @@ pub struct SttPipeline {
 impl SttPipeline {
     /// Spawn the pipeline thread.
     ///
-    /// Mic input is transcribed even while agent TTS is playing: the huddle UI
-    /// already tells users to wear headphones, so speaker bleed is accepted in
-    /// exchange for never dropping human speech that overlaps agent audio.
-    /// Local mic frames still never cancel TTS — push-to-talk and remote
-    /// participant speech remain the explicit barge-in paths.
+    /// Mic input is transcribed even while agent TTS is playing. In open-mic
+    /// VAD mode, confirmed speech acquires the shared human floor: immediately
+    /// on an isolated output route, or after the restored 320 ms sustained-
+    /// speech debounce on an acoustically coupled route. Push-to-talk retains
+    /// its explicit shortcut cancellation path.
     ///
     /// `ptt_active` and `manual_mic_unmuted` are present when the PTT shortcut
     /// is enabled. The pipeline accepts speech while either input path is open;
@@ -85,6 +87,8 @@ impl SttPipeline {
         model_dir: PathBuf,
         ptt_active: Option<Arc<AtomicBool>>,
         manual_mic_unmuted: Option<Arc<AtomicBool>>,
+        human_floor: HumanFloor,
+        output_device: Option<String>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
@@ -93,6 +97,7 @@ impl SttPipeline {
         let shutdown_worker = Arc::clone(&shutdown);
         let ptt_active_worker = ptt_active.as_ref().map(Arc::clone);
         let manual_mic_unmuted_worker = manual_mic_unmuted.as_ref().map(Arc::clone);
+        let local_barge_in = ptt_active.is_none();
         let handle = thread::Builder::new()
             .name("stt-worker".into())
             .spawn(move || {
@@ -103,6 +108,9 @@ impl SttPipeline {
                     shutdown_worker,
                     ptt_active_worker,
                     manual_mic_unmuted_worker,
+                    human_floor,
+                    local_barge_in,
+                    output_device,
                 )
             })
             .map_err(|e| format!("failed to spawn stt-worker thread: {e}"))?;
@@ -202,9 +210,58 @@ const VAD_HANGOVER_FRAMES: usize = 6;
 /// transcript text while still preserving short replies such as "yes".
 const MIN_VOICED_FRAMES: usize = 12;
 
+/// Consecutive 16 ms VAD-positive frames required to restore local barge-in
+/// on acoustically coupled output. The prior implementation shipped 20 frames
+/// after 5 frames caused speaker-bleed self-cancellation (`b29c8cdaa^`).
+const COUPLED_BARGE_IN_FRAMES: usize = 20;
+
+#[derive(Debug, Default)]
+struct LocalBargeIn {
+    acquired_floor: bool,
+    coupled_positive_frames: usize,
+}
+
+impl LocalBargeIn {
+    fn observe(
+        &mut self,
+        probability: f32,
+        confirmed_onset: bool,
+        human_floor: &HumanFloor,
+        output_device: Option<&str>,
+    ) {
+        if self.acquired_floor {
+            return;
+        }
+        let sustained_coupled = self.track_sustained_coupled(probability);
+
+        let route_isolated = super::audio_output::output_route_is_isolated(output_device);
+        if !confirmed_onset && !sustained_coupled {
+            return;
+        }
+        self.acquired_floor = human_floor.enter_local(route_isolated, sustained_coupled);
+    }
+
+    fn track_sustained_coupled(&mut self, probability: f32) -> bool {
+        if probability > VAD_ONSET_THRESHOLD {
+            self.coupled_positive_frames = self.coupled_positive_frames.saturating_add(1);
+        } else {
+            self.coupled_positive_frames = 0;
+        }
+        self.coupled_positive_frames >= COUPLED_BARGE_IN_FRAMES
+    }
+
+    fn release(&mut self, human_floor: &HumanFloor) {
+        if self.acquired_floor {
+            human_floor.leave_local();
+        }
+        *self = Self::default();
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum VadFrameAction {
     None,
+    ConfirmedOnset,
     Speech,
     FirstSilence,
     Flush,
@@ -268,7 +325,7 @@ impl VadEndpoint {
             for buffered in self.pre_roll.drain(..) {
                 self.speech_buf.extend_from_slice(&buffered);
             }
-            return VadFrameAction::Speech;
+            return VadFrameAction::ConfirmedOnset;
         }
 
         if probability > VAD_OFFSET_THRESHOLD {
@@ -349,6 +406,9 @@ fn stt_worker(
     shutdown: Arc<AtomicBool>,
     ptt_active: Option<Arc<AtomicBool>>,
     manual_mic_unmuted: Option<Arc<AtomicBool>>,
+    human_floor: HumanFloor,
+    local_barge_in: bool,
+    output_device: Option<String>,
 ) {
     // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
     use rubato::{Fft, FixedSync, Resampler};
@@ -416,6 +476,7 @@ fn stt_worker(
     // computed at. Valid only while no new voiced frame has arrived since.
     let speculative_enabled = stt_speculative_decode();
     let mut speculative: Option<(String, usize)> = None;
+    let mut local_barge_in_state = LocalBargeIn::default();
 
     // ── 5. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
@@ -487,6 +548,10 @@ fn stt_worker(
                     &text_tx,
                     ptt_active.as_ref(),
                     manual_mic_unmuted.as_ref(),
+                    &human_floor,
+                    local_barge_in,
+                    &mut local_barge_in_state,
+                    output_device.as_deref(),
                 );
             }
         }
@@ -546,6 +611,10 @@ fn process_16k_samples(
     text_tx: &tokio_mpsc::Sender<String>,
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
+    human_floor: &HumanFloor,
+    local_barge_in: bool,
+    local_barge_in_state: &mut LocalBargeIn,
+    output_device: Option<&str>,
 ) {
     let (speculative_enabled, speculative) = speculative;
     leftover.extend_from_slice(samples);
@@ -562,7 +631,21 @@ fn process_16k_samples(
         // VAD mode, or with a manually open mic once the shortcut is up.
         let flush_allowed = vad_flush_allowed(ptt_active.is_some(), manually_open, ptt_held);
 
-        match endpoint.process_frame(frame, prob, accepts_audio, flush_allowed, flush_frames) {
+        let action =
+            endpoint.process_frame(frame, prob, accepts_audio, flush_allowed, flush_frames);
+        if local_barge_in {
+            local_barge_in_state.observe(
+                prob,
+                action == VadFrameAction::ConfirmedOnset,
+                human_floor,
+                output_device,
+            );
+        }
+
+        match action {
+            VadFrameAction::ConfirmedOnset => {
+                speculative.take();
+            }
             VadFrameAction::Speech => {
                 // New voiced audio invalidates any speculative decode.
                 speculative.take();
@@ -594,6 +677,9 @@ fn process_16k_samples(
                     ),
                 }
                 endpoint.reset_segment();
+                if local_barge_in {
+                    local_barge_in_state.release(human_floor);
+                }
             }
             VadFrameAction::None => {}
         }
@@ -607,6 +693,9 @@ fn process_16k_samples(
                 text_tx,
             );
             endpoint.reset_segment();
+            if local_barge_in {
+                local_barge_in_state.release(human_floor);
+            }
             speculative.take();
         }
     }
@@ -688,12 +777,32 @@ use super::drain_until_shutdown;
 #[cfg(test)]
 mod tests {
     use super::{
-        has_enough_voiced_audio, vad_flush_allowed, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
-        SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
+        has_enough_voiced_audio, vad_flush_allowed, LocalBargeIn, VadEndpoint, VadFrameAction,
+        COUPLED_BARGE_IN_FRAMES, MIN_VOICED_FRAMES, SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES,
+        VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
     };
 
     fn frame(value: f32) -> Vec<f32> {
         vec![value; VAD_FRAME_SAMPLES]
+    }
+
+    #[test]
+    fn coupled_barge_in_requires_twenty_consecutive_positive_frames() {
+        let mut barge_in = LocalBargeIn::default();
+        for _ in 0..COUPLED_BARGE_IN_FRAMES - 1 {
+            assert!(!barge_in.track_sustained_coupled(0.9));
+        }
+        assert!(barge_in.track_sustained_coupled(0.9));
+    }
+
+    #[test]
+    fn coupled_barge_in_debounce_resets_on_a_non_speech_frame() {
+        let mut barge_in = LocalBargeIn::default();
+        for _ in 0..COUPLED_BARGE_IN_FRAMES - 1 {
+            assert!(!barge_in.track_sustained_coupled(0.9));
+        }
+        assert!(!barge_in.track_sustained_coupled(0.1));
+        assert!(!barge_in.track_sustained_coupled(0.9));
     }
 
     #[test]
@@ -721,7 +830,7 @@ mod tests {
                 SILENCE_FLUSH_FRAMES,
             );
             if value + 1 == VAD_ONSET_FRAMES {
-                assert_eq!(action, VadFrameAction::Speech);
+                assert_eq!(action, VadFrameAction::ConfirmedOnset);
             } else {
                 assert_eq!(action, VadFrameAction::None);
             }
@@ -752,7 +861,7 @@ mod tests {
         }
         assert_eq!(
             endpoint.process_frame(frame(1.0), 0.9, true, true, SILENCE_FLUSH_FRAMES),
-            VadFrameAction::Speech
+            VadFrameAction::ConfirmedOnset
         );
     }
 

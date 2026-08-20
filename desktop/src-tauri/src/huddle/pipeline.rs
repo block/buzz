@@ -311,6 +311,8 @@ pub(crate) async fn maybe_start_stt_pipeline(
         stt_starting,
         ptt_active_for_stt,
         manual_mic_unmuted_for_stt,
+        human_floor,
+        output_device,
         old_stt,
     ) = {
         let mut hs = state.huddle()?;
@@ -346,6 +348,13 @@ pub(crate) async fn maybe_start_stt_pipeline(
             stt_starting,
             ptt,
             manual_mic_unmuted,
+            hs.human_floor.clone(),
+            state
+                .huddle_audio
+                .output_device
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             old,
         )
     };
@@ -353,7 +362,13 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(model_dir, ptt_active_for_stt, manual_mic_unmuted_for_stt)
+        stt::SttPipeline::new(
+            model_dir,
+            ptt_active_for_stt,
+            manual_mic_unmuted_for_stt,
+            human_floor,
+            output_device,
+        )
     })
     .await;
     let (pipeline, text_rx) = match constructed {
@@ -457,7 +472,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
     // Atomically check preconditions and claim the construction slot.
     // The sentinel prevents a second caller from starting construction
     // while we're building outside the lock.
-    let (tts_active, tts_cancel, tts_starting) = {
+    let (tts_active, tts_cancel, human_floor, tts_starting) = {
         let hs = state.huddle()?;
         if hs.tts_pipeline.is_some() {
             return Ok(false);
@@ -471,6 +486,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
         (
             Arc::clone(&hs.tts_active),
             Arc::clone(&hs.tts_cancel),
+            hs.human_floor.clone(),
             Arc::clone(&hs.tts_starting),
         )
     };
@@ -484,6 +500,7 @@ pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, S
             model_dir,
             tts_active,
             tts_cancel,
+            human_floor,
             &initial_voice,
             output_device,
             app,
