@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/sidebar-offcanvas-rail.spec.ts",
         "**/search-scope-screenshots.spec.ts",
         "**/onboarding-docked-cta-screenshots.spec.ts",
         "**/identity-key-help.spec.ts",
@@ -117,6 +118,7 @@ export default defineConfig({
         "**/drafts-all-fix-screenshots.spec.ts",
         "**/inbox-refactor-screenshots.spec.ts",
         "**/buzz-theme-screenshots.spec.ts",
+        "**/appearance-previews.spec.ts",
         "**/channel-sort.spec.ts",
         "**/identity-lost.spec.ts",
         "**/deep-link-invite.spec.ts",

@@ -13,12 +13,20 @@ import {
   type DiscussionChannel,
   discussionSnippet,
   groupDiscussionChannels,
+  mergeOriginDiscussionChannel,
 } from "@/features/projects/lib/discussionChannels";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
 import type { SearchHit } from "@/shared/api/searchTypes";
+import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
+import { Markdown } from "@/shared/ui/markdown";
+import {
+  ProjectEntityFacepile,
+  ProjectEntityListRow,
+} from "./ProjectEntityListRow";
+import { useProjectConversationPanel } from "./ProjectConversationPanelContext";
 
 // Relay search caps a page at 500. Use the full page and surface a lower-bound
 // marker when it fills rather than silently presenting partial totals as exact.
@@ -69,18 +77,20 @@ function useChannelNameLookup(enabled: boolean) {
 }
 
 /**
- * "Channels" card for PR, issue, and commit detail views: a bordered,
- * softly tinted block with a small header that separates it from the
- * surrounding text. Each channel gets a single truncating line —
- * "Alice, Bob and Carol discussed this in #channel · 2h ago — snippet…" —
- * cut at the card edge regardless of screen width. Clicking the snippet
- * jumps to that message (thread-aware), the same way inbox items do.
- * Renders nothing until at least one channel references the entity, so
- * the detail layout stays unchanged for undiscussed items.
+ * "Related Conversations" card for PR, issue, and commit detail views: a
+ * bordered block under the body. Each channel gets a name line plus a
+ * compact markdown preview of the latest message (same `inbox-preview-markdown`
+ * treatment as inbox rows). Tasks and reviews also include the origin
+ * channel (`h` tag) as a channel-only row — the tag proves only which
+ * channel the entity came from, so no message is quoted or attributed for
+ * it. Renders nothing when search and origin are both empty.
  */
 export function DiscussedInChannels({
   className,
   entityLabel = "this",
+  originChannelId,
+  originCreatedAt,
+  originPubkey,
   query,
   testId,
 }: {
@@ -88,11 +98,34 @@ export function DiscussedInChannels({
   className?: string;
   /** How the sentence names the entity, e.g. "this issue". */
   entityLabel?: string;
+  originChannelId?: string | null;
+  originCreatedAt?: number;
+  originPubkey?: string;
   query: string;
   testId?: string;
 }) {
-  const { channels, hits, isTruncated } = useDiscussionChannels(query);
+  const {
+    channels: discussed,
+    hits,
+    isTruncated,
+  } = useDiscussionChannels(query);
+  const origin = React.useMemo(
+    () =>
+      originChannelId && originPubkey && originCreatedAt != null
+        ? {
+            channelId: originChannelId,
+            createdAt: originCreatedAt,
+            pubkey: originPubkey,
+          }
+        : null,
+    [originChannelId, originCreatedAt, originPubkey],
+  );
+  const channels = React.useMemo(
+    () => mergeOriginDiscussionChannel(discussed, origin),
+    [discussed, origin],
+  );
   const { goChannel, openSearchHit } = useAppNavigation();
+  const projectConversationPanel = useProjectConversationPanel();
   const [expanded, setExpanded] = React.useState(false);
   const channelName = useChannelNameLookup(channels.length > 0);
   const visible = expanded
@@ -104,7 +137,9 @@ export function DiscussedInChannels({
   );
   const profiles = profilesQuery.data?.profiles;
   // Hits are sorted newest first, so the first hit per channel is the one a
-  // click should land on (and the one worth quoting).
+  // click should land on (and the one worth quoting). The origin channel has
+  // no such hit: the `h` tag proves only the channel, so its row navigates
+  // to the channel without claiming any particular message.
   const latestHitByChannel = React.useMemo(() => {
     const byChannel = new Map<string, SearchHit>();
     for (const hit of hits) {
@@ -127,53 +162,85 @@ export function DiscussedInChannels({
       data-testid={testId}
     >
       <h4 className="border-b border-border/40 px-3 py-1.5 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-        Channels
+        Related Conversations
       </h4>
       <div className="divide-y divide-border/40">
         {visible.map((channel) => {
           const latestHit = latestHitByChannel.get(channel.id);
-          if (!latestHit) return null;
           const name = channelName(channel.id, channel.name);
+          const opensForum =
+            latestHit != null &&
+            (latestHit.kind === KIND_FORUM_POST ||
+              latestHit.kind === KIND_FORUM_COMMENT);
+          const openConversation = () => {
+            if (!latestHit) {
+              void goChannel(channel.id);
+              return;
+            }
+            if (!projectConversationPanel || opensForum) {
+              void openSearchHit(latestHit);
+              return;
+            }
+            projectConversationPanel.openConversation(latestHit);
+          };
           return (
             <div
-              className="flex w-full min-w-0 items-center gap-2.5 px-3 py-2"
+              className="group relative flex w-full min-w-0 items-start gap-2.5 px-3 py-2 transition-colors hover:bg-muted/30"
               data-testid="discussion-mention-row"
               key={channel.id}
             >
-              <ParticipantFacepile
-                interactive
-                participants={channel.participants}
-                profiles={profiles}
+              <button
+                aria-label={
+                  latestHit
+                    ? `Open conversation in #${name}`
+                    : `Open channel #${name}`
+                }
+                className="absolute inset-0"
+                onClick={openConversation}
+                title={
+                  latestHit
+                    ? `Open the latest conversation in #${name}`
+                    : `Open #${name}`
+                }
+                type="button"
               />
-              <span className="min-w-0 flex-1 truncate text-sm">
-                <DiscussionNameList
+              <span className="relative z-10 pt-0.5">
+                <ProjectEntityFacepile
+                  interactive
                   participants={channel.participants}
                   profiles={profiles}
                 />
-                <span className="text-muted-foreground">
-                  {" "}
-                  discussed {entityLabel} in{" "}
-                </span>
-                <button
-                  className="font-medium text-foreground hover:underline"
-                  onClick={() => void goChannel(channel.id)}
-                  title={`Open #${name}`}
-                  type="button"
-                >
-                  #{name}
-                </button>
-                <button
-                  className="text-muted-foreground hover:underline"
-                  onClick={() => void openSearchHit(latestHit)}
-                  title={`Open the latest mention in #${name}`}
-                  type="button"
-                >
-                  <span className="text-xs">
+              </span>
+              <span className="pointer-events-none relative z-10 min-w-0 flex-1 text-sm">
+                <span className="block truncate">
+                  <DiscussionNameList
+                    participants={channel.participants}
+                    profiles={profiles}
+                  />
+                  <span className="text-muted-foreground">
+                    {" "}
+                    {latestHit
+                      ? `discussed ${entityLabel} in`
+                      : `created ${entityLabel} from`}{" "}
+                  </span>
+                  <button
+                    className="pointer-events-auto font-medium text-foreground hover:underline"
+                    onClick={() => void goChannel(channel.id)}
+                    title={`Open #${name}`}
+                    type="button"
+                  >
+                    #{name}
+                  </button>
+                  <span className="text-xs text-muted-foreground">
                     {" "}
                     · {relativeTime(channel.lastActivityAt)}
                   </span>
-                  <span> — {discussionSnippet(latestHit.content)}</span>
-                </button>
+                </span>
+                {latestHit ? (
+                  <span className="block text-xs text-muted-foreground">
+                    <DiscussionMessagePreview content={latestHit.content} />
+                  </span>
+                ) : null}
               </span>
             </div>
           );
@@ -185,7 +252,8 @@ export function DiscussedInChannels({
           onClick={() => setExpanded(true)}
           type="button"
         >
-          Show {hiddenCount} more {hiddenCount === 1 ? "channel" : "channels"}
+          Show {hiddenCount} more{" "}
+          {hiddenCount === 1 ? "conversation" : "conversations"}
         </button>
       ) : null}
       {isTruncated ? (
@@ -198,6 +266,18 @@ export function DiscussedInChannels({
 }
 
 const NAME_LIST_MAX = 3;
+
+/** Compact markdown preview matching inbox list rows: first block only,
+ * clamped, non-interactive so the overlay click still opens the thread. */
+function DiscussionMessagePreview({ content }: { content: string }) {
+  return (
+    <Markdown
+      className="inbox-preview-markdown mt-0.5 text-inherit leading-4"
+      content={discussionSnippet(content)}
+      interactive={false}
+    />
+  );
+}
 
 /**
  * The "Alice, Bob and Carol" (or "Alice, Bob and 2 others") part of the
@@ -229,7 +309,7 @@ function DiscussionNameList({
             ) : null}
             <UserProfilePopover pubkey={pubkey} triggerElement="span">
               <button
-                className="font-medium text-foreground hover:underline"
+                className="pointer-events-auto font-medium text-foreground hover:underline"
                 type="button"
               >
                 {resolveUserLabel({ profiles, pubkey })}
@@ -248,73 +328,18 @@ function DiscussionNameList({
   );
 }
 
-function ParticipantFacepile({
-  interactive = false,
-  participants,
-  profiles,
-}: {
-  /** Wrap each avatar in a profile popover. Leave off when the facepile is
-   * nested inside another button (nested interactive elements are invalid). */
-  interactive?: boolean;
-  participants: string[];
-  profiles: UserProfileLookup | undefined;
-}) {
-  const shown = participants.slice(0, 4);
-  const overflow = participants.length - shown.length;
-  return (
-    <span className="flex shrink-0 items-center">
-      {shown.map((pubkey, index) => {
-        const label = resolveUserLabel({ profiles, pubkey });
-        if (!interactive) {
-          return (
-            <UserAvatar
-              avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-              className={cn(
-                "rounded-full ring-2 ring-background",
-                index > 0 && "-ml-1.5",
-              )}
-              displayName={label}
-              key={pubkey}
-              size="xs"
-            />
-          );
-        }
-        return (
-          <UserProfilePopover
-            key={pubkey}
-            pubkey={pubkey}
-            triggerElement="span"
-          >
-            <button
-              className={cn("rounded-full", index > 0 && "-ml-1.5")}
-              title={label}
-              type="button"
-            >
-              <UserAvatar
-                avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
-                displayName={label}
-                size="xs"
-              />
-            </button>
-          </UserProfilePopover>
-        );
-      })}
-      {overflow > 0 ? (
-        <span className="-ml-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-muted text-3xs text-muted-foreground ring-2 ring-background">
-          +{overflow}
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
 /**
  * Full-width channel list for the workspace "Channels" tab: every channel
  * where the repository (or its PRs/issues) is linked in chat, with the
  * people who discussed it there.
  */
-export function DiscussionChannelsPanel({ query }: { query: string }) {
+export function DiscussionChannelsPanel({
+  query,
+  repositoryName,
+}: {
+  query: string;
+  repositoryName: string;
+}) {
   const { channels, isLoading, isTruncated } = useDiscussionChannels(query);
   const { goChannel } = useAppNavigation();
   const channelName = useChannelNameLookup(channels.length > 0);
@@ -325,71 +350,44 @@ export function DiscussionChannelsPanel({ query }: { query: string }) {
   const profiles = profilesQuery.data?.profiles;
 
   if (isLoading) {
-    return (
-      <p className="px-4 py-6 text-sm text-muted-foreground">
-        Searching channel discussions…
-      </p>
-    );
+    return <BuzzLoadingState label="Loading channel discussions" />;
   }
   if (channels.length === 0) {
     return (
       <p className="px-4 py-6 text-sm text-muted-foreground">
-        No channels reference this repository yet. Paste its link (or a PR or
-        issue link) in a channel and it will show up here.
+        No channels reference this repository yet. Paste its link (or a review
+        or task link) in a channel and it will show up here.
       </p>
     );
   }
 
   return (
     <div>
-      <ul
-        className="divide-y divide-border/50"
-        data-testid="discussion-channels"
-      >
+      <ul data-testid="discussion-channels">
         {channels.map((channel) => {
           const name = channelName(channel.id, channel.name);
-          const speakers = channel.participants
-            .slice(0, 2)
-            .map((pubkey) => resolveUserLabel({ profiles, pubkey }));
-          const others = channel.participants.length - speakers.length;
           return (
             <li className="relative" key={channel.id}>
-              <button
-                className="flex w-full min-w-0 items-center gap-2.5 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+              <ProjectEntityListRow
+                affiliation={repositoryName}
+                affiliationTestId="project-channel-repository"
+                count={channel.messageCount}
+                countSuffix={isTruncated ? "+" : undefined}
+                countTestId="project-channel-message-count"
+                countTitle={`${channel.messageCount}${isTruncated ? "+" : ""} ${
+                  channel.messageCount === 1 ? "message" : "messages"
+                }`}
+                dateSeconds={channel.lastActivityAt}
+                dateTestId="project-channel-row-date"
+                icon={<Hash className="h-3.5 w-3.5 text-muted-foreground/70" />}
                 onClick={() => void goChannel(channel.id)}
-                type="button"
-              >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted/50">
-                  <Hash className="h-4 w-4 text-muted-foreground" />
-                </span>
-                <span className="min-w-0 flex-1 space-y-1">
-                  <span className="block truncate text-sm font-medium text-foreground">
-                    #{name}
-                  </span>
-                  <span className="block truncate text-xs text-muted-foreground">
-                    {speakers.join(", ")}
-                    {others > 0
-                      ? ` and ${others} ${others === 1 ? "other" : "others"}`
-                      : ""}{" "}
-                    · {channel.messageCount}
-                    {isTruncated ? "+" : ""}{" "}
-                    {channel.messageCount === 1 ? "message" : "messages"}
-                  </span>
-                </span>
-                <ParticipantFacepile
-                  participants={channel.participants}
-                  profiles={profiles}
-                />
-                <span
-                  className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground sm:block"
-                  data-testid="project-channel-row-date"
-                  title={new Date(
-                    channel.lastActivityAt * 1_000,
-                  ).toLocaleString()}
-                >
-                  {relativeTime(channel.lastActivityAt)}
-                </span>
-              </button>
+                people={channel.participants}
+                peopleTestId="project-channel-participants"
+                profiles={profiles}
+                testId="project-channel-row"
+                title={`#${name}`}
+                titleAttr={`Open #${name}`}
+              />
             </li>
           );
         })}

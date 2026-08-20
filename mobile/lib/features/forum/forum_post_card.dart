@@ -9,9 +9,9 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/message_content.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_profile.dart';
 import 'forum_models.dart';
 
 /// Card displaying a forum post preview in the posts list.

@@ -7,7 +7,10 @@ import type {
   Repository,
 } from "@/features/projects/hooks";
 import { pullRequestShareLink } from "@/features/projects/lib/projectShareLinks";
-import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  listRowDescription,
+  relativeTime,
+} from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -15,23 +18,15 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { ProjectAuthorIdentity } from "./ProjectAuthorIdentity";
+import { ProjectEntityListRow } from "./ProjectEntityListRow";
 import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
-import {
-  PROJECT_LIST_CONTAINER_CLASS,
-  PROJECT_LIST_ROW_CLASS,
-  PROJECT_LIST_ROW_CONTENT_CLASS,
-  PROJECT_LIST_ROW_DATE_CLASS,
-  PROJECT_LIST_ROW_STATUS_CLASS,
-  PROJECT_LIST_ROW_SUBTEXT_CLASS,
-  PROJECT_LIST_ROW_TITLE_CLASS,
-  PROJECT_LIST_ROW_TRAILING_CLASS,
-} from "./projectListRowStyles";
 
 type ProjectsPullRequestsListProps = {
   /** Render without container chrome — a parent table container provides border and rounding. */
@@ -55,7 +50,7 @@ function nextStepLabel(status: ProjectPullRequest["status"]) {
   if (status === "Draft") return "View draft";
   if (status === "Merged") return "View merge";
   if (status === "Closed") return "View closed";
-  return "Review PR";
+  return "Open review";
 }
 
 function PullRequestContext({
@@ -147,8 +142,7 @@ function PullRequestGridCard({
         type="button"
       >
         <span className="sr-only">
-          View pull request {pullRequest.title} by {authorLabel} in{" "}
-          {repository.name}
+          View review {pullRequest.title} by {authorLabel} in {repository.name}
         </span>
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -226,68 +220,40 @@ function PullRequestListRow({
   });
 
   return (
-    <div
-      className={PROJECT_LIST_ROW_CLASS}
-      data-testid={`projects-pr-row-${pullRequest.id}`}
-    >
-      <button
-        className="absolute inset-0"
-        onClick={() => onOpen(project, pullRequest)}
-        type="button"
-      >
-        <span className="sr-only">
-          View pull request {pullRequest.title} by {authorLabel} in{" "}
-          {repository.name}
-        </span>
-      </button>
-      <div className={PROJECT_LIST_ROW_CONTENT_CLASS}>
-        <ProjectEventTypeIcon className="h-5 w-5" kind="pull-request" />
-        <div className="-mt-0.5 min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-1.5">
-            <p className={PROJECT_LIST_ROW_TITLE_CLASS}>{pullRequest.title}</p>
-          </div>
-          <PullRequestContext
-            authorLabel={authorLabel}
-            authorTestId="projects-pr-author"
-            className={PROJECT_LIST_ROW_SUBTEXT_CLASS}
-            profiles={profiles}
-            pullRequest={pullRequest}
-            repository={repository}
-            showMobileStatus
+    <ProjectEntityListRow
+      affiliation={repository.name}
+      count={pullRequest.comments.length}
+      dateSeconds={pullRequest.updatedAt}
+      dateTestId="projects-row-date"
+      description={listRowDescription(pullRequest.content, pullRequest.title)}
+      icon={<ProjectEventTypeIcon className="h-4 w-4" kind="pull-request" />}
+      onClick={() => onOpen(project, pullRequest)}
+      peopleSlot={
+        <ProjectAuthorIdentity
+          label={authorLabel}
+          labelClassName="sr-only"
+          profiles={profiles}
+          pubkey={pullRequest.author}
+          testId="projects-pr-author"
+        />
+      }
+      testId={`projects-pr-row-${pullRequest.id}`}
+      title={pullRequest.title}
+      titleAttr={`Open review ${pullRequest.title}`}
+      trailing={
+        <ProjectListRowMenu label={`More options for ${pullRequest.title}`}>
+          <DropdownMenuItem onSelect={() => onOpen(project, pullRequest)}>
+            <GitPullRequest className="h-4 w-4" />
+            {nextStepLabel(pullRequest.status)}
+          </DropdownMenuItem>
+          <CopyShareLinkMenuItem
+            link={pullRequestShareLink(pullRequest)}
+            label="Copy review link"
+            testId={`projects-pull-request-copy-link-${pullRequest.id}`}
           />
-        </div>
-        <div className={PROJECT_LIST_ROW_TRAILING_CLASS}>
-          <span className={PROJECT_LIST_ROW_STATUS_CLASS}>
-            {pullRequest.status}
-          </span>
-          <div className="hidden w-14 shrink-0 justify-end md:flex">
-            {pullRequest.comments.length > 0 ? (
-              <span className="flex items-center gap-1 text-2xs leading-3 text-muted-foreground">
-                <MessageSquare className="h-3.5 w-3.5" />
-                {pullRequest.comments.length}
-              </span>
-            ) : null}
-          </div>
-          <span
-            className={PROJECT_LIST_ROW_DATE_CLASS}
-            data-testid="projects-row-date"
-            title={new Date(pullRequest.createdAt * 1_000).toLocaleString()}
-          >
-            {relativeTime(pullRequest.createdAt)}
-          </span>
-          <ProjectListRowMenu label={`More options for ${pullRequest.title}`}>
-            <DropdownMenuItem onSelect={() => onOpen(project, pullRequest)}>
-              <GitPullRequest className="h-4 w-4" />
-              {nextStepLabel(pullRequest.status)}
-            </DropdownMenuItem>
-            <CopyShareLinkMenuItem
-              link={pullRequestShareLink(pullRequest)}
-              testId={`projects-pull-request-copy-link-${pullRequest.id}`}
-            />
-          </ProjectListRowMenu>
-        </div>
-      </div>
-    </div>
+        </ProjectListRowMenu>
+      }
+    />
   );
 }
 
@@ -304,16 +270,7 @@ export function ProjectsPullRequestsList({
   viewMode,
 }: ProjectsPullRequestsListProps) {
   if (isLoading) {
-    return (
-      <div
-        className={cn(
-          "px-4 py-12 text-center text-sm text-muted-foreground",
-          !embedded && "border border-border/60",
-        )}
-      >
-        Loading pull requests...
-      </div>
-    );
+    return <BuzzLoadingState label="Loading reviews" />;
   }
 
   const loadNotice = (
@@ -340,7 +297,7 @@ export function ProjectsPullRequestsList({
             !embedded && "border border-dashed border-border/60",
           )}
         >
-          No pull requests yet.
+          No reviews yet.
         </div>
       </div>
     );
@@ -371,25 +328,24 @@ export function ProjectsPullRequestsList({
   return (
     <div className="space-y-3">
       {loadNotice}
-      <div
-        className={
-          embedded ? "divide-y divide-border/60" : PROJECT_LIST_CONTAINER_CLASS
-        }
+      <ul
+        className="divide-y divide-border/60 bg-transparent"
         data-testid="projects-list-container"
       >
         {pullRequests.map(({ project, pullRequest, repository }) => (
-          <PullRequestListRow
-            key={`${repository.id}:${pullRequest.id}`}
-            onOpen={(selectedProject, selectedPullRequest) =>
-              onOpen(selectedProject, repository, selectedPullRequest)
-            }
-            profiles={profiles}
-            project={project}
-            pullRequest={pullRequest}
-            repository={repository}
-          />
+          <li key={`${repository.id}:${pullRequest.id}`}>
+            <PullRequestListRow
+              onOpen={(selectedProject, selectedPullRequest) =>
+                onOpen(selectedProject, repository, selectedPullRequest)
+              }
+              profiles={profiles}
+              project={project}
+              pullRequest={pullRequest}
+              repository={repository}
+            />
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }

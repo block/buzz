@@ -484,12 +484,6 @@ export function AgentDefinitionDialog({
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  // Gate the provider requirement on the field's actual visibility, not the raw
-  // runtime capability. Codex/Claude hide the provider picker (they drive their
-  // own provider), so Customize must not require a provider there. But a
-  // runtime-less legacy/builtin definition still exposes the picker via
-  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
-  // otherwise Save could persist `provider: undefined` despite the visible field.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
@@ -739,7 +733,6 @@ export function AgentDefinitionDialog({
       isPending={isPending}
       onCancel={() => handleOpenChange(false)}
       publishesCatalogUpdates={publishCatalogUpdatesOnSave && hasUserChanges}
-      submitBlockReason={null}
       submitLabel={submitLabel}
     />
   );

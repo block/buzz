@@ -11,6 +11,7 @@ class AppListCard extends StatelessWidget {
     super.key,
     this.label,
     this.dividerIndent,
+    this.verticalPadding = Grid.xxs,
     required this.children,
   });
 
@@ -21,6 +22,12 @@ class AppListCard extends StatelessWidget {
   /// column, clearing a leading icon. Icon-free cards can pass [_inset] so
   /// separators align with their row content on both sides.
   final double? dividerIndent;
+
+  /// Outer padding above and below this section.
+  ///
+  /// Adjacent cards contribute this padding from both sides. For example,
+  /// passing [Grid.twelve] creates a 24dp rhythm between grouped surfaces.
+  final double verticalPadding;
 
   final List<Widget> children;
 
@@ -53,11 +60,11 @@ class AppListCard extends StatelessWidget {
     }
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
+      padding: EdgeInsets.fromLTRB(
         Grid.gutter,
-        Grid.xxs,
+        verticalPadding,
         Grid.gutter,
-        Grid.xxs,
+        verticalPadding,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

@@ -27,11 +27,13 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
     )
     .first()
     .click();
-  await page.getByRole("tab", { name: "Pull Request" }).click();
+  await page.getByRole("tab", { name: "Review" }).click();
 
   const alicePullRequest = page
     .getByTestId("project-pull-request-row")
-    .filter({ hasText: "alice" })
+    .filter({
+      has: page.getByRole("button", { name: "alice", exact: true }),
+    })
     .first();
   await expect(alicePullRequest).toBeVisible({ timeout: 10_000 });
   const pullRequestId = await alicePullRequest.getAttribute(
@@ -110,7 +112,7 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
   ).toBeVisible();
   await expect(
     detail.getByRole("heading", {
-      name: "alice sent you a pull request",
+      name: "alice sent you a review",
       exact: true,
     }),
   ).toBeVisible();
@@ -144,8 +146,8 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
     path: "test-results/project-inbox/01-pull-request-detail.png",
   });
 
-  // At the wide two-column breakpoint, metadata may wrap between phrases but
-  // must never compress individual phrases into word-wide columns.
+  // Metadata phrases may wrap between items but must never compress
+  // individual phrases into word-wide columns.
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect
     .poll(() =>
@@ -156,7 +158,7 @@ test("Buzz Git pull request renders and stays actionable in Inbox", async ({
             .filter(Boolean).length,
       ),
     )
-    .toBe(2);
+    .toBe(1);
   await expect(
     detail.getByRole("button", {
       name: "Open author-claimed origin channel #general",

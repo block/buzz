@@ -41,7 +41,7 @@ void _showMessageReactionPopover({
   );
 }
 
-class _MessageReactionPopover extends StatelessWidget {
+class _MessageReactionPopover extends HookWidget {
   final Rect anchorRect;
   final EdgeInsets spotlightPadding;
   final Animation<double> animation;
@@ -61,6 +61,14 @@ class _MessageReactionPopover extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
+    final selectionStarted = useRef(false);
+
+    void select(Object? result, [VoidCallback? effect]) {
+      if (selectionStarted.value) return;
+      selectionStarted.value = true;
+      Navigator.of(context).pop(result);
+      effect?.call();
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -125,7 +133,7 @@ class _MessageReactionPopover extends StatelessWidget {
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onTap: () => Navigator.of(context).pop(),
+                onTap: () => select(null),
               ),
             ),
             Positioned(
@@ -133,76 +141,111 @@ class _MessageReactionPopover extends StatelessWidget {
               left: left,
               width: trayWidth + _reactionTraySpringAllowance,
               height: _reactionTrayMaxHeight,
-              child: AnimatedBuilder(
+              child: _AnimatedReactionTray(
+                trayKey: const ValueKey('reaction-popover-tray'),
                 animation: animation,
-                child: SizedBox(
-                  width: trayWidth,
-                  height: _reactionTrayMaxHeight,
-                  child: Padding(
-                    padding: const EdgeInsets.all(Grid.xxs),
-                    child: _QuickReactionRow(
-                      message: message,
-                      sheetContext: context,
-                      pageContext: pageContext,
-                      pageRef: pageRef,
-                      presentationAnimation: animation,
-                    ),
-                  ),
-                ),
-                builder: (context, child) {
-                  final appearance = const Interval(
-                    0.04,
-                    0.23,
-                    curve: Curves.easeOutCubic,
-                  ).transform(animation.value);
-                  final expansion = const Interval(
-                    0.16,
-                    0.92,
-                  ).transform(animation.value);
-                  final springExpansion = _reactionSpringCurve.transform(
-                    expansion,
-                  );
-                  final width = lerpDouble(
-                    _reactionTrayMaxHeight,
-                    trayWidth,
-                    springExpansion,
-                  )!;
-
-                  return Opacity(
-                    opacity: appearance,
-                    child: Transform.scale(
-                      alignment: trayScaleAlignment,
-                      scale: lerpDouble(0.95, 1, appearance)!,
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: SizedBox(
-                          key: const ValueKey('reaction-popover-tray'),
-                          width: width,
-                          height: _reactionTrayMaxHeight,
-                          child: Material(
-                            color: context.colors.surface,
-                            surfaceTintColor: Colors.transparent,
-                            elevation: 8,
-                            shadowColor: Colors.black.withValues(alpha: 0.2),
-                            shape: const StadiumBorder(),
-                            clipBehavior: Clip.antiAlias,
-                            child: OverflowBox(
-                              alignment: Alignment.centerLeft,
-                              minWidth: trayWidth,
-                              maxWidth: trayWidth,
-                              minHeight: _reactionTrayMaxHeight,
-                              maxHeight: _reactionTrayMaxHeight,
-                              child: child,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
+                trayWidth: trayWidth,
+                scaleAlignment: trayScaleAlignment,
+                message: message,
+                pageContext: pageContext,
+                pageRef: pageRef,
+                onSelected: (result, effect) => select(result, effect),
               ),
             ),
           ],
+        );
+      },
+    );
+  }
+}
+
+class _AnimatedReactionTray extends StatelessWidget {
+  final Key trayKey;
+  final Animation<double> animation;
+  final double trayWidth;
+  final AlignmentGeometry scaleAlignment;
+  final TimelineMessage message;
+  final BuildContext pageContext;
+  final WidgetRef pageRef;
+  final Object? popResult;
+  final void Function(Object? result, VoidCallback effect)? onSelected;
+
+  const _AnimatedReactionTray({
+    required this.trayKey,
+    required this.animation,
+    required this.trayWidth,
+    required this.scaleAlignment,
+    required this.message,
+    required this.pageContext,
+    required this.pageRef,
+    this.popResult,
+    this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: animation,
+      child: SizedBox(
+        width: trayWidth,
+        height: _reactionTrayMaxHeight,
+        child: Padding(
+          padding: const EdgeInsets.all(Grid.xxs),
+          child: _QuickReactionRow(
+            message: message,
+            sheetContext: context,
+            pageContext: pageContext,
+            pageRef: pageRef,
+            presentationAnimation: animation,
+            popResult: popResult,
+            onSelected: onSelected,
+          ),
+        ),
+      ),
+      builder: (context, child) {
+        final appearance = const Interval(
+          0.04,
+          0.23,
+          curve: Curves.easeOutCubic,
+        ).transform(animation.value);
+        final expansion = const Interval(0.16, 0.92).transform(animation.value);
+        final springExpansion = _reactionSpringCurve.transform(expansion);
+        final width = lerpDouble(
+          _reactionTrayMaxHeight,
+          trayWidth,
+          springExpansion,
+        )!;
+
+        return Opacity(
+          opacity: appearance,
+          child: Transform.scale(
+            alignment: scaleAlignment,
+            scale: lerpDouble(0.95, 1, appearance)!,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: SizedBox(
+                width: width,
+                height: _reactionTrayMaxHeight,
+                child: Material(
+                  key: trayKey,
+                  color: context.colors.surface,
+                  surfaceTintColor: Colors.transparent,
+                  elevation: 8,
+                  shadowColor: Colors.black.withValues(alpha: 0.2),
+                  shape: const StadiumBorder(),
+                  clipBehavior: Clip.antiAlias,
+                  child: OverflowBox(
+                    alignment: Alignment.centerLeft,
+                    minWidth: trayWidth,
+                    maxWidth: trayWidth,
+                    minHeight: _reactionTrayMaxHeight,
+                    maxHeight: _reactionTrayMaxHeight,
+                    child: child,
+                  ),
+                ),
+              ),
+            ),
+          ),
         );
       },
     );

@@ -244,7 +244,7 @@ class _InboxRow extends HookConsumerWidget {
                                           nameColor: context.colors.onSurface,
                                           metadataColor: mutedColor,
                                           nameStyle: activityUsernameTextStyle,
-                                          metadataStyle:
+                                          timestampStyle:
                                               activityTimestampTextStyle,
                                           displayNameKey: ValueKey(
                                             'activity-author-${item.id}',

@@ -181,6 +181,10 @@ Widget _buildComposeBar({
   List<CustomEmoji> customEmoji = const <CustomEmoji>[],
   RelayConfigNotifier Function()? relayConfig,
   PhotoLibrary photoLibrary = const _EmptyPhotoLibrary(),
+  VoidCallback? onFocusRequested,
+  FocusNode? focusNode,
+  ValueChanged<VoidCallback>? onFocusRestorerChanged,
+  String composeBarKey = 'compose-bar',
 }) {
   return ProviderScope(
     overrides: [
@@ -227,7 +231,14 @@ Widget _buildComposeBar({
         body: SafeArea(
           child: Align(
             alignment: Alignment.bottomCenter,
-            child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+            child: ComposeBar(
+              key: ValueKey(composeBarKey),
+              channelId: 'channel-1',
+              focusNode: focusNode,
+              onFocusRestorerChanged: onFocusRestorerChanged,
+              onFocusRequested: onFocusRequested,
+              onSend: onSend,
+            ),
           ),
         ),
       ),
@@ -526,6 +537,288 @@ void main() {
       expect(find.byIcon(LucideIcons.aLargeSmall), findsOneWidget);
     });
 
+    testWidgets('notifies focus intent before attaching the focused field', (
+      tester,
+    ) async {
+      var focusRequested = false;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRequested: () => focusRequested = true,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      expect(focusRequested, isTrue);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode!.hasFocus,
+        isTrue,
+      );
+    });
+
+    testWidgets('uses a parent-owned focus node when provided', (tester) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(focusNode.hasFocus, isTrue);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode,
+        same(focusNode),
+      );
+    });
+
+    testWidgets('restores the collapsed editor before requesting focus', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+      VoidCallback? restoreFocus;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onFocusRestorerChanged: (callback) => restoreFocus = callback,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await tester.tap(find.text('Message\u2026'));
+      await tester.pump();
+      await tester.pump();
+      focusNode.unfocus();
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+
+      restoreFocus!();
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
+    });
+
+    testWidgets('keeps hook order when the parent focus node changes', (
+      tester,
+    ) async {
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          focusNode: focusNode,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('invalidates a registered focus restorer on unmount', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final registeredRestorer = callbacks.single;
+
+      await tester.pumpWidget(const SizedBox.shrink());
+
+      registeredRestorer();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('does not let an old restorer mutate a replacement composer', (
+      tester,
+    ) async {
+      final callbacks = <VoidCallback>[];
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'first-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      final oldRestorer = callbacks.single;
+      await tester.pumpWidget(
+        _buildComposeBar(
+          composeBarKey: 'second-compose-bar',
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onFocusRestorerChanged: callbacks.add,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      expect(callbacks, hasLength(2));
+
+      oldRestorer();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsNothing);
+
+      callbacks.last();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('starts Android composer motion with the first IME metrics', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        final widthFinder = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactWidth = tester.getSize(widthFinder).width;
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 80));
+
+        expect(tester.getSize(widthFinder).width, closeTo(compactWidth, 0.1));
+
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        addTearDown(tester.view.reset);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 40));
+
+        expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('expands Android composer when the IME is already visible', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      addTearDown(() {
+        tester.view.reset();
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      });
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        final widthFinder = find.byKey(
+          const ValueKey('composer-width-transition'),
+        );
+        final compactWidth = tester.getSize(widthFinder).width;
+
+        await tester.tap(find.text('Message\u2026'));
+        await tester.pumpAndSettle();
+
+        expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('returns to the compact capsule when the keyboard drops', (
       tester,
     ) async {
@@ -704,6 +997,9 @@ void main() {
         );
 
         await tester.tap(find.text('Message\u2026'));
+        await tester.pump();
+        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        addTearDown(tester.view.reset);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 80));
         await tester.tap(find.byTooltip('Add attachment').hitTestable());
