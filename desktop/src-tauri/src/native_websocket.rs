@@ -1,5 +1,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use buzz_core_pkg::client_identity::{
+    client_header_value_for_host, may_identify_to, ClientApp, CLIENT_HEADER,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -12,14 +15,41 @@ use crate::native_websocket_batch::{is_auth_challenge, FrameBatch, BATCH_MAX_SER
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::{
     connect_async,
+    tungstenite::client::ClientRequestBuilder,
     tungstenite::protocol::{frame::coding::CloseCode, CloseFrame, Message},
 };
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const SEND_QUEUE_CAPACITY: usize = 64;
+
+/// Build the handshake request for `url`, attaching the advisory `Buzz-Client`
+/// header when the destination permits it.
+///
+/// The header tells the relay which app, platform, and version a live
+/// connection belongs to. Attaching it never fails a connection: a destination
+/// outside `may_identify_to` or an unparseable URL just omits the header, and
+/// the relay counts the connection as unidentified.
+///
+/// The desktop app is one of the two lanes with an independently bumped
+/// release version (`RELEASING.md`), so `CARGO_PKG_VERSION` is a real version
+/// here — `bump-desktop-version` rewrites it. Clients that inherit the
+/// workspace version deliberately send none.
+fn client_request(url: &str) -> Result<ClientRequestBuilder, String> {
+    let uri = url.parse().map_err(|error| format!("{error}"))?;
+    let builder = ClientRequestBuilder::new(uri);
+    let permitted = Url::parse(url).is_ok_and(|parsed| may_identify_to(&parsed));
+    let Some(value) = permitted
+        .then(|| client_header_value_for_host(ClientApp::Desktop, Some(env!("CARGO_PKG_VERSION"))))
+        .flatten()
+    else {
+        return Ok(builder);
+    };
+    Ok(builder.with_header(CLIENT_HEADER, value))
+}
 
 pub(crate) fn install_crypto_provider() {
     // Dependencies enable both rustls providers; choose one before TLS setup.
@@ -133,9 +163,10 @@ async fn open_connection(
     on_message: Channel<InvokeResponseBody>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
+    let request = client_request(url)?;
     let (socket, _) = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url)) => result
+        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)) => result
             .map_err(|_| "WebSocket connection timed out".to_string())?
             .map_err(|error| error.to_string())?,
     };

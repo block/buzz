@@ -1494,6 +1494,7 @@ impl InMemoryMetricKey {
 fn refresh_legacy_active_gauge_recency() {
     metrics::gauge!("buzz_ws_connections_active").increment(0.0);
     metrics::gauge!("buzz_subscriptions_active").increment(0.0);
+    buzz_relay::client_info::refresh_active_gauge_recency();
 }
 
 /// Emit pod-local gauges and zero only label keys that disappeared since the
