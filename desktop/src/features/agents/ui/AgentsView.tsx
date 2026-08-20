@@ -369,8 +369,19 @@ export function AgentsView() {
             ).length
           }
           onConfirm={(persona) => {
-            void personas.handleDelete(persona);
+            void personas.handleDelete(
+              persona,
+              agents.handleDeleteInstancesForPersona,
+            );
           }}
+          providerInstanceCount={
+            (agents.managedAgents ?? []).filter(
+              (a) =>
+                a.personaId === personas.personaToDelete?.id &&
+                a.backend.type === "provider" &&
+                a.backendAgentId,
+            ).length
+          }
           onOpenChange={(open) => {
             if (!open) {
               personas.setPersonaToDelete(null);

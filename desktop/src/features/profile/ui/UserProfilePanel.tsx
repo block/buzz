@@ -63,6 +63,7 @@ import {
 import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProfileAgentActions";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
+import { useProfilePersonaDelete } from "@/features/profile/ui/UserProfilePanelPersonaDelete";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
 import {
@@ -175,8 +176,6 @@ export function UserProfilePanel({
   const [addToChannelOpen, setAddToChannelOpen] = React.useState(false);
   const [personaDialogState, setPersonaDialogState] =
     React.useState<PersonaDialogState | null>(null);
-  const [personaToDelete, setPersonaToDelete] =
-    React.useState<AgentPersona | null>(null);
   const [personaToExportSnapshot, setPersonaToExportSnapshot] =
     React.useState<AgentPersona | null>(null);
   const [requestedInstancePubkey, setRequestedInstancePubkey] = React.useState<
@@ -419,6 +418,19 @@ export function UserProfilePanel({
       relayAgents: relayAgentsQuery.data,
     });
 
+  const {
+    personaToDelete,
+    setPersonaToDelete,
+    instanceCount: personaDeleteInstanceCount,
+    providerInstanceCount: personaDeleteProviderInstanceCount,
+    handleConfirmDeletePersona,
+  } = useProfilePersonaDelete({
+    deleteManagedAgentsForPersona,
+    deletePersona: deletePersonaMutation.mutateAsync,
+    managedAgents: managedAgentsQuery.data,
+    onClose,
+  });
+
   const createManagedAgentForPersona = React.useCallback(
     async (personaToStart: AgentPersona) => {
       const runtimes = await availableRuntimesForStart(availableRuntimesQuery);
@@ -594,41 +606,8 @@ export function UserProfilePanel({
     onClose,
     resolvedPersona,
     setPersonaActiveMutation.mutateAsync,
+    setPersonaToDelete,
   ]);
-
-  const handleConfirmDeletePersona = React.useCallback(
-    async (personaToConfirm: AgentPersona) => {
-      if (personaToConfirm.sourceTeam) {
-        toast.error("This agent is managed by a team.");
-        setPersonaToDelete(null);
-        return;
-      }
-
-      try {
-        await deletePersonaMutation.mutateAsync(personaToConfirm.id);
-        toast.success(`Deleted ${personaToConfirm.displayName}.`);
-        setPersonaToDelete(null);
-        onClose();
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to delete agent.",
-        );
-      }
-    },
-    [deletePersonaMutation.mutateAsync, onClose],
-  );
-
-  // Count of managed-agent instances backed by the persona being deleted.
-  // Shown in the confirm dialog so the user knows what will be cascade-deleted.
-  const personaDeleteInstanceCount = React.useMemo(
-    () =>
-      personaToDelete
-        ? (managedAgentsQuery.data ?? []).filter(
-            (a) => a.personaId === personaToDelete.id,
-          ).length
-        : 0,
-    [managedAgentsQuery.data, personaToDelete],
-  );
 
   const handleAddedToChannel = React.useCallback(
     (channel: Channel, result: AttachManagedAgentToChannelResult) => {
@@ -941,6 +920,7 @@ export function UserProfilePanel({
             : null
         }
         instanceCount={personaDeleteInstanceCount}
+        providerInstanceCount={personaDeleteProviderInstanceCount}
         isPending={
           createPersonaMutation.isPending ||
           updatePersonaMutation.isPending ||

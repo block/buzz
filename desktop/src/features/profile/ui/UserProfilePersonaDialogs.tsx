@@ -53,6 +53,7 @@ export function UserProfilePersonaDialogs({
   personaDialogState,
   personaToDelete,
   personaToExportSnapshot,
+  providerInstanceCount,
   resolvedPersona,
   runtimes,
   runtimesLoading,
@@ -75,6 +76,8 @@ export function UserProfilePersonaDialogs({
   personaDialogState: PersonaDialogState | null;
   personaToDelete: AgentPersona | null;
   personaToExportSnapshot: AgentPersona | null;
+  /** How many of those instances are provider-hosted. */
+  providerInstanceCount: number;
   resolvedPersona: AgentPersona | undefined;
   runtimes: AcpRuntimeCatalogEntry[];
   runtimesLoading: boolean;
@@ -123,6 +126,7 @@ export function UserProfilePersonaDialogs({
         }}
         open={personaToDelete !== null}
         persona={personaToDelete}
+        providerInstanceCount={providerInstanceCount}
       />
       {personaToExportSnapshot ? (
         <UserProfileSnapshotExportDialog
