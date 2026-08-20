@@ -49,6 +49,11 @@ buzz channels create --name "my-channel" --type stream --visibility open
 buzz channels join --channel <uuid>
 buzz channels topic --channel <uuid> --topic "New topic"
 
+# Relay membership (NIP-43; add/remove require relay admin or owner)
+buzz relay list-members
+buzz relay add-member --pubkey npub1...
+buzz relay remove-member --pubkey <hex>
+
 # Reactions
 buzz reactions add --event <event-id> --emoji "👍"
 buzz reactions get --event <event-id>
@@ -125,6 +130,9 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `members` | List channel members |
 | | `add-member` | Add a member |
 | | `remove-member` | Remove a member |
+| `relay` | `list-members` | List the relay-signed NIP-43 membership roster |
+| | `add-member` | Add a relay member (admin/owner only) |
+| | `remove-member` | Remove a relay member (admin/owner only) |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
 | `reactions` | `add` | React to a message |

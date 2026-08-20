@@ -240,6 +240,9 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Manage the relay-wide member roster (NIP-43)
+    #[command(subcommand)]
+    Relay(RelayCmd),
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1961,6 +1964,53 @@ pub enum ModerationCmd {
     },
 }
 
+/// NIP-43 relay membership commands.
+///
+/// The relay URL identifies the community. Add/remove commands are authorized
+/// by the relay (admin or owner); the roster is read from relay-signed kind
+/// 13534 membership snapshots.
+#[derive(Subcommand)]
+pub enum RelayCmd {
+    /// Add a relay member (kind 9030)
+    #[command(
+        name = "add-member",
+        after_help = "Examples:\n  buzz relay add-member --pubkey npub1...\n  buzz relay add-member --pubkey <HEX> --role admin"
+    )]
+    AddMember {
+        /// Member pubkey (64-character hex or checksum-valid npub)
+        #[arg(long)]
+        pubkey: String,
+        /// Role to grant (only relay owners may grant admin)
+        #[arg(long, value_enum, default_value_t = RelayMemberRole::Member)]
+        role: RelayMemberRole,
+    },
+    /// Remove a relay member (kind 9031)
+    #[command(name = "remove-member")]
+    RemoveMember {
+        /// Member pubkey (64-character hex or checksum-valid npub)
+        #[arg(long)]
+        pubkey: String,
+    },
+    /// List the relay-signed NIP-43 membership roster
+    #[command(name = "list-members")]
+    ListMembers,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum RelayMemberRole {
+    Member,
+    Admin,
+}
+
+impl RelayMemberRole {
+    fn as_wire(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Admin => "admin",
+        }
+    }
+}
+
 /// Normalize hand-authored `BUZZ_AUTH_TAG` input to strict JSON.
 ///
 /// `.env` files and shell exports sometimes carry the tag in the unquoted
@@ -2066,6 +2116,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Relay(sub) => commands::relay::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2211,6 +2262,7 @@ mod tests {
             "pr",
             "projects",
             "reactions",
+            "relay",
             "repos",
             "social",
             "upload",
@@ -2302,6 +2354,10 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "relay"),
+            vec!["add-member", "list-members", "remove-member"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),

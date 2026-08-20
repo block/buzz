@@ -12,7 +12,8 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+        RELAY_ADMIN_REMOVE_MEMBER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1695,6 +1696,42 @@ pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilde
     Ok(EventBuilder::new(Kind::Custom(KIND_DM_ADD_MEMBER as u16), "").tags(tags))
 }
 
+/// Build a NIP-43 relay-member enrollment command (kind 9030).
+///
+/// The relay community is selected by the connection host, so this command
+/// carries no channel (`h`) tag. `role` must be `member` or `admin`; the relay
+/// separately enforces that only an owner may grant the latter.
+pub fn build_relay_add_member(pubkey: &str, role: &str) -> Result<EventBuilder, SdkError> {
+    let pubkey = check_pubkey_hex(pubkey, "pubkey")?;
+    if !matches!(role, "member" | "admin") {
+        return Err(SdkError::InvalidInput(
+            "relay member role must be member or admin".into(),
+        ));
+    }
+    let tags = vec![tag(&["p", &pubkey])?, tag(&["role", role])?];
+    // A relay admin may intentionally target its own pubkey. Preserve that p
+    // tag so the relay can apply its own self-membership rules.
+    Ok(
+        EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
+/// Build a NIP-43 relay-member removal command (kind 9031).
+///
+/// The relay rejects attempts to remove the signing identity, but preserving a
+/// self-targeting p tag lets it return that authoritative error to the caller.
+pub fn build_relay_remove_member(pubkey: &str) -> Result<EventBuilder, SdkError> {
+    let pubkey = check_pubkey_hex(pubkey, "pubkey")?;
+    let tags = vec![tag(&["p", &pubkey])?];
+    Ok(
+        EventBuilder::new(Kind::Custom(RELAY_ADMIN_REMOVE_MEMBER as u16), "")
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
 /// Build a presence update event (kind 20001).
 ///
 /// `status` must be one of: `"online"`, `"away"`, `"offline"`.
@@ -2958,6 +2995,32 @@ mod tests {
         let ev = sign(build_remove_member(cid, pubkey).unwrap());
         assert_eq!(ev.kind.as_u16(), 9001);
         assert!(has_tag(&ev, "p", pubkey));
+    }
+
+    #[test]
+    fn relay_member_commands_are_nip43_and_preserve_self_targets() {
+        let signer = keys();
+        let pubkey = signer.public_key().to_hex();
+        let add = build_relay_add_member(&pubkey, "member")
+            .unwrap()
+            .sign_with_keys(&signer)
+            .unwrap();
+        assert_eq!(add.kind.as_u16(), RELAY_ADMIN_ADD_MEMBER as u16);
+        assert!(has_tag(&add, "p", &pubkey));
+        assert!(has_tag(&add, "role", "member"));
+
+        let remove = build_relay_remove_member(&pubkey)
+            .unwrap()
+            .sign_with_keys(&signer)
+            .unwrap();
+        assert_eq!(remove.kind.as_u16(), RELAY_ADMIN_REMOVE_MEMBER as u16);
+        assert!(has_tag(&remove, "p", &pubkey));
+    }
+
+    #[test]
+    fn relay_add_member_rejects_invalid_role() {
+        let pubkey = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        assert!(build_relay_add_member(pubkey, "owner").is_err());
     }
 
     #[test]
