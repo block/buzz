@@ -13,12 +13,23 @@ class AgentCredential:
     """One trial-scoped Buzz identity and attributed LLM credential."""
 
     agent_id: str
+    # The roster *kind* — "orchestrator" or "worker" — despite the name. It is
+    # what the runtime checks a credential against, so it stays as it is.
     role: str
     nostr_secret_key: str
     nostr_pubkey: str
     nostr_auth_tag: str
     llm_endpoint: str
     llm_api_key: str
+    # v1.3 (additive, hence last): the manifest's ``role`` string — "lead",
+    # "implementer", "critic", "navigator". Distinct from ``role`` above
+    # because two entries can share a kind and still be different jobs: the
+    # three-agent critic condition has a worker and a critic, both
+    # ``kind: worker``. This is the value teammates see in their prompt, and
+    # personas address each other by it, so without it a lead cannot tell
+    # which teammate edits and which one only verifies. Empty means "fall
+    # back to the kind", which keeps older provisioners working.
+    manifest_role: str = ""
 
 
 @dataclass(frozen=True, slots=True)

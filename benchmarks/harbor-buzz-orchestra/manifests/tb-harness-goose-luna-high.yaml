@@ -1,0 +1,26 @@
+schema_version: "1"
+condition: tb-harness-goose-luna-high
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    harness: goose
+    prompt:
+      path: personas/bench/solo-harness-comparison.md
+      sha256: 5a3bea67549937b6590a6d5678261cbfa08f3da67cb891dee9e81d408a93730b
+    generation:
+      thinking_effort: high
+prices:
+  gpt-5.6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
+environment:
+  override_cpus: 4
+  override_memory_mb: 8192

@@ -707,12 +707,18 @@ impl AcpClient {
         &mut self,
         session_id: &str,
         text: &str,
+        mode: &str,
     ) -> Result<serde_json::Value, AcpError> {
+        if !matches!(mode, "append" | "set") {
+            return Err(AcpError::Protocol(format!(
+                "invalid Goose system prompt mode {mode:?}; expected append or set"
+            )));
+        }
         self.send_request(
             "_goose/unstable/session/system-prompt/set",
             serde_json::json!({
                 "sessionId": session_id,
-                "mode": "set",
+                "mode": mode,
                 "key": "buzz",
                 "text": text,
             }),
@@ -1769,6 +1775,9 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                if let Some(detail) = tool_call_detail(update) {
+                    tracing::info!(target: "acp::tool", "tool_call_detail: {detail}");
+                }
                 true
             }
             "tool_call_update" => {
@@ -2038,6 +2047,59 @@ impl AcpClient {
         StopReason::from_str(raw)
             .ok_or_else(|| AcpError::Protocol(format!("unknown stopReason: {raw:?}")))
     }
+}
+
+/// Summarise what a `tool_call` update actually touched, for the tool log.
+///
+/// `tool_call: shell (other)` records that a shell ran but not what it ran, and
+/// the command string is not persisted anywhere else in a session bundle — so
+/// after the fact there is no way to tell a teammate that read the repo from one
+/// that rewrote it. That distinction is the whole content of a read-only role,
+/// so it needs to be observable rather than asserted.
+///
+/// Two ACP fields carry it. `locations` is the paths the agent declared the call
+/// touches, which is the direct answer when the agent populates it; `rawInput`
+/// is the tool's arguments, which is where a shell command lives. Both are
+/// optional in the schema and several agents omit `locations`, hence the
+/// fallback rather than a choice.
+///
+/// `rawInput` is truncated hard. A `str_replace` carries the entire replacement
+/// text, and a heredoc `shell` call can carry a whole file; logging those in
+/// full would bury the signal and bloat the bundle. The head of the string is
+/// where the verb and the path are.
+fn tool_call_detail(update: &serde_json::Value) -> Option<String> {
+    const MAX_RAW_INPUT: usize = 400;
+
+    let locations: Vec<&str> = update
+        .get("locations")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|loc| loc.get("path").and_then(|p| p.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !locations.is_empty() {
+        return Some(format!("locations={}", locations.join(" ")));
+    }
+
+    let raw = update.get("rawInput")?;
+    if raw.is_null() {
+        return None;
+    }
+    let mut text = raw.to_string();
+    // Byte-slicing a JSON string can land mid-codepoint, which panics. Walk
+    // back to a boundary rather than trusting the cap to be one.
+    if text.len() > MAX_RAW_INPUT {
+        let mut cut = MAX_RAW_INPUT;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push('…');
+    }
+    Some(format!("rawInput={text}"))
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
@@ -2351,6 +2413,61 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_call_detail_prefers_declared_locations() {
+        let update = serde_json::json!({
+            "title": "str_replace",
+            "locations": [{"path": "/app/solve.py"}, {"path": "/app/README.md"}],
+            "rawInput": {"path": "/app/solve.py", "old_str": "a", "new_str": "b"},
+        });
+        assert_eq!(
+            tool_call_detail(&update).as_deref(),
+            Some("locations=/app/solve.py /app/README.md")
+        );
+    }
+
+    #[test]
+    fn tool_call_detail_falls_back_to_raw_input() {
+        // The shell case, and the one the read-only check actually turns on:
+        // buzz-dev-mcp's shell tool declares no locations, so the command
+        // string is the only evidence of whether the call read or wrote.
+        let update = serde_json::json!({
+            "title": "shell",
+            "rawInput": {"command": "sed -i s/a/b/ /app/solve.py"},
+        });
+        let detail = tool_call_detail(&update).expect("rawInput should be summarised");
+        assert!(detail.starts_with("rawInput="), "got {detail}");
+        assert!(detail.contains("sed -i"), "got {detail}");
+    }
+
+    #[test]
+    fn tool_call_detail_is_none_without_either_field() {
+        let update = serde_json::json!({"title": "read_file", "kind": "read"});
+        assert_eq!(tool_call_detail(&update), None);
+        // An explicit null is the same as absent, not a "null" string.
+        let nulled = serde_json::json!({"title": "read_file", "rawInput": null});
+        assert_eq!(tool_call_detail(&nulled), None);
+        // An empty locations array must fall through, not report "locations=".
+        let empty = serde_json::json!({"title": "read_file", "locations": []});
+        assert_eq!(tool_call_detail(&empty), None);
+    }
+
+    #[test]
+    fn tool_call_detail_truncates_on_a_char_boundary() {
+        // A heredoc that writes a whole file is the realistic large case, and a
+        // multi-byte character straddling the cap is what would panic a naive
+        // byte truncate.
+        let payload = "é".repeat(600);
+        let update = serde_json::json!({
+            "title": "shell",
+            "rawInput": {"command": format!("cat > /app/x <<'EOF'\n{payload}\nEOF")},
+        });
+        let detail = tool_call_detail(&update).expect("should summarise");
+        assert!(detail.ends_with('…'), "expected truncation marker");
+        // "rawInput=" prefix plus at most the cap plus the marker.
+        assert!(detail.len() <= "rawInput=".len() + 400 + '…'.len_utf8());
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -3491,7 +3608,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goose_system_prompt_request_uses_set_contract() {
+    async fn goose_system_prompt_request_uses_append_contract() {
         let script = r#"
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
@@ -3499,7 +3616,7 @@ mod tests {
         "#;
         let mut client = spawn_script(script).await;
         let result = client
-            .session_set_goose_system_prompt("ses_goose", "Be terse")
+            .session_set_goose_system_prompt("ses_goose", "Be terse", "append")
             .await
             .expect("custom request succeeds");
         let received = &result["_receivedRequest"];
@@ -3508,7 +3625,7 @@ mod tests {
             "_goose/unstable/session/system-prompt/set"
         );
         assert_eq!(received["params"]["sessionId"], "ses_goose");
-        assert_eq!(received["params"]["mode"], "set");
+        assert_eq!(received["params"]["mode"], "append");
         assert_eq!(received["params"]["key"], "buzz");
         assert_eq!(received["params"]["text"], "Be terse");
     }
@@ -3523,7 +3640,7 @@ mod tests {
         let mut client = spawn_script(script).await;
         assert!(matches!(
             client
-                .session_set_goose_system_prompt("ses_goose", "Be terse")
+                .session_set_goose_system_prompt("ses_goose", "Be terse", "append")
                 .await,
             Err(AcpError::AgentError { code: -32601, .. })
         ));
@@ -3539,9 +3656,35 @@ mod tests {
         let mut client = spawn_script(script).await;
         assert!(matches!(
             client
-                .session_set_goose_system_prompt("ses_goose", "Be terse")
+                .session_set_goose_system_prompt("ses_goose", "Be terse", "append")
                 .await,
             Err(AcpError::AgentError { code: -32602, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn goose_system_prompt_request_supports_replacement_contract() {
+        let script = r#"
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let result = client
+            .session_set_goose_system_prompt("ses_goose", "Be terse", "set")
+            .await
+            .expect("custom request succeeds");
+        assert_eq!(result["_receivedRequest"]["params"]["mode"], "set");
+    }
+
+    #[tokio::test]
+    async fn goose_system_prompt_rejects_unknown_mode_before_writing() {
+        let mut client = spawn_script("sleep 1").await;
+        assert!(matches!(
+            client
+                .session_set_goose_system_prompt("ses_goose", "Be terse", "replace")
+                .await,
+            Err(AcpError::Protocol(message)) if message.contains("expected append or set")
         ));
     }
 

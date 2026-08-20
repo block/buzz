@@ -1,0 +1,43 @@
+# Persona optimization baseline v0: Mia (Luna) + Mie (DeepSeek), both max on Databricks.
+schema_version: "1"
+condition: tb-persona-v0-luna-deepseek-max
+roster:
+  - id: mia
+    kind: orchestrator
+    role: conn
+    count: 1
+    endpoint: databricks-gpt-5-6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/mia-v0.md
+      sha256: bdda429b6248305ac43c44a5f585ee7b03bcd97bb1bc3b8be2ba6933787fa12f
+    generation:
+      thinking_effort: max
+  - id: mie
+    kind: worker
+    role: twin
+    count: 1
+    endpoint: databricks-deepseek-v4-flash-0731
+    model_revision: deepseek-v4-flash-20260731
+    prompt:
+      path: personas/bench/mie-v0.md
+      sha256: a4924e4c4507ac466a7500bb34a04a782618df41dba850b6f0f729787c48439b
+    generation:
+      thinking_effort: max
+prices:
+  databricks-gpt-5-6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    cache_read_rate: 0.0
+  databricks-deepseek-v4-flash-0731:
+    # Provisional public per-token model rates; receipts preserve measured tokens.
+    input_per_million_usd: 0.14
+    cached_input_per_million_usd: 0.14
+    output_per_million_usd: 0.28
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
+environment:
+  override_cpus: 4
+  override_memory_mb: 8192

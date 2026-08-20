@@ -4453,6 +4453,11 @@ mod agent_draft_prompt_tests {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("read its root `AGENTS.md`"));
         assert!(prompt.contains("path-local `AGENTS.md`"));
+        assert!(prompt.contains(
+            "When relevant to the task, check existing `RESEARCH/`, `GUIDES/`, and `PLANS/`"
+        ));
+        assert!(!prompt.contains("## Startup Recovery"));
+        assert!(!prompt.contains("`buzz feed get`"));
         assert!(
             prompt.contains("product, architecture, and vision documents as design constraints")
         );

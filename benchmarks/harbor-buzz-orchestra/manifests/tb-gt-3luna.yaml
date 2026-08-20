@@ -1,0 +1,109 @@
+# G0 -- the goosetown persona set at the cheap floor: a luna lead coordinating
+# one read-only luna scout and one luna worker, all three direct from OpenAI.
+#
+# This is the CONTROL for the goosetown wave, and without it a G1s win is
+# uninterpretable. G1s/G2s put an expensive model in the lead seat at the same
+# time as they change the persona bytes, so a score move there could be either
+# thing. G0 holds the personas fixed and puts the cheap model in the lead seat,
+# so:
+#
+#   G0 -> G1s   varies the lead's model only (luna -> sol)
+#   G0 vs C1    varies the persona scheme (and the route -- see below)
+#
+# It is also the only cell in this wave that serves the study's actual headline.
+# G1s/G2s/G1/G2 are all hybrid cells: they ask whether a better-orchestrated
+# expensive lead earns its keep, which is doc 02 §1's *rival*, not its thesis.
+# "Three cheap models talking to each other match one expensive model" needs a
+# cheap-only team, and after B1 (0.536) and C1 (0.494) both came in *below* solo
+# luna (0.545) this is the study's remaining shot at it.
+#
+# What is being tested is not prose. The old lead persona
+# (personas/bench/lead-delegate.md:40) told the lead "do the work directly when
+# that is the shorter path", which describes a solo agent that occasionally pays
+# a round trip -- and that is exactly what C1/C3 measured (score at or below the
+# matching solo, input tokens ~1.9x). personas/bench/gt/gt-lead.md inverts it
+# into a boundary: reads are the lead's, every byte written is a teammate's, and
+# there is no trivial-write exception. The scout seat is new to the study
+# entirely -- a read-only role cannot collide with anyone, which is what makes
+# parallel recon safe and is why gt-lead is allowed to send several assignments
+# in one turn.
+#
+# ROUTE CAVEAT. This runs direct against api.openai.com, while A1/B1/C1 ran
+# through the Databricks AI Gateway. A G0-vs-C1 comparison therefore varies the
+# persona scheme *and* the route. Within the goosetown wave, G0/G1s/G2s share
+# the route exactly, so those three comparisons are clean. Report the route with
+# the number.
+#
+# Endpoint names resolve via testbed/endpoints/openai-live.json.
+schema_version: "1"
+condition: tb-gt-3luna
+roster:
+  - id: lead
+    kind: orchestrator
+    # Read verbatim out of the "Your team" table by both delegate personas
+    # ("Your lead is the teammate whose Role column reads `lead`"). Renaming it
+    # means every report @mentions nobody, the sends all report success, and the
+    # trial stalls to its timeout with no error anywhere.
+    role: lead
+    count: 1
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/gt/gt-lead.md
+      sha256: 8a27e833dec0a6d1700c5ea3100f8a81c09e5090ef0a589b9583fac40b24c05c
+
+  - id: scout
+    kind: worker
+    # `scout` is read by gt-lead.md, which routes recon and verification here
+    # and edits away from here. A seat labelled anything else gets sent edits it
+    # is forbidden to make, and answers "this needs a worker" every time.
+    role: scout
+    count: 1
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/gt/gt-scout.md
+      sha256: 0359a957428dd09e56e57a7fd3fe455d860264d910705f0e4992337dde25e5a5
+
+  - id: worker
+    kind: worker
+    role: worker
+    count: 1
+    endpoint: gpt-5.6-luna
+    model_revision: gpt-5.6-luna
+    prompt:
+      path: personas/bench/gt/gt-worker.md
+      sha256: 7a529ae58f2a2ec635fdf65fb43284b30c09d2c9dbf31e70951fe021c3b2b766
+
+prices:
+  # Repriced 2026-07-30: luna 1.0/0.1/6.0 -> 0.20/0.02/1.20 (-80%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Identical to every other luna cell, deliberately: holding the rates equal is
+  # what makes the cost *ratio* against A1 and C1 sound.
+  gpt-5.6-luna:
+    input_per_million_usd: 0.2
+    cached_input_per_million_usd: 0.02
+    output_per_million_usd: 1.2
+    # Fallback only; superseded by the provider's measured split (doc 02 §2.1).
+    # Caching matters more for a team than for a solo agent, because a team's
+    # bill is driven by re-sent context and that is exactly what a prefix cache
+    # serves.
+    cache_read_rate: 0.0
+trial_budget:
+  # 12000s longest task x the study's 3x multiplier, identical to every cell in
+  # the comparison set. benchmark.py's check_budget_clears_clock refuses to
+  # start below that product.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition, solos included -- see tb-solo-luna.yaml for
+  # the full reasoning. Note this roster is 3 agents in one container, the same
+  # headcount C1 ran at.
+  override_cpus: 4
+  override_memory_mb: 8192

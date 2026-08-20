@@ -27,7 +27,9 @@ def test_defaults_are_leaderboard_eligible():
     argv = benchmark.leaderboard_argv(args, Path("prov.json"), Path("linux-bin"))
     assert argv[argv.index("--dataset") + 1] == "terminal-bench/terminal-bench-2-1"
     assert argv[argv.index("--attempts") + 1] == "5"
-    assert argv[argv.index("--manifest") + 1].endswith("tb-cobol-sonnet-haiku.yaml")
+    # Tracks benchmark.DEFAULT_MANIFEST, which moved to the Databricks
+    # bring-up pair when that became the slate the study runs on (doc 04 §6).
+    assert argv[argv.index("--manifest") + 1].endswith("tb-solo-luna.yaml")
     assert argv[argv.index("--agent-bin-dir") + 1] == "linux-bin"
     # In-container agents reach the host relay through the forwarder gateway.
     assert argv[argv.index("--relay-gateway") + 1] == (

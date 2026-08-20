@@ -1,0 +1,72 @@
+# Solo gpt-5.6-sol on the OpenAI-direct route -- the matched control for
+# tb-gt-sol-2luna.
+#
+# WHY THIS EXISTS. tb-solo-sol is the study's sol baseline, but it runs on
+# `databricks-gpt-5-6-sol`, and tb-gt-sol-2luna runs on `gpt-5.6-sol` direct
+# from OpenAI. Comparing the team against tb-solo-sol would therefore move the
+# lead's serving path at the same time as its headcount -- the same joint-delta
+# mistake tb-solo-luna-high made and that tb-solo-luna-openai had to be built to
+# undo. That one resolved to a null (route alone -0.023, p = 0.815), so the
+# expectation here is also that route is inert, but "expected inert" is not
+# "measured inert" and this cell costs about $30 to run.
+#
+# What is held against tb-gt-sol-2luna: route, lead model, price sheet, trial
+# budget, container CPU/memory, clock multiplier and dataset. What moves: the
+# two luna seats and the personas that coordinate them. That is the whole
+# comparison -- does wrapping a sol lead in two cheap scouts beat sol alone?
+#
+# NO `generation` BLOCK, deliberately. None of the tb-gt-* manifests pin
+# thinking_effort either, so both sides of this comparison sit at the provider
+# default. Pinning `medium` here would look tidier and would add back exactly
+# one difference.
+#
+# BUILT FOR LHTB, not Terminal-Bench. It runs fine on either -- nothing in the
+# manifest names a dataset -- but the reason it exists is
+# docs/09-lhtb-benchmark.md, where the team cell would otherwise produce a
+# number with nothing to compare it to: LHTB's own leaderboard is off-limits
+# because stock harbor ignores `continue_until_timeout` and runs the 24
+# long-horizon tasks single-shot.
+#
+# One statistical note that does not apply to the Terminal-Bench cells: LHTB
+# verifiers emit PARTIAL credit (they call `_partial_reward(details)` against a
+# per-gate dict), so rewards are graded, not binary. The paired exact McNemar
+# test the TB analysis rests on is the wrong tool here -- use means with a
+# paired Wilcoxon signed-rank over the shared task set.
+#
+# Endpoint names resolve via testbed/endpoints/openai-live.json.
+schema_version: "1"
+condition: tb-solo-sol-openai
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: gpt-5.6-sol
+    model_revision: gpt-5.6-sol
+    prompt:
+      # Byte-identical to every other solo cell in the study.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+prices:
+  # The same sol row tb-gt-sol-2luna carries, so the cost column measures token
+  # volume rather than a pricing edit. No luna row: there are no luna seats, and
+  # an unused price row is a claim the cell cannot support.
+  gpt-5.6-sol:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 30.0
+    # Fallback only. On the direct OpenAI Responses route the provider reports
+    # the split at usage.prompt_tokens_details.cached_tokens and the harness
+    # stamps accounting_cache_read_tokens_are_measured: true; 0.0 keeps an
+    # unmeasured run conservative rather than optimistic.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to tb-gt-sol-2luna. Does not bind on LHTB anyway -- Harbor
+  # enforces each task's own `[agent] timeout_sec` scaled by the run's
+  # --timeout-multiplier.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

@@ -1,0 +1,26 @@
+schema_version: "1"
+condition: tb-harness-codex-terra-high
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    harness: codex
+    prompt:
+      path: personas/bench/solo-harness-comparison.md
+      sha256: 5a3bea67549937b6590a6d5678261cbfa08f3da67cb891dee9e81d408a93730b
+    generation:
+      thinking_effort: high
+prices:
+  gpt-5.6-terra:
+    input_per_million_usd: 2.0
+    cached_input_per_million_usd: 0.2
+    output_per_million_usd: 12.0
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
+environment:
+  override_cpus: 4
+  override_memory_mb: 8192

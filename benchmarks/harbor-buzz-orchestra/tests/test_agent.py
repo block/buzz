@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -104,6 +105,47 @@ async def test_agent_lifecycle_and_context(tmp_path, manifest_data):
     ) == (10, 2, 3, 0.25)
     assert context.metadata["manifest_sha256"] == agent.manifest.sha256
     assert context.metadata["trial_id"] == str(context_id)
+    assert agent.SUPPORTS_ATIF is True
+    trajectory = json.loads((tmp_path / "trajectory.json").read_text())
+    assert trajectory["schema_version"] == "ATIF-v1.7"
+    assert trajectory["session_id"] == str(context_id)
+    assert trajectory["steps"] == [
+        {"step_id": 1, "source": "user", "message": "solve it"}
+    ]
+    assert trajectory["final_metrics"]["total_prompt_tokens"] == 10
+    assert trajectory["final_metrics"]["total_cached_tokens"] == 2
+    assert trajectory["final_metrics"]["total_completion_tokens"] == 3
+
+
+async def test_agent_trajectory_uses_the_relay_transcript(tmp_path, manifest_data):
+    transcript_dir = tmp_path / "buzz"
+    transcript_dir.mkdir()
+    (transcript_dir / "transcript.json").write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {"author": "user", "content": "@meli solve it", "created_at": 1},
+                    {"author": "meli", "content": "done", "created_at": 2},
+                ]
+            }
+        )
+    )
+    provisioner, runtime, context_id = Provisioner(), Runtime(), uuid4()
+    agent = BuzzOrchestraAgent(
+        logs_dir=tmp_path,
+        manifest=manifest_data,
+        provisioner=provisioner,
+        runtime=runtime,
+    )
+    agent.context_id = context_id
+    await agent.run("solve it", SimpleNamespace(context_id=context_id), AgentContext())
+
+    trajectory = json.loads((tmp_path / "trajectory.json").read_text())
+    assert [step["source"] for step in trajectory["steps"]] == ["user", "agent"]
+    assert [step["message"] for step in trajectory["steps"]] == [
+        "@meli solve it",
+        "done",
+    ]
 
 
 async def test_teardown_runs_when_runtime_fails(tmp_path, manifest_data):

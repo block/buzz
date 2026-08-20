@@ -3,5 +3,15 @@
     "provider": "openai",
     "api_key_env": "OPENAI_COMPAT_API_KEY",
     "env": {}
+  },
+  "gpt-5.6-sol": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_COMPAT_API_KEY",
+    "env": {}
+  },
+  "gpt-5.6-terra": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_COMPAT_API_KEY",
+    "env": {}
   }
 }

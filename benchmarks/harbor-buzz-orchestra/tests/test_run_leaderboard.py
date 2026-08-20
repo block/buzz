@@ -14,16 +14,25 @@ run_leaderboard = importlib.util.module_from_spec(_spec)
 sys.modules["run_leaderboard"] = run_leaderboard
 _spec.loader.exec_module(run_leaderboard)
 
-FORBIDDEN_FLAGS = (
-    "--timeout-multiplier",
+# Never accepted at all. Per-phase timeout knobs would let one phase be
+# stretched without the others, which is a different experiment wearing the same
+# score; --override-gpus could only add capability, since nothing in
+# Terminal-Bench 2.1 requests a GPU.
+REJECTED_FLAGS = (
     "--agent-timeout-multiplier",
     "--verifier-timeout-multiplier",
     "--agent-setup-timeout-multiplier",
     "--environment-build-timeout-multiplier",
-    "--override-cpus",
-    "--override-memory",
-    "--override-storage",
     "--override-gpus",
+)
+
+# Accepted, but only on request, and each makes the job unsubmittable. A
+# default run must contain none of them.
+OPT_IN_FLAGS = (
+    "--timeout-multiplier",
+    "--override-cpus",
+    "--override-memory-mb",
+    "--override-storage-mb",
 )
 
 
@@ -91,8 +100,8 @@ def test_command_uses_standard_settings_only(args, binaries, agent_binaries):
     assert command[:2] == ["harbor", "run"]
     assert command.count("-k") == 1
     assert command[command.index("-k") + 1] == "5"
-    for flag in FORBIDDEN_FLAGS:
-        assert flag not in command
+    for flag in REJECTED_FLAGS + OPT_IN_FLAGS:
+        assert flag not in command, f"{flag} must be off unless asked for"
     # The full production stack rides in as agent kwargs.
     kwargs = [command[i + 1] for i, p in enumerate(command) if p == "--agent-kwarg"]
     assert any(k.startswith("buzz_acp_binary=") for k in kwargs)
@@ -105,21 +114,60 @@ def test_agent_binaries_must_exist(tmp_path):
         run_leaderboard.find_agent_binaries(tmp_path)
 
 
-def test_forbidden_flags_are_not_accepted(tmp_path):
-    for flag in FORBIDDEN_FLAGS:
-        with pytest.raises(SystemExit):
-            run_leaderboard.parse_args(
-                [
-                    "--dataset",
-                    "d",
-                    "--attempts",
-                    "5",
-                    "--agent-bin-dir",
-                    str(tmp_path),
-                    flag,
-                    "1",
-                ]
-            )
+def required_argv(tmp_path):
+    """Every required flag, so a parser error can only be about what we added.
+
+    The previous version of this helper omitted --manifest, --endpoint-config
+    and --provisioner-config, so parse_args exited over the missing required
+    arguments and the assertion below passed for literally any input -- valid
+    flags included. It proved nothing for as long as it existed.
+    """
+    for name in ("m.yaml", "e.json", "p.json"):
+        (tmp_path / name).write_text("{}")
+    return [
+        "--dataset", "d",
+        "--attempts", "5",
+        "--manifest", str(tmp_path / "m.yaml"),
+        "--endpoint-config", str(tmp_path / "e.json"),
+        "--provisioner-config", str(tmp_path / "p.json"),
+        "--agent-bin-dir", str(tmp_path),
+    ]
+
+
+@pytest.mark.parametrize("flag", REJECTED_FLAGS)
+def test_rejected_flags_are_not_accepted(tmp_path, flag):
+    with pytest.raises(SystemExit):
+        run_leaderboard.parse_args(required_argv(tmp_path) + [flag, "1"])
+
+
+def test_the_guard_admits_a_flag_that_is_genuinely_valid(tmp_path):
+    """Guards against the failure the old test had: rejecting everything."""
+    args = run_leaderboard.parse_args(required_argv(tmp_path) + ["--n-concurrent", "7"])
+    assert args.n_concurrent == 7
+
+
+@pytest.mark.parametrize(
+    ("flag", "attr"),
+    [
+        ("--override-cpus", "override_cpus"),
+        ("--override-memory-mb", "override_memory_mb"),
+        ("--override-storage-mb", "override_storage_mb"),
+    ],
+)
+def test_resource_overrides_are_accepted_on_request(tmp_path, flag, attr):
+    args = run_leaderboard.parse_args(required_argv(tmp_path) + [flag, "8192"])
+    assert getattr(args, attr) == 8192
+
+
+def test_requested_resource_overrides_reach_harbor(args, binaries, agent_binaries):
+    """The study pins these in the manifest; this is where they become flags."""
+    args.override_cpus = 4
+    args.override_memory_mb = 8192
+    command = run_leaderboard.build_command(args, binaries, agent_binaries)
+    assert command[command.index("--override-cpus") + 1] == "4"
+    assert command[command.index("--override-memory-mb") + 1] == "8192"
+    # Unset stays unset rather than defaulting to the task's own value.
+    assert "--override-storage-mb" not in command
 
 
 def test_metadata_template_matches_harbor_schema(args, tmp_path):

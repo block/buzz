@@ -1509,6 +1509,24 @@
     }
   },
   {
+    "id": "dbv2-deepseek-v4-flash-max-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-deepseek-v4-flash-0731",
+    "_note": "Probes that the validated DeepSeek endpoint preserves max instead of inheriting the concrete-unknown max-to-xhigh clamp.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "DeepSeek V4 Flash 0731"
+    }
+  },
+  {
     "id": "dbv2-gpt-5-6-terra-exact-record-probe",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-gpt-5-6-terra",

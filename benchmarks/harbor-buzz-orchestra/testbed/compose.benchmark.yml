@@ -13,6 +13,35 @@ services:
   relay:
     ports:
       - "${BUZZ_METRICS_HOST_PORT:-9102}:9102"
+    environment:
+      # Rate limits raised far above anything a run can reach.
+      #
+      # The relay's defaults (300 API calls/min, 60 messages/min per identity)
+      # protect a shared multi-tenant deployment from abuse. This relay is a
+      # private container that exists for the duration of one sweep, so the
+      # only traffic they can throttle is our own — and they did: with several
+      # trials provisioning at once, all as the same pinned user, the burst of
+      # channel-create and add-member calls blew through 300/min and the relay
+      # returned a 429. That killed a qemu-alpine-ssh trial six minutes into a
+      # full run, scoring the task zero for a reason unrelated to the agent,
+      # and which tasks it hits is pure timing.
+      #
+      # Coordination traffic is the thing under study in the 2- and 3-agent
+      # conditions, so a cap on it would not just add noise, it would bound the
+      # measurement: a team throttled at 60 messages/min would look worse than
+      # a solo agent because of the relay, not because of the team. Turning the
+      # limits off keeps the relay out of the result.
+      #
+      # The trade-off is that these runs say nothing about how a team behaves
+      # against a relay that *is* enforcing quotas. That is a real question, and
+      # not this one. buzz_cli.MAX_ATTEMPTS still retries a 429 if one appears.
+      BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN: "1000000"
+      BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN: "1000000"
+      BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC: "100000"
+      BUZZ_RATE_LIMIT_AGENT_STANDARD_API_CALLS_PER_MIN: "1000000"
+      BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN: "1000000"
+      BUZZ_RATE_LIMIT_AGENT_ELEVATED_MESSAGES_PER_MIN: "1000000"
+      BUZZ_RATE_LIMIT_AGENT_PLATFORM_MESSAGES_PER_MIN: "1000000"
   postgres:
     ports:
       - "${BUZZ_PG_HOST_PORT:-5433}:5432"

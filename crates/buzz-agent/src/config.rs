@@ -521,6 +521,28 @@ pub struct Config {
     /// Databricks gateway does not auto-cache, so without this the surfaced
     /// `cache_read_input_tokens` is structurally always 0.
     pub prompt_caching: bool,
+    /// OpenRouter upstream pin: the `provider.order` list, from
+    /// `OPENROUTER_PROVIDER_ORDER` (comma-separated). Empty = let OpenRouter
+    /// route, which is the right default for interactive use and the wrong one
+    /// for a benchmark.
+    ///
+    /// An OpenRouter model id is not one deployment. `deepseek-v4-flash-0731`
+    /// is served by nine upstreams spanning fp4 to fp8, 262K to 1M context, and
+    /// a 1.6x price spread; `kimi-k3` by ten spanning a 1.5x spread. Unpinned,
+    /// consecutive requests land on different ones, so "the model" is a mixture
+    /// whose composition moves with provider load.
+    ///
+    /// It also decides whether prompt caching happens at all. Measured
+    /// 2026-08-01: pinned to `gmicloud/fp8`, deepseek serves a repeated prefix
+    /// from cache on every call; pinned to `siliconflow/fp8` it never does;
+    /// unpinned it did on one call in three. That is a ~7x swing on input cost
+    /// for identical work. (The `/endpoints` metadata is no guide here -- it
+    /// advertises `supports_implicit_caching: false` for every endpoint that
+    /// was then measured caching.)
+    ///
+    /// Set with `allow_fallbacks: false` in the request, so an unavailable pin
+    /// fails loudly instead of silently redefining the condition mid-run.
+    pub openrouter_provider_order: Vec<String>,
 }
 
 impl Config {
@@ -632,6 +654,9 @@ impl Config {
                 env("BUZZ_AGENT_THINKING_SUMMARY").as_deref(),
             )?,
             prompt_caching: parse_env("BUZZ_AGENT_PROMPT_CACHING", 1u8)? != 0,
+            openrouter_provider_order: parse_provider_order(
+                env("OPENROUTER_PROVIDER_ORDER").as_deref(),
+            ),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -676,6 +701,7 @@ impl Config {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: false,
+            openrouter_provider_order: Vec::new(),
         }
     }
 
@@ -968,6 +994,26 @@ impl HookServers {
 
 fn parse_hook_servers_env(key: &str) -> HookServers {
     parse_hook_servers(env(key).as_deref())
+}
+
+/// Parse `OPENROUTER_PROVIDER_ORDER` into a `provider.order` list.
+///
+/// Comma-separated OpenRouter provider tags, in preference order — either a
+/// bare slug (`moonshotai`) or the slug/quantization form shown in
+/// `/api/v1/models/{id}/endpoints` (`gmicloud/fp8`). The quantized form is
+/// worth preferring in a benchmark: one upstream can serve the same model id at
+/// several quantizations, and fp4 versus fp8 is a different set of weights.
+///
+/// Blank entries are dropped rather than passed through, so a trailing comma or
+/// an accidentally-empty variable degrades to "no pin" instead of asking
+/// OpenRouter to route to a provider named "".
+pub fn parse_provider_order(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Pure parser exposed for unit tests. `None` (env unset) and `Some("")`
@@ -2001,6 +2047,18 @@ mod tests {
             normalize_effort_for_databricks_v2(ThinkingEffort::Max, "databricks-gpt-5-6-sol"),
             ThinkingEffort::Max,
             "databricks-gpt-5-6-sol Max must pass through (F1: supported includes max)"
+        );
+    }
+
+    #[test]
+    fn normalize_effort_for_databricks_v2_deepseek_max_passes_through() {
+        assert_eq!(
+            normalize_effort_for_databricks_v2(
+                ThinkingEffort::Max,
+                "databricks-deepseek-v4-flash-0731",
+            ),
+            ThinkingEffort::Max,
+            "the validated DeepSeek max condition must not inherit the unknown-model xhigh clamp"
         );
     }
 

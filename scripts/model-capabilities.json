@@ -411,12 +411,32 @@
       "normalization_policy": "none"
     }
   ],
-  "_comment_databricks_v2_known_models": "Curated fallback catalog for Databricks v2: the model IDs offered when an authenticated api/ai-gateway/v2/endpoints call succeeds but returns an empty list (see catalog.rs authenticated_empty_v2_catalog). Both IDs also have full exact_records, so once offered they classify precisely. Uniqueness enforced by validate_manifest().",
+  "_comment_databricks_v2_known_models": "Curated fallback catalog for Databricks v2: the model IDs offered when an authenticated api/ai-gateway/v2/endpoints call succeeds but returns an empty list (see catalog.rs authenticated_empty_v2_catalog). Every ID also has a full exact_record, so once offered it classifies precisely. Uniqueness enforced by validate_manifest().",
   "databricks_v2_known_models": [
     "databricks-gpt-5-5",
-    "databricks-claude-opus-4-7"
+    "databricks-claude-opus-4-7",
+    "databricks-deepseek-v4-flash-0731"
   ],
   "exact_records": [
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-deepseek-v4-flash-0731",
+      "registry_label": "DeepSeek V4 Flash 0731",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "live Databricks staging endpoint validation plus provider-advertised effort set",
+      "source": "Direct staging invocation with reasoning_effort=max returned HTTP 200 and reasoning content on 2026-08-18; model metadata advertises low|high|max",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The concrete-unknown DatabricksV2 fallback clamps max to xhigh. This endpoint accepts max, so an exact record is required to preserve the requested leaderboard condition.",
+      "_reconciliation_doc": "Live POST /serving-endpoints/databricks-deepseek-v4-flash-0731/invocations on 2026-08-18 with reasoning_effort=max"
+    },
     {
       "provider": "databricks_v2",
       "raw_model_id": "databricks-gpt-5-4-mini",

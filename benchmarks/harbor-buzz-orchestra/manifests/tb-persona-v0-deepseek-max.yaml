@@ -1,0 +1,27 @@
+# Persona optimization baseline v0: Meli copied byte-for-byte, DeepSeek V4 Flash max on Databricks.
+schema_version: "1"
+condition: tb-persona-v0-deepseek-max
+roster:
+  - id: meli
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: databricks-deepseek-v4-flash-0731
+    model_revision: deepseek-v4-flash-20260731
+    prompt:
+      path: personas/bench/meli-solo-v0.md
+      sha256: de6330190fe22cb4b58cd5c2ca1cb7fc080e9b7f97b298c8960e08854e7a7a8b
+    generation:
+      thinking_effort: max
+prices:
+  databricks-deepseek-v4-flash-0731:
+    # Provisional public per-token model rates; receipts preserve measured tokens.
+    input_per_million_usd: 0.14
+    cached_input_per_million_usd: 0.14
+    output_per_million_usd: 0.28
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
+environment:
+  override_cpus: 4
+  override_memory_mb: 8192

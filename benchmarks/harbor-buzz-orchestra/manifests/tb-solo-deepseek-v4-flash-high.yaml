@@ -1,0 +1,67 @@
+# OR2h -- solo deepseek/deepseek-v4-flash-0731 at reasoning effort `high`,
+# via OpenRouter.
+#
+# The cheap end of the OpenRouter pair. Against tb-solo-kimi-k3-high this is a
+# tier comparison at a 22x input price ratio ($0.133 vs $3.00 per Mtok), which
+# makes it the natural open-weight analogue of the luna -> sol ladder.
+#
+# THE UPSTREAM IS PINNED, AND THE CHOICE IS NOT THE OBVIOUS ONE. OpenRouter
+# serves this model id from nine upstreams spanning fp4 to fp8 quantization,
+# 262K to 1M context, and $0.09-$0.14 per Mtok. Cheapest is deepinfra/fp4 --
+# and it caches well -- but fp4 is a materially more degraded set of weights
+# than the fp8 every other endpoint serves, so benchmarking it and labelling
+# the row "deepseek-v4-flash-0731" would overstate what ran. This pins
+# `gmicloud/fp8`: fp8, the full 1M context, 98.9% uptime, and the cheapest of
+# the fp8 endpoints at $0.133/$0.266.
+#
+# Caching was MEASURED per endpoint, not read off the capability flag, because
+# the flag is wrong. `/api/v1/models/.../endpoints` advertises
+# `supports_implicit_caching: false` for gmicloud/fp8 -- which caches a repeated
+# 21K prefix on every single call -- and `true` only for deepseek/fp8, which is
+# not routable on this account at all (404 with allow_fallbacks off). Measured,
+# three calls each: gmicloud/fp8 cached 21760 every time at $0.00059/call;
+# siliconflow/fp8 cached 0 every time at $0.00306; unpinned cached 0, 0, 21760.
+# So the pin buys ~5x on input cost as well as a fixed condition.
+#
+# EFFORT IS PINNED BUT ITS EFFECT ON THIS MODEL IS SMALL AND WORTH CHECKING IN
+# THE RESULTS. deepseek-v4-flash-0731 advertises supported_efforts
+# ["max","high","low"] and defaults to "high", so `high` here matches the
+# provider default; it is pinned anyway so a later default change cannot
+# silently redefine the cell. On the fp4 endpoint, reasoning length did not
+# separate low from high at all (medians 1097 / 1067, within-level spread
+# wider than between-level). If the effort cells land on top of each other,
+# that measurement -- not the benchmark -- is the first thing to re-read.
+schema_version: "1"
+condition: tb-solo-deepseek-v4-flash-high
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: deepseek/deepseek-v4-flash-0731
+    model_revision: deepseek/deepseek-v4-flash-20260731
+    prompt:
+      # Byte-identical to every other solo cell in the study.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+    generation:
+      thinking_effort: high
+prices:
+  deepseek/deepseek-v4-flash-0731:
+    # The gmicloud/fp8 endpoint's own rates -- NOT the model id's headline
+    # $0.14/$0.28, which belongs to a different set of upstreams. Pinning is
+    # what makes this row the correct one.
+    input_per_million_usd: 0.133
+    cached_input_per_million_usd: 0.0266
+    output_per_million_usd: 0.266
+    # Fallback only; the pinned route reports the real split and the harness
+    # prefers it. See tb-solo-kimi-k3-high.yaml.
+    cache_read_rate: 0.0
+trial_budget:
+  # Identical to every other TB solo cell.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

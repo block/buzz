@@ -1,0 +1,75 @@
+# B3h -- two gpt-5.6-terra peers at reasoning effort `high`, direct from OpenAI.
+#
+# The fourth corner of the effort wave, and the one that speaks most directly
+# to the study's headline. Doc 02 §2 states the parity arithmetic: a cheap team
+# wins if it consumes less than the price ratio's worth of extra tokens. Terra
+# sits at exactly 0.5x sol, so the parity line for a terra *pair* against solo
+# sol is unusually easy to state and unusually easy to test:
+#
+#   two terra agents cost less than one sol agent iff they consume less than
+#   2x sol's tokens -- and a pair that re-sends context to a second seat is
+#   right at the edge of that. B1 measured 1.71x A1's cost at medium (13.67 vs
+#   8.00 over the same tasks), so the pairing tax is close to, but under, the
+#   2x line. Whether it stays under at `high` is the number this cell exists
+#   to produce.
+#
+# Against tb-solo-terra-high it varies only headcount. Against tb-peer-2luna-high
+# it varies only model tier. Both are clean single-variable comparisons because
+# every cell in this wave shares one route, one persona set, one clock and one
+# container size.
+#
+# Same cache-write caveat as tb-solo-terra-high: terra's published $2.50/Mtok
+# write rate has no field in this schema, so the reported cost is a slight
+# under-estimate -- and slightly more so here, because a pair writes more cache
+# than a solo agent does.
+schema_version: "1"
+condition: tb-peer-2terra-high
+roster:
+  - id: driver
+    kind: orchestrator
+    role: driver
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/peer-driver.md
+      sha256: 1cf4d1cbf4093dd0d9b1a6a7ccd9a875c39621d0bab3ddec7e0bb23177761149
+    generation:
+      thinking_effort: high
+
+  - id: navigator
+    kind: worker
+    # See tb-peer-2luna-high.yaml: this string is resolved by persona text, not
+    # by the harness, and renaming it fails silently into a timeout.
+    role: navigator
+    count: 1
+    endpoint: gpt-5.6-terra
+    model_revision: gpt-5.6-terra
+    prompt:
+      path: personas/bench/peer-navigator.md
+      sha256: dcf2ae226b5967067687060871438397125e54b8c412f69076eb2a8edd56d2c5
+    generation:
+      thinking_effort: high
+
+prices:
+  # Repriced 2026-07-30: terra 2.5/0.25/15.0 -> 2.00/0.20/12.00 (-20%).
+  # Sol, Opus 5, Sonnet and Haiku did not move. This changes the
+  # condition hash, so a cell that ran before this date carries the old
+  # hash and the old rates in its receipts -- that mismatch is expected,
+  # not corruption. Restate a completed cell's cost with
+  # benchmark-runs/tools/reprice.py, which re-prices the measured tokens
+  # at a new sheet. Never edit a receipt: the tokens are the
+  # measurement, the price sheet is only an overlay on them.
+  # Identical to tb-solo-terra-high. Operator-supplied 2026-07-30.
+  gpt-5.6-terra:
+    input_per_million_usd: 2.0
+    cached_input_per_million_usd: 0.2
+    output_per_million_usd: 12.0
+    cache_read_rate: 0.0
+trial_budget:
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition -- see tb-solo-luna.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

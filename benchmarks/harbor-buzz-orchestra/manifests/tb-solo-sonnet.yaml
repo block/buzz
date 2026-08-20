@@ -1,0 +1,43 @@
+# Terminal-Bench single-agent baseline: one agent, no workers, one Buzz
+# channel. This is the condition every multi-agent result is measured against,
+# so the lone agent gets byte-identical wiring to a worker — same binaries,
+# same MCP toolset, same env. The only difference is the persona and the fact
+# that there is nobody to delegate to.
+#
+# Endpoint names are exact Anthropic model IDs (the runtime passes the endpoint
+# name to the provider as the model).
+# Prices: Anthropic list $/Mtok as of 2026-07 (Sonnet 3/15).
+schema_version: "1"
+condition: tb-solo-sonnet46
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: claude-sonnet-4-6
+    model_revision: claude-sonnet-4-6
+    prompt:
+      path: personas/solo-tb.md
+      sha256: 5303e47d921820cc44cb8c029e41962be9649f273002c34398dd9145b224482d
+
+# Cache-read rates are 0.0 on every Anthropic-route endpoint on purpose:
+# buzz-agent never sends `cache_control`, and Anthropic prompt caching is
+# opt-in, so no cache reads occur and no discount should be modelled. Revisit
+# this the moment buzz-agent starts requesting caching, and set a measured rate
+# for OpenAI-route endpoints (which cache automatically) rather than a guess.
+prices:
+  claude-sonnet-4-6:
+    input_per_million_usd: 3
+    cached_input_per_million_usd: 0.3
+    output_per_million_usd: 15
+    cache_read_rate: 0.0
+trial_budget:
+  # 36000 = the dataset's longest task (12000s) at the 3x timeout multiplier the
+  # study runs with (DEFAULT_TIMEOUT_MULTIPLIER in scripts/benchmark.py). The two
+  # are one setting in two files: benchmark.py refuses to start if this is the
+  # smaller of the pair, because the harness would then cut a task short of the
+  # deadline Harbor granted it and record a timeout the agent never hit. A flat
+  # 900s did exactly that before the multiplier existed — 39 of the 89 tasks
+  # allow more than 900s, and one live trial died at 905s against a task budget
+  # of 1800s.
+  timeout_seconds: 36000

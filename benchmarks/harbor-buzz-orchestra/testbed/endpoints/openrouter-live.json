@@ -1,0 +1,16 @@
+{
+  "moonshotai/kimi-k3": {
+    "provider": "openrouter",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "env": {
+      "OPENROUTER_PROVIDER_ORDER": "moonshotai/mxfp4"
+    }
+  },
+  "deepseek/deepseek-v4-flash-0731": {
+    "provider": "openrouter",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "env": {
+      "OPENROUTER_PROVIDER_ORDER": "gmicloud/fp8"
+    }
+  }
+}

@@ -1060,9 +1060,11 @@ async fn create_session_and_apply_model(
 
     if is_goose && agent.goose_system_prompt_supported != Some(false) {
         if let Some(prompt) = combined_system_prompt.as_deref() {
+            let prompt_mode = std::env::var("BUZZ_ACP_GOOSE_SYSTEM_PROMPT_MODE")
+                .unwrap_or_else(|_| "append".to_owned());
             match agent
                 .acp
-                .session_set_goose_system_prompt(&resp.session_id, prompt)
+                .session_set_goose_system_prompt(&resp.session_id, prompt, &prompt_mode)
                 .await
             {
                 Ok(_) => agent.goose_system_prompt_supported = Some(true),

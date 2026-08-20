@@ -1,0 +1,68 @@
+# A2x solo baseline: tb-solo-sol with reasoning effort raised medium -> xhigh.
+#
+# This is the effort axis (G2), and it is built the same way round as A1-vs-A2:
+# change one thing. Roster shape, persona bytes, endpoint, model revision,
+# prices, budget, clock and container resources are byte-identical to
+# tb-solo-sol. The only difference in the whole file is `thinking_effort`, so a
+# score difference between A2 and A2x is attributable to effort and nothing
+# else, and a *cost* difference is attributable to the tokens effort bought.
+#
+# The question it answers is not "is xhigh better" but "is medium already good
+# enough". Those have different shapes: the first wants a win, the second wants
+# to know the size of the gap and what it cost. A null result here — xhigh
+# scores the same and bills more — is the useful outcome, not a failed run, and
+# is the reason the cell is worth its money.
+#
+# Why xhigh rather than high: the gap between medium and high is small enough
+# that a null could be read as "the axis does not move anything". xhigh is the
+# highest level sol supports, so if diminishing returns are real this is where
+# they are most visible, and a null is hardest to dismiss.
+#
+# Effort genuinely reaches this endpoint. `databricks-gpt-5-6-sol` strips to
+# `gpt-5-6-sol` (config.rs `strip_catalog_prefix`), matches the `gpt-5-6` family
+# token, and that family's supported set includes xhigh and max — so
+# `clamp_adaptive_effort` passes xhigh through untouched. This matters because
+# an unsupported level is clamped down with only a log warning: the run would
+# quietly execute at `high` while claiming xhigh, and the null result would be
+# an artifact rather than a finding.
+schema_version: "1"
+condition: tb-solo-sol-xhigh
+roster:
+  - id: solo
+    kind: orchestrator
+    role: solo
+    count: 1
+    endpoint: databricks-gpt-5-6-sol
+    model_revision: gpt-5.6-sol
+    prompt:
+      # Byte-identical to tb-solo-sol and tb-solo-luna. Tuning the persona for a
+      # higher effort level would confound the axis with a prompt change.
+      path: personas/bench/solo.md
+      sha256: 61c9ac9dc47cbd3c987a7ee6ceb7397496834df8d3fc284c8fe6980e1d5b4ebe
+    generation:
+      # The single line this condition exists for. Unset elsewhere, which means
+      # the harness default of `medium` (container_runtime.THINKING_EFFORT), so
+      # tb-solo-sol needs no edit. It also keeps its hash: `canonical_bytes`
+      # drops this field when unset, precisely so that opening the axis did not
+      # re-identify every condition that ignores it.
+      thinking_effort: xhigh
+prices:
+  # Identical to tb-solo-sol, deliberately. Effort changes token *volume*, not
+  # the rate card, so holding the rates equal is what makes the A2-vs-A2x cost
+  # delta a pure measurement of what the extra thinking cost.
+  databricks-gpt-5-6-sol:
+    input_per_million_usd: 5.0
+    cached_input_per_million_usd: 0.5
+    output_per_million_usd: 30.0
+    cache_read_rate: 0.0
+trial_budget:
+  # Unchanged from tb-solo-sol. Note this is the field most tempting to raise
+  # for a higher-effort run, and raising it would be a mistake: if xhigh needs a
+  # longer clock to finish the same work, that is a *result* about effort, not a
+  # budgeting problem to engineer away.
+  timeout_seconds: 36000
+
+environment:
+  # Identical in every condition — see tb-solo-sol.yaml for the full reasoning.
+  override_cpus: 4
+  override_memory_mb: 8192

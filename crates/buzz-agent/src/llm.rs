@@ -109,6 +109,7 @@ impl Llm {
                     cfg.thinking_effort,
                     effective_model,
                     cfg.prompt_caching,
+                    &cfg.openrouter_provider_order,
                 );
                 self.post_openrouter(cfg, &body)
                     .await
@@ -2480,6 +2481,7 @@ fn apply_openrouter_mutations(
     effort: Option<ThinkingEffort>,
     effective_model: &str,
     prompt_caching: bool,
+    provider_order: &[String],
 ) {
     if let Some(obj) = body.as_object_mut() {
         // OpenRouter's Chat Completions API spells the output cap `max_tokens`;
@@ -2506,6 +2508,24 @@ fn apply_openrouter_mutations(
             obj.insert(
                 "reasoning".into(),
                 json!({ "effort": e.openai_effort_str() }),
+            );
+        }
+
+        // Upstream pin. Only ever set when the operator asked for one, which is
+        // why the "no body shape adds a provider routing filter" tests still
+        // hold: an unset OPENROUTER_PROVIDER_ORDER leaves the body untouched.
+        //
+        // `order` alone is only a *preference* — OpenRouter still falls back to
+        // another upstream when the named one is busy, which is precisely the
+        // silent condition-change a benchmark must not have. `allow_fallbacks:
+        // false` turns that into a 404 the run can see. Note this is NOT
+        // `require_parameters`, the filter the reasoning block above explains
+        // staying away from; that one screens on advertised parameters and
+        // 404s valid models, whereas this names the endpoint outright.
+        if !provider_order.is_empty() {
+            obj.insert(
+                "provider".into(),
+                json!({ "order": provider_order, "allow_fallbacks": false }),
             );
         }
 
@@ -2622,6 +2642,9 @@ mod tests {
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
             prompt_caching: true,
+            // Unpinned by default so the existing "no body shape adds a
+            // provider routing filter" assertions keep testing what they say.
+            openrouter_provider_order: Vec::new(),
         }
     }
 
@@ -6013,6 +6036,7 @@ mod tests {
             c.thinking_effort,
             "anthropic/claude-opus-4-7",
             true,
+            &[],
         );
         assert_eq!(body["reasoning"]["effort"], "high");
         // `openai_body` is always called with `effort=None` on the OpenRouter
@@ -6051,7 +6075,7 @@ mod tests {
             "anthropic/claude-opus-4-7",
             None,
         );
-        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true);
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true, &[]);
         assert!(
             body.get("reasoning").is_none(),
             "reasoning must be absent when effort is None"
@@ -6083,6 +6107,7 @@ mod tests {
             c.thinking_effort,
             "anthropic/claude-opus-4-7",
             true,
+            &[],
         );
         assert_eq!(body["reasoning"]["effort"], "medium");
         assert!(
@@ -6103,11 +6128,87 @@ mod tests {
             "anthropic/claude-opus-4-7",
             None,
         );
-        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true);
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true, &[]);
         assert!(body.get("reasoning").is_none());
         assert!(
             body.get("provider").is_none(),
             "no body shape adds a provider routing filter"
+        );
+    }
+
+    /// An OpenRouter model id is a family of upstream deployments, not one
+    /// deployment: `deepseek-v4-flash-0731` is served at both fp4 and fp8, over
+    /// a 1.6x price spread, and — measured 2026-08-01 — some of those endpoints
+    /// serve a repeated prefix from cache while others never do. A benchmark
+    /// cell that does not pin is therefore not one condition, and its input
+    /// cost swings ~7x on routing luck.
+    #[test]
+    fn openrouter_body_pins_upstream_when_order_is_set() {
+        let c = cfg(Provider::OpenRouter);
+        let order = vec!["gmicloud/fp8".to_string()];
+        let mut body = openai_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &tools_vec(),
+            "deepseek/deepseek-v4-flash-0731",
+            None,
+        );
+        apply_openrouter_mutations(
+            &mut body,
+            None,
+            "deepseek/deepseek-v4-flash-0731",
+            true,
+            &order,
+        );
+        assert_eq!(body["provider"]["order"][0], "gmicloud/fp8");
+        // The half that makes the pin mean anything. With fallbacks left on,
+        // `order` is only a preference: OpenRouter quietly serves from a
+        // different upstream when the named one is busy, which is the silent
+        // mid-run condition change this exists to prevent. Failing loudly is
+        // the point.
+        assert_eq!(
+            body["provider"]["allow_fallbacks"],
+            serde_json::Value::Bool(false),
+            "a pin that silently falls back is not a pin"
+        );
+    }
+
+    /// The pin must stay strictly opt-in. Every other OpenRouter body test
+    /// asserts `provider` is absent, and those assertions are load-bearing:
+    /// a stray routing filter 404s model ids that are otherwise fine.
+    #[test]
+    fn openrouter_body_unpinned_when_order_is_empty() {
+        let c = cfg(Provider::OpenRouter);
+        let mut body = openai_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &tools_vec(),
+            "deepseek/deepseek-v4-flash-0731",
+            None,
+        );
+        apply_openrouter_mutations(
+            &mut body,
+            None,
+            "deepseek/deepseek-v4-flash-0731",
+            true,
+            &[],
+        );
+        assert!(body.get("provider").is_none());
+    }
+
+    /// A trailing comma or a set-but-empty variable must degrade to "no pin",
+    /// not to a request asking OpenRouter to route to a provider named "".
+    #[test]
+    fn provider_order_parsing_drops_blanks() {
+        use crate::config::parse_provider_order;
+        assert_eq!(parse_provider_order(None), Vec::<String>::new());
+        assert_eq!(parse_provider_order(Some("")), Vec::<String>::new());
+        assert_eq!(parse_provider_order(Some("  ,  ")), Vec::<String>::new());
+        assert_eq!(
+            parse_provider_order(Some(" gmicloud/fp8 , deepinfra/fp4 ,")),
+            vec!["gmicloud/fp8".to_string(), "deepinfra/fp4".to_string()]
         );
     }
 
@@ -6127,7 +6228,7 @@ mod tests {
             "anthropic/claude-opus-4-7",
             None,
         );
-        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", false);
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", false, &[]);
         assert!(
             !body.to_string().contains("cache_control"),
             "BUZZ_AGENT_PROMPT_CACHING=0 must suppress every breakpoint: {body}"
@@ -6155,7 +6256,7 @@ mod tests {
             "anthropic/claude-opus-4-7",
             None,
         );
-        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true);
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true, &[]);
         assert!(
             body.to_string().contains("cache_control"),
             "caching on must still emit breakpoints: {body}"
@@ -6167,7 +6268,7 @@ mod tests {
     #[test]
     fn openrouter_body_without_token_limit_gains_none() {
         let mut body = json!({ "model": "vendor/model", "messages": [] });
-        apply_openrouter_mutations(&mut body, None, "vendor/model", true);
+        apply_openrouter_mutations(&mut body, None, "vendor/model", true, &[]);
         assert!(body.get("max_tokens").is_none());
         assert!(body.get("max_completion_tokens").is_none());
     }
@@ -6502,7 +6603,7 @@ mod tests {
             "anthropic/claude-opus-4-7",
             None,
         );
-        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true);
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true, &[]);
         let messages = body["messages"].as_array().unwrap();
 
         // System message should have cache_control
@@ -6599,7 +6700,7 @@ mod tests {
             "anthropic/claude-opus-4-7",
             None,
         );
-        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true);
+        apply_openrouter_mutations(&mut body, None, "anthropic/claude-opus-4-7", true, &[]);
         let messages = body["messages"].as_array().unwrap();
 
         // Count text user messages that got cache_control
