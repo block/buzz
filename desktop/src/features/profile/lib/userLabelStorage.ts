@@ -56,10 +56,33 @@ function parseCachedUserLabel(value: unknown): CachedUserLabel | null {
   };
 }
 
-function readCache(relayUrl: string): UserLabelCache | null {
+// Memo for the parsed cache.
+//
+// `readCache` is reached once per React render, per query observer, via
+// `resolveUserLabelPlaceholderData` -> React Query `placeholderData`. Every
+// rendered username is an observer, so re-parsing up to MAX_CACHED_LABELS
+// entries and rebuilding the lowercased map there is a per-render cost paid
+// even when the bytes have not changed.
+//
+// Keyed by the exact raw string as well as the storage key: any write (from
+// this tab or another) changes the string and invalidates the memo, and a
+// different relay can never be served another relay's labels. The memoized
+// object is shared with callers, so nothing may mutate it -- `readCachedUserLabels`
+// builds its own output object and `writeCachedUserLabels` spreads before
+// merging.
+let memoStorageKey: string | null = null;
+let memoRaw: string | null = null;
+let memoParsed: UserLabelCache | null = null;
+
+/** Drops the parsed-cache memo. Wired into `resetCommunityState`. */
+export function resetUserLabelCacheMemo(): void {
+  memoStorageKey = null;
+  memoRaw = null;
+  memoParsed = null;
+}
+
+function parseCache(raw: string): UserLabelCache | null {
   try {
-    const raw = window.localStorage.getItem(userLabelCacheKey(relayUrl));
-    if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null) return null;
     const payload = parsed as Record<string, unknown>;
@@ -87,10 +110,31 @@ function readCache(relayUrl: string): UserLabelCache | null {
   }
 }
 
+function readCache(relayUrl: string): UserLabelCache | null {
+  try {
+    const storageKey = userLabelCacheKey(relayUrl);
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return null;
+    if (storageKey === memoStorageKey && raw === memoRaw) return memoParsed;
+    const parsed = parseCache(raw);
+    memoStorageKey = storageKey;
+    memoRaw = raw;
+    memoParsed = parsed;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export function readCachedUserLabels(
   relayUrl: string,
   pubkeys: string[],
 ): UsersBatchResponse | undefined {
+  // Nothing to look up. `UserProfilePopover` passes `[]` while it is closed and
+  // mounts per message row, per avatar and per member-list entry, so this is
+  // the common call -- it must not touch storage at all.
+  if (pubkeys.length === 0) return undefined;
+
   const cache = readCache(relayUrl);
   if (!cache) return undefined;
 
