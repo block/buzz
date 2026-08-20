@@ -184,11 +184,12 @@ const VAD_OFFSET_THRESHOLD: f32 = 0.35;
 const VAD_ONSET_FRAMES: usize = 3;
 
 /// Audio retained before confirmed onset so initial phonemes are not clipped.
-/// Pre-roll and hangover remain independent while `reset_segment` clears the
-/// pre-roll buffer at every hard boundary; if that changes, re-derive the
-/// overlap constraint in
-/// `RESEARCH/EARSHOT_1_1_0_TO_1_2_2_MEASUREMENT_2026_08_20.md` before tuning
-/// these constants.
+/// A rolling pre-roll that survived a hard boundary would leak segment N into
+/// segment N+1 when the next confirmed onset occurs within
+/// `VAD_PRE_ROLL_FRAMES - VAD_ONSET_FRAMES` frames (13 frames, or 208 ms, at
+/// the shipped values) of the previous flush. Hangover and the silence flush
+/// window do not enter this bound; `reset_segment` keeps them independent by
+/// clearing pre-roll.
 const VAD_PRE_ROLL_FRAMES: usize = 16;
 
 /// Trailing silence retained in the transcript buffer (about 100 ms).
