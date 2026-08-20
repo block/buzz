@@ -27,6 +27,8 @@ async function addProjectToSidebar(
   const browser = page.getByTestId("project-browser-dialog");
   await browser.getByRole("searchbox", { name: "Search projects" }).fill(dtag);
   await browser.getByTestId(`project-browser-result-${dtag}`).click();
+  await expect(browser).toBeHidden();
+  await expect(page.getByTestId(`sidebar-project-${dtag}`)).toBeVisible();
 }
 
 async function waitForMockLiveSubscription(
@@ -215,6 +217,13 @@ test("top-level project lists show metadata and overflow actions", async ({
     Math.abs(pullRequestPositions.rowHeight - issuePositions.rowHeight),
   ).toBeLessThanOrEqual(ALIGNMENT_TOLERANCE_PX);
   await page.setViewportSize({ height: 720, width: 900 });
+  await expect(
+    page.getByTestId("projects-overview-layout"),
+  ).not.toHaveAttribute("data-project-context-detached", "true");
+  await expect(page.getByTestId("projects-overview-context-rail")).toHaveCSS(
+    "width",
+    "0px",
+  );
   await page.getByTestId("projects-section-projects").click();
   const responsiveRepositoryRow = page
     .locator('[data-testid^="project-row-"]')
