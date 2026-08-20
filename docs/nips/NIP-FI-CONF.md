@@ -462,7 +462,7 @@ They close no item in this gate.
 |---|---|
 | `FI-CONF-CLAIM-COMPLETE` | A report missing an applicable oracle, duplicating one, carrying a result from another claim tuple, claiming a status other than `pass`/`not-applicable` — or `deferred` on any oracle other than `FI-CONF-INTEROP-EXIT` — or omitting mutant evidence for any oracle other than a deferred `FI-CONF-INTEROP-EXIT`, is rejected. |
 | `FI-CONF-DENIAL-FIXTURES` | Every enumerated private condition has a fixture; core and each claimed profile pass exact identifier/class/owner enumeration agreement; anonymity-set responses compare byte-identical; the distinguishing negative control fails. |
-| `FI-CONF-MUTATION` | Every listed oracle — except `FI-CONF-INTEROP-EXIT` while validly deferred, per **Mutation adequacy** — has a singly-applied, attributed, reachability-witnessed mutant killed by that entry's own oracle; survivors are recorded, not waived. |
+| `FI-CONF-MUTATION` | Every listed oracle — except `FI-CONF-INTEROP-EXIT` while validly deferred, per **Mutation adequacy** — has a singly-applied, attributed, reachability-witnessed mutant killed by that entry's own oracle; the deny-everything and allow-everything global controls fail every oracle **Mutation adequacy** requires of them, with retained evidence; survivors are recorded, not waived. |
 | `FI-CONF-INTEROP-EXIT` | Two independent implementations produce, from the documents alone, valid requests equal over the request compared object and per-class denials equal over the denial compared object, and accept each other's output. |
 
 ## Security considerations
