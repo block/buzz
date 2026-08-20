@@ -366,6 +366,93 @@ async fn acquire_channel_membership_lock(
     Ok(())
 }
 
+/// Add one invite claimant to every configured default channel in the same
+/// transaction as relay admission.
+///
+/// Every configured channel must exist, be active, and be open. A deployment
+/// typo therefore fails the invite claim instead of admitting somebody to an
+/// empty community. Existing active roles are preserved; a previously removed
+/// membership is revived as an ordinary member.
+pub(crate) async fn add_invite_default_channel_memberships_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    pubkey_hex: &str,
+    channel_names: &[String],
+) -> Result<Vec<Uuid>> {
+    if channel_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let pubkey = hex::decode(pubkey_hex)
+        .map_err(|_| DbError::InvalidData("invite claimant pubkey must be hex".to_string()))?;
+    if pubkey.len() != 32 {
+        return Err(DbError::InvalidData(format!(
+            "invite claimant pubkey must be 32 bytes, got {}",
+            pubkey.len()
+        )));
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name
+        FROM channels
+        WHERE community_id = $1
+          AND name = ANY($2)
+          AND visibility = 'open'
+          AND archived_at IS NULL
+          AND deleted_at IS NULL
+        ORDER BY id
+        FOR SHARE
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_names)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let found_names = rows
+        .iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+    let missing = channel_names
+        .iter()
+        .filter(|name| !found_names.contains(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(DbError::InvalidData(format!(
+            "invite default channels must exist and be open: {}",
+            missing.join(", ")
+        )));
+    }
+
+    let mut channel_ids = Vec::with_capacity(rows.len());
+    for row in rows {
+        let channel_id: Uuid = row.try_get("id")?;
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+            VALUES ($1, $2, $3, 'member', NULL)
+            ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+                removed_at = NULL,
+                removed_by = NULL,
+                role = CASE
+                    WHEN channel_members.removed_at IS NULL THEN channel_members.role
+                    ELSE 'member'::member_role
+                END
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(&pubkey)
+        .execute(&mut **tx)
+        .await?;
+        channel_ids.push(channel_id);
+    }
+
+    Ok(channel_ids)
+}
+
 /// Add a member to a channel.
 ///
 /// Role enforcement:

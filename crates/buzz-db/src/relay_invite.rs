@@ -39,6 +39,8 @@ pub enum ClaimOutcome {
         use_count: i32,
         /// Remaining slots, or `None` when the invite is unlimited.
         uses_remaining: Option<i32>,
+        /// Every configured default channel refreshed by the transaction.
+        channel_ids: Vec<uuid::Uuid>,
     },
     /// The claimer was already a member. `use_count` was NOT incremented.
     AlreadyMember {
@@ -46,6 +48,8 @@ pub enum ClaimOutcome {
         use_count: i32,
         /// Remaining slots, or `None` when the invite is unlimited.
         uses_remaining: Option<i32>,
+        /// Every configured default channel refreshed by the transaction.
+        channel_ids: Vec<uuid::Uuid>,
     },
     /// The invite's `expires_at` has passed.
     Expired,
@@ -215,6 +219,26 @@ pub async fn claim_relay_invite(
     claimer_pubkey: &str,
     policy_version: Option<&str>,
 ) -> Result<ClaimOutcome> {
+    claim_relay_invite_with_channels(
+        pool,
+        community,
+        token_hash,
+        claimer_pubkey,
+        policy_version,
+        &[],
+    )
+    .await
+}
+
+/// Atomically claim a v2 relay invite and join configured default channels.
+pub async fn claim_relay_invite_with_channels(
+    pool: &PgPool,
+    community: CommunityId,
+    token_hash: &[u8; 32],
+    claimer_pubkey: &str,
+    policy_version: Option<&str>,
+    default_channel_names: &[String],
+) -> Result<ClaimOutcome> {
     let mut tx = pool.begin().await?;
 
     // 2. SELECT FOR UPDATE — lock the invite row for the duration of this txn.
@@ -279,6 +303,13 @@ pub async fn claim_relay_invite(
             .execute(&mut *tx)
             .await?;
         }
+        let channel_ids = crate::channel::add_invite_default_channel_memberships_tx(
+            &mut tx,
+            community,
+            claimer_pubkey,
+            default_channel_names,
+        )
+        .await?;
         tx.commit().await?;
         log_claim_outcome(
             community,
@@ -290,6 +321,7 @@ pub async fn claim_relay_invite(
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
+            channel_ids,
         });
     }
 
@@ -338,6 +370,13 @@ pub async fn claim_relay_invite(
     }
 
     if !inserted {
+        let channel_ids = crate::channel::add_invite_default_channel_memberships_tx(
+            &mut tx,
+            community,
+            claimer_pubkey,
+            default_channel_names,
+        )
+        .await?;
         tx.commit().await?;
         log_claim_outcome(
             community,
@@ -349,8 +388,17 @@ pub async fn claim_relay_invite(
         return Ok(ClaimOutcome::AlreadyMember {
             use_count,
             uses_remaining: uses_remaining(),
+            channel_ids,
         });
     }
+
+    let channel_ids = crate::channel::add_invite_default_channel_memberships_tx(
+        &mut tx,
+        community,
+        claimer_pubkey,
+        default_channel_names,
+    )
+    .await?;
 
     // 10. Increment use_count (for every new member, even unlimited).
     let new_use_count = use_count + 1;
@@ -377,6 +425,7 @@ pub async fn claim_relay_invite(
     Ok(ClaimOutcome::Joined {
         use_count: new_use_count,
         uses_remaining: new_uses_remaining,
+        channel_ids,
     })
 }
 
@@ -454,6 +503,16 @@ mod tests {
             .execute(&mut *tx)
             .await
             .expect("delete test members");
+        sqlx::query("DELETE FROM channel_members WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test channel members");
+        sqlx::query("DELETE FROM channels WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test channels");
         sqlx::query("DELETE FROM communities WHERE id = $1")
             .bind(community.as_uuid())
             .execute(&mut *tx)
@@ -599,6 +658,7 @@ mod tests {
             ClaimOutcome::Joined {
                 use_count: 1,
                 uses_remaining: Some(0),
+                channel_ids: Vec::new(),
             }
         );
         assert_eq!(
@@ -608,6 +668,7 @@ mod tests {
             ClaimOutcome::AlreadyMember {
                 use_count: 1,
                 uses_remaining: Some(0),
+                channel_ids: Vec::new(),
             }
         );
         assert_eq!(
@@ -832,6 +893,7 @@ mod tests {
                 ClaimOutcome::Joined {
                     use_count: expected_count,
                     uses_remaining: None,
+                    channel_ids: Vec::new(),
                 }
             );
         }
@@ -865,6 +927,92 @@ mod tests {
                 .expect("claim after rollback"),
             ClaimOutcome::Joined { use_count: 1, .. }
         ));
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn default_channel_admission_is_atomic_with_invite_claim() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let pubkey = test_pubkey();
+        let creator = vec![1_u8; 32];
+        let mut channel_ids = Vec::new();
+        for name in ["general", "welcome-everyone", "bugs"] {
+            let channel_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO channels \
+                 (id, community_id, name, channel_type, visibility, created_by) \
+                 VALUES ($1, $2, $3, 'stream', 'open', $4)",
+            )
+            .bind(channel_id)
+            .bind(community.as_uuid())
+            .bind(name)
+            .bind(&creator)
+            .execute(&pool)
+            .await
+            .expect("insert default channel");
+            channel_ids.push(channel_id);
+        }
+
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect("mint invite");
+        let hash = hash_v2_code(&invite.code);
+
+        let invalid = claim_relay_invite_with_channels(
+            &pool,
+            community,
+            &hash,
+            &pubkey,
+            None,
+            &["general".to_string(), "missing".to_string()],
+        )
+        .await
+        .expect_err("missing default channel must reject claim");
+        assert!(matches!(invalid, crate::DbError::InvalidData(_)));
+        assert!(!is_relay_member(&pool, community, &pubkey)
+            .await
+            .expect("membership after rejected defaults"));
+        assert_eq!(use_count(&pool, community, invite.invite_id).await, 0);
+
+        let names = vec![
+            "general".to_string(),
+            "welcome-everyone".to_string(),
+            "bugs".to_string(),
+        ];
+        let outcome =
+            claim_relay_invite_with_channels(&pool, community, &hash, &pubkey, None, &names)
+                .await
+                .expect("claim with default channels");
+        let mut admitted_ids = match outcome {
+            ClaimOutcome::Joined {
+                use_count: 1,
+                uses_remaining: Some(0),
+                channel_ids,
+            } => channel_ids,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        admitted_ids.sort_unstable();
+        channel_ids.sort_unstable();
+        assert_eq!(admitted_ids, channel_ids);
+
+        let channel_memberships: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM channel_members \
+             WHERE community_id = $1 AND pubkey = decode($2, 'hex') \
+             AND removed_at IS NULL AND role = 'member'",
+        )
+        .bind(community.as_uuid())
+        .bind(&pubkey)
+        .fetch_one(&pool)
+        .await
+        .expect("count default channel memberships");
+        assert_eq!(channel_memberships, 3);
+        assert!(is_relay_member(&pool, community, &pubkey)
+            .await
+            .expect("relay membership after claim"));
+        assert_eq!(use_count(&pool, community, invite.invite_id).await, 1);
+
         delete_test_community(&pool, community).await;
     }
 }

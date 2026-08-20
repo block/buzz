@@ -153,6 +153,31 @@ pub async fn claim_relay_membership(
     role: &str,
     policy_version: Option<&str>,
 ) -> Result<bool> {
+    Ok(
+        claim_relay_membership_with_channels(pool, community, pubkey, role, policy_version, &[])
+            .await?
+            .inserted,
+    )
+}
+
+/// Result of an invite-backed relay membership claim with default channels.
+#[derive(Debug, PartialEq)]
+pub struct RelayMembershipClaim {
+    /// Whether relay membership was newly inserted.
+    pub inserted: bool,
+    /// Every configured default channel refreshed by the transaction.
+    pub channel_ids: Vec<uuid::Uuid>,
+}
+
+/// Claim relay membership and default channel memberships atomically.
+pub async fn claim_relay_membership_with_channels(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    policy_version: Option<&str>,
+    default_channel_names: &[String],
+) -> Result<RelayMembershipClaim> {
     let mut tx = pool.begin().await?;
     let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
@@ -179,8 +204,19 @@ pub async fn claim_relay_membership(
         .await?;
     }
 
+    let channel_ids = crate::channel::add_invite_default_channel_memberships_tx(
+        &mut tx,
+        community,
+        pubkey,
+        default_channel_names,
+    )
+    .await?;
+
     tx.commit().await?;
-    Ok(inserted)
+    Ok(RelayMembershipClaim {
+        inserted,
+        channel_ids,
+    })
 }
 
 /// Returns whether a member has persisted acceptance evidence for a policy version.

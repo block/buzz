@@ -576,6 +576,45 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // A deployment with invite-default channels treats the database channel
+    // roster as onboarding-critical state. Refresh every signed NIP-29
+    // discovery snapshot before opening the listener so direct operational
+    // repairs (membership or visibility) are reflected on the next rollout.
+    if !state.config.invite_default_channels.is_empty() {
+        match buzz_relay::tenant::bind_deployment_community(&state.db, &state.config.relay_url)
+            .await
+        {
+            Ok(tenant) => match state.db.list_channels(tenant.community(), None).await {
+                Ok(channels) => {
+                    let mut refreshed = 0usize;
+                    for channel in channels {
+                        match buzz_relay::handlers::side_effects::emit_group_discovery_events(
+                            &tenant, &state, channel.id,
+                        )
+                        .await
+                        {
+                            Ok(()) => refreshed += 1,
+                            Err(error) => tracing::warn!(
+                                channel = %channel.id,
+                                %error,
+                                "invite-default channel snapshot refresh failed"
+                            ),
+                        }
+                    }
+                    info!(refreshed, "invite-default channel snapshots refreshed");
+                }
+                Err(error) => tracing::warn!(
+                    %error,
+                    "invite-default channel snapshot refresh could not list channels"
+                ),
+            },
+            Err(error) => tracing::warn!(
+                ?error,
+                "invite-default channel snapshot refresh could not bind community"
+            ),
+        }
+    }
+
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
     // but don't have corresponding events (e.g. seeded via direct SQL inserts).
     // Only runs when BUZZ_RECONCILE_CHANNELS=true (dev/CI environments).

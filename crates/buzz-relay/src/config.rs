@@ -281,6 +281,10 @@ pub struct Config {
     /// documents or age attestation are configured.
     pub join_policy: Option<JoinPolicyConfig>,
 
+    /// Open channels joined atomically with a successful community invite.
+    /// Configured by `BUZZ_INVITE_DEFAULT_CHANNELS` as comma-separated names.
+    pub invite_default_channels: Vec<String>,
+
     /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
     pub admin: Option<AdminConfig>,
 
@@ -409,6 +413,39 @@ fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
 
 fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
     parse_bool(name, false)
+}
+
+fn parse_invite_default_channels(raw: Option<String>) -> Result<Vec<String>, ConfigError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut names = Vec::new();
+    for part in raw.split(',') {
+        let name = part.trim();
+        if name.is_empty() {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_INVITE_DEFAULT_CHANNELS contains an empty channel name".to_string(),
+            ));
+        }
+        if name.len() > 128 {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_INVITE_DEFAULT_CHANNELS channel names must be at most 128 bytes".to_string(),
+            ));
+        }
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+    if names.len() > 32 {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_INVITE_DEFAULT_CHANNELS supports at most 32 channels".to_string(),
+        ));
+    }
+    Ok(names)
 }
 
 fn ensure_git_repo_path(
@@ -908,6 +945,8 @@ impl Config {
         let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let invite_default_channels =
+            parse_invite_default_channels(std::env::var("BUZZ_INVITE_DEFAULT_CHANNELS").ok())?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1038,6 +1077,7 @@ impl Config {
             push_gateway_delivery_url,
             push_gateway_timeout,
             join_policy,
+            invite_default_channels,
             admin,
             web_dir,
             serve_git_web_gui,
@@ -1048,6 +1088,22 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invite_default_channels_are_trimmed_and_deduplicated() {
+        assert_eq!(
+            parse_invite_default_channels(Some(
+                "general, welcome-everyone,bugs,general".to_string()
+            ))
+            .expect("valid default channels"),
+            vec!["general", "welcome-everyone", "bugs"]
+        );
+    }
+
+    #[test]
+    fn invite_default_channels_reject_empty_entries() {
+        assert!(parse_invite_default_channels(Some("general,,bugs".to_string())).is_err());
+    }
 
     // Mutex to serialize tests that mutate environment variables.
     // Parallel env-var mutation causes `defaults_are_valid` to see the invalid
