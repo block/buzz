@@ -37,6 +37,7 @@ import {
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
+import { triggerShouldOwnFocus } from "@/features/profile/ui/userProfilePopoverTrigger";
 import { Spinner } from "@/shared/ui/spinner";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 
@@ -152,6 +153,23 @@ export function UserProfilePopover({
   const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
   const { openProfilePanel } = useProfilePanel();
   const canOpenProfilePanel = enableProfilePanel && Boolean(openProfilePanel);
+  // When the child is already an interactive element (most call sites pass a
+  // <button>), let it be the single Tab stop instead of stacking the wrapper's
+  // own role/tabIndex on top of it. The wrapper still handles the click via
+  // onClick below, which the child's activation bubbles up to.
+  const singleTriggerChild =
+    React.Children.count(children) === 1
+      ? React.Children.toArray(children)[0]
+      : null;
+  const triggerOwnsFocus = triggerShouldOwnFocus(
+    React.isValidElement(singleTriggerChild)
+      ? {
+          type: singleTriggerChild.type,
+          props: singleTriggerChild.props as Record<string, unknown>,
+        }
+      : null,
+    canOpenProfilePanel,
+  );
   const relayAgent = relayAgentsQuery.data?.find((a) => a.pubkey === pubkey);
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
@@ -353,22 +371,26 @@ export function UserProfilePopover({
       <PopoverAnchor asChild>
         <TriggerElement
           aria-label={triggerAriaLabel}
-          role={canOpenProfilePanel ? "button" : undefined}
-          tabIndex={canOpenProfilePanel ? 0 : undefined}
+          role={triggerOwnsFocus ? "button" : undefined}
+          tabIndex={triggerOwnsFocus ? 0 : undefined}
           onClick={handleTriggerClick}
-          onKeyDown={(e) => {
-            if (
-              (e.key === "Enter" || e.key === " ") &&
-              canOpenProfilePanel &&
-              openProfilePanel
-            ) {
-              e.preventDefault();
-              e.stopPropagation();
-              clearHoverTimer();
-              setOpen(false);
-              openProfilePanel(pubkey);
-            }
-          }}
+          onKeyDown={
+            triggerOwnsFocus
+              ? (e) => {
+                  if (
+                    (e.key === "Enter" || e.key === " ") &&
+                    canOpenProfilePanel &&
+                    openProfilePanel
+                  ) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearHoverTimer();
+                    setOpen(false);
+                    openProfilePanel(pubkey);
+                  }
+                }
+              : undefined
+          }
           onMouseEnter={handleTriggerMouseEnter}
           onMouseLeave={handleMouseLeave}
           className={cn(
