@@ -7,6 +7,45 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  func testNavigationGlassButtonExpandsToConfiguredHitTarget() {
+    let button = NavigationGlassButton(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+    button.hitTargetInsets = UIEdgeInsets(top: 2, left: 18, bottom: 2, right: 0)
+
+    XCTAssertTrue(button.point(inside: CGPoint(x: -17, y: 20), with: nil))
+    XCTAssertTrue(button.point(inside: CGPoint(x: 20, y: -1), with: nil))
+    XCTAssertFalse(button.point(inside: CGPoint(x: -19, y: 20), with: nil))
+    XCTAssertFalse(button.point(inside: CGPoint(x: 20, y: -3), with: nil))
+  }
+
+  func testNavigationGlassButtonRejectsExpandedHitsWhenDisabled() {
+    let button = NavigationGlassButton(frame: CGRect(x: 0, y: 0, width: 40, height: 40))
+    button.hitTargetInsets = UIEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+    button.isEnabled = false
+
+    XCTAssertFalse(button.point(inside: CGPoint(x: -1, y: 20), with: nil))
+  }
+
+  func testNavigationGlassFallbackUsesDarkSurfaceForWhiteGlyphInLightMode() {
+    XCTAssertTrue(
+      NavigationGlassButtonPlatformView.usesDarkFallbackSurface(
+        foregroundColor: .white,
+        interfaceStyle: .light
+      )
+    )
+    XCTAssertFalse(
+      NavigationGlassButtonPlatformView.usesDarkFallbackSurface(
+        foregroundColor: .white,
+        interfaceStyle: .dark
+      )
+    )
+    XCTAssertFalse(
+      NavigationGlassButtonPlatformView.usesDarkFallbackSurface(
+        foregroundColor: .systemBlue,
+        interfaceStyle: .light
+      )
+    )
+  }
+
   func testRelativeTrackInsertionTimesPreserveAudioDelay() {
     let times = AppDelegate.relativeTrackInsertionTimes(
       videoStart: CMTime(seconds: 1, preferredTimescale: 600),

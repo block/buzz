@@ -96,6 +96,8 @@ class IosGlassNavigationButton extends HookWidget {
             'foregroundColor': foregroundValue,
             'enabled': enabled,
             'buttonCenterX': buttonCenterX ?? width / 2,
+            'hitTargetWidth': width,
+            'hitTargetHeight': height,
           },
           creationParamsCodec: const StandardMessageCodec(),
           onPlatformViewCreated: (viewId) {

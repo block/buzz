@@ -5257,6 +5257,14 @@ void main() {
         (nativeView.creationParams as Map<String, Object>)['buttonCenterX'],
         iosGlassChannelHeaderButtonCenterX,
       );
+      expect(
+        (nativeView.creationParams as Map<String, Object>)['hitTargetWidth'],
+        iosGlassChannelHeaderLeadingWidth,
+      );
+      expect(
+        (nativeView.creationParams as Map<String, Object>)['hitTargetHeight'],
+        48.0,
+      );
 
       final backRect = tester.getRect(backFinder);
       final titleRect = tester.getRect(

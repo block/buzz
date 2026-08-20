@@ -117,6 +117,8 @@ void main() {
       nativeBack.creationParams,
       containsPair('accessibilityLabel', 'Back'),
     );
+    expect(nativeBack.creationParams, containsPair('hitTargetWidth', 48.0));
+    expect(nativeBack.creationParams, containsPair('hitTargetHeight', 48.0));
     expect(find.byTooltip('Back'), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });

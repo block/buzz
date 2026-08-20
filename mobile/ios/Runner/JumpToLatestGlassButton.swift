@@ -40,6 +40,24 @@ private final class JumpToLatestGlassButton: UIButton {
   }
 }
 
+final class NavigationGlassButton: UIButton {
+  var hitTargetInsets = UIEdgeInsets.zero
+
+  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    guard isEnabled, isUserInteractionEnabled, !isHidden, alpha > 0.01 else {
+      return false
+    }
+    return bounds
+      .inset(by: UIEdgeInsets(
+        top: -hitTargetInsets.top,
+        left: -hitTargetInsets.left,
+        bottom: -hitTargetInsets.bottom,
+        right: -hitTargetInsets.right
+      ))
+      .contains(point)
+  }
+}
+
 final class JumpToLatestGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let containerView: UIView
   private let channel: FlutterMethodChannel
@@ -153,7 +171,7 @@ final class NavigationGlassButtonFactory: NSObject, FlutterPlatformViewFactory {
 final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let containerView: UIView
   private let channel: FlutterMethodChannel
-  private let button = UIButton(type: .system)
+  private let button = NavigationGlassButton(type: .system)
 
   init(
     frame: CGRect,
@@ -173,6 +191,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let arguments = args as? [String: Any]
     let buttonCenterX =
       (arguments?["buttonCenterX"] as? NSNumber)?.doubleValue ?? 24
+    let hitTargetWidth =
+      (arguments?["hitTargetWidth"] as? NSNumber)?.doubleValue ?? 48
+    let hitTargetHeight =
+      (arguments?["hitTargetHeight"] as? NSNumber)?.doubleValue ?? 48
     let icon = arguments?["icon"] as? String
     let symbolName = icon == "close" ? "xmark" : "chevron.backward"
 
@@ -192,6 +214,12 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       )
     )
     button.configuration = configuration
+    button.hitTargetInsets = UIEdgeInsets(
+      top: max(0, (hitTargetHeight - 40) / 2),
+      left: max(0, buttonCenterX - 20),
+      bottom: max(0, (hitTargetHeight - 40) / 2),
+      right: max(0, hitTargetWidth - buttonCenterX - 20)
+    )
     button.accessibilityLabel = arguments?["accessibilityLabel"] as? String ?? "Back"
     button.translatesAutoresizingMaskIntoConstraints = false
     button.addAction(
@@ -227,18 +255,38 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     containerView
   }
 
+  /// Whether the pre-iOS-26 fallback should use a dark surface so a light
+  /// foreground remains visible over media.
+  static func usesDarkFallbackSurface(
+    foregroundColor: UIColor?,
+    interfaceStyle: UIUserInterfaceStyle
+  ) -> Bool {
+    guard interfaceStyle != .dark, let foregroundColor else { return false }
+    var white: CGFloat = 0
+    var alpha: CGFloat = 0
+    guard foregroundColor.getWhite(&white, alpha: &alpha) else { return false }
+    return alpha > 0.5 && white >= 0.9
+  }
+
   private func applyAppearance(from value: Any?) {
     let arguments = value as? [String: Any]
     let brightness = arguments?["brightness"] as? String
     let interfaceStyle: UIUserInterfaceStyle = brightness == "dark" ? .dark : .light
     let colorValue = (arguments?["foregroundColor"] as? NSNumber)?.uint32Value
+    let foregroundColor = colorValue.map(Self.color(from:))
     let enabled = arguments?["enabled"] as? Bool ?? true
 
     containerView.overrideUserInterfaceStyle = interfaceStyle
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
-    if let colorValue {
-      button.configuration?.baseForegroundColor = Self.color(from: colorValue)
+    if let foregroundColor {
+      button.configuration?.baseForegroundColor = foregroundColor
+    }
+    if #unavailable(iOS 26.0) {
+      button.configuration?.baseBackgroundColor = Self.usesDarkFallbackSurface(
+        foregroundColor: foregroundColor,
+        interfaceStyle: interfaceStyle
+      ) ? UIColor.black.withAlphaComponent(0.62) : UIColor.secondarySystemBackground
     }
     button.setNeedsUpdateConfiguration()
   }
