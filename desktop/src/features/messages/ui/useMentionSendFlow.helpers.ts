@@ -34,6 +34,13 @@ export type PendingNonMemberMentionSend = {
   audienceGeneration: number;
   audienceRevision: number | null;
   explicitAgentPubkeys: string[];
+  /**
+   * The sender dismissed the composer's request banner, so this message goes
+   * out unmarked even though it addresses one agent. Captured with the rest
+   * of the draft so a send that pauses on the non-member prompt keeps the
+   * choice the sender actually made.
+   */
+  requestTrackingOptedOut: boolean;
 };
 
 export type SendMessageWithMentionFlowInput = {
@@ -49,6 +56,8 @@ export type SendMessageWithMentionFlowInput = {
   trimmed: string;
   audienceGeneration?: number;
   audienceRevision?: number | null;
+  /** The sender dismissed the composer's request banner. */
+  requestTrackingOptedOut?: boolean;
 };
 
 export async function resolvePreviewTags(

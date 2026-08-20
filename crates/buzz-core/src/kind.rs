@@ -544,6 +544,35 @@ pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 /// See `docs/nips/NIP-AM.md`.
 pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 
+/// NIP-AD: Agent Disposition — signed, append-only record of how an agent
+/// resolved one human→agent request (`completed` | `refused` | `errored`).
+///
+/// Regular stored event (never replaced) — the deliberate inverse of
+/// [`KIND_AGENT_TURN_METRIC`]: plaintext and readable by any authorized
+/// reader of its channel, rather than encrypted and owner-gated, because a
+/// disposition's whole purpose is verifiability by whoever can see the
+/// conversation. Not specially gated — MUST NOT be added to
+/// [`RESULT_GATED_KINDS`] or [`AUTHOR_ONLY_KINDS`] — but reads still inherit
+/// ordinary channel access; this is not public-internet readable.
+///
+/// Tags: exactly one `e` (the request event id), one `h` (channel UUID —
+/// required at ingest, and exactly-one enforced by the kind's own envelope
+/// validator so two `h` tags can't split storage scope from tag matching),
+/// one `p` (the requesting principal), and one `disposition` (`completed` |
+/// `refused` | `errored`), readable directly from the tag without parsing
+/// `content`. NOT a server-side query filter: `#disposition` is not a valid
+/// NIP-01 single-letter tag filter (the `nostr` crate's `Filter.generic_tags`
+/// only accepts `#<one char>` keys and silently drops longer ones rather than
+/// erroring) — consumers filter by state client-side over an `#h`/`#e`-scoped
+/// read. `content` is a plaintext JSON object mirroring the tag.
+///
+/// **Binding.** A disposition only resolves a request when its `pubkey` is
+/// one of that request's `["agent", <pubkey>]` targets — not merely a `p`
+/// mention, which would let any CC'd human close an agent's obligation. The
+/// relay does not enforce this (it would need to fetch a second event during
+/// validation); every consumer must. See `docs/nips/NIP-AD.md`.
+pub const KIND_AGENT_DISPOSITION: u32 = 44300;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -725,6 +754,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
+    KIND_AGENT_DISPOSITION,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
@@ -885,6 +915,12 @@ const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
+// Compile-time: KIND_AGENT_DISPOSITION is a regular stored kind (not ephemeral, not replaceable) —
+// append-only is load-bearing: a disposition ledger that could be overwritten isn't a ledger.
+const _: () = assert!(!is_ephemeral(KIND_AGENT_DISPOSITION));
+const _: () = assert!(!is_replaceable(KIND_AGENT_DISPOSITION));
+const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_DISPOSITION));
+const _: () = assert!(KIND_AGENT_DISPOSITION <= u16::MAX as u32);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
 // 1984 is a regular event (persisted to the queue, never fanned out);
 // 9040–9044 are direct commands (executed, never stored).
@@ -905,6 +941,29 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn agent_disposition_is_world_readable_not_gated() {
+        // A disposition's whole purpose is third-party verifiability — the
+        // opposite of KIND_AGENT_TURN_METRIC's owner-only encrypted payload.
+        // Neither gating list may ever claim it.
+        assert!(
+            !RESULT_GATED_KINDS.contains(&KIND_AGENT_DISPOSITION),
+            "KIND_AGENT_DISPOSITION must stay channel-readable, not result-gated"
+        );
+        assert!(
+            !AUTHOR_ONLY_KINDS.contains(&KIND_AGENT_DISPOSITION),
+            "KIND_AGENT_DISPOSITION must stay channel-readable, not author-only"
+        );
+        assert!(
+            !P_GATED_KINDS.contains(&KIND_AGENT_DISPOSITION),
+            "KIND_AGENT_DISPOSITION must stay channel-readable, not p-gated"
+        );
+        assert!(
+            ALL_KINDS.contains(&KIND_AGENT_DISPOSITION),
+            "KIND_AGENT_DISPOSITION must be registered in ALL_KINDS"
+        );
     }
 
     #[test]

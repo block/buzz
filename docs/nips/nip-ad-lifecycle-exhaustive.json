@@ -1,0 +1,6199 @@
+{
+  "$comment": [
+    "GENERATED FILE -- do not edit by hand.",
+    "Regenerate with: node scripts/gen-nip-ad-corpus.mjs",
+    "",
+    "Every bound-disposition history up to length 4, with expectations",
+    "computed from declarative rules in the generator rather than from",
+    "either implementation. Both the Rust verifier and the TypeScript",
+    "mirror run all of these.",
+    "",
+    "Histories are already ordered: the runner assigns increasing",
+    "created_at values, so index order is sort order. Ordering itself is",
+    "covered by the hand-written cases in nip-ad-conformance.json."
+  ],
+  "caseCount": 341,
+  "cases": [
+    {
+      "history": [],
+      "expect": {
+        "outcome": {
+          "kind": "unanswered"
+        },
+        "latestObservation": null,
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "completed",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "refused",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "responded",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "completed",
+        "errored",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "completed",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "refused",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "responded",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "refused",
+        "errored",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "completed",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "refused",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "responded",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "responded",
+        "errored",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "completed",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal",
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "refused",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "responded",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "completed",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "completed",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "completed",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "completed",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "refused",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "refused",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "refused",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "responded",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "refused",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "errored",
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "responded",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "responded",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "responded",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "responded",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "errored",
+        "completed"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "latestObservation": "completed",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "errored",
+        "refused"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "latestObservation": "refused",
+        "warnings": [],
+        "resolved": true
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "errored",
+        "responded"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "latestObservation": "responded",
+        "warnings": [],
+        "resolved": false
+      }
+    },
+    {
+      "history": [
+        "errored",
+        "errored",
+        "errored",
+        "errored"
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "latestObservation": "errored",
+        "warnings": [],
+        "resolved": false
+      }
+    }
+  ]
+}

@@ -569,6 +569,62 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+    /// Target agent (hex or npub). `Some` makes this a NIP-AD request — see
+    /// NIP-AD.md's target-agent binding. Exactly one target in v1.
+    pub request_agent: Option<String>,
+}
+
+/// Canonicalize a `--request-agent` value to lowercase hex.
+///
+/// Case matters: readers compare `agent` tags exactly, so an uppercase
+/// target would produce a request no disposition could ever bind to.
+fn canonical_request_agent(raw: &str) -> Result<String, CliError> {
+    PublicKey::parse(raw.trim())
+        .map_err(|_| CliError::Usage(format!("invalid --request-agent pubkey: {raw}")))
+        .map(|pk| pk.to_hex())
+}
+
+/// Add the NIP-AD request marker and target-agent tag to `builder`.
+///
+/// `Some(target)` adds `["t","request"]` (so gap detection finds the
+/// request) plus exactly one `["agent", <pubkey>]` (so a reader can verify
+/// the disposition's signer was actually asked). Both derive from the same
+/// value, so a marked request can never lack a target — a marked request
+/// with no named target is unresolvable by anyone and would sit as a
+/// permanent false gap.
+///
+/// **Exactly one target in v1.** A request naming two agents has no single
+/// well-defined outcome: either agent answering would discharge the other's
+/// obligation, or both answering would look like a contradiction. The
+/// verifier classifies multi-target markers as unsupported, so emitting one
+/// would produce a request nobody can answer.
+///
+/// The caller is responsible for also `p`-mentioning the target — see
+/// [`cmd_send_message`], which adds it automatically, since `p` is what
+/// routes the message to the agent at all. An `agent` tag without the
+/// matching `p` names a target that never receives the request.
+///
+/// Applies uniformly regardless of message kind — `buzz dispositions list`'s
+/// gap detection currently only reads kind:9 stream messages, so the marker
+/// is meaningful there today, but the CLI doesn't restrict which kind a
+/// caller marks.
+fn with_request_tag(
+    builder: nostr::EventBuilder,
+    request_agent: Option<&str>,
+) -> Result<nostr::EventBuilder, CliError> {
+    let Some(agent) = request_agent else {
+        return Ok(builder);
+    };
+    let hex = canonical_request_agent(agent)?;
+    Ok(builder
+        .tag(
+            nostr::Tag::parse(["t", "request"])
+                .map_err(|e| CliError::Other(format!("invalid request tag: {e}")))?,
+        )
+        .tag(
+            nostr::Tag::parse(["agent", &hex])
+                .map_err(|e| CliError::Other(format!("invalid agent tag: {e}")))?,
+        ))
 }
 
 pub async fn cmd_send_message(
@@ -585,6 +641,24 @@ pub async fn cmd_send_message(
         validate_hex64(r)?;
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
+
+    // A `--request-agent` target is by definition someone this message is
+    // addressed to, so it mentions itself. `p` is what actually routes the
+    // message to the agent — an `agent` tag without it would name a target
+    // that never receives the request, producing a marked request nobody
+    // can answer and a gap that never clears. Requiring a separate
+    // `--mention` for the same pubkey would make that failure a matter of
+    // remembering a second flag.
+    if let Some(ref agent) = p.request_agent {
+        let hex = canonical_request_agent(agent)?;
+        if !p
+            .mentions
+            .iter()
+            .any(|m| PublicKey::parse(m.trim()).is_ok_and(|pk| pk.to_hex() == hex))
+        {
+            p.mentions.push(hex);
+        }
+    }
 
     let explicit_mentions = normalize_explicit_mentions(&p.mentions)?;
     let stripped = strip_code_regions(&p.content);
@@ -676,6 +750,7 @@ pub async fn cmd_send_message(
             )))
         }
     };
+    let builder = with_request_tag(builder, p.request_agent.as_deref())?;
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
@@ -880,6 +955,7 @@ pub async fn dispatch(
             broadcast,
             files,
             mentions,
+            request_agent,
         } => {
             cmd_send_message(
                 client,
@@ -891,6 +967,7 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
+                    request_agent,
                 },
             )
             .await
@@ -995,7 +1072,7 @@ mod tests {
     use super::{
         event_mention_pubkeys, find_root_from_tags, match_profiles_by_name, merge_message_mentions,
         missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        resolve_names_to_pubkeys,
+        resolve_names_to_pubkeys, with_request_tag,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1371,5 +1448,63 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    fn tagged(request_agent: Option<&str>) -> nostr::Event {
+        with_request_tag(
+            nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello"),
+            request_agent,
+        )
+        .unwrap()
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign")
+    }
+
+    fn tag_values<'a>(event: &'a nostr::Event, key: &str) -> Vec<&'a str> {
+        event
+            .tags
+            .iter()
+            .filter_map(|t| {
+                let s = t.as_slice();
+                (s.first().map(String::as_str) == Some(key)).then(|| s[1].as_str())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn with_request_tag_adds_the_marker_and_exactly_one_agent_target() {
+        let event = tagged(Some(PK_VALID_A));
+        assert!(event.tags.iter().any(|t| t.as_slice() == ["t", "request"]));
+        assert_eq!(tag_values(&event, "agent"), vec![PK_VALID_A]);
+    }
+
+    #[test]
+    fn with_request_tag_leaves_message_unmarked_when_no_target() {
+        // Marker and target derive from one value, so a marked request can
+        // never lack a target — and an unmarked message never gains one.
+        let event = tagged(None);
+        assert!(tag_values(&event, "t").is_empty());
+        assert!(tag_values(&event, "agent").is_empty());
+    }
+
+    #[test]
+    fn with_request_tag_canonicalizes_an_uppercase_target_to_lowercase_hex() {
+        // Readers compare `agent` values exactly, and the verifier rejects
+        // non-canonical hex outright — an uppercase target would otherwise
+        // produce a request no disposition could ever bind to.
+        let event = tagged(Some(&PK_VALID_A.to_ascii_uppercase()));
+        assert_eq!(tag_values(&event, "agent"), vec![PK_VALID_A]);
+    }
+
+    #[test]
+    fn with_request_tag_rejects_a_malformed_target() {
+        let err = with_request_tag(
+            nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello"),
+            Some("not-a-pubkey"),
+        );
+        assert!(
+            err.is_err(),
+            "a malformed target must not be silently dropped"
+        );
     }
 }

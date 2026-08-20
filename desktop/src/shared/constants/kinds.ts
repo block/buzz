@@ -60,6 +60,11 @@ export const KIND_MANAGED_AGENT = 30177;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;
+// NIP-AD: signed record of how an agent resolved a human/agent request
+// (completed | refused | errored). Plaintext, world-readable, `#e`-referenced
+// to the request message — structurally an aux overlay kind, same shape as a
+// reaction. See docs/nips/NIP-AD.md.
+export const KIND_AGENT_DISPOSITION = 44300;
 export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 export const KIND_REPO_STATE = 30618;
@@ -105,6 +110,7 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
   KIND_HUDDLE_ENDED, // 48103 — huddle lifecycle overlay
+  KIND_AGENT_DISPOSITION, // 44300 — NIP-AD disposition (live arrival)
 ] as const;
 
 // Auxiliary (non-row) timeline kinds: events that overlay onto or hide an
@@ -121,6 +127,7 @@ export const CHANNEL_AUX_EVENT_KINDS = [
   KIND_REACTION, // 7 — NIP-25 reactions
   KIND_NIP29_DELETE_EVENT, // 9005 — NIP-29 / Buzz-native deletions
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
+  KIND_AGENT_DISPOSITION, // 44300 — NIP-AD disposition, backfilled by #e reference
 ] as const;
 
 // Visible content kinds the main timeline renders as their own rows. Mirrors

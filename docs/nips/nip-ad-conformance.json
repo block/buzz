@@ -1,0 +1,1581 @@
+{
+  "$comment": [
+    "NIP-AD cross-language conformance corpus (hand-written, expressive cases).",
+    "",
+    "Both the Rust verifier (crates/buzz-core/src/disposition.rs) and the",
+    "TypeScript mirror (desktop/src/shared/lib/disposition.ts) run every case",
+    "here. They previously drifted -- different candidate sets, different",
+    "binding rules, different conflict semantics -- and the drift was invisible",
+    "because each side tested itself with its own fixtures.",
+    "",
+    "This file pins the two IMPLEMENTATIONS to each other. It does not pin",
+    "either to the spec: a hand-written transition table in NIP-AD.md once",
+    "contradicted both implementations and every test still passed. The",
+    "normative table is now generated (scripts/gen-nip-ad-corpus.mjs), and the",
+    "exhaustive lifecycle enumeration lives in nip-ad-lifecycle-exhaustive.json",
+    "with expectations computed from declarative rules rather than from either",
+    "implementation.",
+    "",
+    "`requestKinds` is normative here, not read from either implementation: both runners previously defaulted the event kind to their OWN REQUEST_KINDS[0], so a Rust/TS divergence on the request-kind set would pass both suites.",
+    "Adding a case here obliges both implementations. That is the point."
+  ],
+  "constants": {
+    "agent": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "otherAgent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "human": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "requester": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "channel": "36411e44-0e2d-4cfe-bd6e-567eb169db9f",
+    "otherChannel": "99999999-0000-0000-0000-000000000000",
+    "requestId": "1111111111111111111111111111111111111111111111111111111111111111",
+    "otherRequestId": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "requestClassification": [
+    {
+      "name": "canonical single-target request is a valid obligation",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "p",
+          "$agent"
+        ],
+        [
+          "p",
+          "$human"
+        ]
+      ],
+      "expect": {
+        "kind": "valid",
+        "targetAgent": "$agent"
+      }
+    },
+    {
+      "name": "no agent target is invalid, never an unanswered obligation",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "p",
+          "$human"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "missing_agent_target"
+      }
+    },
+    {
+      "name": "two distinct targets are unsupported in v1",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "agent",
+          "$otherAgent"
+        ],
+        [
+          "p",
+          "$agent"
+        ],
+        [
+          "p",
+          "$otherAgent"
+        ]
+      ],
+      "expect": {
+        "kind": "unsupported",
+        "reason": "multiple_agent_targets"
+      }
+    },
+    {
+      "name": "the same target repeated is rejected as non-canonical",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "p",
+          "$agent"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "duplicate_agent_target"
+      }
+    },
+    {
+      "name": "uppercase target is malformed, not silently accepted",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$AGENT_UPPER"
+        ],
+        [
+          "p",
+          "$AGENT_UPPER"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "malformed_agent_target"
+      }
+    },
+    {
+      "name": "short target is malformed",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "abc"
+        ],
+        [
+          "p",
+          "abc"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "malformed_agent_target"
+      }
+    },
+    {
+      "name": "target that is not p-mentioned is invalid",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "p",
+          "$human"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "target_not_mentioned"
+      }
+    },
+    {
+      "name": "no channel is invalid",
+      "tags": [
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "p",
+          "$agent"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "missing_channel"
+      }
+    },
+    {
+      "name": "an unmarked event is not a request at all",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "p",
+          "$agent"
+        ]
+      ],
+      "expect": {
+        "kind": "not_request"
+      }
+    },
+    {
+      "name": "a marker on a kind v1 does not accept is invalid",
+      "kind": 44300,
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "p",
+          "$agent"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "unsupported_kind"
+      }
+    },
+    {
+      "name": "two channel tags are invalid, not first-wins",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "h",
+          "$otherChannel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "p",
+          "$agent"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "multiple_channels"
+      }
+    },
+    {
+      "name": "a multi-target request with one malformed target is MALFORMED, not unsupported",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "agent",
+          "abc"
+        ],
+        [
+          "p",
+          "$agent"
+        ],
+        [
+          "p",
+          "abc"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "malformed_agent_target"
+      }
+    },
+    {
+      "name": "a multi-target request with one unmentioned target is MALFORMED, not unsupported",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "agent",
+          "$otherAgent"
+        ],
+        [
+          "p",
+          "$agent"
+        ]
+      ],
+      "expect": {
+        "kind": "invalid",
+        "reason": "target_not_mentioned"
+      }
+    },
+    {
+      "name": "only well-formed, reachable, distinct targets are unsupported",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "t",
+          "request"
+        ],
+        [
+          "agent",
+          "$agent"
+        ],
+        [
+          "agent",
+          "$otherAgent"
+        ],
+        [
+          "p",
+          "$agent"
+        ],
+        [
+          "p",
+          "$otherAgent"
+        ]
+      ],
+      "expect": {
+        "kind": "unsupported",
+        "reason": "multiple_agent_targets"
+      }
+    }
+  ],
+  "binding": [
+    {
+      "name": "the target agent binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"completed\",\"reason\":\"\"}",
+      "expect": {
+        "bound": true,
+        "state": "completed"
+      }
+    },
+    {
+      "name": "a merely p-mentioned human does not bind",
+      "signer": "$human",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"completed\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "not_target_agent"
+      }
+    },
+    {
+      "name": "another agent does not bind",
+      "signer": "$otherAgent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"completed\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "not_target_agent"
+      }
+    },
+    {
+      "name": "the requester cannot resolve their own request",
+      "signer": "$requester",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"completed\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "not_target_agent"
+      }
+    },
+    {
+      "name": "a different request id does not bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$otherRequestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"completed\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "request_mismatch"
+      }
+    },
+    {
+      "name": "a different channel does not bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$otherChannel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"completed\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "channel_mismatch"
+      }
+    },
+    {
+      "name": "a different requester does not bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$human"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"completed\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "requester_mismatch"
+      }
+    },
+    {
+      "name": "an unknown state does not bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "maybe-later"
+        ]
+      ],
+      "content": "{\"disposition\":\"maybe-later\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "unknown_state"
+      }
+    },
+    {
+      "name": "content disagreeing with the tag does not bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\":\"refused\",\"reason\":\"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "content_state_mismatch"
+      }
+    },
+    {
+      "name": "content request_id disagreeing with the e tag does not bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"request_id\": \"$otherRequestId\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "content_request_id_mismatch"
+      }
+    },
+    {
+      "name": "responded binds and is non-terminal",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "responded"
+        ]
+      ],
+      "content": "{\"disposition\":\"responded\",\"reason\":\"\"}",
+      "expect": {
+        "bound": true,
+        "state": "responded"
+      }
+    },
+    {
+      "name": "content that is null never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "null",
+      "expect": {
+        "bound": false,
+        "reason": "content_not_object"
+      }
+    },
+    {
+      "name": "content that is a number never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "42",
+      "expect": {
+        "bound": false,
+        "reason": "content_not_object"
+      }
+    },
+    {
+      "name": "content that is a string never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "\"hi\"",
+      "expect": {
+        "bound": false,
+        "reason": "content_not_object"
+      }
+    },
+    {
+      "name": "content that is an array never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "[]",
+      "expect": {
+        "bound": false,
+        "reason": "content_not_object"
+      }
+    },
+    {
+      "name": "content that is unparseable bytes never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{not json",
+      "expect": {
+        "bound": false,
+        "reason": "content_not_object"
+      }
+    },
+    {
+      "name": "an event of the wrong kind never binds, however well-formed its tags",
+      "signer": "$agent",
+      "kind": 9,
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "wrong_kind"
+      }
+    },
+    {
+      "name": "two `e` tags never bind (first-tag selection was the drift)",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ],
+        [
+          "e",
+          "$otherRequestId"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "request_id_cardinality"
+      }
+    },
+    {
+      "name": "two `h` tags never bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ],
+        [
+          "h",
+          "$otherChannel"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "channel_cardinality"
+      }
+    },
+    {
+      "name": "two `p` tags never bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ],
+        [
+          "p",
+          "$human"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "requester_cardinality"
+      }
+    },
+    {
+      "name": "two `disposition` tags never bind",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ],
+        [
+          "disposition",
+          "refused"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "state_cardinality"
+      }
+    },
+    {
+      "name": "a missing `e` tag never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "request_id_cardinality"
+      }
+    },
+    {
+      "name": "a missing `h` tag never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "channel_cardinality"
+      }
+    },
+    {
+      "name": "a non-canonical `e` tag never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "ABC"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "malformed_request_id"
+      }
+    },
+    {
+      "name": "a non-canonical `p` tag never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "nope"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\"}",
+      "expect": {
+        "bound": false,
+        "reason": "malformed_requester"
+      }
+    },
+    {
+      "name": "content without the REQUIRED `reason` never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\"}",
+      "expect": {
+        "bound": false,
+        "reason": "missing_reason"
+      }
+    },
+    {
+      "name": "a non-string `reason` never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": 42}",
+      "expect": {
+        "bound": false,
+        "reason": "reason_not_string"
+      }
+    },
+    {
+      "name": "a non-string `request_id` never binds",
+      "signer": "$agent",
+      "tags": [
+        [
+          "e",
+          "$requestId"
+        ],
+        [
+          "h",
+          "$channel"
+        ],
+        [
+          "p",
+          "$requester"
+        ],
+        [
+          "disposition",
+          "completed"
+        ]
+      ],
+      "content": "{\"disposition\": \"completed\", \"reason\": \"\", \"request_id\": 42}",
+      "expect": {
+        "bound": false,
+        "reason": "request_id_not_string"
+      }
+    }
+  ],
+  "$lifecycleComment": [
+    "Sequences are (id, createdAt, state) triples, all signed by the target",
+    "agent and otherwise canonical. Expected: the derived latest state, the",
+    "anomaly set, and whether the obligation counts as resolved.",
+    "",
+    "Every sequence through length 2 is covered, plus the length-3 repair path",
+    "and the same-second and duplicate-id edges."
+  ],
+  "lifecycle": [
+    {
+      "name": "nothing bound is unanswered",
+      "events": [],
+      "expect": {
+        "outcome": {
+          "kind": "unanswered"
+        },
+        "warnings": [],
+        "latestObservation": null,
+        "resolved": false
+      }
+    },
+    {
+      "name": "completed alone resolves",
+      "events": [
+        [
+          "d1",
+          100,
+          "completed"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "warnings": [],
+        "latestObservation": "completed",
+        "resolved": true
+      }
+    },
+    {
+      "name": "refused alone resolves",
+      "events": [
+        [
+          "d1",
+          100,
+          "refused"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "warnings": [],
+        "latestObservation": "refused",
+        "resolved": true
+      }
+    },
+    {
+      "name": "responded alone is open, not resolved",
+      "events": [
+        [
+          "d1",
+          100,
+          "responded"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "responded"
+        },
+        "warnings": [],
+        "latestObservation": "responded",
+        "resolved": false
+      }
+    },
+    {
+      "name": "errored alone is open, not resolved",
+      "events": [
+        [
+          "d1",
+          100,
+          "errored"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "warnings": [],
+        "latestObservation": "errored",
+        "resolved": false
+      }
+    },
+    {
+      "name": "errored then completed is a clean repair",
+      "events": [
+        [
+          "d1",
+          100,
+          "errored"
+        ],
+        [
+          "d2",
+          200,
+          "completed"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "warnings": [],
+        "latestObservation": "completed",
+        "resolved": true
+      }
+    },
+    {
+      "name": "responded then completed is a clean repair",
+      "events": [
+        [
+          "d1",
+          100,
+          "responded"
+        ],
+        [
+          "d2",
+          200,
+          "completed"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "warnings": [],
+        "latestObservation": "completed",
+        "resolved": true
+      }
+    },
+    {
+      "name": "responded then refused is a clean outcome",
+      "events": [
+        [
+          "d1",
+          100,
+          "responded"
+        ],
+        [
+          "d2",
+          200,
+          "refused"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "warnings": [],
+        "latestObservation": "refused",
+        "resolved": true
+      }
+    },
+    {
+      "name": "repeated non-terminals are not anomalous",
+      "events": [
+        [
+          "d1",
+          100,
+          "errored"
+        ],
+        [
+          "d2",
+          200,
+          "responded"
+        ],
+        [
+          "d3",
+          300,
+          "errored"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "open",
+          "state": "errored"
+        },
+        "warnings": [],
+        "latestObservation": "errored",
+        "resolved": false
+      }
+    },
+    {
+      "name": "completed then refused is opposing terminal",
+      "events": [
+        [
+          "d1",
+          100,
+          "completed"
+        ],
+        [
+          "d2",
+          200,
+          "refused"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "warnings": [],
+        "latestObservation": "refused",
+        "resolved": false
+      }
+    },
+    {
+      "name": "refused then completed is opposing terminal",
+      "events": [
+        [
+          "d1",
+          100,
+          "refused"
+        ],
+        [
+          "d2",
+          200,
+          "completed"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "disputed"
+        },
+        "warnings": [],
+        "latestObservation": "completed",
+        "resolved": false
+      }
+    },
+    {
+      "name": "completed twice is duplicate terminal, not opposing",
+      "events": [
+        [
+          "d1",
+          100,
+          "completed"
+        ],
+        [
+          "d2",
+          200,
+          "completed"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "latestObservation": "completed",
+        "resolved": true
+      }
+    },
+    {
+      "name": "refused twice is duplicate terminal",
+      "events": [
+        [
+          "d1",
+          100,
+          "refused"
+        ],
+        [
+          "d2",
+          200,
+          "refused"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "warnings": [
+          "duplicate_terminal"
+        ],
+        "latestObservation": "refused",
+        "resolved": true
+      }
+    },
+    {
+      "name": "completed then errored is a post-terminal write",
+      "events": [
+        [
+          "d1",
+          100,
+          "completed"
+        ],
+        [
+          "d2",
+          200,
+          "errored"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "latestObservation": "errored",
+        "resolved": true
+      }
+    },
+    {
+      "name": "refused then responded is a post-terminal write",
+      "events": [
+        [
+          "d1",
+          100,
+          "refused"
+        ],
+        [
+          "d2",
+          200,
+          "responded"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "refused"
+        },
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "latestObservation": "responded",
+        "resolved": true
+      }
+    },
+    {
+      "name": "the identical event delivered twice is not a disputed outcome",
+      "events": [
+        [
+          "dup",
+          100,
+          "completed"
+        ],
+        [
+          "dup",
+          100,
+          "completed"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "warnings": [],
+        "latestObservation": "completed",
+        "resolved": true
+      }
+    },
+    {
+      "name": "same-second tie breaks by lexicographically greatest id",
+      "events": [
+        [
+          "zzz",
+          100,
+          "responded"
+        ],
+        [
+          "aaa",
+          100,
+          "completed"
+        ]
+      ],
+      "expect": {
+        "outcome": {
+          "kind": "settled",
+          "state": "completed"
+        },
+        "warnings": [
+          "ordered_after_terminal"
+        ],
+        "latestObservation": "responded",
+        "resolved": true
+      }
+    }
+  ],
+  "requestKinds": [
+    9
+  ]
+}

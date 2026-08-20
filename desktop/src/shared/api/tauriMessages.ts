@@ -15,6 +15,15 @@ export async function sendChannelMessage(
   sentFromThreadTag?: string[],
   expectedRelayUrl?: string,
   expectedSignerPubkey?: string,
+  /**
+   * NIP-AD: pubkeys of the agents this message is addressed to. A non-empty
+   * list makes it a marked request awaiting a disposition, and each pubkey
+   * becomes an `["agent", <pubkey>]` tag that a disposition must be signed
+   * by to resolve this request. Deliberately not derived from the `p`
+   * mention set — a mentioned human must not be able to close an agent's
+   * obligation. See docs/nips/NIP-AD.md.
+   */
+  requestAgentPubkeys?: string[],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -36,6 +45,7 @@ export async function sendChannelMessage(
       // closed when the active identity no longer matches, so a community
       // switch cannot re-sign the captured tenant's content as the new one.
       expectedSignerPubkey: expectedSignerPubkey ?? null,
+      requestAgentPubkeys: requestAgentPubkeys ?? null,
     },
   );
   return {

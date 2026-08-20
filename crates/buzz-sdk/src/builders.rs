@@ -470,6 +470,58 @@ pub fn build_vote(
     Ok(EventBuilder::new(Kind::Custom(45002), content).tags(tags))
 }
 
+/// Build a NIP-AD agent disposition event (kind 44300).
+///
+/// Records how an agent resolved one human→agent request. The valid states
+/// come from [`buzz_core::disposition::DispositionState`] — the same enum the
+/// relay validator, the harness, and both readers use, so a state cannot
+/// exist in one layer and not another.
+///
+/// Note what the states mean: `completed` asserts the work was done and
+/// requires an explicit per-request signal; `responded` means only that the
+/// agent answered, which is all a harness can observe from a clean
+/// end-of-turn. Emitting `completed` for a bare turn end would be a claim
+/// nothing verified.
+///
+/// Plaintext and readable by any authorized reader of the channel —
+/// verifiability is the point, unlike the encrypted, owner-gated kind 44200
+/// turn metric. `channel_id` is required: v1 scopes dispositions to
+/// channel-scoped requests only (see `docs/nips/NIP-AD.md`). `reason` MAY be
+/// an empty string but is always present in `content`, never omitted.
+pub fn build_agent_disposition(
+    channel_id: Uuid,
+    request_event_id: nostr::EventId,
+    requester_pubkey: &str,
+    disposition: &str,
+    reason: &str,
+) -> Result<EventBuilder, SdkError> {
+    if buzz_core::disposition::DispositionState::parse(disposition).is_none() {
+        let valid: Vec<&str> = buzz_core::disposition::DispositionState::ALL
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        return Err(SdkError::InvalidInput(format!(
+            "disposition must be one of {valid:?} (got {disposition:?})"
+        )));
+    }
+    let requester_hex = check_pubkey_hex(requester_pubkey, "requester_pubkey")?;
+    let content = serde_json::json!({ "disposition": disposition, "reason": reason }).to_string();
+    let tags = vec![
+        tag(&["e", &request_event_id.to_hex()])?,
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &requester_hex])?,
+        tag(&["disposition", disposition])?,
+    ];
+    // nostr 0.44 silently strips a `p` tag matching the signer unless opted
+    // in (see build_message's `#4906` note). The `p` tag here is REQUIRED —
+    // its absence fails ingest's tag-count check with a confusing "missing
+    // p tag" error — so this must survive even the rare case of an agent
+    // dispositioning a request it authored itself.
+    Ok(EventBuilder::new(Kind::Custom(44300), content)
+        .tags(tags)
+        .allow_self_tagging())
+}
+
 /// Build a NIP-25 reaction event (kind 7). Emoji max 64 chars.
 pub fn build_reaction(
     target_event_id: nostr::EventId,
@@ -2430,6 +2482,73 @@ mod tests {
         assert!(
             has_tag(&ev, "p", &self_pk),
             "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn agent_disposition_happy_path() {
+        let cid = uuid();
+        let req = event_id();
+        let requester = keys();
+        let requester_hex = requester.public_key().to_hex();
+        let ev = sign(
+            build_agent_disposition(cid, req, &requester_hex, "refused", "outside my delegation")
+                .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 44300);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "e", &req.to_hex()));
+        assert!(has_tag(&ev, "p", &requester_hex));
+        assert!(has_tag(&ev, "disposition", "refused"));
+        let content: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+        assert_eq!(content["disposition"], "refused");
+        assert_eq!(content["reason"], "outside my delegation");
+    }
+
+    #[test]
+    fn agent_disposition_rejects_invalid_state() {
+        let cid = uuid();
+        let req = event_id();
+        let requester_hex = keys().public_key().to_hex();
+        let err = build_agent_disposition(cid, req, &requester_hex, "maybe-later", "").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn agent_disposition_rejects_malformed_pubkey() {
+        let cid = uuid();
+        let req = event_id();
+        let err = build_agent_disposition(cid, req, "not-a-pubkey", "completed", "").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn agent_disposition_reason_may_be_empty_for_completed() {
+        let cid = uuid();
+        let req = event_id();
+        let requester_hex = keys().public_key().to_hex();
+        let ev = sign(build_agent_disposition(cid, req, &requester_hex, "completed", "").unwrap());
+        let content: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+        // The field must still be present (an empty string), never omitted —
+        // see NIP-AD.md's content contract.
+        assert_eq!(content["reason"], "");
+    }
+
+    #[test]
+    fn agent_disposition_preserves_self_p_tag_when_agent_disposits_own_request() {
+        // Mirrors message_preserves_self_mention_p_tag: nostr 0.44 strips a
+        // `p` tag matching the signer unless allow_self_tagging() is set.
+        // Here the `p` tag is REQUIRED (not an optional mention), so losing
+        // it would silently produce a malformed event.
+        let cid = uuid();
+        let req = event_id();
+        let agent = keys();
+        let agent_hex = agent.public_key().to_hex();
+        let builder = build_agent_disposition(cid, req, &agent_hex, "completed", "").unwrap();
+        let ev = builder.sign_with_keys(&agent).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &agent_hex),
+            "p tag must survive signing even when it equals the signer's own pubkey"
         );
     }
 

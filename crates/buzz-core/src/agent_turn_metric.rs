@@ -48,7 +48,7 @@ pub struct TokenCounts {
 /// NIP-AM: consumers MUST treat unrecognized `stopReason` values as `Unknown`
 /// and keep the token counts valid. Custom deserialization maps any unrecognized
 /// string to `Unknown` instead of failing the whole payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// Model reached a natural end-of-turn.

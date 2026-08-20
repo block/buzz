@@ -69,6 +69,36 @@ export function reactionsEqual(
   return true;
 }
 
+export function requestStatusEqual(
+  a: TimelineMessage["requestStatus"],
+  b: TimelineMessage["requestStatus"],
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "invalid" || a.kind === "unsupported") {
+    // Narrowing `a` does not narrow `b`; the kind check above guarantees they
+    // match, and both carry `reason` in these arms.
+    return a.reason === (b as typeof a).reason;
+  }
+  const other = b as typeof a;
+  return (
+    a.outcome.kind === other.outcome.kind &&
+    // `state` is absent on unanswered/disputed outcomes; reading it as an
+    // optional field covers all four shapes without a second switch.
+    (a.outcome as { state?: string }).state ===
+      (other.outcome as { state?: string }).state &&
+    a.latestObservation === other.latestObservation &&
+    a.reason === other.reason &&
+    a.resolved === other.resolved &&
+    // Compared by value, not identity: the warning array is rebuilt fresh on
+    // every format pass, so an identity check would defeat the memo for every
+    // row carrying a request status.
+    a.warnings.length === other.warnings.length &&
+    a.warnings.every((warning, i) => warning === other.warnings[i])
+  );
+}
+
 export function numberArrayEqual(
   a: readonly number[] | undefined,
   b: readonly number[] | undefined,

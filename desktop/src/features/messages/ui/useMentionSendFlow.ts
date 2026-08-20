@@ -1,15 +1,11 @@
 import * as React from "react";
 import { toast } from "sonner";
 import {
-  type CreateChannelManagedAgentInput,
   useAttachManagedAgentToChannelMutation,
-  useAvailableAcpRuntimes,
   useCreateChannelManagedAgentMutation,
-  useManagedAgentsQuery,
   useProvisionChannelManagedAgentMutation,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import {
   useAddChannelMembersMutation,
   useCanAddChannelMembers,
@@ -34,13 +30,12 @@ import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
-import type { AcpRuntime, ChannelType, ManagedAgent } from "@/shared/api/types";
+import type { ChannelType } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
+import { useAgentMentionPreparation } from "./useAgentMentionPreparation";
 import {
   getErrorMessage,
-  isManagedAgentRunning,
-  isProviderBackedAgent,
   MENTION_REFERENCE_TAG,
   mergeOutgoingTagsWithReferenceMentions,
   type PendingNonMemberMentionSend,
@@ -48,6 +43,10 @@ import {
   resolvePreviewTags,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
+import {
+  decideRequestMarking,
+  requestAgentPubkeysFor,
+} from "@/features/messages/lib/requestMarking";
 type UseMentionSendFlowOptions = {
   channelId: string | null;
   channelLinks: Pick<UseChannelLinksResult, "clearChannels">;
@@ -69,6 +68,7 @@ type UseMentionSendFlowOptions = {
         threadHeadId: string | null;
       } | null,
       forceRest?: boolean,
+      requestAgentPubkeys?: string[],
     ) => Promise<void>
   >;
   richText: Pick<
@@ -142,183 +142,20 @@ export function useMentionSendFlow({
     useCreateChannelManagedAgentMutation(channelId);
   const provisionPersonaAgentMutation =
     useProvisionChannelManagedAgentMutation(channelId);
-  const availableRuntimesQuery = useAvailableAcpRuntimes();
-  const managedAgentsQuery = useManagedAgentsQuery();
   const startAgentMutation = useStartManagedAgentMutation();
-  const getManagedAgentsByPubkey = React.useCallback(async () => {
-    const agents =
-      managedAgentsQuery.data ??
-      (await managedAgentsQuery.refetch()).data ??
-      [];
-    return new Map(
-      agents.map((agent) => [normalizePubkey(agent.pubkey), agent]),
-    );
-  }, [managedAgentsQuery.data, managedAgentsQuery.refetch]);
-  const getAvailableRuntimes = React.useCallback(async (): Promise<
-    AcpRuntime[]
-  > => {
-    const cached = availableRuntimesQuery.data ?? [];
-    if (cached.length > 0 || !availableRuntimesQuery.isLoading) {
-      return cached;
-    }
-    const refetched = await availableRuntimesQuery.refetch();
-    return (refetched.data ?? []).filter(
-      (runtime): runtime is AcpRuntime =>
-        runtime.availability === "available" &&
-        runtime.command !== null &&
-        runtime.binaryPath !== null,
-    );
-  }, [
-    availableRuntimesQuery.data,
-    availableRuntimesQuery.isLoading,
-    availableRuntimesQuery.refetch,
-  ]);
-  const ensureManagedAgentMentionsReady = React.useCallback(
-    async (
-      mentionPubkeys: string[],
-      capturedChannelId: string,
-      preparedParticipantPubkeys: string[] = [],
-      preparedManagedAgents: ManagedAgent[] = [],
-    ) => {
-      if (!capturedChannelId || mentionPubkeys.length === 0) {
-        return {
-          errors: [] as string[],
-          pubkeys: [] as string[],
-        };
-      }
-      const managedAgentsByPubkey = await getManagedAgentsByPubkey();
-      for (const agent of preparedManagedAgents) {
-        managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
-      }
-      const participantPubkeys = new Set([
-        ...mentions.memberPubkeys,
-        ...preparedParticipantPubkeys.map(normalizePubkey),
-      ]);
-      const errors: string[] = [];
-      const pubkeys: string[] = [];
-      for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
-        const agent = managedAgentsByPubkey.get(pubkey);
-        if (!agent) {
-          continue;
-        }
-        try {
-          if (participantPubkeys.has(pubkey)) {
-            if (isProviderBackedAgent(agent)) {
-              if (agent.status !== "deployed") {
-                await startAgentMutation.mutateAsync(agent.pubkey);
-              }
-            } else if (!isManagedAgentRunning(agent)) {
-              await startAgentMutation.mutateAsync(agent.pubkey);
-            }
-          } else {
-            await attachAgentMutation.mutateAsync({
-              channelId: capturedChannelId,
-              agent,
-              role: "bot",
-            });
-          }
-          pubkeys.push(pubkey);
-        } catch (error) {
-          errors.push(
-            `${agent.name}: ${getErrorMessage(
-              error,
-              "Could not prepare agent.",
-            )}`,
-          );
-        }
-      }
-      return {
-        errors,
-        pubkeys: uniqueNormalizedPubkeys(pubkeys),
-      };
-    },
-    [
-      attachAgentMutation,
-      getManagedAgentsByPubkey,
-      mentions.memberPubkeys,
-      startAgentMutation,
-    ],
-  );
-  const createMentionedPersonaAgents = React.useCallback(
-    async (trimmed: string, capturedChannelId: string) => {
-      const personaMentions = mentions.extractMentionPersonas(trimmed);
-      if (!capturedChannelId || personaMentions.length === 0) {
-        return {
-          errors: [] as string[],
-          agents: [] as ManagedAgent[],
-          pubkeys: [] as string[],
-        };
-      }
-      const runtimes = await getAvailableRuntimes();
-      const defaultRuntime = runtimes[0] ?? null;
-      const errors: string[] = [];
-      const agents: ManagedAgent[] = [];
-      const pubkeys: string[] = [];
-      const seenPersonaIds = new Set<string>();
-      const shouldProvisionForDm =
-        channelType === "dm" && Boolean(onPrepareSendChannel);
-      for (const { displayName, persona } of personaMentions) {
-        if (seenPersonaIds.has(persona.id)) {
-          continue;
-        }
-        seenPersonaIds.add(persona.id);
-        const { runtime } = resolvePersonaRuntime(
-          persona.runtime,
-          runtimes,
-          defaultRuntime,
-        );
-        if (!runtime) {
-          errors.push(`${displayName}: No agent runtime available.`);
-          continue;
-        }
-        try {
-          const input: CreateChannelManagedAgentInput & {
-            channelId: string;
-          } = {
-            channelId: capturedChannelId,
-            runtime,
-            name: persona.displayName,
-            personaId: persona.id,
-            systemPrompt: persona.systemPrompt,
-            avatarUrl: persona.avatarUrl ?? undefined,
-            model: persona.model ?? undefined,
-            role: "bot",
-            ensureRunning: true,
-          };
-          const result = shouldProvisionForDm
-            ? await provisionPersonaAgentMutation.mutateAsync(input)
-            : await createPersonaAgentMutation.mutateAsync(input);
-          const pubkey = normalizePubkey(result.agent.pubkey);
-          agents.push(result.agent);
-          pubkeys.push(pubkey);
-          mentions.registerMentionPubkey(displayName, pubkey, {
-            isAgent: true,
-          });
-        } catch (error) {
-          errors.push(
-            `${displayName}: ${getErrorMessage(
-              error,
-              "Could not create agent.",
-            )}`,
-          );
-        }
-      }
-      return {
-        agents,
-        errors,
-        pubkeys: uniqueNormalizedPubkeys(pubkeys),
-      };
-    },
-    [
-      createPersonaAgentMutation,
-      channelType,
-      getAvailableRuntimes,
-      mentions.extractMentionPersonas,
-      mentions.registerMentionPubkey,
-      onPrepareSendChannel,
-      provisionPersonaAgentMutation,
-    ],
-  );
+  const {
+    getManagedAgentsByPubkey,
+    ensureManagedAgentMentionsReady,
+    createMentionedPersonaAgents,
+  } = useAgentMentionPreparation({
+    channelType,
+    onPrepareSendChannel,
+    mentions,
+    attachAgentMutation,
+    startAgentMutation,
+    createPersonaAgentMutation,
+    provisionPersonaAgentMutation,
+  });
 
   const clearComposer = React.useCallback(
     (postSendContent = "") => {
@@ -577,6 +414,27 @@ export function useMentionSendFlow({
               draft.explicitAgentPubkeys,
               revalidatedMentionPubkeys,
             );
+          // NIP-AD: the agent this message is addressed to. Any agent in the
+          // final mention list counts, however it got there (autocomplete,
+          // explicit picker, or a raw pubkey/URI). It becomes the `agent`
+          // tag, and a disposition only resolves this request if signed by
+          // it. Non-agent mentions are deliberately excluded: they still get
+          // a `p` tag, but a mentioned human must not be able to close an
+          // agent's obligation.
+          //
+          // The decision itself lives in `decideRequestMarking` so the
+          // composer banner shows the sender the same answer this uses. It
+          // was derived only here before, which is how a message could
+          // silently become an obligation — or silently stop being one.
+          const mentionedAgents = revalidatedMentionPubkeys.filter(
+            mentions.isAgentPubkey,
+          );
+          const requestAgentPubkeys = requestAgentPubkeysFor(
+            decideRequestMarking(
+              mentionedAgents,
+              draft.requestTrackingOptedOut,
+            ),
+          );
           await send(
             finalContent,
             revalidatedMentionPubkeys,
@@ -584,6 +442,7 @@ export function useMentionSendFlow({
             sendChannelId,
             draft.capturedThreadContext,
             draft.preparedLinkPreviews != null,
+            requestAgentPubkeys,
           );
           if (signal?.aborted || isSendCancelled()) return;
           if (revalidatedExplicitAgentPubkeys.length > 0) {
@@ -691,6 +550,7 @@ export function useMentionSendFlow({
       trimmed,
       audienceGeneration = 0,
       audienceRevision = null,
+      requestTrackingOptedOut = false,
     }: SendMessageWithMentionFlowInput) => {
       if (isMentionSendPendingRef.current) {
         return;
@@ -812,6 +672,7 @@ export function useMentionSendFlow({
           savedMentionRefs: mentions.getDraftMentionRefs(trimmed),
           audienceGeneration,
           audienceRevision,
+          requestTrackingOptedOut,
           explicitAgentPubkeys,
         };
 

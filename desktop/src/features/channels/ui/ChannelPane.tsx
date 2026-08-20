@@ -53,6 +53,12 @@ import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSend
 import { useChannelPaneMessages } from "@/features/channels/ui/useChannelPaneMessages";
 import { Button } from "@/shared/ui/button";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
+import { useRenderScopedDispositionHydration } from "@/features/messages/lib/useRenderScopedDispositionHydration";
+import {
+  deriveChannelDispositionSummary,
+  hasVisibleRequests,
+} from "@/features/messages/lib/dispositionSummary";
+import { DispositionSummaryChip } from "@/features/messages/ui/DispositionSummaryChip";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
@@ -409,7 +415,22 @@ export const ChannelPane = React.memo(function ChannelPane({
     profiles,
     threadSummaries,
   });
+  const dispositionSummary = React.useMemo(
+    () => deriveChannelDispositionSummary(mainTimelineEntries),
+    [mainTimelineEntries],
+  );
+  const handleJumpToRequest = React.useCallback((messageId: string) => {
+    document
+      .querySelector(`[data-message-id="${messageId}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, []);
   useRenderScopedReactionHydration({
+    activeChannel,
+    mainTimelineEntries,
+    threadHeadMessage,
+    threadMessages,
+  });
+  useRenderScopedDispositionHydration({
     activeChannel,
     mainTimelineEntries,
     threadHeadMessage,
@@ -567,6 +588,23 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {isHuddleTranscript ? null : header}
+          {/* The wrapper is gated on the same predicate as the chip's own
+              early return, not on a second copy of the condition. Rendering it
+              unconditionally left its `pb-1.5` behind in every channel with no
+              marked requests: 6px of dead space under the header, and the
+              timeline's sticky day divider pushed off its designed offset. */}
+          {isHuddleTranscript ||
+          !hasVisibleRequests(dispositionSummary) ? null : (
+            <div
+              className="relative z-50 px-4 pb-1.5"
+              data-testid="disposition-summary-slot"
+            >
+              <DispositionSummaryChip
+                summary={dispositionSummary}
+                onJumpToMessage={handleJumpToRequest}
+              />
+            </div>
+          )}
           <MessageTimeline
             ref={messageTimelineRef}
             channelId={activeChannel?.id}
