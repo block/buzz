@@ -2,6 +2,8 @@ import * as React from "react";
 
 import type { SearchHit } from "@/shared/api/searchTypes";
 import { cn } from "@/shared/lib/cn";
+import { useOptionalSidebar } from "@/shared/ui/sidebar";
+import { ProjectContextRail } from "./ProjectContextRail";
 import { ProjectConversationPanel } from "./ProjectConversationPanel";
 import { PROJECT_COLUMN_HEADER_BACKDROP_CLASS } from "./projectPanelStyles";
 
@@ -38,6 +40,9 @@ export function ProjectConversationPanelController({
   closeWhen,
   detachFallbackPanel = false,
   fallbackPanel,
+  fallbackPanelOpen = false,
+  fallbackPanelResizing = false,
+  fallbackPanelWidthPx,
   onOpenConversation,
   onResetWidth,
   onResizeStart,
@@ -50,6 +55,9 @@ export function ProjectConversationPanelController({
   closeWhen: boolean;
   detachFallbackPanel?: boolean;
   fallbackPanel?: React.ReactNode;
+  fallbackPanelOpen?: boolean;
+  fallbackPanelResizing?: boolean;
+  fallbackPanelWidthPx: number;
   onOpenConversation: () => void;
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
@@ -57,6 +65,7 @@ export function ProjectConversationPanelController({
   sharedHeaderBackdrop?: boolean;
   widthPx: number;
 }) {
+  const sidebar = useOptionalSidebar();
   const [hit, setHit] = React.useState<SearchHit | null>(null);
   const previousResetKeyRef = React.useRef(resetKey);
   React.useEffect(() => {
@@ -73,12 +82,15 @@ export function ProjectConversationPanelController({
   );
   const detached =
     detachFallbackPanel && hit === null && fallbackPanel !== undefined;
+  const fallbackVisible =
+    fallbackPanelOpen && hit === null && fallbackPanel !== undefined;
   return (
     <ProjectConversationPanelProvider onOpenConversation={openConversation}>
       <div
         className={cn(
           "relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden",
-          detached && "gap-2 bg-sidebar pb-2 pr-2 pt-px",
+          detached && "bg-sidebar pb-2 pr-2 pt-px",
+          detached && sidebar?.open === false && "pl-2",
         )}
         data-detached={detached ? "true" : "false"}
         data-project-context-detached={detached ? "true" : undefined}
@@ -120,7 +132,14 @@ export function ProjectConversationPanelController({
             widthPx={widthPx}
           />
         ) : (
-          fallbackPanel
+          <ProjectContextRail
+            open={fallbackVisible}
+            panelWidthPx={fallbackPanelWidthPx}
+            resizing={fallbackPanelResizing}
+            rounded={detached}
+          >
+            {fallbackPanel}
+          </ProjectContextRail>
         )}
       </div>
     </ProjectConversationPanelProvider>
