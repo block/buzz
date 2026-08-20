@@ -30,6 +30,8 @@ export type AgentManagementUpdateRequest = {
     provider?: string;
     model?: string;
     respondTo?: RespondToMode;
+    /** Present only when `respondTo === "allowlist"`; validated server-side. */
+    respondToAllowlist?: string[];
   };
 };
 
@@ -42,7 +44,16 @@ function isText(value: unknown): value is string {
 }
 
 function isRespondTo(value: unknown): value is RespondToMode | undefined {
-  return value === undefined || value === "owner-only" || value === "anyone";
+  return (
+    value === undefined ||
+    value === "owner-only" ||
+    value === "allowlist" ||
+    value === "anyone"
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => isText(item));
 }
 
 function hasOnlyKeys(
@@ -94,6 +105,8 @@ export function parseAgentManagementRequest(
 
   if (
     !isRespondTo(request.respondTo) ||
+    (request.respondToAllowlist !== undefined &&
+      !isStringArray(request.respondToAllowlist)) ||
     !hasOnlyKeys(request, [
       "channelId",
       "agentName",
@@ -103,6 +116,7 @@ export function parseAgentManagementRequest(
       "provider",
       "model",
       "respondTo",
+      "respondToAllowlist",
     ]) ||
     !isText(request.channelId) ||
     !isText(request.agentName)
@@ -120,6 +134,12 @@ export function parseAgentManagementRequest(
     ...(isText(request.provider) ? { provider: request.provider } : {}),
     ...(isText(request.model) ? { model: request.model } : {}),
     ...(request.respondTo ? { respondTo: request.respondTo } : {}),
+    // Mode and list travel together — only carry the allowlist when the
+    // request actually selects allowlist mode.
+    ...(request.respondTo === "allowlist" &&
+    isStringArray(request.respondToAllowlist)
+      ? { respondToAllowlist: request.respondToAllowlist }
+      : {}),
   };
   if (Object.keys(changes).length === 0) return null;
   return {
