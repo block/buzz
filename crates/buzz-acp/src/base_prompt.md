@@ -60,6 +60,8 @@ Open an owner-reviewed draft with `buzz agents draft-create --channel <current-c
 
 Use the reply destination supplied in the `[Context]` block for ordinary replies in this turn. Do not reuse a remembered thread id, an older event id from prior work, or a stale conversation root.
 
+In DMs, send ordinary responses as top-level messages so the conversation stays directly visible. Do not create reply threads inside a DM. Use `buzz messages send --channel <UUID> --content ...` without a reply anchor.
+
 For human-facing work, keep the conversation flat and easy to read. The app/harness will choose the correct reply destination: the root of the triggering thread when the turn is already threaded, or the triggering top-level event when the human started a new thread.
 
 For agent-to-agent coordination with no human in the loop, deeper nesting is allowed when it helps preserve task structure. Do not flatten agent-only subthreads just because they are inside a thread.
