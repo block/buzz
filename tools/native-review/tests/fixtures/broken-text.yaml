@@ -1,0 +1,13 @@
+schema_version: 1
+flow: broken_text
+platforms: [macos]
+fixture: local_review_channel
+record: {video: "off", screenshots: true, accessibility: true}
+steps:
+  - name: impossible_text_postcondition
+    locate:
+      - {id: open-search}
+    act: {type: click}
+    expect: {value: "this can never match the selected button"}
+    timeout_ms: 50
+cleanup: {terminate_app: true, remove_state: true}

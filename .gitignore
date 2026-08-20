@@ -7,6 +7,9 @@
 __pycache__/
 *.pyc
 
+# Swift native-review build output
+tools/native-review/swift/.build/
+
 # lefthook-generated hook scripts (machine-specific)
 .hooks/
 

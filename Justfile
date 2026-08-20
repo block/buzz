@@ -1024,3 +1024,24 @@ benchmark-check:
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:
     docker compose --project-name buzz-benchmark down
+
+# Validate macOS native-review tooling and report required OS permissions.
+native-review-doctor:
+    ./tools/native-review/bin/review-native doctor
+
+# Run one declarative journey against the isolated local desktop fixture.
+native-review-desktop JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell.yaml":
+    ./tools/native-review/bin/review-native run "{{JOURNEY}}"
+
+# Capture a repeatable native performance cohort (minimum 3 runs).
+native-review-benchmark JOURNEY="tools/native-review/desktop/tooltip-fresh-dwell.yaml" RUNS="5":
+    ./tools/native-review/bin/review-native benchmark "{{JOURNEY}}" --runs "{{RUNS}}"
+
+# Compare baseline and candidate receipt cohorts with explicit budget policy.
+# Pass BASELINE/CANDIDATE as repeated CLI args, e.g. "--baseline a --baseline b".
+native-review-compare BASELINE CANDIDATE BUDGET="tools/native-review/performance/tooltip-fresh-dwell.yaml":
+    ./tools/native-review/bin/review-native compare {{BASELINE}} {{CANDIDATE}} --budget "{{BUDGET}}"
+
+# Run the native iOS Simulator pairing journey with MP4 and screenshot evidence.
+native-review-ios DEVICE="iPhone 17 Pro":
+    ./tools/native-review/bin/review-ios --device "{{DEVICE}}"

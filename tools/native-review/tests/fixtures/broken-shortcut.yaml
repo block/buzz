@@ -1,0 +1,11 @@
+schema_version: 1
+flow: broken_shortcut
+platforms: [macos]
+fixture: local_review_channel
+record: {video: "off", screenshots: true, accessibility: true}
+steps:
+  - name: wrong_shortcut
+    act: {type: press, key: k}
+    expect: {exists: {id: search-results}}
+    timeout_ms: 100
+cleanup: {terminate_app: true, remove_state: true}

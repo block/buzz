@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# Run through the locked native-review Python environment so a clean checkout
+# never depends on host-installed packages.
+source "$REPO_ROOT/bin/activate-hermit"
+exec uv run --frozen --project "$SCRIPT_DIR" python "$SCRIPT_DIR/review_native.py" "$@"

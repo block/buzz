@@ -1,0 +1,39 @@
+schema_version: 1
+flow: search_shortcut_dismissal
+platforms: [macos]
+fixture: local_review_channel
+record:
+  video: window
+  screenshots: true
+  accessibility: true
+steps:
+  - name: activate_buzz
+    act: {type: activate}
+    expect: {exists: {role: window}}
+    timeout_ms: 15000
+  - name: await_interactive_app
+    act: {type: wait, duration_ms: 100}
+    expect: {not_exists: {id: app-loading-gate}}
+    timeout_ms: 60000
+  - name: open_search_with_keyboard
+    act: {type: press, key: k, modifiers: [command]}
+    expect: {exists: {id: search-results}}
+    timeout_ms: 5000
+  - name: search_input_receives_focus
+    locate:
+      - {id: search-dialog-input}
+      - {role: text-field, name: "Search everything"}
+    act: {type: type_text, text: "welcome"}
+    expect: {value: "welcome"}
+  - name: dismiss_search
+    act: {type: press, key: escape}
+    expect: {not_exists: {id: search-results}}
+    timeout_ms: 2000
+  - name: focus_returns_to_trigger
+    locate:
+      - {id: open-search}
+    act: {type: wait, duration_ms: 50}
+    expect: {focused: {id: open-search}}
+cleanup:
+  terminate_app: true
+  remove_state: true

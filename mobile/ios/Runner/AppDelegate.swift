@@ -17,7 +17,11 @@ import UserNotifications
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    UNUserNotificationCenter.current().requestAuthorization(options: [.badge]) { _, _ in }
+    // Integration tests cannot interact with SpringBoard's notification prompt.
+    // Production launches still request badge authorization as before.
+    if ProcessInfo.processInfo.environment["BUZZ_NATIVE_REVIEW"] != "1" {
+      UNUserNotificationCenter.current().requestAuthorization(options: [.badge]) { _, _ in }
+    }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
