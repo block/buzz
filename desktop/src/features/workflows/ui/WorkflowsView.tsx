@@ -1,8 +1,8 @@
 import { Plus, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { stringify as yamlStringify } from "yaml";
+import { toast } from "sonner";
 
 import {
   allWorkflowsQueryKey,
@@ -11,8 +11,13 @@ import {
 } from "@/features/workflows/hooks";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
-import { WorkflowDetailPanel } from "@/features/workflows/ui/WorkflowDetailPanel";
-import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
+import { WorkflowEditorHost } from "@/features/workflows/ui/WorkflowEditorHost";
+import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
+import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
+import {
+  getWorkflowEnabled,
+  withWorkflowEnabled,
+} from "@/features/workflows/ui/workflowDefinition";
 import type { Channel, Workflow } from "@/shared/api/types";
 import {
   deleteWorkflow,
@@ -23,13 +28,16 @@ import {
 import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { getWorkflowEnabled, withWorkflowEnabled } from "./workflowDefinition";
 
 type WorkflowsViewProps = {
   channels: Channel[];
-  onCloseWorkflow: () => void;
-  onSelectWorkflow: (workflowId: string) => void;
-  selectedWorkflowId: string | null;
+  editor: WorkflowEditorRoute | null;
+  onCloseEditor: () => void;
+  onCreateWorkflow: () => void;
+  onDuplicateWorkflow: (workflowId: string) => void;
+  onEditWorkflow: (workflowId: string) => void;
+  onViewWorkflow: (workflowId: string) => void;
+  onEditorPaneChange: (pane: WorkflowEditorPane) => void;
 };
 
 type WorkflowWithChannel = {
@@ -37,30 +45,28 @@ type WorkflowWithChannel = {
   channelName: string;
 };
 
-type DialogState =
-  | { mode: "closed" }
-  | { mode: "create" }
-  | { mode: "edit"; workflow: Workflow }
-  | { mode: "duplicate"; workflow: Workflow };
-
 const WORKFLOW_CARD_GRID_CLASS =
-  "grid grid-cols-1 gap-3 [@container(min-width:38rem)]:grid-cols-2 [@container(min-width:54rem)]:grid-cols-3";
+  "grid grid-cols-1 gap-3 [@container(min-width:42rem)]:grid-cols-2 [@container(min-width:63rem)]:grid-cols-3";
 
 function WorkflowsListSkeleton() {
   return (
     <div className={WORKFLOW_CARD_GRID_CLASS}>
       {["first", "second", "third", "fourth"].map((card) => (
         <div
-          className="flex min-h-60 flex-col rounded-2xl border bg-card p-5"
+          className="flex min-h-60 flex-col rounded-2xl bg-muted/50 p-5 shadow-xs"
           key={card}
         >
           <div className="flex items-start justify-between">
-            <Skeleton className="h-9 w-9 rounded-xl" />
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-9 w-9 rounded-xl" />
+              <Skeleton className="h-4 w-4" />
+              <Skeleton className="h-9 w-9 rounded-xl" />
+            </div>
             <Skeleton className="h-6 w-16 rounded-full" />
           </div>
-          <Skeleton className="mt-5 h-6 w-3/4" />
-          <Skeleton className="mt-3 h-4 w-full" />
-          <Skeleton className="mt-2 h-4 w-4/5" />
+          <Skeleton className="mt-5 h-3 w-28" />
+          <Skeleton className="mt-2 h-6 w-full" />
+          <Skeleton className="mt-2 h-6 w-4/5" />
           <Skeleton className="mt-auto h-4 w-32" />
         </div>
       ))}
@@ -84,15 +90,19 @@ function CreateWorkflowCard({ onClick }: { onClick: () => void }) {
 
 export function WorkflowsView({
   channels,
-  onCloseWorkflow,
-  onSelectWorkflow,
-  selectedWorkflowId,
+  editor,
+  onCloseEditor,
+  onCreateWorkflow,
+  onDuplicateWorkflow,
+  onEditWorkflow,
+  onViewWorkflow,
+  onEditorPaneChange,
 }: WorkflowsViewProps) {
-  const [dialogState, setDialogState] = React.useState<DialogState>({
-    mode: "closed",
-  });
   const [deleteTarget, setDeleteTarget] = React.useState<Workflow | null>(null);
   const queryClient = useQueryClient();
+
+  const editorWorkflowId =
+    editor && editor.mode !== "create" ? editor.workflowId : null;
 
   const memberChannels = channels.filter((c) => c.isMember);
   const channelIds = memberChannels.map((c) => c.id).sort();
@@ -135,10 +145,7 @@ export function WorkflowsView({
 
   const deleteMutation = useMutation({
     mutationFn: (workflowId: string) => deleteWorkflow(workflowId),
-    onSuccess: (_data, workflowId) => {
-      if (selectedWorkflowId === workflowId) {
-        onCloseWorkflow();
-      }
+    onSuccess: () => {
       void queryClient.invalidateQueries({
         predicate: (query) =>
           query.queryKey[0] === "workflows" ||
@@ -190,23 +197,35 @@ export function WorkflowsView({
     [],
   );
 
-  const deleteOne = deleteMutation.mutate;
+  const deleteOne = deleteMutation.mutateAsync;
   const handleConfirmDelete = React.useCallback(
-    (workflow: Workflow) => {
-      deleteOne(workflow.id);
-      setDeleteTarget(null);
+    async (workflow: Workflow) => {
+      try {
+        await deleteOne(workflow.id);
+        setDeleteTarget(null);
+        // Deleting the workflow the editor is pointed at would otherwise leave
+        // that editor open on a workflow that no longer exists.
+        if (workflow.id === editorWorkflowId) onCloseEditor();
+      } catch {
+        // React Query stores the error; keep the confirmation and editor open.
+      }
     },
-    [deleteOne],
+    [deleteOne, editorWorkflowId, onCloseEditor],
+  );
+
+  const handleView = React.useCallback(
+    (workflow: Workflow) => onViewWorkflow(workflow.id),
+    [onViewWorkflow],
   );
 
   const handleEdit = React.useCallback(
-    (workflow: Workflow) => setDialogState({ mode: "edit", workflow }),
-    [],
+    (workflow: Workflow) => onEditWorkflow(workflow.id),
+    [onEditWorkflow],
   );
 
   const handleDuplicate = React.useCallback(
-    (workflow: Workflow) => setDialogState({ mode: "duplicate", workflow }),
-    [],
+    (workflow: Workflow) => onDuplicateWorkflow(workflow.id),
+    [onDuplicateWorkflow],
   );
 
   const toggleEnabled = toggleEnabledMutation.mutate;
@@ -215,11 +234,9 @@ export function WorkflowsView({
     [toggleEnabled],
   );
 
-  const handleDialogOpenChange = React.useCallback((open: boolean) => {
-    if (!open) {
-      setDialogState({ mode: "closed" });
-    }
-  }, []);
+  const editorWorkflowHint = allWorkflows.find(
+    ({ workflow }) => workflow.id === editorWorkflowId,
+  )?.workflow;
 
   return (
     <div
@@ -264,13 +281,10 @@ export function WorkflowsView({
             </div>
           ) : (
             <div className={WORKFLOW_CARD_GRID_CLASS}>
-              <CreateWorkflowCard
-                onClick={() => setDialogState({ mode: "create" })}
-              />
+              <CreateWorkflowCard onClick={onCreateWorkflow} />
               {allWorkflows.map(({ workflow, channelName }) => (
                 <WorkflowCard
                   channelName={channelName}
-                  isActive={selectedWorkflowId === workflow.id}
                   isTogglingEnabled={
                     toggleEnabledMutation.isPending &&
                     toggleEnabledMutation.variables?.id === workflow.id
@@ -279,9 +293,9 @@ export function WorkflowsView({
                   onDelete={handleDelete}
                   onDuplicate={handleDuplicate}
                   onEdit={handleEdit}
-                  onSelect={onSelectWorkflow}
                   onToggleEnabled={handleToggleEnabled}
                   onTrigger={handleTrigger}
+                  onView={handleView}
                   workflow={workflow}
                 />
               ))}
@@ -290,33 +304,31 @@ export function WorkflowsView({
         </div>
       </div>
 
-      {selectedWorkflowId ? (
-        <div className="w-[400px] shrink-0">
-          <WorkflowDetailPanel
-            key={selectedWorkflowId}
-            onClose={onCloseWorkflow}
-            onEdit={handleEdit}
-            workflowId={selectedWorkflowId}
-          />
-        </div>
-      ) : null}
-
-      <WorkflowDialog
+      <WorkflowEditorHost
         channels={memberChannels}
-        mode={dialogState.mode === "closed" ? "create" : dialogState.mode}
-        onOpenChange={handleDialogOpenChange}
-        open={dialogState.mode !== "closed"}
-        workflow={
-          dialogState.mode === "edit" || dialogState.mode === "duplicate"
-            ? dialogState.workflow
-            : null
-        }
+        editor={editor}
+        onClose={onCloseEditor}
+        onDeleteWorkflow={handleDelete}
+        onDuplicateWorkflow={onDuplicateWorkflow}
+        onEditWorkflow={onEditWorkflow}
+        onEditorPaneChange={onEditorPaneChange}
+        onTriggerWorkflow={handleTrigger}
+        workflowHint={editorWorkflowHint}
       />
 
       <WorkflowDeleteDialog
+        error={
+          deleteMutation.error instanceof Error
+            ? deleteMutation.error.message
+            : null
+        }
+        isPending={deleteMutation.isPending}
         onConfirm={handleConfirmDelete}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
+          if (!open) {
+            deleteMutation.reset();
+            setDeleteTarget(null);
+          }
         }}
         open={deleteTarget !== null}
         workflow={deleteTarget}

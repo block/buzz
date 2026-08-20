@@ -47,6 +47,9 @@ pub enum TriggerDef {
         /// Optional: only fire for this specific emoji.
         #[serde(default)]
         emoji: Option<String>,
+        /// Optional evalexpr filter over the reaction context.
+        #[serde(default)]
+        filter: Option<String>,
     },
     /// Fires when a diff message (kind:40008) is posted in the workflow's channel.
     DiffPosted {
@@ -300,11 +303,12 @@ mod tests {
 
     #[test]
     fn parse_reaction_added_trigger() {
-        let yaml = "name: Triage\ntrigger:\n  on: reaction_added\n  emoji: clipboard\nsteps:\n  - id: ack\n    action: add_reaction\n    emoji: eyes\n";
+        let yaml = "name: Triage\ntrigger:\n  on: reaction_added\n  emoji: clipboard\n  filter: 'trigger_message_id == \"abc123\"'\nsteps:\n  - id: ack\n    action: add_reaction\n    emoji: eyes\n";
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
-            TriggerDef::ReactionAdded { emoji } => {
+            TriggerDef::ReactionAdded { emoji, filter } => {
                 assert_eq!(emoji.as_deref(), Some("clipboard"));
+                assert_eq!(filter.as_deref(), Some("trigger_message_id == \"abc123\""));
             }
             other => panic!("unexpected trigger: {other:?}"),
         }
@@ -488,8 +492,9 @@ mod tests {
         let yaml = "name: Any Reaction\ntrigger:\n  on: reaction_added\nsteps:\n  - id: s1\n    action: add_reaction\n    emoji: eyes\n";
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         match &def.trigger {
-            TriggerDef::ReactionAdded { emoji } => {
+            TriggerDef::ReactionAdded { emoji, filter } => {
                 assert!(emoji.is_none(), "emoji should default to None");
+                assert!(filter.is_none(), "filter should default to None");
             }
             other => panic!("unexpected trigger: {other:?}"),
         }

@@ -169,6 +169,66 @@ export function useAppNavigation() {
           params: {
             workflowId,
           },
+          search: { pane: "trigger" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goNewWorkflow = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows",
+          search: { pane: "trigger", view: "create" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goNewWorkflowForChannel = React.useCallback(
+    (channelId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows",
+          search: {
+            channel: channelId,
+            pane: "trigger",
+            view: "create",
+          },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goEditWorkflow = React.useCallback(
+    (workflowId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows/$workflowId",
+          params: { workflowId },
+          search: { pane: "trigger", view: "edit" },
+          state: { workflowEditorHasOrigin: true },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goDuplicateWorkflow = React.useCallback(
+    (workflowId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/workflows/$workflowId",
+          params: { workflowId },
+          search: { pane: "trigger", view: "duplicate" },
+          state: { workflowEditorHasOrigin: true },
         },
         behavior,
       ),
@@ -330,9 +390,13 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goDuplicateWorkflow,
+    goEditWorkflow,
     goForumPost,
     goHome,
     goNewMessage,
+    goNewWorkflow,
+    goNewWorkflowForChannel,
     goProject,
     goProjects,
     goPulse,
