@@ -21,35 +21,24 @@ impl PlaybackChunkAudio {
         &mut self,
         samples: Vec<f32>,
         chunk_index: usize,
-        first_append: &mut bool,
         playback_idle: bool,
     ) -> Option<PreparedModelAudio> {
         if samples.is_empty() {
             return None;
         }
         let previous = self.pending.replace((samples, chunk_index))?;
-        let prepared = prepare_model_audio(previous, first_append, playback_idle, false);
+        let prepared = prepare_model_audio(previous, playback_idle, false);
         Some(prepared)
     }
 
-    pub(super) fn finish(
-        &mut self,
-        first_append: &mut bool,
-        playback_idle: bool,
-    ) -> Option<PreparedModelAudio> {
+    pub(super) fn finish(&mut self, playback_idle: bool) -> Option<PreparedModelAudio> {
         let pending = self.pending.take()?;
-        Some(prepare_model_audio(
-            pending,
-            first_append,
-            playback_idle,
-            true,
-        ))
+        Some(prepare_model_audio(pending, playback_idle, true))
     }
 }
 
 fn prepare_model_audio(
     (samples, chunk_index): (Vec<f32>, usize),
-    first_append: &mut bool,
     starts_playback_chunk: bool,
     ends_playback_chunk: bool,
 ) -> PreparedModelAudio {
@@ -59,7 +48,7 @@ fn prepare_model_audio(
         apply_fade_out(&mut audio);
     }
     PreparedModelAudio {
-        buffer: build_sentence_append_buffer(first_append, audio, starts_playback_chunk),
+        buffer: build_sentence_append_buffer(audio, starts_playback_chunk),
         sample_count,
         chunk_index,
     }
@@ -80,14 +69,9 @@ pub(super) fn apply_fade_out(samples: &mut [f32]) {
 }
 
 pub(super) fn build_sentence_append_buffer(
-    first_append: &mut bool,
     audio: Vec<f32>,
     starts_playback_chunk: bool,
 ) -> Vec<f32> {
-    if *first_append {
-        *first_append = false;
-    }
-
     let lead_in_len = if starts_playback_chunk {
         SENTENCE_LEAD_IN_SAMPLES
     } else {
@@ -106,19 +90,14 @@ mod tests {
     #[test]
     fn model_units_are_queued_contiguously_without_injected_silence() {
         let mut chunk = PlaybackChunkAudio::new();
-        let mut first_append = true;
 
-        assert!(chunk
-            .push(vec![0.4; 16], 0, &mut first_append, false)
-            .is_none());
+        assert!(chunk.push(vec![0.4; 16], 0, false).is_none());
         let first = chunk
-            .push(vec![0.5; 16], 1, &mut first_append, false)
+            .push(vec![0.5; 16], 1, false)
             .expect("first ready model unit");
         assert_eq!(first.buffer, vec![0.4; 16]);
 
-        let last = chunk
-            .finish(&mut first_append, false)
-            .expect("last ready model unit");
+        let last = chunk.finish(false).expect("last ready model unit");
         assert_eq!(last.buffer.len(), 16);
         assert_eq!(last.sample_count, 16);
     }
@@ -126,39 +105,27 @@ mod tests {
     #[test]
     fn empty_edge_units_do_not_steal_audio_boundaries() {
         let mut chunk = PlaybackChunkAudio::new();
-        let mut first_append = true;
 
-        assert!(chunk
-            .push(Vec::new(), 0, &mut first_append, false)
-            .is_none());
-        assert!(chunk
-            .push(vec![0.5; 16], 1, &mut first_append, false)
-            .is_none());
-        assert!(chunk
-            .push(Vec::new(), 2, &mut first_append, false)
-            .is_none());
+        assert!(chunk.push(Vec::new(), 0, false).is_none());
+        assert!(chunk.push(vec![0.5; 16], 1, false).is_none());
+        assert!(chunk.push(Vec::new(), 2, false).is_none());
 
-        let only = chunk
-            .finish(&mut first_append, false)
-            .expect("only audible model unit");
+        let only = chunk.finish(false).expect("only audible model unit");
         assert_eq!(only.buffer.len(), 16);
     }
 
     #[test]
     fn playback_underrun_rearms_the_onset_cushion() {
         let mut chunk = PlaybackChunkAudio::new();
-        let mut first_append = true;
 
-        assert!(chunk
-            .push(vec![0.4; 16], 0, &mut first_append, false)
-            .is_none());
+        assert!(chunk.push(vec![0.4; 16], 0, false).is_none());
         let first = chunk
-            .push(vec![0.5; 16], 1, &mut first_append, false)
+            .push(vec![0.5; 16], 1, false)
             .expect("first ready model unit");
         assert_eq!(first.buffer.len(), 16);
 
         let after_underrun = chunk
-            .push(vec![0.6; 16], 2, &mut first_append, true)
+            .push(vec![0.6; 16], 2, true)
             .expect("second ready model unit");
         assert_eq!(after_underrun.buffer.len(), SENTENCE_LEAD_IN_SAMPLES + 16);
         assert!(after_underrun.buffer[..SENTENCE_LEAD_IN_SAMPLES]
