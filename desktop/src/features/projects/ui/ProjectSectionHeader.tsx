@@ -26,13 +26,15 @@ export function ProjectSectionHeader({
       className={cn("flex min-h-12 items-center gap-3 px-4 py-2", className)}
       data-testid={testId}
     >
-      <Icon
-        className="h-4 w-4 shrink-0 text-muted-foreground"
-        data-testid="project-section-header-icon"
-      />
-      <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-        {title}
-      </h2>
+      <div className="flex min-w-0 flex-1 items-center gap-3">
+        <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">
+          {title}
+        </h2>
+        <Icon
+          className="h-4 w-4 shrink-0 text-muted-foreground"
+          data-testid="project-section-header-icon"
+        />
+      </div>
       {action ? (
         <Button
           aria-label={action.label}

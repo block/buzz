@@ -16,10 +16,16 @@ import type {
   ProjectIssue,
   ProjectPullRequest,
 } from "@/features/projects/hooks";
+import {
+  type ProjectSelectionItem,
+  projectSelectionPresentation,
+} from "@/features/projects/lib/projectSelection";
 import type { ProjectsFilter } from "@/features/projects/lib/projectsViewHelpers";
+import { useProjectSelection } from "@/features/projects/lib/useProjectSelection";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 import { ProjectsCreateMenu } from "./ProjectsCreateMenu";
+import { ProjectsSelectionCountMenu } from "./ProjectsSelectionCountMenu";
 import {
   type OverviewContextStatIcon,
   type ProjectsOverviewSection,
@@ -52,6 +58,7 @@ type ProjectsOverviewPanelProps = {
 type ProjectsOverviewContextPanelProps = {
   filter: ProjectsFilter;
   issues: ProjectIssue[];
+  onChatWithAgent: (items: ProjectSelectionItem[]) => void;
   onCreateIssue: () => void;
   onCreateProject: () => void;
   onCreatePullRequest: () => void;
@@ -144,6 +151,7 @@ export function ProjectsActivityIntro() {
 export function ProjectsOverviewContextPanel({
   filter,
   issues,
+  onChatWithAgent,
   onCreateIssue,
   onCreateProject,
   onCreatePullRequest,
@@ -153,6 +161,10 @@ export function ProjectsOverviewContextPanel({
   pullRequests,
   summaries,
 }: ProjectsOverviewContextPanelProps) {
+  const selection = useProjectSelection();
+  const selectionPresentation = projectSelectionPresentation(
+    selection?.items ?? [],
+  );
   const context = projectsOverviewContext({
     filter,
     issues,
@@ -173,60 +185,73 @@ export function ProjectsOverviewContextPanel({
       data-testid="projects-overview-context-panel"
     >
       <div className="px-4 pb-3 pt-3">
-        <div className="flex min-w-0 items-center justify-between gap-2">
-          <h2
-            className="min-w-0 truncate text-sm font-normal text-muted-foreground/70"
-            data-testid="projects-overview-context-title"
-          >
-            {context.title}
-          </h2>
-          <ProjectsCreateMenu
-            compact
-            onCreateIssue={onCreateIssue}
-            onCreateProject={onCreateProject}
+        {selectionPresentation && selection ? (
+          <ProjectsSelectionCountMenu
+            onChatWithAgent={onChatWithAgent}
             onCreatePullRequest={onCreatePullRequest}
+            presentation={selectionPresentation}
+            selectionItems={selection.items}
           />
-        </div>
-        <div className="space-y-0.5 pt-2">
-          {context.action ? (
-            <OverviewActionButton
-              onClick={actionHandler}
-              testId={context.action.testId}
+        ) : (
+          <div className="flex min-w-0 items-center justify-between gap-2">
+            <h2
+              className="min-w-0 truncate text-sm font-normal text-muted-foreground/70"
+              data-testid="projects-overview-context-title"
             >
-              <Plus className="h-3.5 w-3.5" />
-              {context.action.label}
-            </OverviewActionButton>
-          ) : null}
-          <section
-            className="text-sm"
-            data-testid="projects-overview-stats-pod"
-          >
-            {context.stats.map((stat) => (
-              <OverviewStatRow
-                count={stat.count}
-                icon={STAT_ICONS[stat.icon]}
-                key={`${stat.section}:${stat.label}`}
-                label={stat.label}
-                onClick={() => onSelectSection(stat.section)}
-              />
-            ))}
-          </section>
-        </div>
-        {context.people.length > 0 || context.activityByDay ? (
-          <div className="mt-3 space-y-3 border-border/50 border-t py-3">
-            <ProjectsOverviewPeople
-              people={context.people}
-              profiles={profiles}
+              {context.title}
+            </h2>
+            <ProjectsCreateMenu
+              compact
+              onCreateIssue={onCreateIssue}
+              onCreateProject={onCreateProject}
+              onCreatePullRequest={onCreatePullRequest}
             />
-            {context.activityByDay ? (
-              <div data-testid="projects-overview-activity">
-                <ProjectsOverviewActivityGraph
-                  activityByDay={context.activityByDay}
+          </div>
+        )}
+        {selectionPresentation ? null : (
+          <>
+            <div className="space-y-0.5 pt-2">
+              {context.action ? (
+                <OverviewActionButton
+                  onClick={actionHandler}
+                  testId={context.action.testId}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {context.action.label}
+                </OverviewActionButton>
+              ) : null}
+              <section
+                className="space-y-0.5 text-sm"
+                data-testid="projects-overview-stats-pod"
+              >
+                {context.stats.map((stat) => (
+                  <OverviewStatRow
+                    count={stat.count}
+                    icon={STAT_ICONS[stat.icon]}
+                    key={`${stat.section}:${stat.label}`}
+                    label={stat.label}
+                    onClick={() => onSelectSection(stat.section)}
+                  />
+                ))}
+              </section>
+            </div>
+            {context.people.length > 0 || context.activityByDay ? (
+              <div className="mt-3 space-y-3 py-3">
+                <ProjectsOverviewPeople
+                  people={context.people}
+                  profiles={profiles}
                 />
+                {context.activityByDay ? (
+                  <div data-testid="projects-overview-activity">
+                    <ProjectsOverviewActivityGraph
+                      activityByDay={context.activityByDay}
+                    />
+                  </div>
+                ) : null}
               </div>
             ) : null}
-          </div>
-        ) : null}
+          </>
+        )}
       </div>
     </div>
   );

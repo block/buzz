@@ -10,11 +10,19 @@ import {
 } from "@/features/projects/lib/projectLocalRepos";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import {
+  projectShareLink,
+  repositoryShareLink,
+} from "@/features/projects/lib/projectShareLinks";
+import {
   isProjectOwnedByCurrentUser,
   projectPeople,
   type ProjectsFilter,
   type ProjectsViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  selectionItemFromProject,
+  selectionItemFromRepository,
+} from "@/features/projects/lib/projectSelection";
 import {
   EmptyFilteredState,
   ProjectGridCard,
@@ -91,12 +99,18 @@ export function ProjectsOverviewProjectItems({
     );
   }
   return (
-    <div
-      className="divide-y divide-border/60"
-      data-testid="projects-list-container"
-    >
+    <div data-testid="projects-list-container">
       {visibleProjects.map((project) => {
         const summary = summaries?.[project.id];
+        const selectionRangeItems = visibleProjects.map((item) =>
+          selectionItemFromProject({
+            channelId: item.projectChannelId,
+            id: item.id,
+            owner: item.owner,
+            shareLink: projectShareLink(item),
+            title: item.name,
+          }),
+        );
         return (
           <ProjectListRow
             canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
@@ -112,6 +126,7 @@ export function ProjectsOverviewProjectItems({
             repositoryUnavailableReason={repositoryUnavailableReasonFor(
               project,
             )}
+            selectionRangeItems={selectionRangeItems}
             summary={summary}
           />
         );
@@ -159,10 +174,7 @@ export function ProjectsOverviewRepositoryItems({
     );
   }
   return (
-    <div
-      className="divide-y divide-border/60"
-      data-testid="projects-list-container"
-    >
+    <div data-testid="projects-list-container">
       {visibleRepositories.map(({ project, repository }) => (
         <RepositoryListRow
           hasLocal={hasLocalRepositoryCheckout(repository, localRepoNames)}
@@ -172,6 +184,16 @@ export function ProjectsOverviewRepositoryItems({
           profiles={profiles}
           project={project}
           repository={repository}
+          selectionRangeItems={visibleRepositories.map((row) =>
+            selectionItemFromRepository({
+              channelId:
+                row.repository.channelId ?? row.project.projectChannelId,
+              id: row.repository.id,
+              owner: row.repository.owner,
+              shareLink: repositoryShareLink(row.repository),
+              title: row.repository.name,
+            }),
+          )}
           summary={summaries?.[repository.repoAddress]}
         />
       ))}

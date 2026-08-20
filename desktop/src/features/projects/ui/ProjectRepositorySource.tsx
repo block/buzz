@@ -16,6 +16,7 @@ import {
 
 import { Button } from "@/shared/ui/button";
 import { projectExternalRefUrl } from "@/features/projects/lib/projectExternalUrl";
+import { shortenProjectPath } from "@/features/projects/lib/projectPathDisplay";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import {
   DropdownMenu,
@@ -182,6 +183,7 @@ export type RepoSourceHeaderControls = {
   onSourceChange: (source: "remote" | "local") => void;
   localDisabled: boolean;
   localLabel: string;
+  localPath?: string | null;
   remoteLabel: string;
   remoteKind?: "buzz" | "external";
   remoteUnavailableReason?: ProjectRepoUnavailableReason;
@@ -220,6 +222,8 @@ export function RepoSourceDropdown({
 }) {
   const isLocal = controls.source === "local";
   const cloneLocal = controls.localDisabled && controls.onCloneLocal;
+  const localPath = controls.localPath?.trim() || null;
+  const shortLocalPath = localPath ? shortenProjectPath(localPath) : null;
   const RemoteIcon =
     controls.remoteKind === "external"
       ? controls.remoteLabel === "github.com"
@@ -237,8 +241,21 @@ export function RepoSourceDropdown({
           variant="outline"
         >
           <SourceIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate text-left">
-            {isLocal ? controls.localLabel : controls.remoteLabel}
+          <span
+            className="flex min-w-0 flex-1 items-center gap-2 text-left"
+            title={isLocal && localPath ? localPath : undefined}
+          >
+            <span className="shrink-0">
+              {isLocal ? controls.localLabel : controls.remoteLabel}
+            </span>
+            {isLocal && shortLocalPath ? (
+              <span
+                className="min-w-0 truncate text-xs text-muted-foreground"
+                data-testid="project-repository-local-path"
+              >
+                {shortLocalPath}
+              </span>
+            ) : null}
           </span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         </Button>
@@ -260,7 +277,15 @@ export function RepoSourceDropdown({
               value="local"
             >
               <HardDrive className="mr-1.5 h-3.5 w-3.5 text-muted-foreground" />
-              {controls.localLabel}
+              <span>{controls.localLabel}</span>
+              {shortLocalPath ? (
+                <span
+                  className="ml-auto max-w-48 truncate text-xs text-muted-foreground"
+                  title={localPath ?? undefined}
+                >
+                  {shortLocalPath}
+                </span>
+              ) : null}
             </DropdownMenuRadioItem>
           ) : null}
         </DropdownMenuRadioGroup>

@@ -15,6 +15,7 @@ import {
   groupDiscussionChannels,
   mergeOriginDiscussionChannel,
 } from "@/features/projects/lib/discussionChannels";
+import { selectionItemFromChannel } from "@/features/projects/lib/projectSelection";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
 import type { SearchHit } from "@/shared/api/searchTypes";
@@ -361,6 +362,14 @@ export function DiscussionChannelsPanel({
     );
   }
 
+  const rangeItems = channels.map((channel) =>
+    selectionItemFromChannel({
+      channelId: channel.id,
+      people: channel.participants,
+      title: `#${channelName(channel.id, channel.name)}`,
+    }),
+  );
+
   return (
     <div>
       <ul data-testid="discussion-channels">
@@ -384,6 +393,14 @@ export function DiscussionChannelsPanel({
                 people={channel.participants}
                 peopleTestId="project-channel-participants"
                 profiles={profiles}
+                selection={{
+                  item: selectionItemFromChannel({
+                    channelId: channel.id,
+                    people: channel.participants,
+                    title: `#${name}`,
+                  }),
+                  rangeItems,
+                }}
                 testId="project-channel-row"
                 title={`#${name}`}
                 titleAttr={`Open #${name}`}
