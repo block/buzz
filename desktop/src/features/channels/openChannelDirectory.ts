@@ -1,13 +1,15 @@
+import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 
-import { getOpenChannelDirectory } from "@/shared/api/tauri";
-import type { Channel } from "@/shared/api/types";
+import { getChannelDetails, getOpenChannelDirectory } from "@/shared/api/tauri";
+import type { Channel, ChannelDetail } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   canFetchChannelsForIdentity,
   channelsQueryKey,
   sortChannels,
+  useChannelsQuery,
 } from "@/features/channels/hooks";
 
 /**
@@ -72,4 +74,139 @@ export function useOpenChannelDirectoryQuery(options?: { enabled?: boolean }) {
     queryFn: async () => sortChannels(await getOpenChannelDirectory()),
     staleTime: OPEN_CHANNEL_DIRECTORY_STALE_TIME_MS,
   });
+}
+
+/**
+ * Observes the open-channel directory cache without ever triggering the
+ * all-open scan (`enabled: false`). Returns the directory only when a
+ * discovery surface (browser, global search, route preview) has already
+ * fetched it this session; otherwise `undefined`. This is the "warm cache
+ * only" seam: reference resolution reads a directory populated by active
+ * discovery but never initiates it while composing or rendering messages.
+ */
+export function useWarmOpenChannelDirectory(): Channel[] | undefined {
+  return useQuery({
+    enabled: false,
+    queryKey: openChannelDirectoryQueryKey,
+    queryFn: async () => sortChannels(await getOpenChannelDirectory()),
+    staleTime: OPEN_CHANNEL_DIRECTORY_STALE_TIME_MS,
+  }).data;
+}
+
+/**
+ * The channels resolvable without any network fetch: the member list unioned
+ * with a warm open-channel directory. Multi-id and name-bearing consumers use
+ * this — a non-member open channel resolves once the reader has browsed or
+ * searched channels this session, and stays inert (safe) on a cold cache,
+ * which is the ruled product boundary for name references.
+ */
+export function useChannelSources(options?: { enabled?: boolean }): {
+  memberChannels: Channel[];
+  warmDirectory: Channel[] | undefined;
+  isReady: boolean;
+} {
+  const channelsQuery = useChannelsQuery(options);
+  return {
+    memberChannels: channelsQuery.data ?? [],
+    warmDirectory: useWarmOpenChannelDirectory(),
+    isReady: channelsQuery.isSuccess,
+  };
+}
+
+export function useResolvedChannelDirectory(options?: { enabled?: boolean }): {
+  channels: Channel[];
+  isReady: boolean;
+} {
+  const { memberChannels, warmDirectory, isReady } = useChannelSources(options);
+  const channels = React.useMemo(
+    () => mergeOpenChannelDirectory(memberChannels, warmDirectory),
+    [memberChannels, warmDirectory],
+  );
+  return { channels, isReady };
+}
+
+/** Holds a resolved reference (or a cached miss) across a browse session. */
+export const CHANNEL_REFERENCE_STALE_TIME_MS = 5 * 60_000;
+
+/**
+ * Returns a reference-query key nested under {@link channelsQueryKey}, so a
+ * membership mutation's channel invalidation also drops a cached miss once the
+ * channel becomes visible. Exported for mounted-hook regressions that prove
+ * channel-reference misses never use the all-open directory key.
+ */
+export function channelReferenceQueryKey(channelId: string) {
+  return [...channelsQueryKey, "reference", channelId] as const;
+}
+
+/**
+ * Detail metadata does not establish membership. Only member channels and
+ * non-member open channels may be navigated to from a resolved reference.
+ */
+export function isChannelReferenceOpenable(
+  channel: Channel | undefined,
+): channel is Channel {
+  return (
+    channel !== undefined && (channel.isMember || channel.visibility === "open")
+  );
+}
+
+/**
+ * A channel detail event carries no membership tag, so `fromRawChannel`
+ * defaults `isMember` to true. A reference only reaches the bounded fetch
+ * when the id is absent from the member list, so it is by definition not a
+ * member: force `isMember: false` here so `isChannelOpenable` keeps a fetched
+ * private channel non-openable.
+ */
+function channelFromFetchedDetail(detail: ChannelDetail): Channel {
+  return { ...detail, isMember: false };
+}
+
+/**
+ * Resolves a single channel id to its metadata (name + visibility) for a
+ * reference surface — a permalink chip, project origin, repo-access channel.
+ * Resolution order: the member list, then a warm open directory, then a
+ * bounded per-id `get_channel_details` fetch after the member list settles
+ * (one addressable kind:39000 event, no all-open scan). A genuine "not found"
+ * is cached as a resolved miss so an inaccessible id does not refetch on every
+ * render; a transient relay error stays unresolved (retryable) rather than
+ * caching a false miss.
+ */
+export function useChannelReference(
+  channelId: string | null | undefined,
+): Channel | undefined {
+  const { memberChannels, warmDirectory, isReady } = useChannelSources();
+  const known = channelId
+    ? (memberChannels.find((channel) => channel.id === channelId) ??
+      warmDirectory?.find((channel) => channel.id === channelId))
+    : undefined;
+
+  const { activeCommunity } = useCommunities();
+  const relayUrl = activeCommunity?.relayUrl ?? null;
+  const identityQuery = useIdentityQuery();
+  const ownerPubkey = identityQuery.data?.pubkey ?? null;
+
+  const fetchQuery = useQuery({
+    enabled:
+      Boolean(channelId) &&
+      isReady &&
+      known === undefined &&
+      relayUrl !== null &&
+      canFetchChannelsForIdentity(ownerPubkey, identityQuery.isError),
+    queryKey: channelReferenceQueryKey(channelId ?? "none"),
+    queryFn: async (): Promise<Channel | null> => {
+      if (!channelId) return null;
+      try {
+        return channelFromFetchedDetail(await getChannelDetails(channelId));
+      } catch (error) {
+        if (String(error).includes("channel not found")) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    retry: false,
+    staleTime: CHANNEL_REFERENCE_STALE_TIME_MS,
+  });
+
+  return known ?? fetchQuery.data ?? undefined;
 }

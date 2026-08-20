@@ -1711,11 +1711,8 @@ const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 type MarkdownComponentSet = { components: Components; variant: string };
 
 /**
- * Returns the component map together with the `variant` token that fully
- * identifies it. The token doubles as the variant segment of the parse-cache
- * key (see nodeCache.ts), so the map partitioning and the key partitioning
- * come from one place and cannot drift apart: a new render flag added here
- * automatically partitions the cache too.
+ * Returns the component map and its cache-key `variant` token. The token fully
+ * identifies the map, so a new render flag partitions both together.
  */
 function getMarkdownComponents(
   interactive: boolean,
@@ -1805,6 +1802,7 @@ function MarkdownInner({
       onOpenEntityLink,
       onOpenMessageLink,
       relayOrigin,
+      resolveChannelReferences: true,
       snapshotSharedBy,
       onImportSnapshotFromUrl: (
         fileBytes: number[],

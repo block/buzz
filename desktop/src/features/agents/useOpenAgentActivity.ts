@@ -2,7 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useResolvedChannelDirectory } from "@/features/channels/openChannelDirectory";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -77,8 +77,7 @@ export function useOpenAgentActivity() {
   const { goChannel } = useAppNavigation();
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data;
-  const channelsQuery = useChannelsQuery();
-  const channels = channelsQuery.data;
+  const { channels } = useResolvedChannelDirectory();
 
   const findOpenableChannel = React.useCallback(
     (channelId: string): boolean =>
