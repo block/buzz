@@ -8,6 +8,12 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+const _human =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const _agent =
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const _channelId = '11111111-1111-4111-8111-111111111111';
+
 void main() {
   test(
     'adds the signed message locally before relay acknowledgement',
@@ -236,9 +242,66 @@ void main() {
       ),
     );
   });
-}
 
-const _channelId = '11111111-1111-4111-8111-111111111111';
+  test('thread reply p-tags participating agents without explicit @', () async {
+    final session = _PendingPublishRelaySession();
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      readUserCache: () => const {},
+      addLocalMessage: (_, event) {},
+      completeLocalMessage: (_, eventId) {},
+      removeLocalMessage: (_, eventId) {},
+      isAgentPubkey: (_, pubkey) =>
+          pubkey.toLowerCase() == _agent.toLowerCase(),
+    );
+
+    final root = NostrEvent(
+      id: 'root1',
+      pubkey: _human,
+      createdAt: 1_700_000_000,
+      kind: EventKind.streamMessage,
+      tags: [
+        ['h', _channelId],
+        ['p', _agent],
+      ],
+      content: 'thread head',
+      sig: 'sig',
+    );
+    final agentReply = NostrEvent(
+      id: 'reply-agent',
+      pubkey: _agent,
+      createdAt: 1_700_000_001,
+      kind: EventKind.streamMessage,
+      tags: [
+        ['h', _channelId],
+        ['e', 'root1', '', 'reply'],
+      ],
+      content: 'agent reply',
+      sig: 'sig',
+    );
+
+    final result = send(
+      channelId: _channelId,
+      content: 'human reply without @',
+      parentEventId: 'reply-agent',
+      rootEventId: 'root1',
+      threadEvents: [root, agentReply],
+    );
+    await session.published;
+    session.accept();
+    await result;
+
+    final pTags = session.event.tags
+        .where((tag) => tag.isNotEmpty && tag[0] == 'p')
+        .map((tag) => tag[1])
+        .toList();
+    expect(pTags, contains(_agent));
+  });
+}
 
 Channel _dmChannel(List<String> participantPubkeys) => Channel(
   id: _channelId,

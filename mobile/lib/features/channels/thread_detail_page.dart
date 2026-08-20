@@ -693,6 +693,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     // The root of the entire thread chain. If the current thread head is
     // itself a root message its rootId is null, so fall back to its own id.
     final effectiveRootId = threadHead.rootId ?? threadHead.id;
+    final threadEventsForSend = repliesState.whenData((events) {
+      return mergeThreadEvents(events, liveChannelEvents);
+    }).value;
 
     // Composer size changes and keyboard metrics changes are independent:
     // the dock grows first, then the Scaffold's viewport shrinks once the
@@ -915,6 +918,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                               channel: channel,
                               parentEventId: threadHead.id,
                               rootEventId: effectiveRootId,
+                              threadEvents: threadEventsForSend,
                               mediaTags: mediaTags,
                             ),
                       ),
