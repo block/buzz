@@ -48,6 +48,10 @@ function ParticipantAvatar({
         avatarUrl={participant.avatarUrl}
         className="h-6 w-6 text-2xs"
         displayName={participant.author}
+        // Facepile avatars start with no image URL until profiles hydrate;
+        // the default fallback delay would leave a blank hole for 200ms and
+        // then pop the initials in. Render the fallback immediately.
+        fallbackDelayMs={0}
         size="sm"
       />
     </div>
@@ -210,7 +214,13 @@ export function MessageThreadSummaryRow({
 
       <button
         aria-label={summaryAriaLabel}
-        className="group relative isolate inline-flex h-[1.875rem] w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full py-0 pr-3 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden"
+        // `flex`, not `inline-flex`: an inline-level button participates in
+        // its wrapper's line box via its baseline, and that baseline moves
+        // when the avatar's content resolves (fallback text or image landing
+        // after profiles hydrate) — the row visibly collapsed ~3px per
+        // summary a beat after channel entry. A block-level flex row keeps
+        // the wrapper at padding + button height regardless of avatar state.
+        className="group relative isolate flex h-[1.875rem] w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full py-0 pr-3 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden"
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
