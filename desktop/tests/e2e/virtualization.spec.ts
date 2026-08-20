@@ -31,6 +31,9 @@ async function seedChannelSections(page: Page) {
 // pointer down, past the activation threshold, onto the target, then releases —
 // the sequence dnd-kit needs to fire onDragEnd and commit the reorder.
 async function dragOver(page: Page, source: Locator, target: Locator) {
+  await source.evaluate((element) =>
+    element.scrollIntoView({ block: "center" }),
+  );
   const from = await source.boundingBox();
   if (!from) throw new Error("drag source not laid out");
   const pointer = {
@@ -95,6 +98,7 @@ async function dragOver(page: Page, source: Locator, target: Locator) {
       }),
     );
   }, destination);
+  await expect(page.getByTestId("sidebar-section-drag-overlay")).toBeHidden();
 }
 
 test.describe("list virtualization", () => {

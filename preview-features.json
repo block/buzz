@@ -30,6 +30,12 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "workstreamBoard",
+      "name": "Workstream Board",
+      "description": "Live board of workstream channel canvases",
+      "platforms": ["desktop"]
     }
   ]
 }
