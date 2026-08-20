@@ -170,6 +170,8 @@ final class ChannelBackGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
     containerView.backgroundColor = .clear
     containerView.isOpaque = false
+    let buttonCenterX =
+      ((args as? [String: Any])?["buttonCenterX"] as? NSNumber)?.doubleValue ?? 33
 
     var configuration: UIButton.Configuration
     if #available(iOS 26.0, *) {
@@ -208,7 +210,10 @@ final class ChannelBackGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
     containerView.addSubview(button)
     NSLayoutConstraint.activate([
-      button.centerXAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 24),
+      button.centerXAnchor.constraint(
+        equalTo: containerView.leadingAnchor,
+        constant: buttonCenterX
+      ),
       button.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
       button.widthAnchor.constraint(equalToConstant: 40),
       button.heightAnchor.constraint(equalToConstant: 40),

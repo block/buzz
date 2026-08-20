@@ -5243,6 +5243,10 @@ void main() {
           (nativeView.creationParams as Map<String, Object>)['brightness'],
           'light',
         );
+        expect(
+          (nativeView.creationParams as Map<String, Object>)['buttonCenterX'],
+          33.0,
+        );
         final backButtonRect = tester.getRect(
           find.byKey(const ValueKey('channel-ios-glass-back')),
         );
