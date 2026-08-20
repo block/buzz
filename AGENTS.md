@@ -630,3 +630,7 @@ usage.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+## Local setup gotcha
+
+If `just setup` fails on Linux with Docker permission denied, fix group membership before debugging Hermit — see CONTRIBUTING.md and `scripts/lib/docker_preflight.sh`.
