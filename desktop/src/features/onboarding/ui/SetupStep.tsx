@@ -219,6 +219,40 @@ function RuntimeStatus({
   }
 
   if (runtimeIsReadyForOnboarding(runtime)) {
+    // Cached readiness must not read as freshly confirmed while a warm forced
+    // probe is revalidating (or has rejected) over it. `runtimesQuery` shares
+    // the surface owner's forced-query state, so its fetching/error flags track
+    // the in-flight recheck. Pending → a visible CHECKING… state; a warm
+    // rejection → a recheck affordance (never an unqualified READY). On success
+    // both clear and READY returns. Next stays gated by isChecking/errorMessage
+    // in SetupStepContent, so this only governs the per-card claim.
+    if (runtimesQuery.isFetching) {
+      return (
+        <div
+          aria-label={`Rechecking ${runtime.label}`}
+          className="flex h-5 items-center gap-2 rounded-full bg-[#EBEFEF] px-2.5 font-mono text-badge font-normal uppercase text-foreground"
+          data-testid={`onboarding-runtime-rechecking-${runtime.id}`}
+          role="status"
+        >
+          <Spinner className="h-3 w-3 border-2 text-foreground" />
+          CHECKING…
+        </div>
+      );
+    }
+    if (runtimesQuery.isError) {
+      return (
+        <Button
+          aria-label={`Check ${runtime.label} again`}
+          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+          data-testid={`onboarding-runtime-recheck-${runtime.id}`}
+          onClick={() => void runtimesQuery.forceRefresh()}
+          type="button"
+          variant="ghost"
+        >
+          CHECK AGAIN
+        </Button>
+      );
+    }
     return (
       <Tooltip>
         <TooltipTrigger asChild>

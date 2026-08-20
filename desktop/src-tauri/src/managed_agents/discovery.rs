@@ -574,6 +574,25 @@ pub fn resolve_command(command: &str) -> Option<PathBuf> {
     result
 }
 
+/// Cache-only command resolution for the cheap discovery path.
+///
+/// Consults the Buzz-managed shim dir (a filesystem stat, never a spawn) and
+/// the resolve cache; on a miss it reports the command absent rather than
+/// resolving live via `resolve_command_uncached` → `find_via_login_shell`,
+/// which spawns a login shell on the channel-switch / composer hot path — the
+/// freeze the cheap path exists to avoid. `resolve_command` (the forced path)
+/// is the sole prober and cache populator.
+pub fn resolve_command_cached(command: &str) -> Option<PathBuf> {
+    if let Some(managed) = resolve_buzz_managed_command(command) {
+        return Some(managed);
+    }
+    resolve_cache()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(command).cloned())
+        .flatten()
+}
+
 /// Clear the resolve_command cache so that newly-installed binaries are detected.
 pub fn clear_resolve_cache() {
     let mut guard = resolve_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -1310,14 +1329,20 @@ struct PartialEntry {
 }
 
 fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -> PartialEntry {
+    // Cheap path is cache-only (no login-shell spawn); forced path resolves live.
+    let resolve = if force {
+        resolve_command
+    } else {
+        resolve_command_cached
+    };
     let adapter_result = runtime
         .commands
         .iter()
-        .find_map(|command| find_command(command).map(|path| (*command, path)));
+        .find_map(|command| resolve(command).map(|path| (*command, path)));
 
     let underlying_cli_found = runtime
         .underlying_cli
-        .map(|cli| find_command(cli).is_some())
+        .map(|cli| resolve(cli).is_some())
         .unwrap_or(false);
     let (mut availability, command, binary_path) =
         classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
@@ -1348,7 +1373,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
 
     let underlying_cli_path = runtime
         .underlying_cli
-        .and_then(find_command)
+        .and_then(resolve)
         .map(|p| p.display().to_string());
 
     let default_args = command
@@ -1393,8 +1418,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
         AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
     ) && runtime_needs_npm(runtime)
         && buzz_managed_node_bin_dir().is_none()
-        && resolve_command("npm").is_none()
-        && resolve_command("node").is_none();
+        && resolve("npm").is_none()
+        && resolve("node").is_none();
 
     PartialEntry {
         runtime,
@@ -1462,6 +1487,13 @@ pub fn discover_acp_runtimes_from(
     custom_harnesses_dir: Option<&Path>,
     force: bool,
 ) -> Vec<AcpRuntimeCatalogEntry> {
+    // Cheap path is cache-only (no login-shell spawn); forced path resolves live.
+    let resolve = if force {
+        resolve_command
+    } else {
+        resolve_command_cached
+    };
+
     // Phase 1: build all builtin entries (fast — no probes yet).
     let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
         .iter()
@@ -1500,7 +1532,7 @@ pub fn discover_acp_runtimes_from(
         }
         seen_ids.insert(def.id.to_string());
 
-        entries.push(preset_catalog_entry(def, find_command));
+        entries.push(preset_catalog_entry(def, resolve));
     }
 
     // Phase 3: load and append custom harness definitions.
@@ -1515,8 +1547,8 @@ pub fn discover_acp_runtimes_from(
                 continue;
             }
 
-            // Availability: command on PATH → Available, else NotInstalled.
-            let (availability, command, binary_path) = match find_command(&def.command) {
+            // Availability: command resolves → Available, else NotInstalled.
+            let (availability, command, binary_path) = match resolve(&def.command) {
                 Some(path) => (
                     AcpAvailabilityStatus::Available,
                     Some(def.command.clone()),

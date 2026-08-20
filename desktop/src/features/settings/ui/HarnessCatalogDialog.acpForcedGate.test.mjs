@@ -183,6 +183,30 @@ function catalogEntry(id, authStatusValue) {
   };
 }
 
+/** Raw snake_case backend entry as `discoverAcpRuntimes` receives before
+ * `fromRawAcpRuntimeCatalogEntry`. Use for values returned from discoverHandler
+ * (the IPC boundary), vs. `catalogEntry` for values seeded directly into cache. */
+function rawEntry(id) {
+  return {
+    id,
+    label: id,
+    avatar_url: "",
+    availability: "available",
+    command: id,
+    binary_path: `/usr/bin/${id}`,
+    default_args: [],
+    mcp_command: null,
+    install_hint: "",
+    install_instructions_url: "",
+    can_auto_install: false,
+    requires_external_cli: false,
+    underlying_cli_path: null,
+    node_required: false,
+    auth_status: { status: "logged_in" },
+    source: "builtin",
+  };
+}
+
 function makeQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } });
 }
@@ -215,6 +239,27 @@ function renderSurface() {
   document.body.appendChild(container);
   const root = createRoot(container);
   return { container, root };
+}
+
+/**
+ * Drive the search input the way a user would: set its value and dispatch a
+ * React-observed input event, so `filterCatalogEntries` runs against a live
+ * query. A query that matches no cached entry filters the list to zero.
+ */
+async function typeSearch(query) {
+  const input = document.body.querySelector(
+    '[data-testid="harness-catalog-search"]',
+  );
+  assert.ok(input, "search input must be present");
+  const setter = Object.getOwnPropertyDescriptor(
+    dom.window.HTMLInputElement.prototype,
+    "value",
+  ).set;
+  await act(async () => {
+    setter.call(input, query);
+    input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+  });
 }
 
 function surfaceTree(open) {
@@ -400,6 +445,184 @@ describe("HarnessCatalogDialog forced-probe rendering — P2 regression (mounted
       forcedProbeCount,
       1,
       "opening/closing/reopening the dialog must trigger zero additional forced probes",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("harness-catalog-refresh-error is rendered when a forced refresh rejects over a cached EMPTY catalog", async () => {
+    queryClient = makeQueryClient();
+    // Cached successful empty catalog (data !== undefined but zero entries), so
+    // filtered.length === 0. A rejected forced refresh is still a WARM error;
+    // the status row must render independently of whether the filter has rows,
+    // not be swallowed by the "No runtimes match" branch.
+    queryClient.setQueryData(acpRuntimesQueryKey, []);
+
+    discoverHandler = (args) =>
+      args?.force === true
+        ? Promise.reject(new Error("warm empty refresh failure"))
+        : Promise.resolve([]);
+
+    const { container, root } = renderSurface();
+
+    await act(async () => {
+      root.render(surfaceTree(true));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    assert.ok(
+      document.body.querySelector(
+        '[data-testid="harness-catalog-refresh-error"]',
+      ),
+      "warm-error status must render over a cached empty catalog, not be hidden by 'No runtimes match'",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("harness-catalog-refresh-error stays visible when an active search filters cached rows to zero", async () => {
+    queryClient = makeQueryClient();
+    // A cached row exists, but a search query matches nothing, so
+    // filtered.length === 0 while data !== undefined. The warm-error status
+    // must still show; only the entry list is filtered away.
+    queryClient.setQueryData(acpRuntimesQueryKey, [
+      catalogEntry("codex", "logged_in"),
+    ]);
+
+    discoverHandler = (args) =>
+      args?.force === true
+        ? Promise.reject(new Error("warm filtered refresh failure"))
+        : Promise.resolve([]);
+
+    const { container, root } = renderSurface();
+
+    await act(async () => {
+      root.render(surfaceTree(true));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    await typeSearch("zzz-no-such-runtime");
+
+    assert.ok(
+      document.body.querySelector(
+        '[data-testid="harness-catalog-refresh-error"]',
+      ),
+      "warm-error status must stay visible while a search filters every cached row away",
+    );
+    assert.ok(
+      document.body
+        .querySelector('[data-testid="harness-catalog-list"]')
+        ?.textContent?.includes("No runtimes match"),
+      "the filtered-empty message and the status row coexist",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("harness-catalog-refreshing stays visible when an active search filters cached rows to zero", async () => {
+    queryClient = makeQueryClient();
+    queryClient.setQueryData(acpRuntimesQueryKey, [
+      catalogEntry("codex", "logged_in"),
+    ]);
+
+    const pending = deferred();
+    discoverHandler = (args) =>
+      args?.force === true ? pending.promise : Promise.resolve([]);
+
+    const { container, root } = renderSurface();
+
+    await act(async () => {
+      root.render(surfaceTree(true));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    await typeSearch("zzz-no-such-runtime");
+
+    assert.ok(
+      document.body.querySelector('[data-testid="harness-catalog-refreshing"]'),
+      "refreshing spinner must stay visible while a search filters every cached row away",
+    );
+
+    await act(async () => {
+      pending.resolve([]);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("cold-error Retry issues exactly one forced probe and renders entries on success", async () => {
+    queryClient = makeQueryClient();
+    // No cache seeded → cold error on the first forced probe. The owner's
+    // mount-time probe rejects; the dialog's cold-error Retry must run a fresh
+    // forced probe (not rely on close/reopen, which fires nothing) and, on
+    // success, render the catalog.
+    let forcedProbeCount = 0;
+    discoverHandler = (args) => {
+      if (args?.force !== true) return Promise.resolve([]);
+      forcedProbeCount += 1;
+      return forcedProbeCount === 1
+        ? Promise.reject(new Error("cold load failure"))
+        : Promise.resolve([rawEntry("codex")]);
+    };
+
+    const { container, root } = renderSurface();
+
+    await act(async () => {
+      root.render(surfaceTree(true));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    const retry = document.body.querySelector(
+      '[data-testid="harness-catalog-load-retry"]',
+    );
+    assert.ok(retry, "cold-error state must render a Retry control");
+    assert.equal(
+      forcedProbeCount,
+      1,
+      "only the owner's mount probe has run before Retry",
+    );
+
+    await act(async () => {
+      retry.dispatchEvent(
+        new dom.window.MouseEvent("click", { bubbles: true }),
+      );
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    assert.equal(
+      forcedProbeCount,
+      2,
+      "Retry must issue exactly one additional forced probe",
+    );
+    assert.ok(
+      document.body.querySelector(
+        '[data-testid="harness-catalog-list-item-codex"]',
+      ),
+      "entries must render after the Retry probe succeeds",
     );
 
     await act(async () => {

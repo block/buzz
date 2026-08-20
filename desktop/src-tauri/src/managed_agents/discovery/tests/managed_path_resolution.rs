@@ -112,18 +112,20 @@ fn resolve_command_prefers_buzz_managed_npm_shim_over_path() {
     );
 }
 
-/// Cheap discovery must not re-spawn login shells for absent commands.
+/// The cheap discovery path must never spawn a login shell — not even on a
+/// cold cache.
 ///
-/// `resolve_command` caches negative resolutions so an absent command is a
-/// permanent hit, not a permanent miss. Without it, every "cheap"
-/// `discover_acp_runtimes_from(_, false)` re-runs `resolve_command_uncached`
-/// for each absent command → `find_via_login_shell` spawns a login shell on the
-/// channel-switch/composer hot path, the exact spawn the cheap path exists to
-/// avoid. This drives the real pipeline (custom + builtin commands) and counts
-/// login-shell child launches directly, not just auth-probe children.
+/// `force: false` resolves commands from cache only (`resolve_command_cached`):
+/// on a resolve-cache miss it reports the command absent instead of falling
+/// through to `resolve_command_uncached` → `find_via_login_shell`, which spawns
+/// zsh/bash. That spawn on the channel-switch/composer hot path is the exact
+/// freeze source the cheap path exists to avoid, so a cold cheap call must
+/// spawn zero login shells. The forced path remains the sole prober: the same
+/// absent-command fixture spawns at least once under `force: true`, proving the
+/// cheap-path zero is real and not a fixture that never reaches the probe.
 #[cfg(unix)]
 #[test]
-fn cheap_discovery_does_not_respawn_login_shell_for_absent_command() {
+fn cheap_discovery_never_spawns_login_shell_even_when_cold() {
     use crate::managed_agents::custom_harnesses::registry_test_lock;
     use crate::managed_agents::discovery::{
         clear_resolve_cache, discover_acp_runtimes_from, login_shell_spawn_probe,
@@ -136,8 +138,8 @@ fn cheap_discovery_does_not_respawn_login_shell_for_absent_command() {
     let _path_guard = crate::managed_agents::lock_path_mutex();
     let _registry = registry_test_lock();
 
-    // A custom harness whose command cannot resolve anywhere, so cold cheap
-    // discovery is guaranteed to reach `find_via_login_shell` at least once.
+    // A custom harness whose command cannot resolve anywhere, so the resolver
+    // reaches `find_via_login_shell` under the forced (live) path.
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join("absent-harness.json"),
@@ -150,25 +152,38 @@ fn cheap_discovery_does_not_respawn_login_shell_for_absent_command() {
     )
     .unwrap();
 
-    // Cold cache: the first cheap discovery must spawn a login shell for the
-    // absent command (proves the path is exercised — not a vacuous zero).
+    // Cold cache, cheap path: must spawn ZERO login shells (cache-only resolve
+    // reports the absent command missing without probing).
     clear_resolve_cache();
     login_shell_spawn_probe::reset();
     let _ = discover_acp_runtimes_from(Some(dir.path()), false);
-    let first = login_shell_spawn_probe::count();
-    assert!(
-        first >= 1,
-        "cold cheap discovery must probe an absent command via login shell at least once, got {first}"
+    let cold_cheap = login_shell_spawn_probe::count();
+    assert_eq!(
+        cold_cheap, 0,
+        "a cold cheap discovery must not spawn any login shell, got {cold_cheap}"
     );
 
-    // Second cheap discovery, no intervening `clear_resolve_cache`: every absent
-    // command is now negatively cached, so zero login shells are spawned.
+    // Second cheap discovery, still cold (no forced probe populated the cache):
+    // still zero — cache-only resolution never probes.
     login_shell_spawn_probe::reset();
     let _ = discover_acp_runtimes_from(Some(dir.path()), false);
-    let second = login_shell_spawn_probe::count();
-    clear_resolve_cache();
+    let second_cheap = login_shell_spawn_probe::count();
     assert_eq!(
-        second, 0,
-        "a second cheap discovery must not re-spawn a login shell for any absent command (negative cache), got {second}"
+        second_cheap, 0,
+        "a repeated cheap discovery must not spawn any login shell, got {second_cheap}"
+    );
+
+    // Forced path over the SAME absent fixture: resolves live and reaches
+    // `find_via_login_shell` at least once. Proves the cheap-path zero above is
+    // genuine — the fixture does drive the probe when live resolution runs —
+    // not a vacuous zero from a fixture that never reaches it.
+    clear_resolve_cache();
+    login_shell_spawn_probe::reset();
+    let _ = discover_acp_runtimes_from(Some(dir.path()), true);
+    let forced = login_shell_spawn_probe::count();
+    clear_resolve_cache();
+    assert!(
+        forced >= 1,
+        "the forced path must probe the absent command via login shell at least once, got {forced}"
     );
 }

@@ -90,11 +90,17 @@ fn forced_discovery_probes_auth_but_cheap_discovery_reuses_cached_status() {
     }
 }
 
-/// Before any forced probe, the cheap path reports `Unknown` for a
-/// probeable-but-unprobed runtime rather than inventing a status.
+/// Before any forced probe warms the resolve cache, the cheap path resolves
+/// nothing live — it reports a present-but-unresolved binary as absent rather
+/// than spawning to discover it. This is the flip side of the zero-spawn
+/// contract: cache-only resolution cannot see a binary the forced path has not
+/// yet cached, so availability is `NotInstalled` and auth stays `Unknown`. The
+/// forced path (exercised on every surface mount) resolves it and warms the
+/// cache; a subsequent cheap call then sees it Available (covered by
+/// `forced_discovery_probes_auth_but_cheap_discovery_reuses_cached_status`).
 #[cfg(unix)]
 #[test]
-fn cheap_discovery_reports_unknown_before_any_forced_probe() {
+fn cheap_discovery_reports_absent_before_any_forced_probe() {
     use crate::managed_agents::custom_harnesses::registry_test_lock;
     use crate::managed_agents::discovery::{clear_resolve_cache, discover_acp_runtimes_from};
     use crate::managed_agents::{AcpAvailabilityStatus, AuthStatus};
@@ -122,11 +128,15 @@ fn cheap_discovery_reports_unknown_before_any_forced_probe() {
             .iter()
             .find(|e| e.id == "claude")
             .expect("claude entry present");
-        assert_eq!(claude.availability, AcpAvailabilityStatus::Available);
+        assert_eq!(
+            claude.availability,
+            AcpAvailabilityStatus::NotInstalled,
+            "cache-only cheap discovery must not resolve a binary the forced path has not cached"
+        );
         assert_eq!(
             claude.auth_status,
             AuthStatus::Unknown,
-            "an available probeable runtime with no cached status stays Unknown"
+            "an unresolved runtime with no cached status stays Unknown"
         );
     });
 
