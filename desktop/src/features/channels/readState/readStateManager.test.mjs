@@ -270,6 +270,66 @@ test("publish flushes pending local state first", async () => {
   }
 });
 
+test("publishing does not refresh read recency", async () => {
+  globalThis.window.localStorage = makeLocalStorage();
+  const { restore } = withFakeTimers();
+  const pubkey = "7".repeat(64);
+  const manager = new ReadStateManager(pubkey, makeFakeRelay());
+  const msgKey = `msg:${"c".repeat(64)}`;
+  const markerValue = 1_000_000; // timestamp of the message that was read
+  const readHappenedAt = 1_500_000; // when that read entered the client
+
+  // @tauri-apps/api/core reads `window.__TAURI_INTERNALS__.invoke`.
+  const originalInternals = globalThis.window.__TAURI_INTERNALS__;
+  const invoked = [];
+  globalThis.window.__TAURI_INTERNALS__ = {
+    invoke: (cmd, args) => {
+      invoked.push(cmd);
+      if (cmd === "nip44_encrypt_to_self") return Promise.resolve("ciphertext");
+      if (cmd === "sign_event") {
+        return Promise.resolve(
+          JSON.stringify({
+            id: "e".repeat(64),
+            pubkey,
+            created_at: args.createdAt,
+            kind: args.kind,
+            tags: args.tags,
+            content: args.content,
+            sig: "f".repeat(128),
+          }),
+        );
+      }
+      return Promise.resolve(null);
+    },
+  };
+
+  try {
+    manager.markContextRead(msgKey, markerValue);
+    manager.contextSourceCreatedAt.set(msgKey, readHappenedAt);
+    // Fresh launch on an account whose blob is trimmed: the relay copy that
+    // seeds lastPublishedContexts does not carry this key, so it reads as
+    // changed on the next publish.
+    manager.lastPublishedContexts = {};
+    manager.fetchOwnBlobBeforePublish = async () => {};
+
+    await manager.publish();
+
+    assert.ok(
+      invoked.includes("sign_event"),
+      "precondition: the blob must actually publish",
+    );
+    assert.equal(
+      manager.contextSourceCreatedAt.get(msgKey),
+      readHappenedAt,
+      "a publish is not a read: recency must stay at the time of the read",
+    );
+  } finally {
+    globalThis.window.__TAURI_INTERNALS__ = originalInternals;
+    manager.destroy();
+    restore();
+  }
+});
+
 test("destroyed manager cannot persist after an in-flight fetch resolves", async () => {
   const storage = makeLocalStorage();
   globalThis.window.localStorage = storage;

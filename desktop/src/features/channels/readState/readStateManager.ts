@@ -143,8 +143,8 @@ export function applyRemoteContextTimestamp(args: {
     // Only an advance is a NEW read fact. Re-learning an unchanged context from
     // a routine republish must not refresh its recency, or every context in
     // every blob would look freshly read and `contextSourceCreatedAt` would
-    // collapse to "time of last publish" — useless as an eviction key. Mirrors
-    // the publish path, which already bumps only changed keys.
+    // collapse to "time of last publish" — useless as an eviction key. The
+    // publish path does not write recency at all, for the same reason.
     if (eventCreatedAt > sourceCreatedAt) {
       contextSourceCreatedAt.set(contextId, eventCreatedAt);
     }
@@ -571,11 +571,15 @@ export class ReadStateManager {
         `[ReadStateManager] publish accepted slotId=${slotId} createdAt=${createdAt}`,
       );
 
-      for (const key of Object.keys(contexts)) {
-        if (this.lastPublishedContexts[key] !== contexts[key]) {
-          this.contextSourceCreatedAt.set(key, createdAt);
-        }
-      }
+      // Publishing is not a read action, so it must not refresh
+      // `contextSourceCreatedAt`. Stamping "keys that changed since the last
+      // publish" is not the narrow filter it looks like: lastPublishedContexts
+      // is seeded from the *trimmed* relay blob, so every key
+      // trimContextsToBudget dropped reads as changed on the first publish
+      // after each launch, and the recency signal collapses to "time of last
+      // publish" for the whole prunable tier. Recency is written only where a
+      // read happens — markContextRead, and the advance branch of
+      // applyRemoteContextTimestamp.
       // Merge this slot's contexts into lastPublishedContexts (union).
       for (const [key, ts] of Object.entries(contexts)) {
         this.lastPublishedContexts[key] = ts;
