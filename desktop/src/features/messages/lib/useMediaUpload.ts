@@ -670,8 +670,8 @@ export function useMediaUpload({
       const files = Array.from(event.dataTransfer.files);
       if (files.length === 0) return;
 
-      // Accept any file. The Tauri layer and the relay enforce the deny-list
-      // (active-content + executables) and size caps; everything else uploads.
+      // Let the native layer preflight the file; the relay authoritatively
+      // enforces the narrow media/document allowlist and size caps.
       const validFiles = files;
 
       queueFiles(validFiles.filter(shouldQueueFile));

@@ -406,106 +406,45 @@ async fn test_auth_server_tag_correct() {
 
 #[tokio::test]
 #[ignore]
-async fn test_upload_svg_accepted_as_text_xml() {
-    // SVG with XML declaration is detected by `infer` as text/xml (not image/svg+xml),
-    // which is not in the blocked list, so it routes through the generic file path.
+async fn test_upload_svg_rejected_even_when_detected_as_text_xml() {
     let client = http_client();
     let keys = Keys::generate();
     let svg = b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
     let resp = upload(&client, &keys, svg).await;
-    let status = resp.status().as_u16();
     assert_eq!(
-        status, 200,
-        "SVG (undetected) should succeed via file path, got {status}"
+        resp.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "SVG must not enter document storage"
     );
-    let desc: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(desc["type"].as_str().unwrap(), "text/xml");
-    println!("✅ SVG (XML declaration) → 200 as text/xml");
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_upload_html_served_as_inert_attachment() {
-    // HTML is accepted on the generic file path and MUST be served as an inert
-    // download: the security property the whole feature relies on is that the
-    // relay returns `Content-Disposition: attachment` + `X-Content-Type-Options:
-    // nosniff` + `Content-Security-Policy: default-src 'none'` so the payload can
-    // never execute or render as active content. This response-level regression
-    // pins that end to end (upload → GET), not just the deny-list membership.
+async fn test_upload_html_rejected() {
     let client = http_client();
     let keys = Keys::generate();
     // Exactly the shape `infer` classifies as text/html (leading recognised tag).
     let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
     let resp = upload(&client, &keys, html).await;
-    let status = resp.status().as_u16();
     assert_eq!(
-        status, 200,
-        "HTML should upload via file path, got {status}"
+        resp.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "HTML must not enter document storage"
     );
-    let desc: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(desc["type"].as_str().unwrap(), "text/html");
-    let url = desc["url"].as_str().unwrap();
-    assert!(
-        url.ends_with(".html"),
-        "served URL must carry the .html extension, got {url}"
-    );
-    let sha256 = desc["sha256"].as_str().unwrap();
-
-    let get_resp = client
-        .get(url)
-        .header(
-            "Authorization",
-            blossom_auth_header(&sign_blossom_get_auth(&keys, sha256)),
-        )
-        .send()
-        .await
-        .expect("GET request");
-    assert_eq!(get_resp.status(), 200, "HTML GET roundtrip should succeed");
-
-    let header = |name: &str| {
-        get_resp
-            .headers()
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string()
-    };
-    assert_eq!(header("content-type"), "text/html");
-    assert_eq!(
-        header("content-disposition"),
-        "attachment",
-        "HTML must be forced to download, never rendered inline"
-    );
-    assert_eq!(
-        header("x-content-type-options"),
-        "nosniff",
-        "nosniff must prevent MIME re-sniffing to an executable type"
-    );
-    assert_eq!(
-        header("content-security-policy"),
-        "default-src 'none'",
-        "restrictive CSP must neutralise any active content"
-    );
-    println!("✅ HTML → 200, served as inert attachment (disposition+nosniff+CSP)");
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_upload_pdf_accepted() {
-    // PDF is detected by `infer` and is not in the blocked list, so it
-    // routes through the generic file path successfully.
+async fn test_upload_unapproved_pdf_rejected() {
     let client = http_client();
     let keys = Keys::generate();
     let pdf = b"%PDF-1.4 fake pdf content here for testing";
     let resp = upload(&client, &keys, pdf).await;
-    let status = resp.status().as_u16();
     assert_eq!(
-        status, 200,
-        "PDF should succeed via file path, got {status}"
+        resp.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unapproved documents must fail closed"
     );
-    let desc: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(desc["type"].as_str().unwrap(), "application/pdf");
-    println!("✅ PDF → 200");
 }
 
 #[tokio::test]
@@ -547,40 +486,29 @@ async fn test_standard_upload_rejects_recognized_audio() {
 
 #[tokio::test]
 #[ignore]
-async fn test_upload_zero_bytes_accepted() {
-    // Empty body has no magic bytes — routes through the generic file path
-    // as application/octet-stream.
+async fn test_upload_zero_bytes_rejected() {
     let client = http_client();
     let keys = Keys::generate();
     let resp = upload(&client, &keys, b"").await;
-    let status = resp.status().as_u16();
     assert_eq!(
-        status, 200,
-        "zero bytes should succeed via file path, got {status}"
+        resp.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "empty opaque files must fail closed"
     );
-    let desc: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(desc["type"].as_str().unwrap(), "application/octet-stream");
-    assert_eq!(desc["size"].as_u64().unwrap(), 0);
-    println!("✅ Zero bytes → 200 as octet-stream");
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_upload_random_bytes_accepted() {
-    // Random bytes with no magic signature route through the generic file
-    // path as application/octet-stream.
+async fn test_upload_random_bytes_rejected() {
     let client = http_client();
     let keys = Keys::generate();
     let random: Vec<u8> = (0..1000).map(|i| (i * 37 % 256) as u8).collect();
     let resp = upload(&client, &keys, &random).await;
-    let status = resp.status().as_u16();
     assert_eq!(
-        status, 200,
-        "random bytes should succeed via file path, got {status}"
+        resp.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "arbitrary octet streams must fail closed"
     );
-    let desc: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(desc["type"].as_str().unwrap(), "application/octet-stream");
-    println!("✅ Random bytes → 200 as octet-stream");
 }
 
 #[tokio::test]

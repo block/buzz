@@ -14,6 +14,10 @@ use crate::error::MediaError;
 /// `video/mp4` and `validate_content()` rejects it here.
 const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+/// Calendar documents are text and should remain comfortably below media-sized
+/// uploads. Keep a hard ceiling even when an operator raises `max_file_bytes`.
+const MAX_CALENDAR_BYTES: u64 = 10 * 1024 * 1024;
+
 const MP4_BRANDS: &[[u8; 4]] = &[
     *b"isom", *b"iso2", *b"iso3", *b"iso4", *b"iso5", *b"iso6", *b"iso7", *b"iso8", *b"iso9",
     *b"mp41", *b"mp42", *b"avc1", *b"dash", *b"M4V ",
@@ -60,171 +64,77 @@ pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
             .any(|brand| MP4_BRANDS.iter().any(|candidate| brand == candidate))
 }
 
-/// MIME types blocked from the generic file-upload path.
+/// Validate uploaded bytes for the non-preview document path.
 ///
-/// These are the formats a browser (or the desktop webview) will *execute* or
-/// *render as active content* if it ever reaches them with the wrong response
-/// headers. We serve generic files with `Content-Disposition: attachment` +
-/// `X-Content-Type-Options: nosniff` + `CSP: default-src 'none'`, which already
-/// neutralises them — this allowlist-of-denials is defence in depth, so a future
-/// header regression can't turn an uploaded blob into a stored-XSS vector.
-///
-/// JS and SVG are the classic stored-XSS carriers. Native executables are
-/// blocked because there's no legitimate reason to host them inline in chat and
-/// they're a malware-distribution risk.
-///
-/// HTML is intentionally *not* blocked: it is accepted as an inert download
-/// (`serve_inline` returns false for `text/html`, so it is served with
-/// `Content-Disposition: attachment` + `nosniff` + `CSP: default-src 'none'`,
-/// and the desktop renderer never navigates a webview to a generic
-/// attachment). The old sniff-based block only caught the well-formed HTML
-/// `infer` recognises anyway — HTML that evades the sniff already uploaded as
-/// `application/octet-stream` and served as a download, so blocking canonical
-/// HTML was inconsistent rather than a real control. `application/xhtml+xml`
-/// stays listed as dormant defence in depth: `infer` has no XHTML matcher, so
-/// it is unreachable through sniffing, but the entry costs nothing and guards
-/// against a future detector that does classify it.
-const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
-    // Active web content — stored-XSS vectors.
-    "application/xhtml+xml",
-    "image/svg+xml",
-    "application/javascript",
-    "text/javascript",
-    // Native executables / installers.
-    "application/x-msdownload", // .exe / .dll
-    "application/x-executable", // ELF
-    "application/vnd.microsoft.portable-executable",
-    "application/x-mach-binary", // Mach-O
-    "application/x-sharedlib",
-    "application/x-elf",
-    "application/x-msi",
-    "application/vnd.android.package-archive", // .apk
-    "application/x-apple-diskimage",           // .dmg
-];
-
-/// Map a sniffed MIME type to a file extension for the generic file path.
-///
-/// Covers the common document, archive, audio, and data formats `infer`
-/// recognises. Returns `None` for MIME types we don't have a canonical
-/// extension for — the caller falls back to `bin`.
-fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
-    let ext = match mime {
-        // Documents
-        "application/pdf" => "pdf",
-        "application/msword" => "doc",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
-        "application/vnd.ms-excel" => "xls",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
-        "application/vnd.ms-powerpoint" => "ppt",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-        "application/vnd.oasis.opendocument.text" => "odt",
-        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
-        "application/vnd.oasis.opendocument.presentation" => "odp",
-        "application/rtf" => "rtf",
-        "application/epub+zip" => "epub",
-        // Archives
-        "application/zip" => "zip",
-        "application/gzip" => "gz",
-        "application/x-tar" => "tar",
-        "application/x-7z-compressed" => "7z",
-        "application/x-rar-compressed" | "application/vnd.rar" => "rar",
-        "application/x-bzip2" => "bz2",
-        "application/x-xz" => "xz",
-        "application/zstd" => "zst",
-        // Audio
-        "audio/mpeg" => "mp3",
-        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
-        "audio/flac" | "audio/x-flac" => "flac",
-        "audio/wav" | "audio/x-wav" => "wav",
-        "audio/ogg" => "ogg",
-        "audio/aac" => "aac",
-        "audio/opus" => "opus",
-        // Other media containers (served as downloads, not transcoded)
-        "video/quicktime" => "mov",
-        "video/webm" => "webm",
-        "video/x-matroska" => "mkv",
-        // Data / text
-        "application/json" => "json",
-        "text/csv" => "csv",
-        "text/html" => "html",
-        "text/plain" => "txt",
-        _ => return None,
-    };
-    Some(ext)
-}
-
-/// Validate uploaded bytes for the **generic file** upload path.
-///
-/// This is the catch-all path for non-media attachments (documents, archives,
-/// text, data). It enforces three things:
-///   1. A size cap (`config.max_file_bytes`).
-///   2. A *deny* list — known active-content and executable MIME types are
-///      rejected even though safe headers already neutralise them.
-///   3. Magic-byte sniffing where possible.
-///
-/// Files with no detectable signature (plain text, CSV, source code, JSON —
-/// none of which have magic bytes) are accepted as `application/octet-stream`.
-/// They are always served as downloads, so an un-sniffable file can never
-/// execute in the app.
+/// Documents are an allowlist, not a catch-all. The declared MIME and filename
+/// extension are both required because text formats have no reliable magic
+/// bytes; the content validator then proves the selected format's structure.
 ///
 /// Returns `(mime, ext)`.
+pub fn document_extension_for_mime(mime: &str) -> Option<&'static str> {
+    match mime {
+        "text/calendar" => Some("ics"),
+        _ => None,
+    }
+}
+
 pub fn validate_file_content(
     bytes: &[u8],
     config: &MediaConfig,
+    declared_mime: Option<&str>,
+    extension: Option<&str>,
 ) -> Result<(String, String), MediaError> {
-    // 1. Size cap.
-    if bytes.len() as u64 > config.max_file_bytes {
+    match (declared_mime, extension) {
+        (Some(mime), Some(extension)) if document_extension_for_mime(mime) == Some(extension) => {
+            validate_calendar_content(bytes, config, mime, extension)
+        }
+        _ => match infer::get(bytes) {
+            Some(kind) => Err(MediaError::DisallowedContentType(
+                kind.mime_type().to_string(),
+            )),
+            None => Err(MediaError::UnknownContentType),
+        },
+    }
+}
+
+fn validate_calendar_content(
+    bytes: &[u8],
+    config: &MediaConfig,
+    declared_mime: &str,
+    extension: &str,
+) -> Result<(String, String), MediaError> {
+    if declared_mime != "text/calendar" || extension != "ics" {
+        return Err(MediaError::DisallowedContentType(declared_mime.to_string()));
+    }
+
+    let max = config.max_file_bytes.min(MAX_CALENDAR_BYTES);
+    if bytes.len() as u64 > max {
         return Err(MediaError::FileTooLarge {
             size: bytes.len() as u64,
-            max: config.max_file_bytes,
+            max,
         });
     }
 
-    // ISO-BMFF permits arbitrary major brands, so `infer` cannot enumerate all
-    // valid MP4 signatures. Never let an `ftyp` container fall through as an
-    // opaque attachment merely because its brand is unfamiliar.
-    if looks_like_iso_bmff(bytes) {
-        let mime = infer::get(bytes)
-            .map(|kind| kind.mime_type().to_string())
-            .unwrap_or_else(|| "application/iso-bmff".to_string());
-        return Err(MediaError::DisallowedContentType(mime));
+    let text = std::str::from_utf8(bytes).map_err(|_| MediaError::UnknownContentType)?;
+    if text.as_bytes().contains(&0) {
+        return Err(MediaError::UnknownContentType);
+    }
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next().ok_or(MediaError::UnknownContentType)?;
+    let last = lines.next_back().unwrap_or(first);
+    if !first.eq_ignore_ascii_case("BEGIN:VCALENDAR") || !last.eq_ignore_ascii_case("END:VCALENDAR")
+    {
+        return Err(MediaError::UnknownContentType);
     }
 
-    // 2. Sniff. `None` means no magic signature (text/csv/json/source) — that's
-    //    fine for the generic path; treat as opaque binary served as a download.
-    match infer::get(bytes) {
-        Some(kind) => {
-            let mime = kind.mime_type().to_string();
-            // Recognized media must never fall through exact-byte attachment
-            // storage. Images and video use their canonical media validators;
-            // audio is rejected until Buzz has an explicit sanitizer and
-            // location-metadata validator for its container.
-            if mime.starts_with("image/")
-                || mime.starts_with("video/")
-                || mime.starts_with("audio/")
-            {
-                return Err(MediaError::DisallowedContentType(mime));
-            }
-            // 3. Deny dangerous active-content / executable types.
-            if BLOCKED_FILE_MIME_TYPES.contains(&mime.as_str()) {
-                return Err(MediaError::DisallowedContentType(mime));
-            }
-            let ext = file_mime_to_ext(&mime)
-                .map(str::to_string)
-                .unwrap_or_else(|| kind.extension().to_string());
-            Ok((mime, ext))
-        }
-        None => Ok(("application/octet-stream".to_string(), "bin".to_string())),
-    }
+    Ok(("text/calendar".to_string(), "ics".to_string()))
 }
 
 /// Whether a stored blob should be served inline (rendered in the client) or as
 /// an attachment (forced download).
 ///
-/// Images and video are previewed inline by the renderer; everything else is a
-/// generic file card with a download action, so it serves as an attachment.
-/// PDF is intentionally *not* inline yet — inline PDF preview is a planned
-/// fast-follow; until the renderer handles it, force download like any other file.
+/// Images and video are previewed inline by the renderer; everything else uses
+/// a named download action and is served as an attachment.
 pub fn serve_inline(mime: &str) -> bool {
     mime.starts_with("image/") || mime.starts_with("video/")
 }
@@ -1525,19 +1435,20 @@ mod tests {
     fn test_generic_file_path_cannot_bypass_media_validation() {
         let config = test_config();
         assert!(
-            matches!(validate_file_content(TINY_JPEG, &config), Err(MediaError::DisallowedContentType(m)) if m == "image/jpeg")
+            matches!(validate_file_content(TINY_JPEG, &config, None, None), Err(MediaError::DisallowedContentType(m)) if m == "image/jpeg")
         );
         assert!(
-            matches!(validate_file_content(MP4_FTYP_MAGIC, &config), Err(MediaError::DisallowedContentType(m)) if m == "video/mp4")
+            matches!(validate_file_content(MP4_FTYP_MAGIC, &config, None, None), Err(MediaError::DisallowedContentType(m)) if m == "video/mp4")
         );
 
         let proprietary_major = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
         assert!(infer::get(proprietary_major).is_none());
         assert!(looks_like_iso_bmff(proprietary_major));
         assert!(looks_like_mp4_iso_bmff(proprietary_major));
-        assert!(
-            matches!(validate_file_content(proprietary_major, &config), Err(MediaError::DisallowedContentType(m)) if m == "application/iso-bmff")
-        );
+        assert!(matches!(
+            validate_file_content(proprietary_major, &config, None, None),
+            Err(MediaError::UnknownContentType)
+        ));
     }
 
     #[test]
@@ -1562,7 +1473,7 @@ mod tests {
             );
             assert!(
                 matches!(
-                    validate_file_content(bytes, &config),
+                    validate_file_content(bytes, &config, None, None),
                     Err(MediaError::DisallowedContentType(mime)) if mime.starts_with("audio/")
                 ),
                 "generic path accepted {name}"
@@ -2601,7 +2512,65 @@ mod tests {
         );
     }
 
-    // --- Generic file path tests ---
+    // --- Document file path tests ---
+
+    const TINY_ICS: &[u8] = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Buzz test//EN\r\nBEGIN:VEVENT\r\nUID:test@example.com\r\nDTSTAMP:20260820T120000Z\r\nDTSTART:20260821T120000Z\r\nSUMMARY:Planning\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn calendar_document_requires_matching_mime_extension_and_envelope() {
+        let config = test_config();
+        assert_eq!(
+            validate_calendar_content(TINY_ICS, &config, "text/calendar", "ics").unwrap(),
+            ("text/calendar".to_string(), "ics".to_string())
+        );
+    }
+
+    #[test]
+    fn file_policy_routes_declared_ics_through_calendar_validation() {
+        let config = test_config();
+        assert_eq!(
+            validate_file_content(TINY_ICS, &config, Some("text/calendar"), Some("ics")).unwrap(),
+            ("text/calendar".to_string(), "ics".to_string())
+        );
+    }
+
+    #[test]
+    fn file_policy_rejects_arbitrary_octet_streams() {
+        assert!(matches!(
+            validate_file_content(b"opaque bytes", &test_config(), None, None),
+            Err(MediaError::UnknownContentType)
+        ));
+    }
+
+    #[test]
+    fn calendar_document_rejects_mime_and_extension_mismatches() {
+        let config = test_config();
+        for (mime, extension) in [
+            ("application/octet-stream", "ics"),
+            ("text/plain", "ics"),
+            ("text/calendar", "txt"),
+            ("text/calendar", "ICS"),
+        ] {
+            assert!(
+                validate_file_content(TINY_ICS, &config, Some(mime), Some(extension)).is_err(),
+                "accepted {mime} with .{extension}"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_document_rejects_malformed_or_disguised_content() {
+        let config = test_config();
+        let nul = b"BEGIN:VCALENDAR\r\nSUMMARY:bad\0value\r\nEND:VCALENDAR\r\n";
+        let invalid_utf8 = b"BEGIN:VCALENDAR\r\nSUMMARY:\xff\r\nEND:VCALENDAR\r\n";
+        let missing_end = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n";
+        let html = b"<!DOCTYPE html><script>alert(1)</script>";
+        for bytes in [nul.as_slice(), invalid_utf8, missing_end, html] {
+            assert!(
+                validate_file_content(bytes, &config, Some("text/calendar"), Some("ics")).is_err()
+            );
+        }
+    }
 
     /// Minimal PDF header — infer detects `application/pdf` from `%PDF`.
     const TINY_PDF: &[u8] = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF";
@@ -2612,58 +2581,29 @@ mod tests {
     ];
 
     #[test]
-    fn test_validate_file_pdf_accepted() {
+    fn document_allowlist_rejects_unapproved_documents_and_archives() {
         let config = test_config();
-        let (mime, ext) = validate_file_content(TINY_PDF, &config).unwrap();
-        assert_eq!(mime, "application/pdf");
-        assert_eq!(ext, "pdf");
+        for bytes in [TINY_PDF, TINY_ZIP] {
+            assert!(matches!(
+                validate_file_content(bytes, &config, None, None),
+                Err(MediaError::DisallowedContentType(_))
+            ));
+        }
     }
 
     #[test]
-    fn test_validate_file_zip_accepted() {
-        let config = test_config();
-        let (mime, ext) = validate_file_content(TINY_ZIP, &config).unwrap();
-        assert_eq!(mime, "application/zip");
-        assert_eq!(ext, "zip");
-    }
-
-    #[test]
-    fn test_validate_file_plaintext_accepted_as_octet_stream() {
-        // Plain text has no magic bytes — infer returns None. The generic path
-        // accepts it as opaque binary served as a download (the common Slack
-        // case: .txt, .csv, .md, source code).
-        let config = test_config();
-        let (mime, ext) = validate_file_content(b"hello, this is a text file\n", &config).unwrap();
-        assert_eq!(mime, "application/octet-stream");
-        assert_eq!(ext, "bin");
-    }
-
-    #[test]
-    fn test_validate_file_html_accepted_as_inert_download() {
-        // HTML is accepted on the generic file path as an inert attachment.
-        // `infer` recognises canonical HTML as `text/html`; it must map to the
-        // `html` extension and, crucially, NOT be served inline — the serve
-        // layer relies on `serve_inline("text/html") == false` to attach a
-        // `Content-Disposition: attachment` + `nosniff` + restrictive CSP,
-        // which is what keeps the payload from ever executing.
+    fn active_html_is_rejected_instead_of_stored_as_a_download() {
         let config = test_config();
         let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
-        // Sanity: this fixture is exactly the shape `infer` classifies as HTML.
         assert_eq!(infer::get(html).map(|k| k.mime_type()), Some("text/html"));
-        let (mime, ext) = validate_file_content(html, &config).unwrap();
-        assert_eq!(mime, "text/html");
-        assert_eq!(ext, "html");
-        assert!(
-            !serve_inline(&mime),
-            "text/html must never be served inline — it must force download"
-        );
+        assert!(matches!(
+            validate_file_content(html, &config, None, None),
+            Err(MediaError::DisallowedContentType(mime)) if mime == "text/html"
+        ));
     }
 
     #[test]
     fn test_validate_file_executable_still_rejected() {
-        // Removing HTML from the deny-list must not weaken the executable
-        // block. `infer` classifies an ELF header as `application/x-executable`,
-        // which the generic path must still reject via the deny-list.
         let config = test_config();
         // `infer`'s ELF matcher requires the magic plus >52 bytes of header.
         let mut elf = b"\x7fELF".to_vec();
@@ -2673,43 +2613,31 @@ mod tests {
             Some("application/x-executable")
         );
         assert!(
-            matches!(validate_file_content(&elf, &config), Err(MediaError::DisallowedContentType(ref m)) if m == "application/x-executable"),
-            "ELF executable must still be rejected by the generic file path"
+            matches!(validate_file_content(&elf, &config, None, None), Err(MediaError::DisallowedContentType(ref m)) if m == "application/x-executable"),
+            "ELF executable must be rejected by the document allowlist"
         );
-    }
-
-    #[test]
-    fn test_generic_deny_list_keeps_active_content_and_executables() {
-        // Static guard on the deny-list itself: HTML is intentionally gone, but
-        // SVG, JavaScript, XHTML, and the native-executable types remain. These
-        // are the entries that keep the inert-download boundary honest even if a
-        // future `infer` upgrade starts classifying more of them by content.
-        assert!(!BLOCKED_FILE_MIME_TYPES.contains(&"text/html"));
-        for kept in [
-            "image/svg+xml",
-            "application/xhtml+xml",
-            "application/javascript",
-            "text/javascript",
-            "application/x-msdownload",
-            "application/x-executable",
-            "application/vnd.microsoft.portable-executable",
-            "application/x-mach-binary",
-            "application/x-msi",
-            "application/x-apple-diskimage",
-        ] {
-            assert!(
-                BLOCKED_FILE_MIME_TYPES.contains(&kept),
-                "{kept} must remain in the generic-file deny-list"
-            );
-        }
     }
 
     #[test]
     fn test_validate_file_too_large_rejected() {
         let mut config = test_config();
         config.max_file_bytes = 10;
-        let result = validate_file_content(TINY_PDF, &config);
+        let result = validate_file_content(TINY_ICS, &config, Some("text/calendar"), Some("ics"));
         assert!(matches!(result, Err(MediaError::FileTooLarge { .. })));
+    }
+
+    #[test]
+    fn calendar_document_hard_limit_applies_when_operator_limit_is_larger() {
+        let mut config = test_config();
+        config.max_file_bytes = MAX_CALENDAR_BYTES * 2;
+        let oversized = vec![b'A'; MAX_CALENDAR_BYTES as usize + 1];
+        assert!(matches!(
+            validate_file_content(&oversized, &config, Some("text/calendar"), Some("ics")),
+            Err(MediaError::FileTooLarge {
+                max: MAX_CALENDAR_BYTES,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2717,11 +2645,12 @@ mod tests {
         assert!(serve_inline("image/jpeg"));
         assert!(serve_inline("image/png"));
         assert!(serve_inline("video/mp4"));
-        // Generic files force download.
+        // Non-preview attachments force download.
         assert!(!serve_inline("application/pdf"));
         assert!(!serve_inline("application/zip"));
         assert!(!serve_inline("application/octet-stream"));
         assert!(!serve_inline("audio/mpeg"));
         assert!(!serve_inline("text/plain"));
+        assert!(!serve_inline("text/calendar"));
     }
 }

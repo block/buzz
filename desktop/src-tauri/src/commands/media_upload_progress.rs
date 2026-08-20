@@ -63,6 +63,7 @@ pub(super) struct UploadAttempt<'a> {
     pub url: String,
     pub auth_header: &'a str,
     pub mime: &'a str,
+    pub extension: Option<&'a str>,
     pub sha256: &'a str,
     pub body: bytes::Bytes,
     pub progress: Option<&'a (tauri::AppHandle, String)>,
@@ -77,17 +78,21 @@ pub(super) async fn send_upload_attempt(
         url,
         auth_header,
         mime,
+        extension,
         sha256,
         body,
         progress,
         cancellation,
     } = attempt;
-    let req = state
+    let mut req = state
         .http_client
         .put(url)
         .header("Authorization", auth_header)
         .header("Content-Type", mime)
         .header("X-SHA-256", sha256);
+    if let Some(extension) = extension {
+        req = req.header("X-Buzz-File-Extension", extension);
+    }
 
     let response = if let Some((app, progress_id)) = progress {
         let app = app.clone();

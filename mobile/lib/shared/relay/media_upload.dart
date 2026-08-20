@@ -63,7 +63,7 @@ const _allowedImageMimeTypes = {
 };
 const _allowedVideoMimeTypes = {'video/mp4'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
-const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
+const _maxDocumentSizeBytes = 10 * 1024 * 1024; // 10MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
@@ -420,7 +420,7 @@ class MediaUploadService {
     return uploadVideo(pickedVideo);
   }
 
-  /// Opens the system document picker for a generic file attachment.
+  /// Opens the system document picker for an allowlisted attachment.
   Future<XFile?> pickAttachmentFile() async {
     final pickAttachmentFile = _pickAttachmentFile;
     if (pickAttachmentFile == null) {
@@ -429,7 +429,7 @@ class MediaUploadService {
     return pickAttachmentFile();
   }
 
-  /// Uploads [pickedFile] as a size-limited generic attachment.
+  /// Uploads [pickedFile] as an allowlisted non-preview document.
   Future<BlobDescriptor> uploadFile(
     XFile pickedFile, {
     ValueChanged<double>? onProgress,
@@ -440,21 +440,26 @@ class MediaUploadService {
     if (length == 0) {
       throw Exception('File is empty.');
     }
-    if (length > _maxFileSizeBytes) {
+    final filename = _safeAttachmentFilename(pickedFile.name);
+    if (!_hasCalendarExtension(filename)) {
+      throw Exception('unsupported file type');
+    }
+    if (length > _maxDocumentSizeBytes) {
       throw Exception(
-        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
+        'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 10MB.',
       );
     }
     final bytes = await pickedFile.readAsBytes();
+    _validateCalendarBytes(bytes);
     _throwIfCancelled(cancellationToken);
     final descriptor = await _uploadPreparedBytes(
       bytes,
-      mimeType: 'application/octet-stream',
-      allowGenericFile: true,
+      mimeType: 'text/calendar',
+      fileExtension: 'ics',
       onProgress: onProgress,
       cancellationToken: cancellationToken,
     );
-    return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
+    return descriptor.withFilename(filename);
   }
 
   Future<BlobDescriptor?> pickAndUploadFile() async {
@@ -490,14 +495,14 @@ class MediaUploadService {
   Future<BlobDescriptor> _uploadPreparedBytes(
     Uint8List bytes, {
     required String mimeType,
-    bool allowGenericFile = false,
+    String? fileExtension,
     ValueChanged<double>? onProgress,
     UploadCancellationToken? cancellationToken,
   }) async {
     _throwIfCancelled(cancellationToken);
-    if (!allowGenericFile &&
-        !_allowedImageMimeTypes.contains(mimeType) &&
-        !_allowedVideoMimeTypes.contains(mimeType)) {
+    if (!_allowedImageMimeTypes.contains(mimeType) &&
+        !_allowedVideoMimeTypes.contains(mimeType) &&
+        !(mimeType == 'text/calendar' && fileExtension == 'ics')) {
       throw Exception('unsupported file type: $mimeType');
     }
 
@@ -505,6 +510,7 @@ class MediaUploadService {
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
+      fileExtension: fileExtension,
       sha256: sha256,
       path: _mediaUploadPath,
       onProgress: onProgress,
@@ -515,6 +521,7 @@ class MediaUploadService {
       response = await _sendUploadRequest(
         bytes: bytes,
         mimeType: mimeType,
+        fileExtension: fileExtension,
         sha256: sha256,
         path: _legacyMediaUploadPath,
         onProgress: onProgress,
@@ -540,6 +547,7 @@ class MediaUploadService {
   Future<http.Response> _sendUploadRequest({
     required Uint8List bytes,
     required String mimeType,
+    String? fileExtension,
     required String sha256,
     required String path,
     ValueChanged<double>? onProgress,
@@ -553,7 +561,11 @@ class MediaUploadService {
     );
     request.contentLength = bytes.length;
     request.headers.addAll(
-      _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
+      _buildUploadHeaders(
+        mimeType: mimeType,
+        sha256: sha256,
+        fileExtension: fileExtension,
+      ),
     );
     final writeRequest = request.sink
         .addStream(_uploadByteStream(bytes, onProgress))
@@ -573,11 +585,13 @@ class MediaUploadService {
   Map<String, String> _buildUploadHeaders({
     required String mimeType,
     required String sha256,
+    String? fileExtension,
   }) {
     final headers = <String, String>{
       'Authorization': _buildUploadAuthHeader(sha256),
       'Content-Type': mimeType,
       'X-SHA-256': sha256,
+      'X-Buzz-File-Extension': ?fileExtension,
     };
     return headers;
   }
@@ -684,24 +698,58 @@ class MediaUploadService {
 String _safeAttachmentFilename(String filename) {
   final segments = filename.split(RegExp(r'[/\\]'));
   final basename = segments.isEmpty ? '' : segments.last;
+  final preserveCalendarExtension = _hasCalendarExtension(basename);
+  final source = preserveCalendarExtension
+      ? basename.substring(0, basename.length - '.ics'.length)
+      : basename;
+  final byteLimit = preserveCalendarExtension ? 255 - '.ics'.length : 255;
   final sanitized = StringBuffer();
   var byteLength = 0;
 
-  for (final rune in basename.runes) {
+  for (final rune in source.runes) {
     if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
       continue;
     }
 
     final character = String.fromCharCode(rune);
     final characterByteLength = utf8.encode(character).length;
-    if (byteLength + characterByteLength > 255) break;
+    if (byteLength + characterByteLength > byteLimit) break;
 
     sanitized.write(character);
     byteLength += characterByteLength;
   }
 
   final safeBasename = sanitized.toString().trim();
+  if (preserveCalendarExtension) {
+    return '${safeBasename.isEmpty ? 'calendar' : safeBasename}.ics';
+  }
   return safeBasename.isEmpty ? 'file' : safeBasename;
+}
+
+bool _hasCalendarExtension(String filename) {
+  return filename.toLowerCase().endsWith('.ics');
+}
+
+void _validateCalendarBytes(Uint8List bytes) {
+  late final String text;
+  try {
+    text = utf8.decode(bytes);
+  } on FormatException {
+    throw Exception('invalid calendar file: expected UTF-8 text');
+  }
+  if (bytes.contains(0)) {
+    throw Exception('invalid calendar file: NUL bytes are not allowed');
+  }
+  final lines = text
+      .split(RegExp(r'\r?\n'))
+      .map((line) => line.trim())
+      .where((line) => line.isNotEmpty)
+      .toList(growable: false);
+  if (lines.isEmpty ||
+      lines.first.toUpperCase() != 'BEGIN:VCALENDAR' ||
+      lines.last.toUpperCase() != 'END:VCALENDAR') {
+    throw Exception('invalid calendar file: missing VCALENDAR envelope');
+  }
 }
 
 Stream<List<int>> _uploadByteStream(

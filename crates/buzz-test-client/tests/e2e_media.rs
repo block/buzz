@@ -26,6 +26,12 @@ fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
 }
 
+fn relay_ws_url() -> String {
+    relay_http_url()
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1)
+}
+
 fn http_client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(15))
@@ -207,6 +213,119 @@ async fn test_upload_and_get() {
     println!("GET thumbnail → {}", thumb_resp.status());
     // Thumbnail may be same as original for 1x1 images — just check 200
     assert_eq!(thumb_resp.status(), 200, "thumbnail should return 200");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_calendar_upload_round_trip_and_policy_rejections() {
+    use buzz_test_client::BuzzTestClient;
+
+    let client = http_client();
+    let keys = Keys::generate();
+    let calendar = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Buzz E2E//EN\r\nBEGIN:VEVENT\r\nUID:e2e@example.com\r\nDTSTAMP:20260820T120000Z\r\nDTSTART:20260821T120000Z\r\nSUMMARY:Round trip\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    let sha256 = hex::encode(Sha256::digest(calendar));
+    let upload_auth = blossom_auth_header(&sign_blossom_auth(&keys, &sha256));
+
+    let upload = client
+        .put(format!("{}/upload", relay_http_url()))
+        .header("Authorization", upload_auth)
+        .header("Content-Type", "text/calendar")
+        .header("X-Buzz-File-Extension", "ics")
+        .header("X-SHA-256", &sha256)
+        .body(calendar.to_vec())
+        .send()
+        .await
+        .expect("calendar upload failed");
+    assert_eq!(upload.status(), 200, "calendar upload should succeed");
+    let descriptor: serde_json::Value = upload.json().await.expect("calendar descriptor");
+    assert_eq!(descriptor["type"], "text/calendar");
+    assert_eq!(descriptor["size"], calendar.len() as u64);
+    assert_eq!(descriptor["sha256"], sha256);
+    let url = descriptor["url"].as_str().expect("descriptor URL");
+    assert!(url.ends_with(".ics"));
+
+    let read_auth = blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256));
+    let get = client
+        .get(url)
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("calendar GET failed");
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.headers()["content-type"], "text/calendar");
+    assert_eq!(get.headers()["content-disposition"], "attachment");
+    assert_eq!(get.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(get.bytes().await.unwrap().as_ref(), calendar);
+
+    let disguised = b"<!DOCTYPE html><script>alert(1)</script>";
+    let disguised_hash = hex::encode(Sha256::digest(disguised));
+    let rejected = client
+        .put(format!("{}/upload", relay_http_url()))
+        .header(
+            "Authorization",
+            blossom_auth_header(&sign_blossom_auth(&keys, &disguised_hash)),
+        )
+        .header("Content-Type", "text/calendar")
+        .header("X-Buzz-File-Extension", "ics")
+        .header("X-SHA-256", disguised_hash)
+        .body(disguised.to_vec())
+        .send()
+        .await
+        .expect("disguised calendar request failed");
+    assert_eq!(
+        rejected.status(),
+        reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let create = EventBuilder::new(Kind::from(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["name", &format!("calendar-imeta-{channel_id}")]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let created = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&create).unwrap())
+        .send()
+        .await
+        .expect("channel creation failed");
+    assert!(created.status().is_success());
+
+    let mut ws = BuzzTestClient::connect(&relay_ws_url(), &keys)
+        .await
+        .expect("websocket connect failed");
+    let wrong_size = EventBuilder::new(Kind::from(9), format!("[Planning.ics]({url})"))
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse([
+                "imeta",
+                &format!("url {url}"),
+                "m text/calendar",
+                &format!("x {sha256}"),
+                &format!("size {}", calendar.len() + 1),
+                "filename Planning.ics",
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ok = ws
+        .send_event(wrong_size)
+        .await
+        .expect("send wrong-size event");
+    assert!(!ok.accepted, "imeta size mismatch must be rejected");
+    assert!(
+        ok.message.contains("does not match stored size"),
+        "{}",
+        ok.message
+    );
+    ws.disconnect().await.unwrap();
 }
 
 /// Idempotency: uploading the same file twice returns the same BlobDescriptor.

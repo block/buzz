@@ -17,12 +17,12 @@ use crate::validation::{
     validate_video_file,
 };
 
-/// Shared buffered-upload pipeline for the image and generic-file paths.
+/// Shared buffered-upload pipeline for image and document paths.
 ///
 /// Both paths are identical except for two steps, which are injected:
 /// - `validate`: a CPU-bound check (run inside `spawn_blocking`) that returns
 ///   the `(mime, ext)` pair for the body. Images derive `ext` from the MIME;
-///   generic files get both from the deny-list validator.
+///   documents get both from their format-specific validator.
 /// - `prepare_metadata`: builds metadata and stores any derived artifacts such
 ///   as a thumbnail, but deliberately does not write the sidecar. The sidecar
 ///   is the media serve gate and is published only after the moderation record
@@ -231,13 +231,21 @@ pub async fn process_upload(
     .await
 }
 
-/// Process a generic non-media file upload end-to-end.
+/// Untrusted document classification hints supplied by an upload client.
+#[derive(Debug, Clone, Default)]
+pub struct DocumentUploadHints {
+    /// Declared request MIME type, normalized by the relay.
+    pub declared_mime: Option<String>,
+    /// Lowercase original filename extension supplied by the client.
+    pub extension: Option<String>,
+}
+
+/// Process an allowlisted non-preview document upload end-to-end.
 ///
-/// This is the catch-all attachment path for documents, archives, text, and
-/// data. Recognized image, video, and audio formats fail closed instead of
-/// entering exact-byte storage without their format-specific location policy.
+/// The declared MIME and extension are untrusted hints used to select the
+/// format-specific validator; the validator proves they agree with the bytes.
 /// The body is fully buffered in RAM (bounded by `config.max_file_bytes` at the
-/// transport layer), validated against the deny-list + size cap, stored, and
+/// transport layer), validated against the document allowlist + size cap, stored, and
 /// recorded in a minimal sidecar. No thumbnail, dimensions, or duration.
 ///
 /// The resulting blob is served with `Content-Disposition: attachment`, so the
@@ -247,6 +255,7 @@ pub async fn process_file_upload(
     config: &MediaConfig,
     ctx: &TenantContext,
     auth_event: &nostr::Event,
+    hints: DocumentUploadHints,
     body: Bytes,
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
@@ -259,9 +268,16 @@ pub async fn process_file_upload(
             body,
             attribution,
         },
-        |bytes, cfg| validate_file_content(bytes, cfg),
+        move |bytes, cfg| {
+            validate_file_content(
+                bytes,
+                cfg,
+                hints.declared_mime.as_deref(),
+                hints.extension.as_deref(),
+            )
+        },
         |input| async move {
-            // Minimal sidecar — no thumbnail/dim/blurhash/duration for generic files.
+            // Minimal sidecar — no thumbnail/dim/blurhash/duration for documents.
             let meta = BlobMeta {
                 dim: String::new(),
                 blurhash: String::new(),

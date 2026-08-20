@@ -1158,7 +1158,48 @@ void main() {
       );
     });
 
-    test('rejects empty generic file attachments before upload', () async {
+    test('uploads a calendar as a named document attachment', () async {
+      final calendarBytes = Uint8List.fromList(
+        utf8.encode('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'),
+      );
+      http.Request? capturedRequest;
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          capturedRequest = request;
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/calendar.ics',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': request.bodyBytes.length,
+              'type': 'text/calendar',
+              'uploaded': 1,
+            }),
+            HttpStatus.ok,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickAttachmentFile: () async =>
+            _NamedXFile(calendarBytes, 'Planning.ics'),
+      );
+
+      final descriptor = await service.pickAndUploadFile();
+
+      expect(capturedRequest?.headers['Content-Type'], 'text/calendar');
+      expect(capturedRequest?.headers['X-Buzz-File-Extension'], 'ics');
+      expect(capturedRequest?.bodyBytes, calendarBytes);
+      expect(descriptor?.filename, 'Planning.ics');
+      expect(descriptor?.toImetaTag(), contains('filename Planning.ics'));
+      expect(
+        descriptor?.toMarkdownImage(),
+        '[Planning.ics](https://relay.example/media/calendar.ics)',
+      );
+    });
+
+    test('rejects empty file attachments before upload', () async {
       var uploadRequested = false;
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
@@ -1186,18 +1227,18 @@ void main() {
       expect(uploadRequested, isFalse);
     });
 
-    test('sanitizes generic filenames to relay imeta constraints', () async {
+    test('sanitizes calendar filenames while preserving the extension', () async {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
         httpClient: http_testing.MockClient((request) async {
           return http.Response(
             jsonEncode({
-              'url': 'https://relay.example/media/test.bin',
+              'url': 'https://relay.example/media/test.ics',
               'sha256':
                   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
               'size': request.bodyBytes.length,
-              'type': 'application/octet-stream',
+              'type': 'text/calendar',
               'uploaded': 1,
             }),
             HttpStatus.ok,
@@ -1206,8 +1247,10 @@ void main() {
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async => null,
         pickAttachmentFile: () async => _NamedXFile(
-          Uint8List.fromList([1]),
-          'folder\\draft\u0000${List.filled(200, 'é').join()}.txt',
+          Uint8List.fromList(
+            utf8.encode('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n'),
+          ),
+          'folder\\draft\u0000${List.filled(200, 'é').join()}.ics',
         ),
       );
 
@@ -1218,6 +1261,7 @@ void main() {
       expect(filename, isNot(contains('\u0000')));
       expect(filename, isNot(contains('/')));
       expect(filename, isNot(contains('\\')));
+      expect(filename, endsWith('.ics'));
       expect(utf8.encode(filename).length, lessThanOrEqualTo(255));
     });
   });

@@ -296,6 +296,23 @@ fn serving_lease_lost(error: anyhow::Error) -> MediaError {
     MediaError::ServiceUnavailable
 }
 
+fn document_upload_hints(headers: &HeaderMap) -> (Option<String>, Option<String>) {
+    let declared_mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let extension = headers
+        .get("x-buzz-file-extension")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    (declared_mime, extension)
+}
+
 /// PUT `/upload` or the temporary media-only `/media/upload` alias.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
@@ -374,11 +391,9 @@ pub async fn upload_blob(
                 )
                 .await?
             } else {
-                // Non-video path: buffer the body (bounded by the larger of the image
-                // and generic-file caps), then decide image-vs-generic by sniffed MIME.
-                // Images go through the thumbnailing pipeline; non-media attachments
-                // (docs, archives, text, data) take the generic file path and are
-                // served as downloads. Recognized audio/video cannot fall through it.
+                // Non-video path: buffer the body (bounded by the larger image/document
+                // cap), then decide image-vs-document by sniffed MIME. Images go through
+                // thumbnailing; allowlisted documents are served as downloads.
                 let max = state
                     .config
                     .media
@@ -410,11 +425,16 @@ pub async fn upload_blob(
                         .unwrap_or_else(|| "application/octet-stream".to_string());
                     return Err(MediaError::DisallowedContentType(mime));
                 } else {
+                    let (declared_mime, extension) = document_upload_hints(&headers);
                     buzz_media::process_file_upload(
                         &state.media_storage,
                         &state.config.media,
                         &auth.tenant,
                         &auth.auth_event,
+                        buzz_media::DocumentUploadHints {
+                            declared_mime,
+                            extension,
+                        },
                         bytes,
                         attribution,
                     )
@@ -442,7 +462,7 @@ pub async fn upload_blob(
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" => {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" | "text/calendar" => {
             &descriptor.mime_type
         }
         _ => "other",
@@ -556,8 +576,7 @@ fn blob_cache_control() -> &'static str {
 /// resolve paths always compare the requested ext against it. This check is a
 /// cheap structural gate to reject obviously hostile path segments (traversal,
 /// overlong, non-alphanumeric) before any storage lookup. Accepts 1–8 lowercase
-/// alphanumeric chars, which covers every extension the generic file path emits
-/// (jpg, png, mp4, pdf, docx, xlsx, tar, 7z, mp3, flac, json, bin, …).
+/// alphanumeric chars, covering media, allowlisted documents, and historical sidecars.
 pub(crate) fn is_safe_ext(ext: &str) -> bool {
     !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9'))
 }
@@ -684,7 +703,7 @@ pub(crate) async fn serve_blob_for_tenant(
         sidecar_mime
     };
 
-    // Images and video render inline; generic files force download. This is the
+    // Images and video render inline; documents force download. This is the
     // primary defence for non-previewable types — combined with `nosniff` and
     // `CSP: default-src 'none'`, an attachment disposition prevents an uploaded
     // file from ever executing or rendering as active content in the client.
@@ -863,6 +882,11 @@ pub async fn head_blob(
     };
 
     let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
+    let disposition = if buzz_media::serve_inline(&content_type) {
+        "inline"
+    } else {
+        "attachment"
+    };
     match state.media_storage.head_with_metadata(&key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
@@ -873,6 +897,9 @@ pub async fn head_blob(
                     ("content-length", size_str.as_str()),
                     ("accept-ranges", "bytes"),
                     ("cache-control", cache_control),
+                    ("content-disposition", disposition),
+                    ("content-security-policy", "default-src 'none'"),
+                    ("x-content-type-options", "nosniff"),
                 ],
             )
                 .into_response())
@@ -984,6 +1011,21 @@ mod tests {
         let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
         assert!(infer::get(bytes).is_none());
         assert!(should_stream_as_video(bytes));
+    }
+
+    #[test]
+    fn calendar_upload_hints_normalize_declared_mime_and_extension() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "Text/Calendar; charset=utf-8".parse().unwrap(),
+        );
+        headers.insert("x-buzz-file-extension", "ICS".parse().unwrap());
+
+        assert_eq!(
+            document_upload_hints(&headers),
+            (Some("text/calendar".to_string()), Some("ics".to_string()))
+        );
     }
 
     async fn test_state() -> Arc<AppState> {
@@ -1217,10 +1259,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_media_path_accepts_generic_exts() {
-        // Path validation now accepts any safe ext token — the deny-list for
-        // dangerous *content* lives in the upload validator, not here. The
-        // sidecar ext comparison is the authoritative check at serve time.
+    fn test_validate_media_path_accepts_structurally_safe_exts() {
+        // Path validation accepts safe tokens because historical sidecars may
+        // carry them; the current upload allowlist lives in buzz-media.
         assert!(validate_media_path(&format!("{VALID_HASH}.pdf")).is_ok());
         assert!(validate_media_path(&format!("{VALID_HASH}.docx")).is_ok());
         assert!(validate_media_path(&format!("{VALID_HASH}.zip")).is_ok());
