@@ -62,9 +62,18 @@ export function HarnessCatalogDialog({
   open: boolean;
 }) {
   const contentRef = React.useRef<HTMLDivElement | null>(null);
-  const runtimesQuery = useAcpRuntimesQueryForced({ enabled: open });
+  // The Settings panel owns this surface's force-on-mount (it renders this
+  // dialog always-mounted). Passing `forceOnMount: false` here consumes the
+  // shared catalog + `forceRefresh` without firing a second 20–65s forced
+  // probe on every open/reopen — see useAcpRuntimesQueryForced's owner/child
+  // contract.
+  const runtimesQuery = useAcpRuntimesQueryForced({
+    enabled: open,
+    forceOnMount: false,
+  });
   const isLoading = runtimesQuery.isLoading;
   const isColdError = runtimesQuery.isError && runtimesQuery.data === undefined;
+  const isWarmError = runtimesQuery.isError && runtimesQuery.data !== undefined;
   const isRefreshing = runtimesQuery.isFetching && !isLoading;
   const entries = React.useMemo(
     () => catalogDialogEntries(runtimesQuery.data ?? []),
@@ -174,6 +183,21 @@ export function HarnessCatalogDialog({
                       >
                         <Spinner className="h-2.5 w-2.5" />
                         Refreshing…
+                      </div>
+                    ) : isWarmError ? (
+                      <div
+                        className="flex items-center justify-between gap-2 px-4 py-1 text-xs text-destructive"
+                        data-testid="harness-catalog-refresh-error"
+                      >
+                        <span>Couldn't refresh runtimes.</span>
+                        <button
+                          className="shrink-0 underline underline-offset-2 hover:text-foreground"
+                          data-testid="harness-catalog-refresh-retry"
+                          onClick={() => void runtimesQuery.forceRefresh()}
+                          type="button"
+                        >
+                          Retry
+                        </button>
                       </div>
                     ) : null}
                     {groups.setup.length > 0 ? (

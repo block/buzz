@@ -126,6 +126,7 @@ let React,
   QueryClient,
   QueryClientProvider,
   HarnessCatalogDialog,
+  useAcpRuntimesQueryForced,
   acpRuntimesQueryKey,
   ThemeProvider,
   TooltipProvider;
@@ -137,7 +138,7 @@ before(async () => {
     "@tanstack/react-query"
   ));
   ({ HarnessCatalogDialog } = await import("./HarnessCatalogDialog.tsx"));
-  ({ acpRuntimesQueryKey } = await import(
+  ({ useAcpRuntimesQueryForced, acpRuntimesQueryKey } = await import(
     "@/features/agents/acpRuntimesQuery.ts"
   ));
   ({ ThemeProvider } = await import("@/shared/theme/ThemeProvider.tsx"));
@@ -194,40 +195,61 @@ function deferred() {
   return { promise, resolve };
 }
 
+/**
+ * Mirrors the real surface: HarnessesSettingsPanel owns the single
+ * force-on-mount (`useAcpRuntimesQueryForced()` with `forceOnMount` defaulted
+ * to true) and renders the always-mounted dialog, which consumes shared state
+ * with `forceOnMount: false`. Tests render this so the dialog reflects a real
+ * owner-driven probe rather than firing its own.
+ */
+function HarnessSurface({ open }) {
+  useAcpRuntimesQueryForced();
+  return React.createElement(HarnessCatalogDialog, {
+    open,
+    onOpenChange: () => {},
+  });
+}
+
+function renderSurface() {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  return { container, root };
+}
+
+function surfaceTree(open) {
+  return React.createElement(
+    QueryClientProvider,
+    { client: queryClient },
+    React.createElement(
+      ThemeProvider,
+      null,
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(HarnessSurface, { open }),
+      ),
+    ),
+  );
+}
+
+let queryClient;
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("HarnessCatalogDialog forced-probe rendering — P2 regression (mounted consumer)", () => {
   it("harness-catalog-load-error is rendered on cold forced probe rejection", async () => {
-    const queryClient = makeQueryClient();
+    queryClient = makeQueryClient();
     // No cache seeded — isColdError = isError && data === undefined.
     discoverHandler = (args) =>
       args?.force === true
         ? Promise.reject(new Error("cold load failure"))
         : Promise.resolve([]);
 
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = renderSurface();
 
     await act(async () => {
-      root.render(
-        React.createElement(
-          QueryClientProvider,
-          { client: queryClient },
-          React.createElement(
-            ThemeProvider,
-            null,
-            React.createElement(
-              TooltipProvider,
-              null,
-              React.createElement(HarnessCatalogDialog, {
-                open: true,
-                onOpenChange: () => {},
-              }),
-            ),
-          ),
-        ),
-      );
+      root.render(surfaceTree(true));
     });
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50));
@@ -250,7 +272,7 @@ describe("HarnessCatalogDialog forced-probe rendering — P2 regression (mounted
   });
 
   it("harness-catalog-refreshing is rendered while forced probe is pending over cached entries", async () => {
-    const queryClient = makeQueryClient();
+    queryClient = makeQueryClient();
     // Seed cache with a visible runtime so filtered.length > 0 and the
     // isRefreshing branch renders (it is inside the non-empty entries block).
     queryClient.setQueryData(acpRuntimesQueryKey, [
@@ -261,31 +283,12 @@ describe("HarnessCatalogDialog forced-probe rendering — P2 regression (mounted
     discoverHandler = (args) =>
       args?.force === true ? pending.promise : Promise.resolve([]);
 
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = renderSurface();
 
     await act(async () => {
-      root.render(
-        React.createElement(
-          QueryClientProvider,
-          { client: queryClient },
-          React.createElement(
-            ThemeProvider,
-            null,
-            React.createElement(
-              TooltipProvider,
-              null,
-              React.createElement(HarnessCatalogDialog, {
-                open: true,
-                onOpenChange: () => {},
-              }),
-            ),
-          ),
-        ),
-      );
+      root.render(surfaceTree(true));
     });
-    // Allow mount-time forceRefresh to dispatch (but not resolve).
+    // Allow the owner's mount-time forceRefresh to dispatch (but not resolve).
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10));
     });
@@ -303,6 +306,102 @@ describe("HarnessCatalogDialog forced-probe rendering — P2 regression (mounted
       pending.resolve([]);
       await new Promise((r) => setTimeout(r, 0));
     });
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("harness-catalog-refresh-error is rendered when a forced refresh rejects over cached entries", async () => {
+    queryClient = makeQueryClient();
+    // Cached entries present, so a rejected forced refresh is a WARM error
+    // (isError && data !== undefined): stale entries must stay listed and the
+    // failure must be visible inside the dialog.
+    queryClient.setQueryData(acpRuntimesQueryKey, [
+      catalogEntry("codex", "logged_in"),
+    ]);
+
+    discoverHandler = (args) =>
+      args?.force === true
+        ? Promise.reject(new Error("warm refresh failure"))
+        : Promise.resolve([]);
+
+    const { container, root } = renderSurface();
+
+    await act(async () => {
+      root.render(surfaceTree(true));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    const refreshErrorEl = document.body.querySelector(
+      '[data-testid="harness-catalog-refresh-error"]',
+    );
+    assert.ok(
+      refreshErrorEl,
+      "harness-catalog-refresh-error must be rendered when a forced refresh rejects over cached entries",
+    );
+    // Cached entries remain listed alongside the failure indication.
+    const cachedRow = document.body.querySelector(
+      '[data-testid="harness-catalog-list-item-codex"]',
+    );
+    assert.ok(
+      cachedRow,
+      "cached entries must stay listed when a warm refresh fails",
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    queryClient.clear();
+  });
+
+  it("reopening the dialog after the owner's probe settles triggers zero additional forced probes", async () => {
+    queryClient = makeQueryClient();
+    let forcedProbeCount = 0;
+    discoverHandler = (args) => {
+      if (args?.force === true) forcedProbeCount += 1;
+      // Probe COUNT is the assertion here, not rendered entries. Return an
+      // empty catalog so no detail pane renders (handler results flow through
+      // fromRawAcpRuntimeCatalogEntry, which expects the raw backend shape).
+      return Promise.resolve([]);
+    };
+
+    const { container, root } = renderSurface();
+
+    // Mount the surface (owner fires its single force-on-mount) and let it
+    // settle.
+    await act(async () => {
+      root.render(surfaceTree(false));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    assert.equal(
+      forcedProbeCount,
+      1,
+      "owner's force-on-mount must run exactly one forced probe",
+    );
+
+    // Open, close, reopen the dialog. With forceOnMount:false the dialog must
+    // not fire its own probe on any of these transitions.
+    for (const open of [true, false, true]) {
+      await act(async () => {
+        root.render(surfaceTree(open));
+      });
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 20));
+      });
+    }
+    assert.equal(
+      forcedProbeCount,
+      1,
+      "opening/closing/reopening the dialog must trigger zero additional forced probes",
+    );
+
     await act(async () => {
       root.unmount();
     });
