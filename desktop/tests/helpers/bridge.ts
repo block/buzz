@@ -150,6 +150,7 @@ type MockBridgeOptions = {
   ttsSettings?: {
     version: number;
     agentTextToSpeech: boolean;
+    transcriptionLanguage: string | null;
     voicePreferences: string[];
   };
   /** Native picker boundary result for Pocket voice import tests. */

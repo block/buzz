@@ -9,7 +9,7 @@
 //!   → stt_worker thread
 //!       rubato: 48 kHz → 16 kHz mono
 //!       earshot VAD: accumulate speech frames
-//!       sherpa-onnx Parakeet TDT-CTC 110M: transcribe on silence
+//!       sherpa-onnx Whisper Base multilingual: transcribe on silence
 //!   → text_rx  [mpsc channel]
 //!   → tokio task (start_stt_pipeline)
 //!       builds kind:9 event → relay
@@ -19,7 +19,7 @@
 //! sherpa-onnx is CPU-bound and not Send-safe across await points.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
@@ -82,6 +82,7 @@ impl SttPipeline {
     /// thread on every `recv_timeout` call).
     pub fn new(
         model_dir: PathBuf,
+        transcription_language: Option<String>,
         ptt_active: Option<Arc<AtomicBool>>,
         manual_mic_unmuted: Option<Arc<AtomicBool>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
@@ -95,14 +96,15 @@ impl SttPipeline {
         let handle = thread::Builder::new()
             .name("stt-worker".into())
             .spawn(move || {
-                stt_worker(
+                stt_worker(SttWorkerConfig {
                     model_dir,
+                    transcription_language,
                     audio_rx,
                     text_tx,
-                    shutdown_worker,
-                    ptt_active_worker,
-                    manual_mic_unmuted_worker,
-                )
+                    shutdown: shutdown_worker,
+                    ptt_active: ptt_active_worker,
+                    manual_mic_unmuted: manual_mic_unmuted_worker,
+                })
             })
             .map_err(|e| format!("failed to spawn stt-worker thread: {e}"))?;
 
@@ -175,7 +177,7 @@ const VAD_THRESHOLD: f32 = 0.5;
 
 /// Minimum voiced audio needed before an utterance may be decoded.
 /// One earshot false-positive frame is only 16 ms; requiring 192 ms prevents
-/// silence/room-noise blips from reaching Parakeet and becoming hallucinated
+/// silence/room-noise blips from reaching Whisper and becoming hallucinated
 /// transcript text while still preserving short replies such as "yes".
 const MIN_VOICED_FRAMES: usize = 12;
 
@@ -185,7 +187,7 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(50);
 /// Number of ONNX Runtime intra-op threads used by the offline recognizer.
 ///
 /// Held at 1 (conservative) until we have a local A/B on real huddle audio.
-/// Sherpa-onnx's Parakeet example uses 2 and most published RTF numbers are
+/// Sherpa-onnx's Whisper examples use 2 and most published RTF numbers are
 /// at 2 threads on x86_64 server class hardware, but the encoder runs only
 /// on VAD chunk boundaries on a dedicated thread, so the threading knob
 /// trades worker latency against potential oversubscription with the audio
@@ -203,7 +205,7 @@ fn stt_num_threads() -> i32 {
         .unwrap_or(STT_NUM_THREADS)
 }
 
-/// EXPERIMENTAL (latency bench): `BUZZ_STT_SPECULATIVE=1` starts the Parakeet
+/// EXPERIMENTAL (latency bench): `BUZZ_STT_SPECULATIVE=1` starts the Whisper
 /// decode at the FIRST silent VAD frame instead of after the full flush
 /// window, overlapping the ~150-250 ms decode with the silence wait. If
 /// speech resumes, the speculative result is discarded. When silence holds
@@ -213,14 +215,26 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
-fn stt_worker(
+struct SttWorkerConfig {
     model_dir: PathBuf,
+    transcription_language: Option<String>,
     audio_rx: Receiver<Vec<u8>>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
     ptt_active: Option<Arc<AtomicBool>>,
     manual_mic_unmuted: Option<Arc<AtomicBool>>,
-) {
+}
+
+fn stt_worker(config: SttWorkerConfig) {
+    let SttWorkerConfig {
+        model_dir,
+        transcription_language,
+        audio_rx,
+        text_tx,
+        shutdown,
+        ptt_active,
+        manual_mic_unmuted,
+    } = config;
     // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
     use rubato::{Fft, FixedSync, Resampler};
 
@@ -239,16 +253,19 @@ fn stt_worker(
 
     // ── 3. Initialise sherpa-onnx recognizer ─────────────────────────────────
     //
-    // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
-    // `tokens.txt`. sherpa-onnx infers the model family from which inner config
-    // has a `model` path set, so we don't need to set `model_type` explicitly.
-    // (See rust-api-examples/parakeet_tdt_ctc_simulate_streaming_microphone.rs
-    // in k2-fsa/sherpa-onnx.)
-    use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
+    use sherpa_onnx::OfflineRecognizer;
 
-    let tokens_path = model_dir.join("tokens.txt");
-    let model_path = model_dir.join("model.int8.onnx");
-    if !tokens_path.exists() || !model_path.exists() {
+    let config = recognizer_config(&model_dir, transcription_language.as_deref());
+    let whisper = &config.model_config.whisper;
+    let files_ready = [
+        whisper.encoder.as_deref(),
+        whisper.decoder.as_deref(),
+        config.model_config.tokens.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|path| Path::new(path).exists());
+    if !files_ready {
         eprintln!(
             "buzz-desktop: STT model not found at {} — STT disabled",
             model_dir.display()
@@ -257,15 +274,7 @@ fn stt_worker(
         return;
     }
 
-    let mut cfg = OfflineRecognizerConfig::default();
-    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
-    cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
-    cfg.model_config.num_threads = stt_num_threads();
-    // Explicit — defaults are not part of the API contract, and noisy debug
-    // logging in release builds would be expensive on every VAD chunk.
-    cfg.model_config.debug = false;
-
-    let recognizer = match OfflineRecognizer::create(&cfg) {
+    let recognizer = match OfflineRecognizer::create(&config) {
         Some(r) => r,
         None => {
             eprintln!("buzz-desktop: OfflineRecognizer::create returned None — STT disabled");
@@ -369,6 +378,36 @@ fn stt_worker(
     // No final flush — leave_huddle/end_huddle emit lifecycle events before
     // the STT worker exits, so a final flush would post a kind:9 message AFTER
     // the user has "left." Losing the last partial utterance is acceptable.
+}
+
+fn recognizer_config(
+    model_dir: &Path,
+    transcription_language: Option<&str>,
+) -> sherpa_onnx::OfflineRecognizerConfig {
+    let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
+    config.model_config.whisper.encoder = Some(
+        model_dir
+            .join("base-encoder.int8.onnx")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    config.model_config.whisper.decoder = Some(
+        model_dir
+            .join("base-decoder.int8.onnx")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    config.model_config.whisper.task = Some("transcribe".to_string());
+    config.model_config.whisper.language = transcription_language.map(str::to_string);
+    config.model_config.tokens = Some(
+        model_dir
+            .join("base-tokens.txt")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    config.model_config.num_threads = stt_num_threads();
+    config.model_config.debug = false;
+    config
 }
 
 /// Resample a mono 48 kHz chunk to 16 kHz using rubato.
@@ -570,7 +609,40 @@ use super::drain_until_shutdown;
 
 #[cfg(test)]
 mod tests {
-    use super::{has_enough_voiced_audio, vad_flush_allowed, MIN_VOICED_FRAMES};
+    use super::{has_enough_voiced_audio, recognizer_config, vad_flush_allowed, MIN_VOICED_FRAMES};
+
+    #[test]
+    fn recognizer_uses_multilingual_whisper_with_language_auto_detection() {
+        let model_dir = std::path::Path::new("/models/whisper-base-multilingual");
+        let config = recognizer_config(model_dir, None);
+
+        assert_eq!(
+            config.model_config.whisper.encoder.as_deref(),
+            Some("/models/whisper-base-multilingual/base-encoder.int8.onnx")
+        );
+        assert_eq!(
+            config.model_config.whisper.decoder.as_deref(),
+            Some("/models/whisper-base-multilingual/base-decoder.int8.onnx")
+        );
+        assert_eq!(config.model_config.whisper.language, None);
+        assert_eq!(
+            config.model_config.whisper.task.as_deref(),
+            Some("transcribe")
+        );
+        assert!(config.model_config.nemo_ctc.model.is_none());
+    }
+
+    #[test]
+    fn recognizer_can_force_turkish_for_short_utterances() {
+        let model_dir = std::path::Path::new("/models/whisper-base-multilingual");
+        let config = recognizer_config(model_dir, Some("tr"));
+
+        assert_eq!(config.model_config.whisper.language.as_deref(), Some("tr"));
+        assert_eq!(
+            config.model_config.whisper.task.as_deref(),
+            Some("transcribe")
+        );
+    }
 
     #[test]
     fn short_vad_blips_do_not_reach_the_recognizer() {

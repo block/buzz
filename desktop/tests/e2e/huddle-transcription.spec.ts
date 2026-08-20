@@ -764,6 +764,7 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
     ttsSettings: {
       version: 1,
       agentTextToSpeech: true,
+      transcriptionLanguage: null,
       voicePreferences: ["pocket:vera"],
     },
     huddle: {

@@ -20,6 +20,7 @@ use crate::{app_state::AppState, managed_agents::storage::atomic_write_json_rest
 use super::{
     models,
     pocket::DEFAULT_VOICE,
+    transcription_settings::normalize_transcription_language,
     tts_voice_registry::{source_url, MARY_VOICE_KEY, POCKET_VOICES},
     HuddlePhase, HuddleState,
 };
@@ -136,6 +137,8 @@ pub fn voice_registry(app: &AppHandle) -> Vec<VoiceRegistryEntry> {
 pub struct TtsSettings {
     pub version: u32,
     pub agent_text_to_speech: bool,
+    #[serde(default)]
+    pub transcription_language: Option<String>,
     pub voice_preferences: VoicePreferences,
 }
 
@@ -144,6 +147,7 @@ impl Default for TtsSettings {
         Self {
             version: CURRENT_VERSION,
             agent_text_to_speech: true,
+            transcription_language: None,
             voice_preferences: vec![MARY_VOICE_KEY.to_string()],
         }
     }
@@ -271,6 +275,7 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
                 .get("agentTextToSpeech")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
+            transcription_language: None,
             voice_preferences: vec![voice_key],
         });
     }
@@ -286,10 +291,13 @@ pub(crate) fn load_from_path(path: &Path) -> Result<TtsSettings, String> {
     {
         settings.voice_preferences = TtsSettings::default().voice_preferences;
     }
+    settings.transcription_language =
+        normalize_transcription_language(settings.transcription_language.as_deref())?;
     Ok(settings)
 }
 
 pub(crate) fn save_to_path(path: &Path, settings: &TtsSettings) -> Result<(), String> {
+    normalize_transcription_language(settings.transcription_language.as_deref())?;
     if settings.voice_preferences.is_empty() {
         return Err("At least one voice preference is required".to_string());
     }
@@ -345,7 +353,7 @@ pub fn list_voice_registry(app: AppHandle) -> Vec<VoiceRegistryEntry> {
     voice_registry(&app)
 }
 
-fn ensure_settings_writable(state: &AppState) -> Result<(), String> {
+pub(crate) fn ensure_settings_writable(state: &AppState) -> Result<(), String> {
     if let Some(error) = state
         .huddle_audio
         .tts_load_error
@@ -463,7 +471,7 @@ async fn apply_tts_settings(
     Ok(voice_change_wait)
 }
 
-fn current_settings(state: &AppState) -> Result<TtsSettings, String> {
+pub(crate) fn current_settings(state: &AppState) -> Result<TtsSettings, String> {
     state
         .huddle_audio
         .tts
@@ -738,6 +746,7 @@ mod tests {
             TtsSettings {
                 version: 1,
                 agent_text_to_speech: true,
+                transcription_language: None,
                 voice_preferences: vec!["pocket:mary".to_string()],
             }
         );
@@ -864,6 +873,7 @@ mod tests {
             TtsSettings {
                 version: 1,
                 agent_text_to_speech: false,
+                transcription_language: None,
                 voice_preferences: vec![EVE_VOICE_KEY.to_string()],
             }
         );

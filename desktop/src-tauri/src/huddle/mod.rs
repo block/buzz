@@ -41,6 +41,7 @@ pub mod relay_api;
 pub mod state;
 pub mod stt;
 pub mod transcription;
+pub mod transcription_settings;
 pub mod tts;
 pub mod tts_settings;
 mod tts_voice_import;
@@ -768,7 +769,7 @@ pub fn push_audio_pcm(
     }
 }
 
-/// Trigger a background download of voice models (Parakeet STT + Pocket TTS).
+/// Trigger a background download of voice models (Whisper STT + Pocket TTS).
 ///
 /// Returns immediately — downloads run in tokio background tasks.
 /// Poll `get_model_status` to track progress.
