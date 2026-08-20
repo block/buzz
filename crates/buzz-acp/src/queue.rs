@@ -1029,6 +1029,8 @@ pub struct ContextMessage {
     pub pubkey: String,
     pub timestamp: String,
     pub content: String,
+    /// Validated, ordered Board references; raw reference tags are never projected.
+    pub board_references: Vec<buzz_sdk::BoardReference>,
 }
 
 /// Channel metadata for prompt formatting.
@@ -1107,6 +1109,17 @@ fn format_prompt_actor(pubkey: &str, profile_lookup: Option<&PromptProfileLookup
     }
 }
 
+/// Append a validated machine-readable projection associated with one message.
+fn append_board_references(output: &mut String, references: &[buzz_sdk::BoardReference]) {
+    if references.is_empty() {
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(references) {
+        output.push_str("\nBoard references (validated JSON): ");
+        output.push_str(&json);
+    }
+}
+
 /// Format the per-event `[Event]` block for a single [`BatchEvent`].
 ///
 /// Includes: event_id, channel (name + UUID), kind, sender (hex + npub),
@@ -1152,10 +1165,31 @@ pub(crate) fn format_event_block(
     );
 
     // Always include tags — they carry structural information.
-    let tags_json: Vec<&[String]> = be.event.tags.iter().map(|t| t.as_slice()).collect();
+    let tags_json: Vec<&[String]> = be
+        .event
+        .tags
+        .iter()
+        .map(|t| t.as_slice())
+        .filter(|tag| tag.first().map(String::as_str) != Some(buzz_sdk::BOARD_REFERENCE_TAG))
+        .collect();
     if let Ok(tags_str) = serde_json::to_string(&tags_json) {
         block.push_str(&format!("\nTags: {tags_str}"));
     }
+    let board_references = be
+        .event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let values = tag.as_slice();
+            (values.first().map(String::as_str) == Some("h"))
+                .then(|| values.get(1))
+                .flatten()
+        })
+        .map(|workstream_id| {
+            buzz_sdk::parse_board_references_for_workstream(&be.event.tags, workstream_id)
+        })
+        .unwrap_or_default();
+    append_board_references(&mut block, &board_references);
 
     // Parsed structural fields.
     let thread = parse_thread_tags(&be.event);
@@ -1440,6 +1474,7 @@ fn format_conversation_context(
             msg.timestamp,
             msg.content,
         ));
+        append_board_references(&mut s, &msg.board_references);
     }
     s
 }
@@ -2744,6 +2779,7 @@ mod tests {
                 event_id: String::new(),
                 pubkey: "npub1test".into(),
                 content: "prior message".into(),
+                board_references: vec![],
                 timestamp: "2024-01-01T00:00:00Z".into(),
             }],
             total: 1,
@@ -3362,12 +3398,14 @@ mod tests {
                     pubkey: "npub1xyz".into(),
                     timestamp: "2026-03-15T16:30:00Z".into(),
                     content: "Let's refactor auth".into(),
+                    board_references: vec![],
                 },
                 ContextMessage {
                     event_id: String::new(),
                     pubkey: "npub1def".into(),
                     timestamp: "2026-03-15T16:35:00Z".into(),
                     content: "yes go ahead".into(),
+                    board_references: vec![],
                 },
             ],
             total: 5,
@@ -3412,6 +3450,7 @@ mod tests {
                 pubkey: "npub1abc".into(),
                 timestamp: "2026-03-15T16:00:00Z".into(),
                 content: "Can you deploy?".into(),
+                board_references: vec![],
             }],
             total: 1,
             truncated: false,
@@ -3458,6 +3497,7 @@ mod tests {
                 pubkey: author_hex.clone(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
+                board_references: vec![],
             }],
             total: 1,
             truncated: false,
@@ -3672,6 +3712,7 @@ mod tests {
                 pubkey: "npub1xyz".into(),
                 timestamp: "2026-03-15T16:30:00Z".into(),
                 content: "Should I deploy?".into(),
+                board_references: vec![],
             }],
             total: 1,
             truncated: false,

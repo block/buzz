@@ -448,6 +448,7 @@ pub async fn send_channel_message(
     mention_tags: Option<Vec<Vec<String>>>,
     link_preview_tags: Option<Vec<Vec<String>>>,
     sent_from_thread_tag: Option<Vec<String>>,
+    board_references: Option<Vec<buzz_sdk_pkg::BoardReference>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     expected_relay_url: Option<String>,
@@ -462,6 +463,7 @@ pub async fn send_channel_message(
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
     let link_previews = link_preview_tags.unwrap_or_default();
+    let board_references = board_references.unwrap_or_default();
     // Resolve the relay AND the signing identity once and use them for every
     // read and the submission. Callers that captured a tenant scope before an
     // await (Projects agent sends) pass `expected_relay_url` and
@@ -520,7 +522,7 @@ pub async fn send_channel_message(
                 }
                 None => None,
             };
-            events::build_message(
+            events::build_message_with_client_tags(
                 channel_uuid,
                 content.trim(),
                 thread_ref.as_ref(),
@@ -531,6 +533,8 @@ pub async fn send_channel_message(
                 &link_previews,
                 sent_from_thread_tag.as_deref(),
                 &relay_base,
+                &[],
+                &board_references,
             )?
         }
     };
@@ -693,6 +697,7 @@ fn build_managed_agent_channel_message(
     thread_ref: Option<&events::ThreadRef>,
     mention_pubkeys: &[String],
     client_tags: &[Vec<String>],
+    board_references: &[buzz_sdk_pkg::BoardReference],
 ) -> Result<nostr::EventBuilder, String> {
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
     events::build_message_with_client_tags(
@@ -707,6 +712,7 @@ fn build_managed_agent_channel_message(
         None,
         &crate::relay::relay_api_base_url(),
         client_tags,
+        board_references,
     )
 }
 
@@ -721,6 +727,7 @@ pub async fn send_managed_agent_channel_message(
     mention_pubkeys: Option<Vec<String>>,
     parent_event_id: Option<String>,
     additional_markers: Option<Vec<String>>,
+    board_references: Option<Vec<buzz_sdk_pkg::BoardReference>>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
@@ -813,6 +820,7 @@ pub async fn send_managed_agent_channel_message(
         thread_ref.as_ref(),
         &mentions,
         &client_tags,
+        &board_references.unwrap_or_default(),
     )?;
     // Same contract as `send_channel_message`: `created_at` is the signed
     // event's, not a post-publication clock read.

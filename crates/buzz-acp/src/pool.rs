@@ -3785,6 +3785,33 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
     })
 }
 
+fn json_board_references(obj: &serde_json::Value) -> Vec<buzz_sdk::BoardReference> {
+    let Some(raw_tags) = obj.get("tags").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let tags = raw_tags
+        .iter()
+        .filter_map(|value| {
+            let parts = value
+                .as_array()?
+                .iter()
+                .map(|part| part.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()?;
+            nostr::Tag::parse(parts).ok()
+        })
+        .collect::<Vec<_>>();
+    let tags = nostr::Tags::from_list(tags);
+    let workstream_id = tags.iter().find_map(|tag| {
+        let values = tag.as_slice();
+        (values.first().map(String::as_str) == Some("h"))
+            .then(|| values.get(1))
+            .flatten()
+    });
+    workstream_id
+        .map(|id| buzz_sdk::parse_board_references_for_workstream(&tags, id))
+        .unwrap_or_default()
+}
+
 /// Extract a `ContextMessage` from a JSON message object.
 ///
 /// Works with both thread reply objects and channel message objects.
@@ -3819,6 +3846,7 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
         pubkey: pubkey.to_string(),
         timestamp,
         content: content.to_string(),
+        board_references: json_board_references(obj),
     })
 }
 
@@ -5847,6 +5875,54 @@ mod tests {
     }
 
     #[test]
+    fn test_json_to_context_message_projects_only_strict_board_references() {
+        let workstream_id = "123e4567-e89b-12d3-a456-426614174000";
+        let valid = json!({
+            "kind": "workstream",
+            "identity": workstream_id,
+            "snapshot": { "label": "Checkout recovery" },
+            "placement": {
+                "workstreamId": workstream_id,
+                "workstreamLabel": "checkout-recovery",
+                "sectionId": "workstream",
+                "sectionLabel": "Workstream"
+            }
+        });
+        let mut unknown = valid.clone();
+        unknown["snapshot"]["extra"] = json!(true);
+        let mut controlled = valid.clone();
+        controlled["snapshot"]["label"] = json!("bad\u{0085}label");
+        let mut forged = valid.clone();
+        forged["identity"] = json!("123e4567-e89b-12d3-a456-426614174001");
+        let tag = |value: serde_json::Value| {
+            json!([
+                buzz_sdk::BOARD_REFERENCE_TAG,
+                buzz_sdk::BOARD_REFERENCE_VERSION,
+                serde_json::to_string(&value).unwrap()
+            ])
+        };
+        let obj = json!({
+            "pubkey": "abc",
+            "content": "hello",
+            "created_at": 1710518400,
+            "tags": [
+                ["h", workstream_id],
+                tag(unknown),
+                tag(controlled),
+                tag(forged),
+                tag(valid.clone())
+            ]
+        });
+
+        let msg = json_to_context_message(&obj).expect("message survives bad references");
+        assert_eq!(msg.board_references.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&msg.board_references[0]).unwrap(),
+            valid
+        );
+    }
+
+    #[test]
     fn test_collect_prompt_pubkeys_includes_authors_mentions_and_context() {
         let keys = Keys::generate();
         let p_tag = Tag::parse([
@@ -5875,6 +5951,7 @@ mod tests {
                 pubkey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
+                board_references: vec![],
             }],
             total: 1,
             truncated: false,
@@ -5951,6 +6028,7 @@ mod tests {
             pubkey: "author".into(),
             timestamp: "2026-08-09T00:00:00Z".into(),
             content: content.into(),
+            board_references: vec![],
         }
     }
 

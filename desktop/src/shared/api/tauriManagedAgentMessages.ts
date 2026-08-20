@@ -1,5 +1,6 @@
 import type { SendChannelMessageResult } from "@/shared/api/types";
 import { invokeTauri } from "@/shared/api/tauri";
+import type { BoardReference } from "@/features/workstream-board/lib/boardReferences";
 
 type RawSendChannelMessageResult = {
   event_id: string;
@@ -18,6 +19,7 @@ export async function sendManagedAgentChannelMessage(input: {
   mentionPubkeys?: string[];
   parentEventId?: string;
   additionalMarkers?: string[];
+  boardReferences?: BoardReference[];
 }): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_managed_agent_channel_message",
@@ -30,6 +32,7 @@ export async function sendManagedAgentChannelMessage(input: {
       mentionPubkeys: input.mentionPubkeys ?? null,
       parentEventId: input.parentEventId ?? null,
       additionalMarkers: input.additionalMarkers ?? null,
+      boardReferences: input.boardReferences ?? null,
     },
   );
 

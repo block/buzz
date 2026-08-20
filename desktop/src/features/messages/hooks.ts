@@ -41,6 +41,10 @@ import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
+import {
+  boardReferenceTags,
+  type BoardReference,
+} from "@/features/workstream-board/lib/boardReferences";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
   addReaction,
@@ -95,6 +99,7 @@ export function createOptimisticMessage(
   mediaTags: string[][] = [],
   sentFromThreadRootId: string | null = null,
   sentFromThreadRootExcerpt: string | null = null,
+  boardReferences: readonly BoardReference[] = [],
 ): RelayEvent {
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
@@ -123,6 +128,7 @@ export function createOptimisticMessage(
   for (const tag of mediaTags) {
     tags.push(tag);
   }
+  for (const tag of boardReferenceTags(boardReferences)) tags.push(tag);
   if (sentFromThreadRootId) {
     tags.push(
       buildSentFromThreadTag(sentFromThreadRootId, sentFromThreadRootExcerpt),
@@ -454,6 +460,7 @@ export function useSendMessageMutation(
       sentFromThreadRootId?: string | null;
       sentFromThreadRootExcerpt?: string | null;
       transport?: "auto" | "http";
+      boardReferences?: BoardReference[];
     },
     MessageQueryContext | undefined
   >({
@@ -468,6 +475,7 @@ export function useSendMessageMutation(
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
       transport = "auto",
+      boardReferences = [],
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
@@ -532,7 +540,8 @@ export function useSendMessageMutation(
         parentEventId ||
         imetaTags.length > 0 ||
         emojiTags.length > 0 ||
-        linkPreviewTags.length > 0
+        linkPreviewTags.length > 0 ||
+        boardReferences.length > 0
       ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
@@ -549,6 +558,9 @@ export function useSendMessageMutation(
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
+          undefined,
+          undefined,
+          boardReferences,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -587,6 +599,7 @@ export function useSendMessageMutation(
             ...emojiTags,
             ...mentionTags,
             ...linkPreviewTags,
+            ...boardReferenceTags(boardReferences),
             ...(sentFromThreadTag ? [sentFromThreadTag] : []),
           ],
           content: content.trim(),
@@ -610,6 +623,7 @@ export function useSendMessageMutation(
       mediaTags,
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
+      boardReferences = [],
     }) => {
       // Mirror mutationFn's target resolution so the optimistic message lands
       // in the cache for the same channel as the real send. A caller-supplied
@@ -647,6 +661,7 @@ export function useSendMessageMutation(
         mediaTags ?? [],
         sentFromThreadRootId ?? null,
         sentFromThreadRootExcerpt ?? null,
+        boardReferences,
       );
 
       const nextWindow = mergeLiveChannelWindowEvent(

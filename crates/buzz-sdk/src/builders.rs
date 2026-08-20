@@ -229,6 +229,28 @@ pub fn build_message(
     broadcast: bool,
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
+    build_message_with_board_references(
+        channel_id,
+        content,
+        thread_ref,
+        mentions,
+        broadcast,
+        media_tags,
+        &[],
+    )
+}
+
+/// Build a stream message carrying validated, ordered Board references.
+#[allow(clippy::too_many_arguments)]
+pub fn build_message_with_board_references(
+    channel_id: Uuid,
+    content: &str,
+    thread_ref: Option<&ThreadRef>,
+    mentions: &[&str],
+    broadcast: bool,
+    media_tags: &[Vec<String>],
+    board_references: &[crate::BoardReference],
+) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
@@ -239,6 +261,7 @@ pub fn build_message(
         tags.push(tag(&["broadcast", "1"])?);
     }
     imeta_tags(media_tags, &mut tags)?;
+    tags.extend(crate::build_board_reference_tags(board_references)?);
     Ok(EventBuilder::new(Kind::Custom(9), content)
         .tags(tags)
         .allow_self_tagging())

@@ -287,6 +287,13 @@ type MockBridgeOptions = {
     rootEventId: string;
     targetEventId: string;
   };
+  workstreamBoardFixtures?: Array<{
+    channelId: string;
+    channelName: string;
+    canvas: string;
+    rootEventId: string;
+    targetEventId: string;
+  }>;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
   applyCommunityDelayMs?: number;
   /** Reject `clear_pending_navigation_deep_links` with this message. */

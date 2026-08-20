@@ -1,5 +1,6 @@
 import { invokeTauri } from "@/shared/api/tauri";
 import type { RawSendChannelMessageResult } from "@/shared/api/tauriMessageTypes";
+import type { BoardReference } from "@/features/workstream-board/lib/boardReferences";
 import type { SendChannelMessageResult } from "@/shared/api/types";
 
 export async function sendChannelMessage(
@@ -15,6 +16,7 @@ export async function sendChannelMessage(
   sentFromThreadTag?: string[],
   expectedRelayUrl?: string,
   expectedSignerPubkey?: string,
+  boardReferences?: BoardReference[],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -27,6 +29,7 @@ export async function sendChannelMessage(
       mentionTags: mentionTags ?? null,
       linkPreviewTags,
       sentFromThreadTag: sentFromThreadTag ?? null,
+      boardReferences: boardReferences ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
       // Tenant scope captured by the caller before its first await; the

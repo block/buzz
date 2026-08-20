@@ -41,6 +41,7 @@ fn managed_agent_message_builder_adds_mentions_and_client_marker() {
         None,
         std::slice::from_ref(&pubkey),
         &[vec!["client".to_string(), "welcome-v1".to_string()]],
+        &[],
     )
     .expect("message should build")
     .sign_with_keys(&Keys::generate())
@@ -64,6 +65,7 @@ fn managed_agent_message_builder_can_carry_multiple_client_markers() {
             vec!["client".to_string(), "opener-v1".to_string()],
             vec!["client".to_string(), "closer-v1".to_string()],
         ],
+        &[],
     )
     .expect("message should build")
     .sign_with_keys(&Keys::generate())
@@ -80,6 +82,7 @@ fn managed_agent_message_builder_rejects_invalid_mentions() {
         "Welcome!",
         None,
         &["not-a-pubkey".to_string()],
+        &[],
         &[],
     )
     .expect_err("invalid mentions should fail");

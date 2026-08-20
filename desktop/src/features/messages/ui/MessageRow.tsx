@@ -59,6 +59,8 @@ import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
+import { BoardReferenceSet } from "@/features/workstream-board/ui/BoardReferenceSet";
+
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 
@@ -892,6 +894,10 @@ export const MessageRow = React.memo(
                 {headerNode}
                 <div className={bodyContainerClass} data-testid="message-body">
                   {messageBodyNode}
+                  <BoardReferenceSet
+                    channelId={channelId}
+                    tags={message.tags}
+                  />
                 </div>
               </div>
             </>
@@ -902,6 +908,10 @@ export const MessageRow = React.memo(
                 {headerNode}
                 <div className={bodyContainerClass} data-testid="message-body">
                   {messageBodyNode}
+                  <BoardReferenceSet
+                    channelId={channelId}
+                    tags={message.tags}
+                  />
                 </div>
               </div>
             </>

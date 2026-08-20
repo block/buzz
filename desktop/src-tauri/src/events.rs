@@ -273,6 +273,7 @@ pub fn build_message(
         sent_from_thread_tag,
         relay_base,
         &[],
+        &[],
     )
 }
 
@@ -294,6 +295,7 @@ pub fn build_message_with_client_tags(
     sent_from_thread_tag: Option<&[String]>,
     relay_base: &str,
     client_tags: &[Vec<String>],
+    board_references: &[buzz_sdk_pkg::BoardReference],
 ) -> Result<EventBuilder, String> {
     if sent_from_thread_tag.is_some() && thread_ref.is_some() {
         return Err("sent-from-thread provenance requires a top-level message".into());
@@ -310,6 +312,9 @@ pub fn build_message_with_client_tags(
     crate::link_preview_tags::append(link_preview_tags, relay_base, &mut tags)?;
     append_sent_from_thread_tag(sent_from_thread_tag, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
+    tags.extend(
+        buzz_sdk_pkg::build_board_reference_tags(board_references).map_err(|e| e.to_string())?,
+    );
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
 
