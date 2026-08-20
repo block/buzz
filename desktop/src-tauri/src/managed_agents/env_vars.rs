@@ -45,6 +45,42 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 // See `reserved_env_keys.rs` for why this is `include!`d rather than a module.
 include!("reserved_env_keys.rs");
 
+/// Decide which environment variables to set for agent arguments.
+///
+/// When any argument contains a comma, the legacy comma-delimited
+/// `BUZZ_ACP_AGENT_ARGS` cannot represent it losslessly — the comma would
+/// be interpreted as a delimiter. In that case the arguments are serialized
+/// as a JSON array into `BUZZ_ACP_AGENT_ARGS_JSON` (the canonical structured
+/// transport), and `BUZZ_ACP_AGENT_ARGS` is set to the default `"acp"` so the
+/// harness's conflict guard (legacy must be unset or default) passes.
+///
+/// When no argument contains a comma, the legacy comma-delimited form is
+/// used for full backward compatibility with older harness builds.
+///
+/// Returns `(legacy_value, json_value)` where `legacy_value` is always set
+/// and `json_value` is `Some` only when the JSON transport is used.
+fn agent_args_env(agent_args: &[String]) -> (String, Option<String>) {
+    if agent_args.iter().any(|a| a.contains(',')) {
+        let json = serde_json::to_string(agent_args).unwrap_or_else(|_| agent_args.join(","));
+        ("acp".to_string(), Some(json))
+    } else {
+        (agent_args.join(","), None)
+    }
+}
+
+/// Write agent arguments to the child process environment using the
+/// appropriate transport. See [`agent_args_env`] for the selection logic.
+pub(crate) fn set_agent_args_env(
+    command: &mut std::process::Command,
+    agent_args: &[String],
+) {
+    let (legacy, json) = agent_args_env(agent_args);
+    command.env("BUZZ_ACP_AGENT_ARGS", legacy);
+    if let Some(json) = json {
+        command.env("BUZZ_ACP_AGENT_ARGS_JSON", json);
+    }
+}
+
 /// Returns true if `key` is a well-formed POSIX-shaped env var name:
 /// `[A-Za-z_][A-Za-z0-9_]*`. This is a hard requirement, not a stylistic
 /// nit: Rust's `Command::env` will happily accept a key containing `=`

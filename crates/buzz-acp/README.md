@@ -138,6 +138,14 @@ When both `BUZZ_ACP_AGENT_ARGS_JSON` and a non-default `BUZZ_ACP_AGENT_ARGS` are
 set, startup fails with an error explaining the conflict. Invalid JSON also
 fails startup — the agent does not launch with ambiguous arguments.
 
+**Producer behavior:** Desktop and the Kubernetes backend automatically select
+the appropriate transport. When no argument contains a comma, they write
+`BUZZ_ACP_AGENT_ARGS` (comma-joined). When any argument contains a comma, they
+serialize the argument list as JSON into `BUZZ_ACP_AGENT_ARGS_JSON` and set
+`BUZZ_ACP_AGENT_ARGS` to the default `"acp"`, which the harness treats as
+"not configured." This is transparent to the user — no manual env var
+configuration is needed.
+
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
 ### Parallel Agents & Heartbeat
