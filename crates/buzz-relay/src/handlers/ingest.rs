@@ -2455,21 +2455,13 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    if channel_id.is_some() {
-        // Allow kind:9002 with archived=false (unarchive operation)
-        let is_unarchive = kind_u32 == KIND_NIP29_EDIT_METADATA
-            && event.tags.iter().any(|t| {
-                let parts = t.as_slice();
-                parts.len() >= 2 && parts[0] == "archived" && parts[1] == "false"
-            });
-
-        if !is_unarchive {
-            if let Some(channel) = &channel_row {
-                if channel.archived_at.is_some() {
-                    return Err(IngestError::Rejected("invalid: channel is archived".into()));
-                }
-            }
-        }
+    if channel_id.is_some()
+        && !crate::handlers::side_effects::archived_channel_allows_event(kind_u32, &event)
+        && channel_row
+            .as_ref()
+            .is_some_and(|channel| channel.archived_at.is_some())
+    {
+        return Err(IngestError::Rejected("invalid: channel is archived".into()));
     }
 
     // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
