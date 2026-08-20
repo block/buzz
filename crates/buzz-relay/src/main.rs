@@ -534,10 +534,22 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    match state.db.verify_channel_roster_fence().await {
+        Ok(()) => {
+            info!("Channel roster fence verified");
+        }
+        Err(error) => {
+            error!(%error, "Channel roster fence validation failed");
+            return Err(anyhow::anyhow!(
+                "Channel roster fence is unsafe; apply or repair migration 0032 before starting this relay: {error}"
+            ));
+        }
+    }
+
     // Repair legacy NIP-29 channel rosters that were persisted while the
-    // canonical member query still truncated at 1,000 rows. This runs before
-    // listeners open, is tenant-preserving across shared deployments, and
-    // rewrites only mismatched large-channel snapshots.
+    // canonical member query still truncated at 1,000 rows. Validation above
+    // makes migration 0032 a code/schema compatibility gate before the new
+    // replacement protocol or listener can serve traffic.
     match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
     {
         Ok(count) if count > 0 => info!(count, "large channel member snapshots repaired"),

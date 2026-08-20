@@ -32,6 +32,20 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     .await
 }
 
+#[cfg(test)]
+pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result<()> {
+    with_exclusive_schema_destruction_lock(pool, |mut conn| async move {
+        let outcome = async {
+            reject_legacy_nip_rs_cardinality_ambiguity(&mut conn).await?;
+            MIGRATOR.run_to(target, &mut conn).await?;
+            Ok(())
+        }
+        .await;
+        (conn, outcome)
+    })
+    .await
+}
+
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
     MIGRATOR.run(&mut *conn).await?;
@@ -43,6 +57,7 @@ async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     // guard, so migration fails closed if any is missing. (The fence probe
     // re-runs this same check at startup on non-migrating relays.)
     crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
+    crate::channel::verify_channel_roster_fence_catalog(&mut *conn).await?;
     Ok(())
 }
 
@@ -1254,6 +1269,7 @@ mod tests {
         // Build the needles so this test's own source never matches them.
         let migrate_macro = ["sqlx", "::migrate!"].concat();
         let migrator_run = ["MIGRATOR", ".run("].concat();
+        let migrator_run_to = ["MIGRATOR", ".run_to("].concat();
 
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let this_file = manifest_dir.join("src/migration.rs");
@@ -1280,23 +1296,24 @@ mod tests {
         rust_sources(crates_dir, &mut files);
         for path in &files {
             let source = std::fs::read_to_string(path).expect("read rust source");
-            let (macro_hits, run_hits) = (
+            let (macro_hits, run_hits, run_to_hits) = (
                 count(&source, &migrate_macro),
                 count(&source, &migrator_run),
+                count(&source, &migrator_run_to),
             );
             if *path == this_file {
                 assert_eq!(
-                    (macro_hits, run_hits),
-                    (1, 1),
-                    "migration.rs must embed the migrator once and run it exactly once, \
-                     inside the locked wrapper"
+                    (macro_hits, run_hits, run_to_hits),
+                    (1, 1, 1),
+                    "migration.rs must embed the migrator once, run it once in production, \
+                     and expose exactly one test-only bounded run"
                 );
             } else if *path == push_gateway_exception {
                 continue;
             } else {
                 assert_eq!(
-                    (macro_hits, run_hits),
-                    (0, 0),
+                    (macro_hits, run_hits, run_to_hits),
+                    (0, 0, 0),
                     "{} embeds or runs a SQLx migrator outside the schema/destruction \
                      lock contract; route migration execution through \
                      buzz_db migration::run_migrations",
@@ -1319,13 +1336,23 @@ mod tests {
             .find("async fn with_exclusive_schema_destruction_lock")
             .expect("exclusive lock wrapper");
         let run_site = source.find(&migrator_run).expect("migrator run site");
+        let run_to_site = source
+            .find(&migrator_run_to)
+            .expect("bounded test migrator run site");
         assert!(
             source[entry..locked].contains("with_exclusive_schema_destruction_lock("),
             "run_migrations must delegate through the exclusive schema/destruction lock"
         );
         assert!(
             run_site > locked && run_site < wrapper,
-            "the migrator run site must live inside run_migrations_locked"
+            "the production migrator run site must live inside run_migrations_locked"
+        );
+        assert!(
+            run_to_site > entry
+                && run_to_site < locked
+                && source[entry..run_to_site].contains("#[cfg(test)]")
+                && source[entry..run_to_site].contains("with_exclusive_schema_destruction_lock("),
+            "the bounded migrator run must remain test-only and use the exclusive lock wrapper"
         );
         assert!(
             source[wrapper..].contains("pg_advisory_lock($1)")

@@ -2390,6 +2390,13 @@ impl Db {
         channel::set_canvas(&self.pool, community_id, channel_id, canvas).await
     }
 
+    /// Verify the mixed-version channel-roster database fence end to end.
+    #[datastore_span(name = "verify_channel_roster_fence", system = "postgresql")]
+    pub async fn verify_channel_roster_fence(&self) -> Result<()> {
+        channel::verify_channel_roster_fence_catalog(&self.pool).await?;
+        channel::verify_channel_roster_fence_behavior(&self.pool).await
+    }
+
     /// Capture the active roster while holding the membership-writer lock.
     #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
     pub async fn lock_member_snapshot(
@@ -5511,6 +5518,113 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn unmigrated_roster_fence_blocks_startup_until_0032_is_applied() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) =
+            create_scratch_db_through(&admin, "roster_fence_unmigrated", Some(31)).await;
+        let db = Db::from_pool(pool.clone());
+
+        let error = db
+            .verify_channel_roster_fence()
+            .await
+            .expect_err("pre-0032 schema must block roster publishers");
+        assert!(
+            error.to_string().contains("channel roster fence trigger"),
+            "startup gate must report the missing schema fence: {error}"
+        );
+        let rows_before: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE kind = 39002")
+            .fetch_one(&pool)
+            .await
+            .expect("count pre-migration rosters");
+        assert_eq!(
+            rows_before, 0,
+            "failed startup gate must not publish a roster"
+        );
+
+        migration::run_migrations(&pool)
+            .await
+            .expect("apply migration 0032");
+        db.verify_channel_roster_fence()
+            .await
+            .expect("0032 must open the startup gate");
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_roster_fence_behavior_verification_detects_inert_function() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_inert").await;
+        let db = Db::from_pool(pool.clone());
+
+        sqlx::raw_sql(
+            "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot() \
+             RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;",
+        )
+        .execute(&pool)
+        .await
+        .expect("replace roster fence with inert body");
+        let error = db
+            .verify_channel_roster_fence()
+            .await
+            .expect_err("inert roster fence must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("stale probe roster was accepted"),
+            "behavior probe must identify inert semantics: {error}"
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_roster_fence_catalog_verification_fails_closed() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_catalog").await;
+        let db = Db::from_pool(pool.clone());
+
+        db.verify_channel_roster_fence()
+            .await
+            .expect("migrated roster fence must verify");
+
+        let child: String = sqlx::query_scalar(
+            "SELECT n.nspname || '.' || c.relname \
+             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE i.inhparent = 'public.events'::regclass ORDER BY i.inhrelid LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("load event partition");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE {child} DISABLE TRIGGER trg_events_guard_channel_roster_snapshot"
+        )))
+        .execute(&pool)
+        .await
+        .expect("disable partition roster trigger");
+        let error = db
+            .verify_channel_roster_fence()
+            .await
+            .expect_err("disabled partition roster fence must fail closed");
+        assert!(
+            error.to_string().contains(&child),
+            "verification must identify the unfenced partition: {error}"
+        );
+
+        drop_scratch_db(&admin, pool, &scratch_name).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn addressable_replacement_rolls_back_when_mention_indexing_fails() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -7179,9 +7293,12 @@ mod tests {
         std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
     }
 
-    /// Create a fresh scratch database on the same server and run migrations.
-    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+    /// Create a fresh scratch database on the same server and optionally run migrations.
+    async fn create_scratch_db_through(
+        admin: &PgPool,
+        prefix: &str,
+        target: Option<i64>,
+    ) -> (PgPool, String) {
         let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
         sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
             .execute(admin)
@@ -7196,10 +7313,21 @@ mod tests {
         let pool = PgPool::connect(&scratch_url)
             .await
             .expect("connect scratch db");
-        migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
+        match target {
+            Some(target) => migration::run_migrations_through(&pool, target)
+                .await
+                .expect("migrate scratch db through target"),
+            None => migration::run_migrations(&pool)
+                .await
+                .expect("migrate scratch db"),
+        }
         (pool, name)
+    }
+
+    /// Create a fresh scratch database on the same server and run all migrations.
+    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
+    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+        create_scratch_db_through(admin, prefix, None).await
     }
 
     async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {

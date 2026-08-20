@@ -347,6 +347,129 @@ pub async fn set_canvas(
 /// `buzz_channel_ttl:`.
 const CHANNEL_MEMBERSHIP_LOCK_NAMESPACE: &str = "buzz_channel_membership:";
 
+/// Verify that migration 0032's roster fence is active on the partitioned
+/// `events` parent and every attached partition.
+///
+/// New roster publishers depend on this database-side guard to serialize with
+/// legacy publishers during a rolling deployment. If the migration has not
+/// been applied, publishing with the new lock protocol would falsely appear
+/// safe while an old pod could still overwrite it with stale membership.
+pub async fn verify_channel_roster_fence_catalog<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+) -> Result<()> {
+    // tgtype bits: 1 = ROW, 2 = BEFORE, 4 = INSERT, 16 = UPDATE, 64 = INSTEAD.
+    // Required: ROW + BEFORE + INSERT set; UPDATE + INSTEAD clear.
+    let missing: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT n.nspname || '.' || c.relname
+        FROM (
+            SELECT 'public.events'::regclass AS oid
+            UNION ALL
+            SELECT inhrelid FROM pg_inherits WHERE inhparent = 'public.events'::regclass
+        ) rels
+        JOIN pg_class c ON c.oid = rels.oid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE NOT EXISTS (
+            SELECT 1 FROM pg_trigger t
+            WHERE t.tgrelid = rels.oid
+              AND t.tgname = 'trg_events_guard_channel_roster_snapshot'
+              AND t.tgfoid = to_regprocedure('public.guard_channel_roster_snapshot()')
+              AND t.tgenabled IN ('O', 'A')
+              AND t.tgtype & 1 = 1      -- row-level
+              AND t.tgtype & 2 = 2      -- BEFORE
+              AND t.tgtype & 4 = 4      -- fires on INSERT
+              AND t.tgtype & 16 = 0     -- not UPDATE
+              AND t.tgtype & 64 = 0     -- not INSTEAD OF
+        )
+        "#,
+    )
+    .fetch_all(executor)
+    .await?;
+    if !missing.is_empty() {
+        return Err(DbError::InvalidData(format!(
+            "channel roster fence trigger missing, disabled, or mis-shaped on: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// Prove migration 0032's roster fence semantics through the live writer pool.
+///
+/// The catalog check cannot detect a no-op or otherwise corrupted trigger
+/// function. This rolled-back probe verifies that a canonical empty roster is
+/// accepted while a stale roster member is rejected with `check_violation`.
+pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let community_id = Uuid::new_v4();
+    let channel_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+        .bind(community_id)
+        .bind(format!(
+            "roster-fence-verify-{}.invalid",
+            community_id.simple()
+        ))
+        .execute(&mut *tx)
+        .await?;
+
+    let insert = |id: Vec<u8>, tags: serde_json::Value| {
+        sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, NOW(), 39002, $4, '', $5, NOW(), $6, $7)",
+        )
+        .bind(community_id)
+        .bind(id)
+        .bind(vec![0u8; 32])
+        .bind(tags)
+        .bind(vec![0u8; 64])
+        .bind(channel_id)
+        .bind(channel_id.to_string())
+    };
+
+    insert(
+        vec![0u8; 32],
+        serde_json::json!([["d", channel_id.to_string()]]),
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| {
+        DbError::InvalidData(format!(
+            "channel roster fence rejected a canonical probe roster: {error}"
+        ))
+    })?;
+
+    sqlx::query("SAVEPOINT roster_fence_probe")
+        .execute(&mut *tx)
+        .await?;
+    let stale = insert(
+        vec![1u8; 32],
+        serde_json::json!([
+            ["d", channel_id.to_string()],
+            ["p", hex::encode([2u8; 32]), "", "member"]
+        ]),
+    )
+    .execute(&mut *tx)
+    .await;
+    match stale {
+        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("23514") => {}
+        Ok(_) => {
+            return Err(DbError::InvalidData(
+                "channel roster fence is inert: a stale probe roster was accepted".into(),
+            ));
+        }
+        Err(error) => {
+            return Err(DbError::InvalidData(format!(
+                "channel roster fence probe failed unexpectedly: {error}"
+            )));
+        }
+    }
+    sqlx::query("ROLLBACK TO SAVEPOINT roster_fence_probe")
+        .execute(&mut *tx)
+        .await?;
+    tx.rollback().await?;
+    Ok(())
+}
+
 /// Take the per-channel membership lock. MUST be the first statement in the
 /// transaction that then reads roles/owner counts and writes membership, so the
 /// whole check-then-write sequence is atomic against a concurrent one.
