@@ -1,0 +1,64 @@
+{{- /*
+Creates the media bucket in the bundled MinIO. Mirrors the docker-compose
+`minio-init` step (which depends_on minio and runs concurrently, not as a
+lifecycle hook).
+
+This is a NORMAL resource, deliberately NOT a helm hook. The relay's A3
+object-store conformance probe is startup-fatal and does not create the bucket
+itself, so the bucket must exist for a relay Pod to pass readiness. A
+`post-install` hook cannot satisfy that: `helm install --wait` blocks on the
+main resources (the relay Deployment) becoming Ready *before* post-install
+hooks run, but the relay can never become Ready without the bucket — a
+deadlock (relays CrashLoopBackOff forever). A `pre-install` hook deadlocks the
+other way: it would run to completion before MinIO (a normal resource) is
+created. Running the Job as a normal resource lets helm create MinIO, this Job,
+and the relay Deployment together; the Job's `until` loop waits for MinIO, and
+`--wait` waits for the Job to complete alongside the Deployment.
+
+The name carries the release revision so `helm upgrade` creates a fresh Job
+(a completed Job's spec is immutable); `ttlSecondsAfterFinished` GCs it.
+Quickstart-only.
+*/ -}}
+{{- if .Values.minio.enabled -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "buzz.minioFullname" . }}-init-{{ .Release.Revision }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-init
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        {{- include "buzz.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: {{ .Values.minio.mcImage | quote }}
+          env:
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_SECRET_KEY
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              until mc alias set local {{ include "buzz.minioEndpoint" . }} "$S3_ACCESS_KEY" "$S3_SECRET_KEY"; do
+                echo "waiting for MinIO..."; sleep 3
+              done
+              mc mb --ignore-existing local/{{ .Values.s3.bucket }}
+              mc anonymous set none local/{{ .Values.s3.bucket }}
+              echo "bucket {{ .Values.s3.bucket }} ready"
+{{- end -}}

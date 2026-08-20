@@ -1,0 +1,29 @@
+services:
+  relay:
+    ports: !reset []
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      BUZZ_DOMAIN: ${BUZZ_DOMAIN:?set BUZZ_DOMAIN}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - buzz-caddy-data:/data
+      - buzz-caddy-config:/config
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+volumes:
+  buzz-caddy-data:
+    labels:
+      com.buzz.volume: caddy-data
+  buzz-caddy-config:
+    labels:
+      com.buzz.volume: caddy-config

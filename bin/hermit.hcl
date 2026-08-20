@@ -1,0 +1,1 @@
+manage-git = true
