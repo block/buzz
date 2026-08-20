@@ -134,6 +134,17 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final participantPresent = ref.watch(
+      huddleSessionProvider.select(
+        (session) => isSelf || session.participantPubkeys.contains(pubkey),
+      ),
+    );
+    if (!participantPresent) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) onDismiss();
+      });
+      return const SizedBox.shrink();
+    }
     final profile = ref.watch(
       userCacheProvider.select((profiles) => profiles[pubkey]),
     );

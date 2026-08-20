@@ -4562,14 +4562,16 @@ void main() {
           findsNothing,
         );
 
-        await tester.tap(
-          find.byKey(const ValueKey('huddle-participant-spotlight')),
-        );
+        transport.emitPeerLeave(1);
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('huddle-participant-spotlight')),
           findsNothing,
         );
+        transport.emitPeerJoin(
+          const HuddlePeer(pubkey: 'desktop', peerIndex: 1),
+        );
+        await tester.pump();
 
         await tester.tap(
           find.byKey(const ValueKey('huddle-participant-avatar-agent')),
