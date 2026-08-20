@@ -3,7 +3,6 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useProjectsQuery } from "@/features/projects/hooks";
 import type { Project } from "@/features/projects/projectModels";
-import { cn } from "@/shared/lib/cn";
 import {
   entityLinkProjectRouteId,
   isEntityLink,
@@ -313,16 +312,13 @@ export function renderEntityLinkAnchor({
 
   const chip = (metadata?: LinkPreviewMetadata | null) => {
     const resolvedContext = metadata?.title.trim();
-    // Issue chips stay at the repository name — no event hash while the fetch
-    // is in flight, no fetched title once it lands — so the inline label keeps
-    // one width across the whole lifecycle. The title lives in the tooltip and
-    // accessible name.
+    // Fetched metadata belongs in the tooltip and accessible name, never the
+    // visible chip. PR and issue chips share the repository-name label so their
+    // inline width stays stable before, during, and after resolution.
     const chipLabel =
-      parsed.value.type === "issue"
+      parsed.value.type === "pr" || parsed.value.type === "issue"
         ? parsed.value.dtag
-        : resolvedContext && parsed.value.type === "pr"
-          ? `${parsed.value.dtag} · ${resolvedContext}`
-          : presentation.label;
+        : presentation.label;
     const ariaLabel =
       resolvedContext &&
       (parsed.value.type === "pr" || parsed.value.type === "issue")
@@ -334,7 +330,6 @@ export function renderEntityLinkAnchor({
         href={href}
         icon={presentation.icon}
         aria-label={ariaLabel}
-        className={cn(metadata === null && "buzz-link-unavailable")}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
         wrapping

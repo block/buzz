@@ -278,12 +278,10 @@ function composerLinkPresentation(
     channelName: "",
     dataAttributes: { "data-buzz-link-kind": entity.value.type },
     icon: entity.value.type,
-    // Only pull requests carry their short id inline; issue chips match the
-    // rendered message chip, which shows the repository name alone.
-    label:
-      entity.value.type === "pr"
-        ? `${entity.value.dtag} · ${shortId}`
-        : entity.value.dtag,
+    // Entity chips use only stable link-derived identity. Fetched metadata is
+    // reserved for sent-message tooltips/cards, so every composer chip keeps the
+    // same label after send and throughout metadata resolution.
+    label: entity.value.dtag,
   };
 }
 

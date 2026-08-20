@@ -103,7 +103,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   await expect(prCard).toBeVisible();
   await expect(prCard).toContainText("relay-tools");
   await expect(prCard).toContainText(PR_SUBJECT);
-  await expect(prCard).toContainText(
+  await expect(prCard).not.toContainText(
     "Open · fix/entity-cards → main · abc1230",
   );
   await expect(prCard).toHaveAttribute("data-image-state", "none");
@@ -124,14 +124,11 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   await expect(prChip).toHaveClass(/wrapping-inline-chip/);
   await expect(prChip).toHaveCSS("display", "inline");
   await expect(prChip.locator(".truncate")).toHaveCount(0);
-  await expect(prChip).toHaveText(
-    `${`relay-tools · ${PR_SUBJECT}`.slice(0, 47)}…`,
-  );
-  // Resolved subjects are bounded before rendering, so a signed value cannot
-  // turn the compact chip into an arbitrarily tall message surface.
-  expect(
-    await prChip.evaluate((element) => element.getClientRects().length),
-  ).toBeLessThanOrEqual(2);
+  await expect(prChip).toHaveText("relay-tools");
+  await expect(prChip).not.toContainText(PR_SUBJECT);
+  await expect(prChip).not.toContainText(PR_ID.slice(0, 8));
+  // Fetched subjects stay out of the inline chip, so metadata resolution cannot
+  // resize the surrounding message.
   await prChip.hover();
   const prTooltip = page.getByRole("tooltip");
   const prContext = prTooltip.locator(
@@ -159,9 +156,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     return result;
   });
   expect(tooltipSemanticColors.actual).toEqual(tooltipSemanticColors.expected);
-  await expect(prChip).toContainText(
-    `${`relay-tools · ${PR_SUBJECT}`.slice(0, 47)}…`,
-  );
+  await expect(prChip).toHaveText("relay-tools");
 
   const issueChip = row.getByRole("button", {
     name: /Open issue .* in repository relay-tools/,
@@ -233,12 +228,12 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const missingRepoChip = row.getByRole("button", {
     name: "Open repository missing-repo",
   });
-  await expect(missingRepoChip).toHaveClass(/buzz-link-unavailable/);
+  await expect(missingRepoChip).not.toHaveClass(/buzz-link-unavailable/);
   const missingRepoColors = await missingRepoChip.evaluate((element) => {
     const styles = getComputedStyle(element);
     const probe = document.createElement("span");
-    probe.style.backgroundColor = "hsl(var(--secondary))";
-    probe.style.color = "hsl(var(--secondary-foreground) / 0.7)";
+    probe.style.backgroundColor = "hsl(var(--primary) / 0.15)";
+    probe.style.color = "hsl(var(--primary))";
     document.body.append(probe);
     const semanticStyles = getComputedStyle(probe);
     const result = {
@@ -541,7 +536,51 @@ test("reopening the same entity link reapplies its workspace state", async ({
   await expect(issueHeading).toBeVisible();
 });
 
-test("missing message links remain unavailable and preserve exact-message navigation", async ({
+test("deleted reply links identify deletion and fall back to their thread root", async ({
+  page,
+}) => {
+  const deletedReplyId = "c".repeat(64);
+  const threadRootId = "b".repeat(64);
+  const channelId = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
+  const link = `buzz://message?channel=${channelId}&id=${deletedReplyId}&thread=${threadRootId}`;
+  await installMockBridge(page, { deletedEventIds: [deletedReplyId] });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  await page.evaluate(
+    ({ id }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: "Surviving thread root",
+        id,
+      });
+    },
+    { id: threadRootId },
+  );
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(`Deleted reply ${link}`);
+  await page.getByTestId("send-message").click();
+
+  const deletedLink = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Deleted reply" })
+    .last()
+    .getByRole("button", {
+      name: "Open thread in channel random; linked message was deleted",
+    });
+  await expect(deletedLink).toHaveAttribute(
+    "data-message-link-state",
+    "deleted",
+  );
+  await deletedLink.click();
+
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect(page).toHaveURL(new RegExp(`thread=${threadRootId}`));
+  await expect(page.getByRole("heading", { name: "Thread" })).toBeVisible();
+});
+
+test("deleted top-level message links identify deletion and fall back to channel navigation", async ({
   page,
 }) => {
   const missingMessageId = "d".repeat(64);
@@ -557,36 +596,22 @@ test("missing message links remain unavailable and preserve exact-message naviga
     .getByTestId("message-row")
     .filter({ hasText: "Missing link" })
     .last();
-  const missingLink = linkMessage.getByRole("button", {
-    name: "Open message in channel random",
+  const deletedLink = linkMessage.getByRole("button", {
+    name: "Open channel random; linked message was deleted",
   });
-  await expect(missingLink).toHaveText("random");
-  await expect(missingLink).toHaveClass(/buzz-link-unavailable/);
-  await expect
-    .poll(() =>
-      missingLink.evaluate((element) => {
-        const styles = getComputedStyle(element);
-        const probe = document.createElement("span");
-        probe.style.backgroundColor = "hsl(var(--secondary))";
-        probe.style.color = "hsl(var(--secondary-foreground) / 0.7)";
-        document.body.append(probe);
-        const semanticStyles = getComputedStyle(probe);
-        const result =
-          styles.backgroundColor === semanticStyles.backgroundColor &&
-          styles.color === semanticStyles.color;
-        probe.remove();
-        return result;
-      }),
-    )
-    .toBe(true);
-  await missingLink.hover();
-  await expect(page.getByRole("tooltip")).toHaveCount(0);
-
-  await missingLink.click();
-  await expect(page.getByTestId("chat-title")).toHaveText("random");
-  await expect(page).toHaveURL(
-    new RegExp(`#/channels/${channelId}\\?messageId=${missingMessageId}$`),
+  await expect(deletedLink).toHaveText("random");
+  await expect(deletedLink).toHaveAttribute(
+    "data-message-link-state",
+    "deleted",
   );
+  await expect(deletedLink).toHaveClass(/buzz-link-deleted/);
+  await expect(deletedLink).not.toHaveClass(/buzz-link-unavailable/);
+  await deletedLink.hover();
+  await expect(page.getByRole("tooltip")).toHaveText("Message deleted");
+
+  await deletedLink.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect(page).toHaveURL(new RegExp(`#/channels/${channelId}$`));
 });
 
 test("cold-start entity links drain after the React listener mounts", async ({

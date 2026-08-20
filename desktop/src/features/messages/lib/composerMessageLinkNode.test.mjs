@@ -244,7 +244,7 @@ test("composer node renders channel and entity chip presentations", () => {
   const pullRequest = render(PR_HREF);
   assert.equal(pullRequest[1]["data-buzz-link-kind"], "pr");
   assert.match(pullRequest[1].class, /inline-chip-icon-pr/);
-  assert.equal(pullRequest[2], "buzz-world · cccccccc");
+  assert.equal(pullRequest[2], "buzz-world");
 });
 
 test("markdown rendering stores identity in attributes, not visible id text", () => {

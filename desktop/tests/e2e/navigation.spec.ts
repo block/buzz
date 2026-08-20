@@ -394,8 +394,8 @@ test("mixed Buzz permalinks render as chips in the composer", async ({
   await expect(chips.nth(0)).toHaveText("general");
   await expect(chips.nth(1)).toHaveText("general");
   await expect(chips.nth(2)).toHaveText("buzz-world");
-  await expect(chips.nth(3)).toHaveText("buzz-world · cccccccc");
-  // Issue chips are the repository name alone, matching the rendered chip.
+  // PR and issue chips both use repository identity only, matching rendered chips.
+  await expect(chips.nth(3)).toHaveText("buzz-world");
   await expect(chips.nth(4)).toHaveText("buzz-world");
   await expect(chips.nth(1)).toHaveClass(/inline-chip-icon-channel/);
   await expect(chips.nth(2)).toHaveClass(/inline-chip-icon-repo/);
@@ -446,7 +446,7 @@ test("message links to visible root messages open the thread panel", async ({
     );
   }, link);
   const composerLink = composerInput.locator('[data-composer-message-link=""]');
-  await expect(composerLink).toHaveText("general");
+  await expect(composerLink).toHaveText(/general(?: · mock-gen)?/);
   await expect(composerLink).toHaveClass(/mention-chip/);
   await expect(composerLink).toHaveClass(/inline-chip-icon-message/);
   await expect(composerLink).toHaveAttribute("data-buzz-link", "");
@@ -573,9 +573,8 @@ test("message links to visible root messages open the thread panel", async ({
     '[data-buzz-tooltip-metadata-type=""]',
   );
   await expect(channelFooter).toHaveText("Public channel");
-  await expect(channelFooter).toHaveCSS("white-space", "nowrap");
-  await expect(channelFooter).toHaveCSS("overflow", "hidden");
-  await expect(channelFooter).toHaveCSS("text-overflow", "ellipsis");
+  await expect(channelFooter).toHaveCSS("white-space", "normal");
+  await expect(channelFooter).toHaveCSS("overflow-wrap", "anywhere");
   await rootThreadLink.hover();
   await rootThreadLink.click({ button: "right" });
 

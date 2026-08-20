@@ -71,7 +71,14 @@ function MessageLinkMetadataTooltip({
   metadata: ReturnType<typeof useMessageLinkMetadata>;
 }) {
   const { contentRef, onPointerMove } = useInlineTooltipPosition();
-  if (metadata.state.kind === "unavailable") {
+  if (
+    metadata.state.kind === "deleted" ||
+    metadata.state.kind === "unavailable"
+  ) {
+    const message =
+      metadata.state.kind === "deleted"
+        ? "Message deleted"
+        : "Message unavailable";
     return (
       <TooltipProvider delayDuration={500} skipDelayDuration={0}>
         <Tooltip>
@@ -79,7 +86,7 @@ function MessageLinkMetadataTooltip({
             {children}
           </TooltipTrigger>
           <TooltipContent ref={contentRef} side="top">
-            Message unavailable
+            {message}
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -127,6 +134,7 @@ export function MessageLinkPill({
   href,
   interactive,
   link,
+  onOpenChannel,
   onOpenMessageLink,
   threadExcerpt,
   variant = "default",
@@ -162,17 +170,40 @@ export function MessageLinkPill({
     // the event-hash fallback both live in the tooltip, so the chip keeps the
     // same width before, during, and after metadata resolution.
     const chipLabel = truncateInlineChipLabel(channelLabel);
+    const isDeleted = metadata.state.kind === "deleted";
     const chip = (
       <BuzzLinkChip
         data-message-link=""
+        data-message-link-state={isDeleted ? "deleted" : undefined}
         href={permalink}
         icon="message"
-        aria-label={`Open message in channel ${channelLabel}`}
+        aria-label={
+          isDeleted
+            ? link.threadRootId
+              ? `Open thread in channel ${channelLabel}; linked message was deleted`
+              : `Open channel ${channelLabel}; linked message was deleted`
+            : `Open message in channel ${channelLabel}`
+        }
         className={cn(
           metadata.state.kind === "unavailable" && "buzz-link-unavailable",
+          isDeleted && "buzz-link-deleted",
         )}
         interactive={interactive}
-        onOpenLink={() => onOpenMessageLink(link)}
+        onOpenLink={() => {
+          if (!isDeleted) {
+            onOpenMessageLink(link);
+            return;
+          }
+          if (link.threadRootId) {
+            onOpenMessageLink({
+              ...link,
+              messageId: link.threadRootId,
+              threadRootId: link.threadRootId,
+            });
+            return;
+          }
+          onOpenChannel(link.channelId);
+        }}
         wrapping
       >
         {chipLabel}

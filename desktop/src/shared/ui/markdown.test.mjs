@@ -1125,13 +1125,13 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
   assert.match(html, /inline-chip-icon-pr/);
   assert.match(html, /inline-chip-icon-issue/);
   assert.match(html, /inline-chip-icon-repo/);
-  // Only the pull-request chip carries a short id; the issue chip is the bare
-  // repository name and the repo chip has never had one.
-  assert.equal((visibleText.match(/buzz-world · c3b589fa/g) ?? []).length, 1);
-  assert.match(visibleText, /buzz-world/);
+  // PR, issue, and repository chips all use the stable repository identity;
+  // fetched subjects and event hashes never alter their inline width.
+  assert.equal((visibleText.match(/buzz-world/g) ?? []).length, 3);
+  assert.doesNotMatch(visibleText, /c3b589fa/);
 });
 
-test("inline issue chips show the repository name without the event hash", () => {
+test("inline issue and pull-request chips show the repository name without the event hash", () => {
   const renderEntityChip = (href) =>
     renderToStaticMarkup(
       renderEntityLinkAnchor({
@@ -1157,11 +1157,13 @@ test("inline issue chips show the repository name without the event hash", () =>
     /aria-label="Open issue c3b589fa in repository buzz-world"/,
   );
 
-  // Pull-request chips are untouched by the issue-only policy.
+  // Pull-request chips follow the same stable inline identity policy.
   const pullRequestText = renderEntityChip(
     `buzz://pr?id=${EVENT_HEX}&owner=${OWNER_HEX}&d=buzz-world`,
   ).replace(/<[^>]+>/g, "");
-  assert.equal(pullRequestText, "buzz-world · c3b589fa");
+  assert.equal(pullRequestText, "buzz-world");
+  assert.doesNotMatch(pullRequestText, /c3b589fa/);
+  assert.doesNotMatch(pullRequestText, /·/);
 });
 
 test("inline entity chip labels are bounded without truncating their accessible names", () => {
