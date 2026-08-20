@@ -486,6 +486,9 @@ pub struct DbConfig {
     /// (env `BUZZ_DB_STATEMENT_TIMEOUT_MS`). `0` disables it and is the
     /// default because migrations and backfills may legitimately run long.
     pub statement_timeout_ms: u64,
+    /// Whether every new writer-pool connection defaults all transactions to
+    /// read-only. Intended for operator audit commands, never the relay pool.
+    pub default_transaction_read_only: bool,
 }
 
 impl Default for DbConfig {
@@ -506,6 +509,7 @@ impl Default for DbConfig {
             lock_timeout_ms: DEFAULT_LOCK_TIMEOUT_MS,
             idle_txn_timeout_ms: DEFAULT_IDLE_TXN_TIMEOUT_MS,
             statement_timeout_ms: 0,
+            default_transaction_read_only: false,
         }
     }
 }
@@ -587,6 +591,7 @@ impl Db {
         let lock_timeout_ms = config.lock_timeout_ms;
         let idle_txn_timeout_ms = config.idle_txn_timeout_ms;
         let statement_timeout_ms = config.statement_timeout_ms;
+        let default_transaction_read_only = config.default_transaction_read_only;
         let options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
@@ -611,11 +616,17 @@ impl Db {
                     sqlx::query(
                         "SELECT set_config('lock_timeout', $1, false), \
                                 set_config('idle_in_transaction_session_timeout', $2, false), \
-                                set_config('statement_timeout', $3, false)",
+                                set_config('statement_timeout', $3, false), \
+                                set_config('default_transaction_read_only', $4, false)",
                     )
                     .bind(lock_timeout_ms.to_string())
                     .bind(idle_txn_timeout_ms.to_string())
                     .bind(statement_timeout_ms.to_string())
+                    .bind(if default_transaction_read_only {
+                        "on"
+                    } else {
+                        "off"
+                    })
                     .execute(&mut *conn)
                     .await?;
                     let isolation: String = sqlx::query_scalar("SHOW transaction_isolation")
