@@ -8124,7 +8124,7 @@ void main() {
     );
 
     testWidgets(
-      'a newly sent thread reply follows the tail without animation',
+      'a newly sent reply keeps Latest visible until the lazy tail settles',
       (tester) async {
         tester.view.physicalSize = const Size(400, 800);
         tester.view.devicePixelRatio = 1;
@@ -8138,11 +8138,17 @@ void main() {
           createdAt: 1000,
         );
         final replies = [
-          for (var i = 0; i < 20; i++)
+          for (var i = 0; i < 160; i++)
             _textMsg(
               id: 'reply-$i',
               pubkey: 'bob',
-              content: 'Reply $i',
+              content: [
+                'Reply $i',
+                ...List.filled(
+                  1 + (i ~/ 6),
+                  'Variable-height reply line for lazy layout.',
+                ),
+              ].join('\n'),
               createdAt: 1100 + i,
               extraTags: const [
                 ['e', 'thread-root', '', 'reply'],
@@ -8181,13 +8187,22 @@ void main() {
         await tester.pumpAndSettle();
 
         final list = find.byKey(const ValueKey('thread-message-list'));
+        final positionedList = tester.widget<ScrollablePositionedList>(list);
         final threadScrollable = tester.state<ScrollableState>(
           find.descendant(of: list, matching: find.byType(Scrollable)).first,
         );
+        positionedList.itemScrollController!.jumpTo(index: 5);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-159')),
+          findsNothing,
+        );
+        final initialMaxScrollExtent =
+            threadScrollable.position.maxScrollExtent;
         final localReply = _textMsg(
           id: 'reply-local',
           pubkey: 'self',
-          content: 'My new reply',
+          content: 'My new reply\n${List.filled(30, 'Final line').join('\n')}',
           createdAt: 2000,
           extraTags: const [
             ['e', 'thread-root', '', 'reply'],
@@ -8198,6 +8213,23 @@ void main() {
         await tester.pump();
         await tester.pump();
 
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest-hidden')),
+          findsNothing,
+          reason:
+              'Automatic correction must not hide Latest before the lazy '
+              'tail is actually visible.',
+        );
+
+        await tester.pumpAndSettle();
+
+        expect(
+          threadScrollable.position.maxScrollExtent,
+          greaterThan(initialMaxScrollExtent),
+          reason:
+              'The fixture must expand the lazy extent after automatic '
+              'correction starts.',
+        );
         expect(
           find.byKey(const ValueKey('thread-message-group-reply-local')),
           findsOneWidget,

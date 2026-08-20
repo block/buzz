@@ -244,6 +244,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final initialTailSettle = useMemoized(InitialThreadTailSettle.new);
     final isAtThreadTail = useState(true);
     final tailCorrectionInProgress = useRef(false);
+    final tailCorrectionGeneration = useRef(0);
     final activeThreadScrollPosition = useRef<ScrollPosition?>(null);
     final viewportHeight = useListenable(listViewport.height).value;
     final previousViewportHeight = useRef(viewportHeight);
@@ -357,16 +358,55 @@ class ThreadDetailPage extends HookConsumerWidget {
       return true;
     }
 
+    void finishThreadTailCorrection({
+      required bool revealViewport,
+      required int generation,
+      int corrections = 0,
+    }) {
+      if (!context.mounted) return;
+      if (generation != tailCorrectionGeneration.value) return;
+      // A finger drag interrupts the correction. Do not take control back
+      // from the user with another jump after they detach from the tail.
+      if (!tailCorrectionInProgress.value ||
+          tailIntent.isDragging ||
+          userOptedOutOfTailFollow.value) {
+        tailCorrectionInProgress.value = false;
+        isAtThreadTail.value = threadTailIsVisible();
+        return;
+      }
+      final reachedTail = threadTailIsVisible();
+      // Lazy children can revise maxScrollExtent for several frames. Keep
+      // moving the same active position until the measured tail is visible;
+      // the cap only guards pathological layouts that never stabilize.
+      if (!reachedTail && corrections < _latestTailCorrectionLimit) {
+        jumpActiveScrollPositionToTail();
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => finishThreadTailCorrection(
+            revealViewport: revealViewport,
+            generation: generation,
+            corrections: corrections + 1,
+          ),
+        );
+        WidgetsBinding.instance.scheduleFrame();
+        return;
+      }
+      tailCorrectionInProgress.value = false;
+      if (revealViewport) initialViewportReady.value = true;
+      isAtThreadTail.value = reachedTail;
+    }
+
     void correctThreadTailInstantly() {
       if (!jumpActiveScrollPositionToTail()) return;
       tailCorrectionInProgress.value = true;
-      isAtThreadTail.value = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        tailCorrectionInProgress.value = false;
-        if (context.mounted && followsThreadTail.value) {
-          isAtThreadTail.value = true;
-        }
-      });
+      final generation = ++tailCorrectionGeneration.value;
+      isAtThreadTail.value = threadTailIsVisible();
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => finishThreadTailCorrection(
+          revealViewport: false,
+          generation: generation,
+        ),
+      );
+      WidgetsBinding.instance.scheduleFrame();
     }
 
     void followThreadTailFromComposer() {
@@ -377,8 +417,9 @@ class ThreadDetailPage extends HookConsumerWidget {
       tailIntent.detach();
       userOptedOutOfTailFollow.value = false;
       followsThreadTail.value = true;
-      isAtThreadTail.value = true;
-      if (!threadTailIsVisible()) correctThreadTailInstantly();
+      final reachedTail = threadTailIsVisible();
+      isAtThreadTail.value = reachedTail;
+      if (!reachedTail) correctThreadTailInstantly();
     }
 
     useEffect(
@@ -430,40 +471,19 @@ class ThreadDetailPage extends HookConsumerWidget {
       userDragDetachedTailFollow.value = false;
       followsThreadTail.value = true;
       tailCorrectionInProgress.value = true;
-
-      void finishAtTail(int corrections) {
-        if (!context.mounted) return;
-        // A finger drag interrupts ScrollPosition.animateTo. Do not follow it
-        // with a corrective jump that would take control back from the user.
-        if (!tailCorrectionInProgress.value ||
-            tailIntent.isDragging ||
-            userOptedOutOfTailFollow.value) {
-          tailCorrectionInProgress.value = false;
-          return;
-        }
-        final reachedTail = threadTailIsVisible();
-        // Lazy children can revise maxScrollExtent for several frames. Keep
-        // moving the same active position until the measured tail is visible;
-        // the cap only guards pathological layouts that never stabilize.
-        if (!reachedTail && corrections < _latestTailCorrectionLimit) {
-          jumpActiveScrollPositionToTail();
-          WidgetsBinding.instance.addPostFrameCallback(
-            (_) => finishAtTail(corrections + 1),
-          );
-          WidgetsBinding.instance.scheduleFrame();
-          return;
-        }
-        tailCorrectionInProgress.value = false;
-        initialViewportReady.value = true;
-        isAtThreadTail.value = reachedTail;
-      }
+      final generation = ++tailCorrectionGeneration.value;
 
       Future<void> navigateToTail() async {
         if (!await animateActiveScrollPositionToTail()) {
-          tailCorrectionInProgress.value = false;
+          if (generation == tailCorrectionGeneration.value) {
+            tailCorrectionInProgress.value = false;
+          }
           return;
         }
-        finishAtTail(0);
+        finishThreadTailCorrection(
+          revealViewport: true,
+          generation: generation,
+        );
       }
 
       unawaited(navigateToTail());
