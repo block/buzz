@@ -341,6 +341,10 @@ type E2eConfig = {
     honorChannelsKnownHash?: boolean;
     /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
     deepHistoryMessageCount?: number;
+    /** Channel name → target member count. Appends synthetic members until
+     *  each named channel reaches its target; perf specs use this to model
+     *  high-membership channels. Applied once, on first channel read. */
+    inflateChannelMembers?: Record<string, number>;
     feedReadError?: string;
     canvasReadError?: string;
     /** Delay (ms) for `apply_workspace` so e2e tests can observe the
@@ -2611,11 +2615,39 @@ function listMockProfiles(): RawProfile[] {
     .filter((profile): profile is RawProfile => profile !== null);
 }
 
+let memberInflationApplied = false;
+
+/**
+ * One-shot high-membership inflation for perf specs. Reads
+ * `mock.inflateChannelMembers` (channel name → target member count) and
+ * appends synthetic hex-pubkey members until each named channel reaches its
+ * target. Runs lazily on the first channel read so it sees the final config.
+ */
+function ensureInflatedChannelMembers(): void {
+  if (memberInflationApplied) return;
+  const inflation = getConfig()?.mock?.inflateChannelMembers;
+  if (!inflation) return;
+  memberInflationApplied = true;
+  for (const [name, targetCount] of Object.entries(inflation)) {
+    const channel = mockChannels.find((candidate) => candidate.name === name);
+    if (!channel) continue;
+    for (let index = channel.members.length; index < targetCount; index += 1) {
+      // "ab" prefix + zero-padded hex index: unique, hex-valid, and disjoint
+      // from every fixture pubkey.
+      const pubkey = `ab${index.toString(16).padStart(62, "0")}`;
+      channel.members.push(createMockMember(pubkey, "member", 500));
+    }
+    syncMockChannel(channel);
+  }
+}
+
 function listMockChannels(config?: E2eConfig): RawChannelWithMembership[] {
+  ensureInflatedChannelMembers();
   return mockChannels.map((channel) => toRawChannel(channel, config));
 }
 
 function getMockChannel(channelId: string): MockChannel {
+  ensureInflatedChannelMembers();
   const channel = mockChannels.find((candidate) => candidate.id === channelId);
   if (!channel) {
     throw new Error(`Channel ${channelId} not found.`);
