@@ -377,6 +377,29 @@ pub async fn bootstrap_owner(
     Ok(())
 }
 
+/// Ensures a deployment-managed pubkey holds the `admin` role in `community`.
+/// An existing owner is left as owner; every other existing role is promoted
+/// to admin. Safe to call on every startup.
+pub async fn bootstrap_admin(
+    pool: &PgPool,
+    community: CommunityId,
+    admin_pubkey: &str,
+) -> Result<()> {
+    let pubkey = admin_pubkey.to_ascii_lowercase();
+    sqlx::query(
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
+         VALUES ($1, $2, 'admin', NULL) \
+         ON CONFLICT (community_id, pubkey) DO UPDATE SET \
+           role = CASE WHEN relay_members.role = 'owner' THEN 'owner' ELSE 'admin' END, \
+           updated_at = now()",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// The result of a transfer-ownership attempt.
 #[derive(Debug, PartialEq)]
 pub enum TransferResult {
@@ -682,6 +705,31 @@ mod tests {
             .await
             .expect("bootstrap owner");
         (community, owner)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bootstrap_admin_is_idempotent_and_never_demotes_owner() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let owner = test_pubkey();
+        let admin = test_pubkey();
+
+        bootstrap_owner(&pool, community, &owner)
+            .await
+            .expect("bootstrap owner");
+        bootstrap_admin(&pool, community, &admin)
+            .await
+            .expect("bootstrap admin");
+        bootstrap_admin(&pool, community, &admin)
+            .await
+            .expect("repeat bootstrap admin");
+        bootstrap_admin(&pool, community, &owner)
+            .await
+            .expect("owner listed as bootstrap admin");
+
+        assert_role(&pool, community, &admin, "admin").await;
+        assert_role(&pool, community, &owner, "owner").await;
     }
 
     #[tokio::test]

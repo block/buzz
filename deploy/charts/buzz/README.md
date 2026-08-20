@@ -47,6 +47,7 @@ See:
 |---|---|---|
 | `relayUrl` | Public `wss://` URL clients connect to | Always |
 | `ownerPubkey` | 64-char lowercase hex Nostr pubkey of the relay operator | When `relay.requireRelayMembership=true` (default) |
+| `bootstrapAdminPubkeys` | Comma-separated control-plane pubkeys ensured as relay admins | Optional |
 | `secrets.existingSecret` | Name of pre-created Secret | Production / GitOps |
 | `externalPostgresql.url` / `externalRedis.url` / `s3.endpoint` | External service URLs | Production — when the matching bundled service is disabled (the default) |
 

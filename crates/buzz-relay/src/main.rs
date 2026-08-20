@@ -344,6 +344,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    if let Some(community) = deployment_community {
+        for admin_pubkey in &config.relay_bootstrap_admin_pubkeys {
+            match db.bootstrap_admin(community, admin_pubkey).await {
+                Ok(()) => info!(pubkey = %admin_pubkey, "Relay bootstrap admin ensured"),
+                Err(e) => {
+                    error!(pubkey = %admin_pubkey, "Fatal: failed to bootstrap relay admin: {e}");
+                    return Err(anyhow::anyhow!(
+                        "Failed to bootstrap relay admin {admin_pubkey}: {e}"
+                    ));
+                }
+            }
+        }
+    }
+
     // NIP-33: backfill d_tag for any existing parameterized replaceable events
     // that predate the column addition. Idempotent — no-ops when fully populated.
     match db.backfill_d_tags().await {

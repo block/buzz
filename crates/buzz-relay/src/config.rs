@@ -183,6 +183,15 @@ pub struct Config {
     /// with the `owner` role on first startup.
     pub relay_owner_pubkey: Option<String>,
 
+    /// Deployment-managed identities that must hold the `admin` role in the
+    /// deployment community. This is intended for control-plane connectors
+    /// that reconcile relay and channel membership without holding the relay
+    /// owner's private key.
+    ///
+    /// Set via `RELAY_BOOTSTRAP_ADMIN_PUBKEYS` as a comma-separated list of
+    /// 64-character hex pubkeys. Invalid entries fail startup.
+    pub relay_bootstrap_admin_pubkeys: Vec<String>,
+
     /// Canonical HTTP origin of the deployment-global operator API.
     ///
     /// Every operator NIP-98 `u` tag is verified against this origin, independent
@@ -648,6 +657,29 @@ impl Config {
                 }
             });
 
+        let relay_bootstrap_admin_pubkeys = match std::env::var("RELAY_BOOTSTRAP_ADMIN_PUBKEYS") {
+            Ok(raw) => {
+                let mut pubkeys = Vec::new();
+                for entry in raw.split(',') {
+                    let entry = entry.trim().to_lowercase();
+                    if entry.is_empty() {
+                        continue;
+                    }
+                    let valid = entry.len() == 64 && entry.chars().all(|c| c.is_ascii_hexdigit());
+                    if !valid {
+                        return Err(ConfigError::InvalidValue(format!(
+                                "RELAY_BOOTSTRAP_ADMIN_PUBKEYS entry is not a valid 64-char hex pubkey: {entry:?}"
+                            )));
+                    }
+                    if !pubkeys.contains(&entry) {
+                        pubkeys.push(entry);
+                    }
+                }
+                pubkeys
+            }
+            Err(_) => Vec::new(),
+        };
+
         // Note: intentionally not prefixed with BUZZ_ — same relay-identity
         // config family as RELAY_OWNER_PUBKEY. Comma-separated 64-char hex
         // pubkeys. Unlike RELAY_OWNER_PUBKEY (warn-and-ignore), an invalid
@@ -1016,6 +1048,7 @@ impl Config {
             mesh,
             mesh_demo_echo,
             relay_owner_pubkey,
+            relay_bootstrap_admin_pubkeys,
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
@@ -1131,6 +1164,10 @@ mod tests {
         assert!(
             config.relay_owner_pubkey.is_none(),
             "relay_owner_pubkey should default to None"
+        );
+        assert!(
+            config.relay_bootstrap_admin_pubkeys.is_empty(),
+            "relay_bootstrap_admin_pubkeys should default empty"
         );
         assert!(
             config.relay_operator_pubkeys.is_empty(),
@@ -1531,6 +1568,38 @@ mod tests {
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn relay_bootstrap_admin_pubkeys_parse_dedupe_and_normalize() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var(
+            "RELAY_BOOTSTRAP_ADMIN_PUBKEYS",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("RELAY_BOOTSTRAP_ADMIN_PUBKEYS");
+
+        assert_eq!(
+            config.relay_bootstrap_admin_pubkeys,
+            vec![
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn relay_bootstrap_admin_pubkeys_invalid_entry_is_error() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("RELAY_BOOTSTRAP_ADMIN_PUBKEYS", "not-a-pubkey");
+        let result = Config::from_env();
+        std::env::remove_var("RELAY_BOOTSTRAP_ADMIN_PUBKEYS");
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref msg)) if msg.contains("RELAY_BOOTSTRAP_ADMIN_PUBKEYS")
+        ));
     }
 
     #[test]

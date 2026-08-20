@@ -80,6 +80,10 @@ mediaBaseUrl: ""
 # relay.requireRelayMembership=true (the production default).
 ownerPubkey: ""
 
+# Comma-separated control-plane pubkeys ensured as relay administrators at
+# startup. These identities can reconcile membership without the owner key.
+bootstrapAdminPubkeys: ""
+
 # ── Chart-managed secrets ────────────────────────────────────────────────────
 # Production / GitOps path: create a Secret out-of-band with these keys and
 # point `secrets.existingSecret` at it. Any key omitted from the existing

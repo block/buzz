@@ -4448,6 +4448,11 @@ impl Db {
         relay_members::has_admin_or_owner(&self.pool, community).await
     }
 
+    /// Ensures a deployment-managed identity holds the relay `admin` role.
+    pub async fn bootstrap_admin(&self, community: CommunityId, admin_pubkey: &str) -> Result<()> {
+        relay_members::bootstrap_admin(&self.pool, community, admin_pubkey).await
+    }
+
     /// Atomically transfers ownership of `community` to `new_owner_pubkey`,
     /// demoting the previous owner(s) to `member`. Verifies
     /// `expected_owner_pubkey` matches the current owner inside the same
