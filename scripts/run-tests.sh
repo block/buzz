@@ -90,6 +90,16 @@ run_unit_tests() {
   run_test_step "buzz-cli tests" \
     cargo test -p buzz-cli -- --nocapture
 
+  # buzz-relay router/NIP-11 unit tests (no infra): NIP-11 CORS conformance,
+  # trace-span propagation, and the WebSocket frame limit. The rest of the
+  # package's --lib set needs Postgres/Redis, so select the infra-free modules
+  # rather than the whole package — see the `test-unit` recipe in the Justfile.
+  run_test_step "buzz-relay router unit tests" \
+    cargo test -p buzz-relay --lib router::tests -- --nocapture
+
+  run_test_step "buzz-relay NIP-11 unit tests" \
+    cargo test -p buzz-relay --lib nip11::tests -- --nocapture
+
   # buzz-db migrator/lint unit tests (no infra): guard the embedded-migrator
   # invariant (exactly the consolidated 0001; cutover/backfill stays an operator
   # script, not startup state) and the tenant-scoping lints. The Postgres-backed

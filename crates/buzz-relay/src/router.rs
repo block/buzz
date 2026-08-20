@@ -23,7 +23,7 @@ use crate::api;
 use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
-use crate::nip11::{nip11_document, relay_info_handler};
+use crate::nip11::{nip11_document, relay_info_handler, relay_info_response};
 use crate::state::AppState;
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -295,7 +295,7 @@ async fn nip11_or_ws_handler(
     }
 
     if accept.contains("application/nostr+json") {
-        return Json(nip11_document(&state, raw_host).await).into_response();
+        return relay_info_response(nip11_document(&state, raw_host).await);
     }
 
     // Row zero: bind the connection to its community from the request host
@@ -463,6 +463,10 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::header::{
+        HeaderName, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+        ACCESS_CONTROL_ALLOW_ORIGIN,
+    };
     use axum::{routing::get, Router};
     use futures_util::SinkExt;
     use opentelemetry::trace::TracerProvider as _;
@@ -475,6 +479,119 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    /// The two CORS-relevant halves of the relay surface behind the real
+    /// `build_cors_layer`: the public NIP-11 document and one authenticated
+    /// bridge route that the allowlist must keep narrowing.
+    fn nip11_and_bridge_router(cors_origins: &[String]) -> Router {
+        Router::new()
+            .route(
+                "/info",
+                get(|| async {
+                    relay_info_response(crate::nip11::RelayInfo::build(
+                        None,
+                        None,
+                        false,
+                        crate::config::DEFAULT_MAX_FRAME_BYTES,
+                        None,
+                    ))
+                }),
+            )
+            .route("/query", post(|| async { StatusCode::OK }))
+            .layer(build_cors_layer(cors_origins))
+    }
+
+    async fn header_values(
+        app: Router,
+        path: &str,
+        origin: &str,
+        header: HeaderName,
+    ) -> Vec<String> {
+        let response = app
+            .oneshot(
+                Request::get(path)
+                    .header(axum::http::header::ORIGIN, origin)
+                    .body(Body::empty())
+                    .expect("build test request"),
+            )
+            .await
+            .expect("router should answer the test request");
+
+        response
+            .headers()
+            .get_all(header)
+            .iter()
+            .map(|value| value.to_str().expect("header is valid UTF-8").to_string())
+            .collect()
+    }
+
+    /// A relay whose CORS allowlist is configured (`BUZZ_CORS_ORIGINS`, which
+    /// the deployment guide tells operators to set) must still serve the NIP-11
+    /// relay information document to any origin — the spec makes that a MUST,
+    /// and a browser client hosted elsewhere has no other way to discover the
+    /// relay's capabilities.
+    #[tokio::test]
+    async fn nip11_document_stays_readable_from_any_origin_under_a_cors_allowlist() {
+        let allowlist = vec!["https://buzz.example.com".to_string()];
+
+        assert_eq!(
+            header_values(
+                nip11_and_bridge_router(&allowlist),
+                "/info",
+                "https://some-web-client.example",
+                ACCESS_CONTROL_ALLOW_ORIGIN,
+            )
+            .await,
+            vec!["*".to_string()],
+            "NIP-11 requires the relay information document to be readable cross-origin"
+        );
+
+        for header in [ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS] {
+            assert_eq!(
+                header_values(
+                    nip11_and_bridge_router(&allowlist),
+                    "/info",
+                    "https://some-web-client.example",
+                    header.clone(),
+                )
+                .await,
+                vec!["*".to_string()],
+                "NIP-11 requires {header} on the relay information document"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn allowlisted_origin_gets_exactly_one_allow_origin_on_the_nip11_document() {
+        // The relay-wide layer overwrites the permissive value rather than
+        // appending to it — two `Access-Control-Allow-Origin` values would be
+        // rejected by every browser.
+        assert_eq!(
+            header_values(
+                nip11_and_bridge_router(&["https://buzz.example.com".to_string()]),
+                "/info",
+                "https://buzz.example.com",
+                ACCESS_CONTROL_ALLOW_ORIGIN,
+            )
+            .await,
+            vec!["https://buzz.example.com".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_allowlist_still_narrows_the_authenticated_surface() {
+        assert!(
+            header_values(
+                nip11_and_bridge_router(&["https://buzz.example.com".to_string()]),
+                "/query",
+                "https://some-web-client.example",
+                ACCESS_CONTROL_ALLOW_ORIGIN,
+            )
+            .await
+            .is_empty(),
+            "exempting the NIP-11 document must not widen CORS on the rest of the surface"
+        );
+    }
 
     #[test]
     fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {

@@ -177,12 +177,46 @@ impl RelayInfo {
 pub async fn relay_info_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::AppState>>,
     headers: axum::http::HeaderMap,
-) -> axum::response::Json<RelayInfo> {
+) -> axum::response::Response {
     let raw_host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    axum::response::Json(nip11_document(&state, raw_host).await)
+    relay_info_response(nip11_document(&state, raw_host).await)
+}
+
+/// Serialise the relay information document with the CORS headers NIP-11
+/// requires on it.
+///
+/// NIP-11 makes cross-origin readability a MUST: the document is how a browser
+/// client discovers a relay's capabilities before it has any credentials, so it
+/// has to be readable from an origin the operator never enumerated. Every
+/// route, this one included, sits under the relay-wide layer built from
+/// `BUZZ_CORS_ORIGINS`, which narrows responses to the configured allowlist —
+/// and the deployment guide tells operators to set that variable, so the
+/// documented VPS path would otherwise ship a relay that fails the MUST.
+///
+/// Setting the headers on the response conforms without widening the allowlist
+/// that protects `/events`, `/query`, `/count`, and the media surface:
+/// `tower_http`'s CORS layer overwrites only the header names it emits, so an
+/// allowlisted origin still gets its own value echoed back and every other
+/// origin keeps the permissive one set here. The document carries no private
+/// data — capabilities, limits, and the relay's public key — and
+/// `auth_required`/`restricted_writes` continue to gate everything that
+/// matters. Same pattern as the NIP-05 document in [`crate::api::nip05`].
+pub(crate) fn relay_info_response(info: RelayInfo) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
+    let mut response = axum::response::Json(info).into_response();
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        (axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS, "*"),
+        (axum::http::header::ACCESS_CONTROL_ALLOW_METHODS, "*"),
+    ] {
+        headers.insert(name, axum::http::HeaderValue::from_static(value));
+    }
+    response
 }
 
 fn push_descriptor(
