@@ -115,7 +115,7 @@ pub async fn open_project_terminal(
     if let Some(clone_url) = clone_url.as_deref() {
         validate_local_clone_url_for_workspace(clone_url, &state)?;
     }
-    // Public GitHub clones stay anonymous; Buzz remotes use the workspace
+    // Public GitHub clones stay anonymous; Mesh remotes use the workspace
     // identity. Keep the result outside the blocking task so it borrows no
     // Tauri state.
     let auth = if let Some(clone_url) = clone_url.as_deref() {

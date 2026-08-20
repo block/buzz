@@ -57,7 +57,7 @@ pub(crate) struct HarnessDefinition {
     #[serde(default)]
     pub args: Vec<String>,
     /// Environment variables injected at spawn time. Definition env is applied
-    /// first and LOSES on conflict with Buzz-injected vars — `BUZZ_MANAGED_AGENT`
+    /// first and LOSES on conflict with Mesh-injected vars — `BUZZ_MANAGED_AGENT`
     /// is always authoritative and cannot be overridden here.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
@@ -920,7 +920,7 @@ mod tests {
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
-            err.contains("reserved by Buzz"),
+            err.contains("reserved by Mesh"),
             "ownership marker key must be rejected: {err}"
         );
     }
@@ -941,7 +941,7 @@ mod tests {
         };
         let err = validate_harness_definition_pub(&def).unwrap_err();
         assert!(
-            err.contains("reserved by Buzz"),
+            err.contains("reserved by Mesh"),
             "reserved key must be blocked case-insensitively: {err}"
         );
     }

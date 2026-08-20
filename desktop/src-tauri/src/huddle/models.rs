@@ -128,7 +128,7 @@ const STT_MODEL_DIR_NAME: &str = "parakeet-tdt-ctc-110m-en";
 
 /// All files that must be present for the model to be considered ready.
 ///
-/// Includes the attribution sidecar written by Buzz during install. The
+/// Includes the attribution sidecar written by Mesh during install. The
 /// upstream archive does not ship a license file, so readiness should require
 /// the local CC-BY-4.0 attribution to travel with the cached model bytes.
 const STT_EXPECTED_FILES: &[&str] = &["model.int8.onnx", "tokens.txt", STT_LICENSE_FILE_NAME];

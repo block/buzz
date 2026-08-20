@@ -112,7 +112,7 @@ pub fn acquire(
     #[cfg(target_os = "macos")]
     {
         let assertion_type = c"PreventUserIdleSystemSleep".as_ptr();
-        let reason = c"Buzz \u{2014} agents are active".as_ptr();
+        let reason = c"Mesh \u{2014} agents are active".as_ptr();
 
         unsafe {
             let cf_type = macos::CFStringCreateWithCString(

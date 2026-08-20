@@ -872,7 +872,7 @@ fn refresh_agents_md_preserves_managed_section() {
     let content = fs::read_to_string(&agents_md).unwrap();
     // Static content should be refreshed (from template).
     assert!(
-        content.starts_with("# Buzz Nest"),
+        content.starts_with("# Mesh Nest"),
         "template header must be present"
     );
     // Managed section should be preserved.

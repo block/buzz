@@ -589,7 +589,7 @@ pub async fn merge_project_pull_request(
             let merge_result = run_git(
                 &[
                     "-c",
-                    "user.name=Buzz User",
+                    "user.name=Mesh User",
                     "-c",
                     format!("user.email={merge_email}").as_str(),
                     "merge",

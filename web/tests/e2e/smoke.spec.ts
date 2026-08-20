@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-test("home page loads with Buzz branding", async ({ page }) => {
+test("home page loads with Mesh branding", async ({ page }) => {
   await page.goto("/");
   await expect(
-    page.getByRole("main").getByRole("img", { name: "Buzz" }),
+    page.getByRole("main").getByRole("img", { name: "Mesh" }),
   ).toBeVisible();
 });
 
@@ -13,7 +13,7 @@ test("home page shows repositories section", async ({ page }) => {
   await expect(page.getByText("Repositories")).toBeVisible();
 });
 
-test("invite requires age and legal consent before opening Buzz", async ({
+test("invite requires age and legal consent before opening Mesh", async ({
   page,
 }) => {
   await page.route("**/api/join-policy", async (route) => {
@@ -77,10 +77,10 @@ test("invite requires age and legal consent before opening Buzz", async ({
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
-    "I agree to the Buzz Terms of Service and Privacy Policy.",
+    "I agree to the Mesh Terms of Service and Privacy Policy.",
   );
   const acceptInvite = page.getByRole("button", {
-    name: "Accept invite in Buzz",
+    name: "Accept invite in Mesh",
   });
 
   await expect(ageConfirmation).toBeVisible();
@@ -106,7 +106,7 @@ test("invite requires age and legal consent before opening Buzz", async ({
   await page
     .locator("label")
     .filter({
-      hasText: "I agree to the Buzz Terms of Service and Privacy Policy.",
+      hasText: "I agree to the Mesh Terms of Service and Privacy Policy.",
     })
     .click({ position: { x: 8, y: 8 } });
   await expect(agreementConfirmation).toBeChecked();

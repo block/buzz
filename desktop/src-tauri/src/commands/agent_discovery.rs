@@ -298,7 +298,7 @@ fn install_acp_runtime_blocking(
     // Phase 1: Install CLI if missing and commands are available.
     // Today every entry in `cli_install_commands` is a curl-pipe; npm-backed
     // adapter installs live in Phase 2 below where they are rewritten to a
-    // Buzz-private prefix before execution.
+    // Mesh-private prefix before execution.
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
             for cmd in runtime.cli_install_commands_for_os() {
@@ -723,7 +723,7 @@ fn install_shell_args(
 }
 
 /// Build a login-shell `Command` for `command` with hermit env vars stripped,
-/// Buzz-managed npm locations set, and the user's PATH set. This is the
+/// Mesh-managed npm locations set, and the user's PATH set. This is the
 /// single source of truth for
 /// the shell selection and environment cleanup shared by `run_install_command`
 /// and managed npm install path — keeping them in sync so the hermit-strip list
@@ -744,7 +744,7 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     // runtime/probe path so the two can never drift.  managed entries first
     // (Node/npm bins keep precedence); login-shell entries next; inherited
     // process PATH appended last when no login-shell PATH exists — the case
-    // where the composed PATH would otherwise be Buzz's managed Node dirs
+    // where the composed PATH would otherwise be Mesh's managed Node dirs
     // alone, with no `curl`/`sh`/`tar` for the vendor install pipes
     // (cmd.env("PATH", …) replaces rather than extends). On Windows that case
     // is the steady state: login_shell_path() always returns None there
@@ -857,7 +857,7 @@ fn is_powershell_command(command: &str) -> bool {
 }
 
 /// Apply the shared npm env cleanup and managed-prefix setup to an install child.
-/// Strips hermit-managed vars and establishes the Buzz-managed npm prefix so adapters
+/// Strips hermit-managed vars and establishes the Mesh-managed npm prefix so adapters
 /// installed via either path (shell or native PowerShell) land in the same location.
 fn apply_npm_env(cmd: &mut std::process::Command) {
     cmd.env_remove("NPM_CONFIG_PREFIX");
@@ -947,7 +947,7 @@ fn install_powershell_command(command: &str) -> std::process::Command {
 
     apply_npm_env(&mut cmd);
 
-    // Compose PATH: managed Buzz dirs first, then inherited process PATH.
+    // Compose PATH: managed Mesh dirs first, then inherited process PATH.
     // No login-shell path: login_shell_path() always returns None on Windows,
     // and we deliberately skip it here to avoid POSIX-shaped entries.
     let managed: Vec<std::path::PathBuf> = [
@@ -1588,7 +1588,7 @@ mod tests {
             path_value.contains(sentinel),
             "install_shell_command PATH must include the inherited process PATH; got: {path_value}"
         );
-        // The sentinel must appear LAST — managed Buzz dirs must have precedence.
+        // The sentinel must appear LAST — managed Mesh dirs must have precedence.
         assert!(
             path_value.ends_with(sentinel),
             "inherited process PATH must be appended LAST so managed dirs keep precedence; got: {path_value}"

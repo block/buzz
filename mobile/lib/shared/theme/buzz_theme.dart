@@ -12,21 +12,21 @@ const buzzThemeName = 'buzz';
 
 /// Name of the dark counterpart, which reuses the GitHub Dark palette and the
 /// dark-tuned gradient stops. Paired with [buzzThemeName] in `themePairs`, so
-/// the two behave as a single "Buzz" choice under System mode.
+/// the two behave as a single "Mesh" choice under System mode.
 const buzzDarkThemeName = 'buzz-dark';
 
-/// Whether [themeName] is either half of the Buzz pair. Both halves enable the
+/// Whether [themeName] is either half of the Mesh pair. Both halves enable the
 /// gradient so System mode keeps it on across an OS light/dark switch.
 bool isBuzzTheme(String themeName) =>
     themeName == buzzThemeName || themeName == buzzDarkThemeName;
 
-/// Whether the current widget tree is using the first-party Buzz treatment.
+/// Whether the current widget tree is using the first-party Mesh treatment.
 bool isBuzzThemeContext(BuildContext context) =>
     Theme.of(context).extension<AppColors>()?.topSectionGradient != null;
 
 /// Primary foreground for the mobile top navigation.
 ///
-/// Every theme uses its own [ColorScheme.onSurface]. Buzz is the exception:
+/// Every theme uses its own [ColorScheme.onSurface]. Mesh is the exception:
 /// its desktop-matching top gradient needs a neutral black or white foreground
 /// rather than the accent-derived color scheme foreground.
 Color navigationPrimaryForeground(BuildContext context) {
@@ -44,7 +44,7 @@ Color navigationSecondaryForeground(BuildContext context) {
 
 /// Channel-section label and icon foreground for the mobile side navigation.
 ///
-/// Section labels need more hierarchy than a placeholder. Buzz therefore uses
+/// Section labels need more hierarchy than a placeholder. Mesh therefore uses
 /// a stronger neutral over its gradient, while all other themes preserve their
 /// established secondary foreground token.
 Color navigationSectionForeground(BuildContext context) {
@@ -64,7 +64,7 @@ Color navigationSearchSurface(BuildContext context) {
 Color navigationDivider(BuildContext context, double opacity) =>
     navigationPrimaryForeground(context).withValues(alpha: opacity);
 
-/// Buzz renders with its fixed neutral foreground while preserving the stored
+/// Mesh renders with its fixed neutral foreground while preserving the stored
 /// wire accent so the user's choice returns on another theme.
 int effectiveAccentIndex(String themeName, String storedAccent) {
   if (isBuzzTheme(themeName)) return neutralAccentIndex;
@@ -72,12 +72,12 @@ int effectiveAccentIndex(String themeName, String storedAccent) {
 }
 
 /// Gradient stops, matching desktop's `--buzz-gradient-*` custom properties.
-const _lightTop = Color(0xFFE6E6B6);
-const _lightBottom = Color(0xFFC4D0DA);
-const _darkTop = Color(0xFF4A4616);
-const _darkBottom = Color(0xFF0A1423);
+const _lightTop = Color(0xFFEAD6FB);
+const _lightBottom = Color(0xFFC5E8F2);
+const _darkTop = Color(0xFF2A1F3D);
+const _darkBottom = Color(0xFF0B0B0B);
 
-/// The Buzz gradient for the app's top section, or null when [themeName] is not
+/// The Mesh gradient for the app's top section, or null when [themeName] is not
 /// a Buzz theme — in which case the section keeps its default frosted fill.
 ///
 /// The stops are fully opaque: under Buzz the color replaces the frosted

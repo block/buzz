@@ -25,13 +25,13 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Buzz authentication complete</title>
+  <title>Mesh authentication complete</title>
   <style>
     :root {
       color-scheme: light;
       font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: #231e1e;
-      background: #d7d72e;
+      background: #d8b4fe;
     }
 
     * {
@@ -45,7 +45,7 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
       display: grid;
       place-items: center;
       padding: 24px;
-      background-color: #d7d72e;
+      background-color: #d8b4fe;
       background-image: radial-gradient(circle, rgba(35, 30, 30, 0.16) 1.2px, transparent 1.3px);
       background-size: 37px 37px;
     }
@@ -74,7 +74,7 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
       margin: 0 0 20px;
       padding: 6px 14px;
       border-radius: 999px;
-      background: #d7d72e;
+      background: #d8b4fe;
       font-size: 14px;
       font-weight: 600;
       letter-spacing: 0.01em;
@@ -117,7 +117,7 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
 </head>
 <body>
   <main>
-    <svg class="bee" viewBox="0 0 466 309" role="img" aria-label="Buzz">
+    <svg class="bee" viewBox="0 0 466 309" role="img" aria-label="Mesh">
       <defs>
         <mask id="bee-mask">
           <rect width="466" height="309" fill="black"/>
@@ -134,7 +134,7 @@ const AUTH_COMPLETE_HTML: &str = r#"<!doctype html>
     </svg>
     <div class="eyebrow">Authentication complete</div>
     <h1>You&rsquo;re signed in.</h1>
-    <p>You can close this window and return to Buzz.</p>
+    <p>You can close this window and return to Mesh.</p>
   </main>
 </body>
 </html>"#;
@@ -647,12 +647,12 @@ mod tests {
     #[test]
     fn auth_complete_page_uses_buzz_brand() {
         for expected in [
-            "<title>Buzz authentication complete</title>",
-            "#d7d72e",
+            "<title>Mesh authentication complete</title>",
+            "#d8b4fe",
             "#231e1e",
             "#d7e7f6",
-            "aria-label=\"Buzz\"",
-            "return to Buzz",
+            "aria-label=\"Mesh\"",
+            "return to Mesh",
         ] {
             assert!(
                 AUTH_COMPLETE_HTML.contains(expected),

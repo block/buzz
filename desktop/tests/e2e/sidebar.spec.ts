@@ -251,7 +251,7 @@ test("automatically shows community join requirements near the community URL", a
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
-    "I agree to the Buzz Terms of Service and Privacy Policy.",
+    "I agree to the Mesh Terms of Service and Privacy Policy.",
   );
   await expect(ageConfirmation).toBeVisible();
   await expect(agreementConfirmation).toBeVisible();

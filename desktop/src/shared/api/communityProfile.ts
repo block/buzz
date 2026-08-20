@@ -15,7 +15,7 @@
 import { relayClient } from "@/shared/api/relayClient";
 import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
 
-/** Buzz: admin command to set the community profile (icon). */
+/** Mesh: admin command to set the community profile (icon). */
 export const KIND_SET_COMMUNITY_PROFILE = 9033;
 
 /**

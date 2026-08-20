@@ -13,7 +13,7 @@ export function ConnectButton({ className }: { className?: string }) {
     >
       <a href={deepLink}>
         <ExternalLink className="h-4 w-4" />
-        Open in Buzz
+        Open in Mesh
       </a>
     </Button>
   );

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Buzz",
+  "productName": "Mesh",
   "version": "0.5.14",
   "identifier": "xyz.block.buzz.app",
   "build": {

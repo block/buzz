@@ -85,7 +85,7 @@ const BUZZ_CLI_READ_VERBS = new Set([
 
 const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
   message: "Message",
-  "relay-op": "Buzz relay op",
+  "relay-op": "Mesh relay op",
   "file-edit": "File edit",
   "file-read": "File read",
   "skill-read": "Skill read",
@@ -434,13 +434,13 @@ function buzzOperationObject(operation: string) {
   if (isBuzzMessageSend(operation)) return "message";
   if (operation.includes(".")) {
     const [group] = operation.split(".");
-    return group ? group.replace(/[-_]+/g, " ") : "Buzz";
+    return group ? group.replace(/[-_]+/g, " ") : "Mesh";
   }
   const object = operation.replace(
     /^(add|approve|archive|create|delete|edit|get|hide|join|leave|list|open|publish|remove|search|send|set|trigger|unarchive|update|vote)_/,
     "",
   );
-  return object ? object.replace(/[-_]+/g, " ") : "Buzz";
+  return object ? object.replace(/[-_]+/g, " ") : "Mesh";
 }
 
 function buzzCliTone(group: string, verb: string): AgentActivityTone {

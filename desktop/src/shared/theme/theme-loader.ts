@@ -23,33 +23,33 @@ import {
 export const BUZZ_THEME_NAME = "buzz";
 
 /**
- * Buzz Dark theme name. The dark-mode counterpart to {@link BUZZ_THEME_NAME}:
+ * Mesh Dark theme name. The dark-mode counterpart to {@link BUZZ_THEME_NAME}:
  * reuses the GitHub Dark palette for every base color, with the same branded
  * sidebar gradient (dark-tuned colors, see `shared/styles/globals/theme.css`).
  * {@link ThemeProvider} toggles the shared `data-buzz-sidebar` attribute for
  * this theme too; the `.dark` root class selects the dark gradient values.
  *
- * Buzz and Buzz Dark are paired in {@link THEME_PAIRS}, so the picker shows a
- * combined "Buzz" tile under System mode (follow-OS) plus a single "Buzz" tile
- * under Light and a "Buzz Dark" tile under Dark.
+ * Mesh and Mesh Dark are paired in {@link THEME_PAIRS}, so the picker shows a
+ * combined "Mesh" tile under System mode (follow-OS) plus a single "Mesh" tile
+ * under Light and a "Mesh Dark" tile under Dark.
  */
 export const BUZZ_DARK_THEME_NAME = "buzz-dark";
 
-/** The Shiki bundle Buzz borrows its base palette from. */
+/** The Shiki bundle Mesh borrows its base palette from. */
 export const BUZZ_BASE_THEME: SyntaxThemeName = "github-light";
 
-/** The Shiki bundle Buzz Dark borrows its base palette from. */
+/** The Shiki bundle Mesh Dark borrows its base palette from. */
 export const BUZZ_DARK_BASE_THEME: SyntaxThemeName = "github-dark";
 
 /**
  * Resolve a theme name to the real Shiki bundled theme it maps to.
  *
- * Most themes map to themselves, but the Buzz aliases (`buzz` / `buzz-dark`)
+ * Most themes map to themselves, but the Mesh aliases (`buzz` / `buzz-dark`)
  * are not bundled Shiki themes — they reuse the GitHub Light / GitHub Dark
  * palettes. The Shiki highlighter engine (used for fenced code blocks in
  * `CodeBlock.tsx`) only understands bundled names, so callers that hand a
  * theme name to `loadTheme` / `codeToTokens` must resolve it through here
- * first; passing a raw Buzz alias makes Shiki throw and code blocks fall
+ * first; passing a raw Mesh alias makes Shiki throw and code blocks fall
  * back to unhighlighted plain text.
  */
 export function resolveShikiThemeName(name: string): SyntaxThemeName {
@@ -58,7 +58,7 @@ export function resolveShikiThemeName(name: string): SyntaxThemeName {
   return name as SyntaxThemeName;
 }
 
-// Available themes. "buzz" is a Buzz-branded theme that reuses the
+// Available themes. "buzz" is a Mesh-branded theme that reuses the
 // github-light palette plus a sidebar gradient; the rest are the Shiki
 // bundled syntax themes, alphabetically sorted.
 export const SYNTAX_THEMES = [

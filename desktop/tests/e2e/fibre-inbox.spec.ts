@@ -202,14 +202,17 @@ test("fibre inbox keyboard Done marks the selected fibre", async ({ page }) => {
   await expect(page.getByTestId("fibre-row")).toHaveCount(1);
 });
 
-test("fibre inbox empty state is Inbox Zero", async ({ page }) => {
+test("fibre inbox empty open state has no Inbox Zero copy", async ({
+  page,
+}) => {
   await installMockBridge(page);
   await mockFibreService(page, []);
   await page.goto("/");
   await expect(page.getByTestId("fibre-inbox")).toBeVisible();
   await expect(page.getByTestId("fibre-zero")).toBeVisible();
-  await expect(page.getByTestId("fibre-zero")).toContainText("Inbox Zero");
-  await expect(page.getByTestId("fibre-restore")).toBeVisible();
+  await expect(page.getByTestId("fibre-zero")).toHaveText("");
+  await expect(page.getByTestId("fibre-restore")).toHaveCount(0);
+  await expect(page.getByTestId("fibre-tab-open-count")).toHaveText("0");
   await expect(page.locator("html")).toHaveAttribute("data-inbox-zero", "");
 });
 

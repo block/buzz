@@ -44,7 +44,7 @@ const claudeRuntime = {
 const buzzAgentRuntime = {
   ...gooseRuntime,
   id: "buzz-agent",
-  label: "Buzz Agent",
+  label: "Mesh Agent",
   command: "buzz-agent-cmd",
   mcpCommand: null,
 };

@@ -115,7 +115,7 @@ export function EncryptedBackupProvider({
   React.useEffect(() => {
     if (state.downloadPending) {
       toast.loading("Preparing backup…", {
-        description: "You can close this window while Buzz finishes.",
+        description: "You can close this window while Mesh finishes.",
         duration: Number.POSITIVE_INFINITY,
         id: BACKUP_READY_TOAST_ID,
       });

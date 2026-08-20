@@ -121,7 +121,7 @@ test("a consuming client can switch to sharing its saved local model", async ({
   await expect(card).toContainText(
     "This machine is currently using another member's shared compute",
   );
-  await expect(card).toContainText("Buzz may briefly restart");
+  await expect(card).toContainText("Mesh may briefly restart");
   await expect(toggle).not.toBeChecked();
   await expect(
     page.getByTestId("mesh-share-compute-options-motion"),

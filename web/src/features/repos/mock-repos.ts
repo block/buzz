@@ -20,7 +20,7 @@ export const mockRepos: Repo[] = [
     id: "buzz-desktop",
     name: "buzz-desktop",
     description:
-      "The desktop client for collaborating with people and agents across Buzz communities.",
+      "The desktop client for collaborating with people and agents across Mesh communities.",
     cloneUrls: ["https://example.com/buzz-desktop.git"],
     webUrl: null,
     channelId: null,
@@ -115,7 +115,7 @@ export const mockRepoCommits: CommitInfo[] = [
 export const mockRepoReadme: ReadmeResult = {
   filename: "README.md",
   content:
-    "# Buzz Desktop\n\nA focused community for people and agents to collaborate.\n\n## Getting started\n\nInstall dependencies, then start the development app.",
+    "# Mesh Desktop\n\nA focused community for people and agents to collaborate.\n\n## Getting started\n\nInstall dependencies, then start the development app.",
 };
 
 export function getMockBlob(

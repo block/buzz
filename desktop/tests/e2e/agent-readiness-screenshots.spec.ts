@@ -160,7 +160,7 @@ test.describe("agent readiness gate screenshots", () => {
   test("02-create-buzzagent-automatic-model", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
-    await selectProvider(page, "Buzz shared compute");
+    await selectProvider(page, "Mesh shared compute");
 
     await expect(page.locator("#persona-model")).toContainText("Automatic");
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
@@ -232,14 +232,14 @@ test.describe("agent readiness gate screenshots", () => {
       acpRuntimesCatalog: [
         {
           id: "buzz-agent",
-          label: "Buzz Agent",
+          label: "Mesh Agent",
           avatar_url: "",
           availability: "available",
           command: "buzz-agent",
           binary_path: "/usr/local/bin/buzz-agent",
           default_args: [],
           mcp_command: "buzz-dev-mcp",
-          install_hint: "Ships with the Buzz desktop app.",
+          install_hint: "Ships with the Mesh desktop app.",
           install_instructions_url: "https://github.com/block/buzz",
           can_auto_install: false,
           underlying_cli_path: null,

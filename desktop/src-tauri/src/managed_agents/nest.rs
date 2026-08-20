@@ -115,7 +115,7 @@ pub fn ensure_nest() -> Result<(), String> {
     ensure_nest_at(&root)
 }
 
-/// Creates a Buzz nest at the given `root` path.
+/// Creates a Mesh nest at the given `root` path.
 ///
 /// - Creates the root directory and all subdirectories.
 /// - Writes `AGENTS.md` only if it doesn't already exist.
@@ -529,7 +529,7 @@ pub fn render_dynamic_section(
     relay_url: &str,
 ) -> String {
     let active_agents = if agents.is_empty() {
-        "## Active Agents\n\n*(No agents deployed yet. Add agents in the Buzz desktop app.)*"
+        "## Active Agents\n\n*(No agents deployed yet. Add agents in the Mesh desktop app.)*"
             .to_string()
     } else {
         let mut table =

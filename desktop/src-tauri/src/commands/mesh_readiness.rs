@@ -72,14 +72,14 @@ fn mesh_readiness_failure_message(
 ) -> String {
     match failure {
         MeshReadinessFailure::CatalogNeverSynced => format!(
-            "Buzz shared compute connected to the serving member but could not sync \
+            "Mesh shared compute connected to the serving member but could not sync \
              the model list for \"{model_id}\" — this is a network path problem \
              between this machine and the host (the compute node is reachable for \
              pings but the model-sync stream did not establish). Try again, or have \
              the host and this machine on a more direct network. (last: {last_detail})"
         ),
         MeshReadinessFailure::RoutingNeverCompleted => format!(
-            "Buzz shared compute found \"{model_id}\" on a serving member but inference \
+            "Mesh shared compute found \"{model_id}\" on a serving member but inference \
              requests did not complete — the host is discoverable but not currently \
              reachable for requests. Try again shortly. (last: {last_detail})"
         ),

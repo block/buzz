@@ -78,7 +78,7 @@ cat > "$ios_overrides" <<XCCONFIG
 // Applies to Debug builds only (included from Flutter/Debug.xcconfig before
 // AppOverrides.xcconfig, so a developer's app-specific overrides win).
 BUNDLE_IDENTIFIER = ${ios_bundle_id}
-APP_DISPLAY_NAME = Buzz (${label})
+APP_DISPLAY_NAME = Mesh (${label})
 XCCONFIG
 
 cat > "$android_props" <<PROPERTIES

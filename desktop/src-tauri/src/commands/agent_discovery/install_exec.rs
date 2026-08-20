@@ -126,7 +126,7 @@ fn annotate_retry_attempts(mut result: InstallStepResult, attempts: u32) -> Inst
 ///
 /// A packaged desktop launch inherits `/` as its working directory, and
 /// installers that write relative to the CWD then fail on a read-only root, so
-/// they run from Buzz's own default workdir instead (#2245).
+/// they run from Mesh's own default workdir instead (#2245).
 ///
 /// This is the only command builder [`run_install_command`] calls, so anything
 /// it spawns is guaranteed to carry the workdir — which is what makes the
@@ -611,7 +611,7 @@ mod tests {
 
     // ── install working directory ─────────────────────────────────────────────
 
-    /// Every install child must run from Buzz's writable default workdir. A
+    /// Every install child must run from Mesh's writable default workdir. A
     /// packaged launch inherits `/`, where installers that write relative to
     /// the CWD fail on a read-only root (#2245).
     ///

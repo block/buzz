@@ -113,11 +113,11 @@ export function InviteJoinPolicyNotice({
 
       {policy.terms_markdown || policy.privacy_markdown ? (
         <PolicyCheckbox
-          accessibleLabel="I agree to the Buzz Terms of Service and Privacy Policy."
+          accessibleLabel="I agree to the Mesh Terms of Service and Privacy Policy."
           checked={agreementConfirmed}
           onCheckedChange={onAgreementConfirmedChange}
         >
-          I agree to the Buzz{" "}
+          I agree to the Mesh{" "}
           {policy.terms_markdown ? (
             <button
               className="text-black no-underline underline-offset-4 hover:text-black/70 hover:underline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-black"

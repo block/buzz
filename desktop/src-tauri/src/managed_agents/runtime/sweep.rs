@@ -534,16 +534,16 @@ mod tests {
     fn strip_deleted_suffix_removes_kernel_suffix() {
         // Linux appends " (deleted)" when the binary has been replaced since
         // launch — this is exactly the stale orphan class we want to reap.
-        let p = PathBuf::from("/Applications/Buzz.app/Contents/MacOS/buzz-acp (deleted)");
+        let p = PathBuf::from("/Applications/Mesh.app/Contents/MacOS/buzz-acp (deleted)");
         assert_eq!(
             strip_deleted_suffix(p),
-            PathBuf::from("/Applications/Buzz.app/Contents/MacOS/buzz-acp")
+            PathBuf::from("/Applications/Mesh.app/Contents/MacOS/buzz-acp")
         );
     }
 
     #[test]
     fn strip_deleted_suffix_leaves_normal_path_unchanged() {
-        let p = PathBuf::from("/Applications/Buzz.app/Contents/MacOS/buzz-acp");
+        let p = PathBuf::from("/Applications/Mesh.app/Contents/MacOS/buzz-acp");
         assert_eq!(strip_deleted_suffix(p.clone()), p,);
     }
 
@@ -556,7 +556,7 @@ mod tests {
 
     // ── select_untracked_bundle_harnesses ────────────────────────────────
 
-    const BUNDLE_HARNESS: &str = "/Applications/Buzz.app/Contents/MacOS/buzz-acp";
+    const BUNDLE_HARNESS: &str = "/Applications/Mesh.app/Contents/MacOS/buzz-acp";
     const DEV_HARNESS: &str = "/Users/dev/buzz/.worktrees/main/target/debug/buzz-acp";
 
     fn snap(pid: u32, path: &str) -> ProcessSnapshot {
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn child_of_tracked_parent_not_directly_targeted() {
         // A non-harness binary is never selected regardless of tracked state.
-        let snapshots = vec![snap(1004, "/Applications/Buzz.app/Contents/MacOS/goose")];
+        let snapshots = vec![snap(1004, "/Applications/Mesh.app/Contents/MacOS/goose")];
         let result =
             select_untracked_bundle_harnesses(&snapshots, &PathBuf::from(BUNDLE_HARNESS), &[]);
         assert!(result.is_empty());
@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn deleted_suffix_stripped_path_matches_expected() {
         // Snapshot with " (deleted)" suffix stripped → should match the clean expected path.
-        let raw = PathBuf::from("/Applications/Buzz.app/Contents/MacOS/buzz-acp (deleted)");
+        let raw = PathBuf::from("/Applications/Mesh.app/Contents/MacOS/buzz-acp (deleted)");
         let snaps = vec![ProcessSnapshot {
             pid: 3001,
             exe_path: strip_deleted_suffix(raw),

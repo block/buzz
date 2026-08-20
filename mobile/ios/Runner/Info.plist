@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Buzz</string>
+	<string>Mesh</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -44,13 +44,13 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Buzz uses Face ID to confirm sensitive identity transfers.</string>
+	<string>Mesh uses Face ID to confirm sensitive identity transfers.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Buzz needs camera access so you can take photos to attach to messages and scan QR codes for device pairing.</string>
+	<string>Mesh needs camera access so you can take photos to attach to messages and scan QR codes for device pairing.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Buzz needs photo library access so you can attach images to messages.</string>
+	<string>Mesh needs photo library access so you can attach images to messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Buzz needs permission to save images to your photo library.</string>
+	<string>Mesh needs permission to save images to your photo library.</string>
 	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

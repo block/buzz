@@ -4,7 +4,7 @@ import 'theme_catalog.dart';
 /// (`desktop/src/shared/theme/theme-loader.ts`) so both clients offer the same
 /// System-mode pairings.
 ///
-/// Buzz leads the map the way it leads desktop's, so the first-party pair sorts
+/// Mesh leads the map the way it leads desktop's, so the first-party pair sorts
 /// ahead of the borrowed syntax themes wherever insertion order is preserved.
 const themePairs = <String, String>{
   'buzz': 'buzz-dark',
@@ -102,6 +102,7 @@ const _modeTokens = <String>{
 /// mode-specific tokens so `github-light` reads as "Github" and stands for both
 /// halves. Mirrors desktop's `pairedThemeLabel`.
 String pairedThemeLabel(String lightName) {
+  if (lightName == 'buzz') return 'Mesh';
   final stripped = lightName
       .split('-')
       .where((token) => !_modeTokens.contains(token))

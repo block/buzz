@@ -52,7 +52,7 @@ test("relay-resolved Buzz entities beat conflicting sender snapshots in content 
       {
         href: ENTITY_HREF,
         title: "Relay-authenticated PR title",
-        provider: "Buzz",
+        provider: "Mesh",
       },
       {
         href: EXTERNAL_HREF,

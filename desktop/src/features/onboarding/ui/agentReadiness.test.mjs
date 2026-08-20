@@ -146,7 +146,7 @@ test("resolveAgentReadiness_cli_ignores_buzz_agent_runtime", () => {
 test("resolveAgentReadiness_buzz_agent_ready_when_provider_model_and_key_set", () => {
   // anthropic requires ANTHROPIC_API_KEY
   const result = resolveAgentReadiness(
-    [makeRuntime({ id: "buzz-agent", label: "Buzz Agent" })],
+    [makeRuntime({ id: "buzz-agent", label: "Mesh Agent" })],
     makeConfig({
       preferred_runtime: "buzz-agent",
       provider: "anthropic",
@@ -210,7 +210,7 @@ test("resolveAgentReadiness_welcome_readiness_uses_ready_cli_without_preference"
 });
 
 test("resolveAgentReadiness_legacy_config_without_preference_uses_buzz_agent_fields", () => {
-  const runtimes = [makeRuntime({ id: "buzz-agent", label: "Buzz Agent" })];
+  const runtimes = [makeRuntime({ id: "buzz-agent", label: "Mesh Agent" })];
   const result = resolveAgentReadiness(
     runtimes,
     makeConfig({
@@ -239,7 +239,7 @@ test("resolveAgentReadiness_legacy_config_does_not_treat_goose_binary_as_ready",
 test("resolveAgentReadiness_preferred_goose_does_not_borrow_ready_buzz_agent_config", () => {
   const runtimes = [
     makeRuntime({ id: "goose", label: "Goose" }),
-    makeRuntime({ id: "buzz-agent", label: "Buzz Agent" }),
+    makeRuntime({ id: "buzz-agent", label: "Mesh Agent" }),
   ];
   const result = resolveAgentReadiness(
     runtimes,

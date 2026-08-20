@@ -130,7 +130,8 @@ test("renders kind labels and titles without a score badge", () => {
     openCount: 2,
   });
 
-  assert.match(screen.getByTestId("fibre-list").textContent, /2 open/);
+  assert.equal(screen.getByTestId("fibre-tab-open-count").textContent, "2");
+  assert.equal(screen.getByTestId("fibre-tab-done-count").textContent, "0");
   const rows = screen.getAllByTestId("fibre-row");
   assert.equal(rows.length, 2);
   assert.equal(rows[0].getAttribute("data-kind"), "blocker");
@@ -151,15 +152,18 @@ test("renders kind labels and titles without a score badge", () => {
   assert.deepEqual(selected, ["f2"]);
 });
 
-test("empty open list shows Inbox Zero copy", () => {
+test("empty open list omits Inbox Zero copy and keeps the count on the tab", () => {
   renderList({
     fibres: [],
     openCount: 0,
     selectedId: null,
   });
 
-  assert.match(screen.getByTestId("fibre-list").textContent, /Inbox Zero/);
-  assert.match(screen.getByTestId("fibre-list").textContent, /0 open/);
+  assert.equal(
+    screen.getByTestId("fibre-list").textContent.includes("Inbox Zero"),
+    false,
+  );
+  assert.equal(screen.getByTestId("fibre-tab-open-count").textContent, "0");
   assert.equal(screen.queryAllByTestId("fibre-row").length, 0);
 });
 
@@ -176,7 +180,7 @@ test("empty done list shows completed copy", () => {
     screen.getByTestId("fibre-list").textContent,
     /Nothing completed yet/,
   );
-  assert.match(screen.getByTestId("fibre-list").textContent, /0 done/);
+  assert.equal(screen.getByTestId("fibre-tab-done-count").textContent, "0");
 });
 
 test("unseen fibres show a blue dot; updated fibres show purple", () => {

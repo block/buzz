@@ -231,7 +231,7 @@ export function CustomEmojiSettingsCard() {
                     className="text-sm font-normal text-muted-foreground/70"
                     data-settings-subcopy
                   >
-                    Choose an image first; Buzz will suggest a name from the
+                    Choose an image first; Mesh will suggest a name from the
                     filename.
                   </p>
                 ) : ownDuplicate ? (

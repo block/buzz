@@ -1,10 +1,10 @@
 //! WebKit rendering workarounds for Linux, applied before WebKit initializes.
 //!
 //! WebKitGTK's dmabuf renderer aborts the web process during startup on some
-//! GPU/driver/compositor combinations, so Buzz comes up with no window at all
+//! GPU/driver/compositor combinations, so Mesh comes up with no window at all
 //! and the user has no way to fix it (#2338, upstream tauri#9394).
 //!
-//! Historically Buzz set `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which used to fall
+//! Historically Mesh set `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which used to fall
 //! back to shared-memory buffers. On current WebKitGTK that variable leaves the
 //! transport mode empty, so `AcceleratedBackingStore::create()` returns null
 //! and the UI SIGSEGVs the first time compositing is needed (#3654).
@@ -88,7 +88,7 @@ enum Plan {
 ///
 /// Must be called from `main()` before `crate::run()`: WebKit memoizes these
 /// variables at process start, and `std::env::set_var` is only sound while the
-/// process is still single threaded, which it is nowhere else in Buzz.
+/// process is still single threaded, which it is nowhere else in Mesh.
 ///
 /// `Err` carries a user-facing diagnostic; the caller reports it and exits.
 pub fn apply() -> Result<(), String> {

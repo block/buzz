@@ -34,7 +34,7 @@ export function useProjectRepoPresentation(
         host.kind === "external"
           ? host.host
           : host.kind === "buzz"
-            ? "Buzz"
+            ? "Mesh"
             : "Remote",
     },
   };

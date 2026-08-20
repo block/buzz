@@ -60,10 +60,10 @@ const MESH_IROH_RELAYS_ENV: &str = "BUZZ_MESH_IROH_RELAYS";
 /// SDK default (30s) times out long before that. Matches mesh-console.
 const MESH_STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 /// The pinned SDK defines startup readiness as the management API on `:3131`.
-/// Buzz defines client readiness by the OpenAI ingress agents consume on
+/// Mesh defines client readiness by the OpenAI ingress agents consume on
 /// `:9337`, so it supervises client startup independently and gives the SDK a
 /// long management deadline. A live ingress is therefore not torn down merely
-/// because the optional management API is delayed; Buzz's ingress watchdog is
+/// because the optional management API is delayed; Mesh's ingress watchdog is
 /// responsible for aborting and re-arming genuinely dead attempts.
 const MESH_CLIENT_MANAGEMENT_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// Bound explicit and watchdog-driven shutdowns. `EmbeddedNodeHandle::stop`
@@ -261,7 +261,7 @@ static MESH_RUNTIME_ID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 
 enum DesktopMeshHandle {
     /// The pinned SDK does not return its handle until `:3131/api/status` is
-    /// available. Keep that wait off the agent-save path while Buzz supervises
+    /// available. Keep that wait off the agent-save path while Mesh supervises
     /// the real `:9337` ingress independently.
     Starting {
         task: tokio::task::JoinHandle<anyhow::Result<EmbeddedNodeHandle>>,
@@ -391,7 +391,7 @@ impl DesktopMeshRuntime {
                 }
                 // Admission: present our owner attestation, and when a member
                 // roster was resolved, admit only those owners. Membership in
-                // the Buzz relay is the source of the roster; possession of a
+                // the Mesh relay is the source of the roster; possession of a
                 // dial pointer or relay reachability admits nobody.
                 let identity = ensure_owner_identity()?;
                 builder = builder.owner_key(identity.keystore_path.clone());

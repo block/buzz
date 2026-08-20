@@ -48,10 +48,10 @@
     --sidebar-border: 225 13.56% 76.86%;
     --sidebar-ring: 225 13.56% 76.86%;
     /* Exact Buzz palette tokens; components consume these semantically. */
-    --buzz-gradient-light-top: #e6e6b6;
-    --buzz-gradient-light-bottom: #c4d0da;
-    --buzz-gradient-dark-top: #4a4616;
-    --buzz-gradient-dark-bottom: #0a1423;
+    --buzz-gradient-light-top: #ead6fb;
+    --buzz-gradient-light-bottom: #c5e8f2;
+    --buzz-gradient-dark-top: #2a1f3d;
+    --buzz-gradient-dark-bottom: #0b0b0b;
     --buzz-content-dark: 0 0% 10.1960784314%;
     /* Hosted-community onboarding intentionally keeps this light palette in
        both app themes; semantic tokens keep component code color-agnostic. */

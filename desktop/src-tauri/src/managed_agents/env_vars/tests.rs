@@ -177,7 +177,7 @@ fn reserved_keys_include_remote_lifetime_policy() {
 
 #[test]
 fn reserved_keys_include_code_execution_surface() {
-    // The agent/MCP command + args are what Buzz actually exec's.
+    // The agent/MCP command + args are what Mesh actually exec's.
     // Overriding lets the user run arbitrary code as the agent.
     for key in [
         "BUZZ_ACP_AGENT_COMMAND",

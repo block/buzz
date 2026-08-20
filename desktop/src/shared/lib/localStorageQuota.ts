@@ -132,7 +132,7 @@ function notifyStorageFull(): void {
     .then(({ toast }) => {
       toast.error("Local storage is full", {
         description:
-          "Buzz could not save some local data — read positions may not persist across restarts.",
+          "Mesh could not save some local data — read positions may not persist across restarts.",
       });
     })
     .catch(() => {});

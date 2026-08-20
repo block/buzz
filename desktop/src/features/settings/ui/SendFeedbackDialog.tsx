@@ -167,7 +167,7 @@ export function SendFeedbackDialog({
             className="pt-2 text-sm text-muted-foreground"
             data-testid="feedback-privacy-disclosure"
           >
-            Feedback is sent privately to this Buzz deployment and is not posted
+            Feedback is sent privately to this Mesh deployment and is not posted
             to a channel. Attachments are uploaded before you send.
           </p>
         </DialogHeader>

@@ -225,7 +225,7 @@ void main() {
 
     expect(storage.loadCalls, 1);
     expect(pending.consumeCalls, 1);
-    expect(find.text('Join this Buzz community?'), findsOneWidget);
+    expect(find.text('Join this Mesh community?'), findsOneWidget);
   });
 
   testWidgets('waits for an invite modal before preparing the next invite', (
@@ -263,7 +263,7 @@ void main() {
     expect(pending.consumeCalls, 1);
     expect(pending.current, same(second));
     expect(container.read(inviteJoinProvider).invite, same(first));
-    expect(find.text('Join this Buzz community?'), findsOneWidget);
+    expect(find.text('Join this Mesh community?'), findsOneWidget);
 
     await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
     await tester.pumpAndSettle();
@@ -271,7 +271,7 @@ void main() {
     expect(pending.consumeCalls, 2);
     expect(pending.current, isNull);
     expect(container.read(inviteJoinProvider).invite, same(second));
-    expect(find.text('Join this Buzz community?'), findsOneWidget);
+    expect(find.text('Join this Mesh community?'), findsOneWidget);
   });
 
   testWidgets('dispatches a queued channel after preparing an invite', (
@@ -308,7 +308,7 @@ void main() {
 
     expect(pending.consumeCalls, 1);
     expect(pending.current, same(channelLink));
-    expect(find.text('Join this Buzz community?'), findsOneWidget);
+    expect(find.text('Join this Mesh community?'), findsOneWidget);
     expect(find.byType(_CapturedDestination), findsNothing);
 
     await tester.tap(find.widgetWithText(OutlinedButton, 'Cancel'));
@@ -354,7 +354,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Join this Buzz community?'), findsOneWidget);
+      expect(find.text('Join this Mesh community?'), findsOneWidget);
       expect(inviteContainer.read(pendingDeepLinkProvider), isNull);
 
       final messageContainer = ProviderContainer(

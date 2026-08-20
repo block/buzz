@@ -56,7 +56,7 @@ test("extractConfigNudge parses normalized_field requirement", () => {
 
 test("extractConfigNudge parses git_bash requirement", () => {
   const payload = {
-    agent_name: "Buzz Agent",
+    agent_name: "Mesh Agent",
     agent_pubkey: ATLAS_PUBKEY,
     requirements: [{ surface: "git_bash" }],
   };

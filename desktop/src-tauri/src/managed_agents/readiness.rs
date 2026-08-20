@@ -1294,7 +1294,7 @@ mod tests {
         let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\nexit 1\n");
         let exe = present_binary_str();
         // Use the fixture's absolute adapter path here. Bare `codex-acp`
-        // intentionally prefers Buzz's managed npm shim when it exists, which
+        // intentionally prefers Mesh's managed npm shim when it exists, which
         // would make this version-gate regression test depend on machine state.
         let rt = make_codex_runtime(
             leaked_adapter_commands(&dir.path().join("codex-acp")),

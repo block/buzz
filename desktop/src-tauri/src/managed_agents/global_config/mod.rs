@@ -8,7 +8,7 @@
 //! # Precedence (low → high)
 //!
 //! ```text
-//! baked build env  <  GLOBAL  <  definition (linked) / instance (legacy)  <  Buzz-identity
+//! baked build env  <  GLOBAL  <  definition (linked) / instance (legacy)  <  Mesh-identity
 //! ```
 //!
 //! # Semantics

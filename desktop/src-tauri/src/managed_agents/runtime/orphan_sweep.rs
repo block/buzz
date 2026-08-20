@@ -34,7 +34,7 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32])
                 return false;
             }
             // Receipt/PID-file entries were written by this instance at spawn
-            // time — they are Buzz-owned by construction; no name gate needed.
+            // time — they are Mesh-owned by construction; no name gate needed.
             // Kill live processes; dead ones fall through to receipt cleanup.
             (process_is_running(*pid) && process_has_buzz_marker(*pid, &instance_id))
                 || !process_is_running(*pid)
@@ -123,7 +123,7 @@ pub(super) const PROC_PIDTBSDINFO: libc::c_int = 3;
 /// (`instance_id`) that isn't in `skip_pids`. This catches orphans that escaped
 /// PID-file-based cleanup (e.g. agent workers spawned with their own process
 /// group whose parent harness already exited and had its PID file removed),
-/// while leaving another live Buzz instance's agents untouched.
+/// while leaving another live Mesh instance's agents untouched.
 #[cfg(target_os = "macos")]
 pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32]) {
     let my_uid = unsafe { libc::getuid() };

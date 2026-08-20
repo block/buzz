@@ -56,7 +56,7 @@ export const PRESENCE_HEARTBEAT_INTERVAL_MS = 60_000;
 export const PRESENCE_TTL_SECONDS = 3 * (PRESENCE_HEARTBEAT_INTERVAL_MS / 1000);
 
 // Away means "human not at the machine" (Slack/Discord semantics), never
-// "Buzz is not the focused window". OS-wide idle is authoritative when the
+// "Mesh is not the focused window". OS-wide idle is authoritative when the
 // platform exposes it; otherwise fall back to in-app activity.
 export const PRESENCE_IDLE_TIMEOUT_MS = 10 * 60_000;
 

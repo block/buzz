@@ -683,7 +683,7 @@ test("buildRecord_runtime_switch_new_hiddenKeys_then_generic_edit", () => {
   // Derive both descriptor sets from real runtime objects.
   const buzzAgentRuntime = {
     id: "buzz-agent",
-    label: "Buzz Agent",
+    label: "Mesh Agent",
     avatarUrl: "",
     availability: "available",
     command: "buzz-agent",
@@ -812,7 +812,7 @@ test("filterBakedGenericRows_numeric_baked_key_excluded_and_placeholder_shown", 
   // numeric input shows the inherited placeholder via numericTuningPlaceholder.
   const buzzAgentRuntime = {
     id: "buzz-agent",
-    label: "Buzz Agent",
+    label: "Mesh Agent",
     avatarUrl: "",
     availability: "available",
     command: "buzz-agent",
