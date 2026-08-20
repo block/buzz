@@ -247,6 +247,10 @@ export function useAppNavigation() {
          * firing. Used by the Drafts panel "Send message" confirm flow.
          */
         autoSend?: string;
+        /** Navigate even when the destination matches the current href.
+         * Used by desktop-notification activation so a click is never
+         * silently swallowed (block/buzz#3509). */
+        force?: boolean;
         messageId?: string;
         replace?: boolean;
         /** Open this thread panel directly without waiting for a timeline row. */
@@ -275,6 +279,7 @@ export function useAppNavigation() {
           },
         },
         {
+          force: options?.force,
           replace: options?.replace,
           resetScroll: options?.messageId ? true : undefined,
         },
@@ -298,6 +303,8 @@ export function useAppNavigation() {
       channelId: string,
       postId: string,
       options?: {
+        /** Navigate even when the destination matches the current href. */
+        force?: boolean;
         replace?: boolean;
         replyId?: string;
       },
@@ -312,6 +319,7 @@ export function useAppNavigation() {
           search: options?.replyId ? { replyId: options.replyId } : {},
         },
         {
+          force: options?.force,
           replace: options?.replace,
           resetScroll: false,
         },
@@ -362,7 +370,15 @@ export function useAppNavigation() {
   );
 
   const openSearchHit = React.useCallback(
-    async (hit: SearchHit) => {
+    async (
+      hit: SearchHit,
+      behavior?: {
+        /** Navigate even when the destination matches the current href.
+         * Used by desktop-notification activation so a click is never
+         * silently swallowed (block/buzz#3509). */
+        force?: boolean;
+      },
+    ) => {
       cacheSearchHitEvent(hit);
 
       const destination = await resolveSearchHitDestination(hit);
@@ -372,11 +388,13 @@ export function useAppNavigation() {
 
       if (destination.kind === "forum-post") {
         return goForumPost(destination.channelId, destination.postId, {
+          force: behavior?.force,
           replyId: destination.replyId,
         });
       }
 
       return goChannel(destination.channelId, {
+        force: behavior?.force,
         messageId: destination.messageId,
         threadRootId: destination.threadRootId,
       });
