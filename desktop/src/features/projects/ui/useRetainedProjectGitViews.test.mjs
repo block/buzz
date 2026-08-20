@@ -16,12 +16,12 @@ import { buildProjectDetailCrumbs } from "./useProjectDetailCrumbs.ts";
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "@/features/forum/ui/ForumComposer") {
-      return { shortCircuit: true, url: "buzz-test-stub:ForumComposer" };
+      return { shortCircuit: true, url: "buzz-pr-panel-stub:ForumComposer" };
     }
     return nextResolve(specifier, context);
   },
   load(url, context, nextLoad) {
-    if (url === "buzz-test-stub:ForumComposer") {
+    if (url === "buzz-pr-panel-stub:ForumComposer") {
       return {
         format: "module",
         shortCircuit: true,
@@ -345,6 +345,7 @@ async function renderReviewsPanel(initialProps) {
         root.unmount();
       });
       client.clear();
+      client.unmount();
       container.remove();
     },
   };
