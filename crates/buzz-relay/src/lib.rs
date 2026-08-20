@@ -35,6 +35,9 @@ pub mod protocol;
 pub mod push_runtime;
 /// Axum router construction.
 pub mod router;
+/// Twilio outbound SMS sink — sends replies in the SMS-inbox channel back
+/// to the originating phone number.
+pub(crate) mod sms_sink;
 /// Shared application state.
 pub mod state;
 pub mod storage_sweep;
@@ -46,6 +49,8 @@ pub mod telemetry;
 pub mod tenant;
 /// Relay-side tunnel session directory and routing.
 pub mod tunnel;
+/// Twilio inbound request signature validation.
+pub mod twilio_auth;
 /// Webhook secret generation and constant-time comparison.
 pub mod webhook_secret;
 /// Workflow action sink — relay-side implementation of [`buzz_workflow::ActionSink`].

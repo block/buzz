@@ -1,0 +1,16 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "com.buzz.sms-operator",
+  "name": "Buzz SMS Operator",
+  "version": "0.1.0",
+  "description": "Routes inbound SMS messages to the correct external project (bidcraft or construct-pro), or asks the sender to disambiguate.",
+  "author": "Buzz",
+  "license": "MIT",
+  "keywords": ["sms", "twilio", "dispatch", "operator"],
+  "engines": {
+    "buzz": ">=0.1.0"
+  },
+  "personas": [
+    "agents/sms-operator.persona.md"
+  ]
+}

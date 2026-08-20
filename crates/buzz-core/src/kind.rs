@@ -384,6 +384,24 @@ pub const fn is_moderation_command_kind(kind: u32) -> bool {
     )
 }
 
+// Buzz SMS routing commands (operator-signed, processed like the 9040-series:
+// validated + executed directly, never stored and never fanned out).
+//
+// Not storing these is a privacy requirement, not an optimisation: the command
+// carries a subscriber's phone number, and the `sms_identities` table it writes
+// is deliberately server-side only. Persisting the command as an ordinary event
+// would republish that number to every subscriber of the channel and leave it
+// queryable forever.
+/// Set (or clear) an SMS identity's default project route.
+///
+/// Tags: `sms_from` = the E.164 number to route, `project` = the NIP-MP
+/// project `d`-tag to dispatch into. An empty or absent `project` clears the
+/// route, putting the number back in the "ask which project" state.
+///
+/// Authorization is membership of the configured SMS-inbox channel — see
+/// `handlers/sms_commands.rs`, which owns the check.
+pub const KIND_SMS_SET_ROUTE: u32 = 9046;
+
 // NIP-43 relay membership admin commands
 /// NIP-43: Add a pubkey to the relay member list.
 pub const RELAY_ADMIN_ADD_MEMBER: u32 = 9030;

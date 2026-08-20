@@ -47,6 +47,8 @@ pub mod relay_invite;
 pub mod relay_members;
 /// Replica freshness fence for keyset-cursor read routing.
 pub mod replica_fence;
+/// Twilio SMS allow-list and project-routing persistence.
+pub mod sms;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.
@@ -3840,6 +3842,26 @@ impl Db {
             definition_hash,
         )
         .await
+    }
+
+    /// Look up a phone number's SMS allow-list / project-routing state.
+    /// Returns `Ok(None)` for an unknown number.
+    #[datastore_span(name = "get_sms_identity", system = "postgresql")]
+    pub async fn get_sms_identity(&self, phone_number: &str) -> Result<Option<sms::SmsIdentity>> {
+        sms::get_sms_identity(&self.pool, phone_number).await
+    }
+
+    /// Set or clear an allow-listed number's default project route. Returns
+    /// `false` if no such number is registered in this community; never
+    /// creates an identity.
+    #[datastore_span(name = "set_sms_default_project", system = "postgresql")]
+    pub async fn set_sms_default_project(
+        &self,
+        community_id: CommunityId,
+        phone_number: &str,
+        project: Option<&str>,
+    ) -> Result<bool> {
+        sms::set_default_project(&self.pool, community_id, phone_number, project).await
     }
 
     /// Fetch a single workflow by ID, scoped to its community.

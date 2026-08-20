@@ -12,7 +12,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_SMS_SET_ROUTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1757,6 +1757,40 @@ pub fn build_moderation_ban(
         tags.push(tag(&["reason", r])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_BAN as u16), "").tags(tags))
+}
+
+/// Build an SMS route command (kind 9046) setting which project a phone
+/// number's inbound texts dispatch against.
+///
+/// `project` is the NIP-MP project `d`-tag; `None` clears the route, putting
+/// the number back into the "ask which project" state. `phone_number` must be
+/// E.164 (`+` then 7–15 digits) — the relay refuses anything else rather than
+/// normalizing, since a mistyped number would route one person's agent output
+/// to another person's handset.
+pub fn build_sms_set_route(
+    phone_number: &str,
+    project: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let phone_number = phone_number.trim();
+    let e164 = phone_number
+        .strip_prefix('+')
+        .filter(|digits| (7..=15).contains(&digits.len()))
+        .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+        .is_some();
+    if !e164 {
+        return Err(SdkError::InvalidInput(format!(
+            "phone_number must be E.164 like +15551234567, got {phone_number:?}"
+        )));
+    }
+
+    let mut tags = vec![tag(&["sms_from", phone_number])?];
+    // Omit the tag entirely when clearing, rather than sending an empty
+    // value. The relay treats both as "clear", but an absent tag says what is
+    // meant without relying on that equivalence.
+    if let Some(project) = project.map(str::trim).filter(|p| !p.is_empty()) {
+        tags.push(tag(&["project", project])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_SMS_SET_ROUTE as u16), "").tags(tags))
 }
 
 /// Build a community unban command (kind 9041).
@@ -4393,6 +4427,50 @@ mod tests {
         let ev = sign(build_moderation_unban(&pk).unwrap());
         assert_eq!(ev.kind.as_u16(), KIND_MODERATION_UNBAN as u16);
         assert!(has_tag(&ev, "p", &pk));
+    }
+
+    #[test]
+    fn sms_set_route_shape() {
+        let ev = sign(build_sms_set_route("+18655550123", Some("bidcraft")).unwrap());
+        assert_eq!(ev.kind.as_u16(), KIND_SMS_SET_ROUTE as u16);
+        assert!(has_tag(&ev, "sms_from", "+18655550123"));
+        assert!(has_tag(&ev, "project", "bidcraft"));
+    }
+
+    /// Clearing omits the project tag rather than sending an empty value.
+    #[test]
+    fn sms_set_route_omits_project_tag_when_clearing() {
+        for project in [None, Some(""), Some("   ")] {
+            let ev = sign(build_sms_set_route("+18655550123", project).unwrap());
+            assert!(
+                !ev.tags
+                    .iter()
+                    .any(|t| t.as_slice().first().map(String::as_str) == Some("project")),
+                "project {project:?} should clear by omitting the tag"
+            );
+        }
+    }
+
+    /// A mistyped number would route one person's agent output to another
+    /// person's handset, so the builder refuses rather than normalizes.
+    #[test]
+    fn sms_set_route_rejects_non_e164() {
+        for bad in [
+            "8655550123",
+            "+1 865 555 0123",
+            "+1-865-555-0123",
+            "+123456",
+            "+1234567890123456",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    build_sms_set_route(bad, Some("bidcraft")),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 
     #[test]
