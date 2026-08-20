@@ -51,7 +51,7 @@ export function CompactMessageSummary({
   const variant = useAgentSessionTranscriptVariant();
   const { goChannel } = useAppNavigation();
   const { openProfilePanel } = useProfilePanel();
-  const isCompactPreview = variant === "compactPreview";
+  const isCompactPreview = variant !== "default";
   const shouldClampBubble = !isCompactPreview;
   const [bubbleRef, hasBubbleOverflow] =
     useTranscriptBubbleOverflow(shouldClampBubble);

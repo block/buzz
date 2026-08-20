@@ -11,7 +11,7 @@ export function shouldShowTranscriptRowTimestamp(
   item: TranscriptItem,
   options: { enabled: boolean; variant: string },
 ): boolean {
-  if (!options.enabled || options.variant === "compactPreview") {
+  if (!options.enabled || options.variant !== "default") {
     return false;
   }
   if (item.type === "message" && item.role !== "assistant") {

@@ -1,6 +1,6 @@
 import * as React from "react";
 import { VList } from "virtua";
-import type { VListHandle } from "virtua";
+import type { CustomItemComponentProps, VListHandle } from "virtua";
 
 import { formatDayGroupLabel } from "@/shared/lib/datetime";
 import {
@@ -60,6 +60,8 @@ type TimelineMessageListProps = {
   entranceMessageId?: string | null;
   onEntranceMessageComplete?: (messageId: string) => void;
   messageFooters?: Record<string, React.ReactNode>;
+  /** Owner-only content rendered immediately before a specific message row. */
+  messageLeadingContent?: Record<string, React.ReactNode>;
   /** Hoisted main-timeline entries (computed once in ChannelPane). Falls back
    *  to deriving them here when omitted (e.g. the deferred-render pass). */
   mainEntries?: MainTimelineEntry[];
@@ -102,6 +104,8 @@ type TimelineMessageListProps = {
   threadUnreadCounts?: ReadonlyMap<string, number>;
   /** Content rendered as the first virtual row before channel history. */
   leadingContent?: React.ReactNode;
+  /** Live content rendered after channel history and before the composer gap. */
+  trailingContent?: React.ReactNode;
   /** Hide date boundaries for a huddle's live transcript. */
   hideDayDividers?: boolean;
   /** Show speaker identity on every row instead of grouping consecutive messages. */
@@ -137,6 +141,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   entranceMessageId = null,
   onEntranceMessageComplete,
   messageFooters,
+  messageLeadingContent,
   mainEntries,
   threadSummaries,
   messages,
@@ -157,6 +162,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   threadUnreadCounts,
   unfollowThreadById,
   leadingContent,
+  trailingContent,
   historyExhausted = false,
   hideDayDividers = false,
   alwaysShowMessageIdentity = false,
@@ -240,48 +246,56 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               ownerProfiles={ownerProfiles}
             />
           );
-        case "message":
+        case "message": {
+          const leadingMessageContent =
+            messageLeadingContent?.[item.entry.message.id] ?? null;
           return (
-            <MessageRowItem
-              channelId={channelId}
-              currentPubkey={currentPubkey}
-              entry={item.entry}
-              followThreadById={followThreadById}
-              footer={messageFooters?.[item.entry.message.id] ?? null}
-              highlightedMessageId={highlightedMessageId}
-              huddleMemberPubkeys={huddleMemberPubkeys}
-              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-              hideAgentAccessBadges={hideAgentAccessBadges}
-              isContinuation={
-                alwaysShowMessageIdentity ? false : item.isContinuation
-              }
-              isFollowedByContinuation={
-                alwaysShowMessageIdentity
-                  ? false
-                  : item.isFollowedByContinuation
-              }
-              isFollowingThreadById={isFollowingThreadById}
-              isUnread={isMessageUnreadById?.(item.entry.message.id)}
-              playEntrance={item.entry.message.id === entranceMessageId}
-              onEntranceComplete={onEntranceMessageComplete}
-              onDelete={onDelete}
-              onEdit={onEdit}
-              onMarkRead={onMarkRead}
-              onMarkUnread={onMarkUnread}
-              onReply={onReply}
-              onOpenThread={onOpenThread}
-              onToggleReaction={onToggleReaction}
-              profiles={profiles}
-              searchActiveMessageId={searchActiveMessageId}
-              searchMatchingMessageIds={searchMatchingMessageIds}
-              searchQuery={searchQuery}
-              threadUnreadCounts={threadUnreadCounts}
-              unfollowThreadById={unfollowThreadById}
-              videoReviewContext={videoReviewContextById.get(
-                item.entry.message.id,
-              )}
-            />
+            <>
+              {leadingMessageContent}
+              <MessageRowItem
+                channelId={channelId}
+                currentPubkey={currentPubkey}
+                entry={item.entry}
+                followThreadById={followThreadById}
+                footer={messageFooters?.[item.entry.message.id] ?? null}
+                highlightedMessageId={highlightedMessageId}
+                huddleMemberPubkeys={huddleMemberPubkeys}
+                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                hideAgentAccessBadges={hideAgentAccessBadges}
+                isContinuation={
+                  alwaysShowMessageIdentity || leadingMessageContent
+                    ? false
+                    : item.isContinuation
+                }
+                isFollowedByContinuation={
+                  alwaysShowMessageIdentity
+                    ? false
+                    : item.isFollowedByContinuation
+                }
+                isFollowingThreadById={isFollowingThreadById}
+                isUnread={isMessageUnreadById?.(item.entry.message.id)}
+                playEntrance={item.entry.message.id === entranceMessageId}
+                onEntranceComplete={onEntranceMessageComplete}
+                onDelete={onDelete}
+                onEdit={onEdit}
+                onMarkRead={onMarkRead}
+                onMarkUnread={onMarkUnread}
+                onReply={onReply}
+                onOpenThread={onOpenThread}
+                onToggleReaction={onToggleReaction}
+                profiles={profiles}
+                searchActiveMessageId={searchActiveMessageId}
+                searchMatchingMessageIds={searchMatchingMessageIds}
+                searchQuery={searchQuery}
+                threadUnreadCounts={threadUnreadCounts}
+                unfollowThreadById={unfollowThreadById}
+                videoReviewContext={videoReviewContextById.get(
+                  item.entry.message.id,
+                )}
+              />
+            </>
           );
+        }
       }
     },
     [
@@ -298,6 +312,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       entranceMessageId,
       onEntranceMessageComplete,
       messageFooters,
+      messageLeadingContent,
       onDelete,
       onEdit,
       onMarkRead,
@@ -323,6 +338,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         historyExhausted={historyExhausted}
         hideDayDividers={hideDayDividers}
         leadingContent={leadingContent}
+        trailingContent={trailingContent}
         onAtBottomStateChange={onAtBottomStateChange}
         onStartReached={onStartReached}
         onVirtualizerApiChange={onVirtualizerApiChange}
@@ -361,6 +377,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
           ))}
         </section>
       ))}
+      {trailingContent}
     </div>
   );
 });
@@ -379,6 +396,7 @@ type VirtualizedTimelineRowsProps = {
   historyExhausted: boolean;
   hideDayDividers: boolean;
   leadingContent?: React.ReactNode;
+  trailingContent?: React.ReactNode;
   onAtBottomStateChange?: (atBottom: boolean) => void;
   onStartReached?: () => boolean;
   onVirtualizerApiChange?: (api: TimelineVirtualizerApi | null) => void;
@@ -387,26 +405,19 @@ type VirtualizedTimelineRowsProps = {
   renderItem: (item: TimelineNonDayItem) => React.ReactNode;
 };
 
-type VirtualizedTimelineItemShellProps = {
-  children: React.ReactNode;
-  index: number;
-  ref?: React.LegacyRef<HTMLDivElement>;
-  style: React.CSSProperties;
-};
-
 const PreserveVirtualizedItemVisibilityContext = React.createContext(false);
 
 function VirtualizedTimelineItemShell({
   children,
   ref,
   style,
-}: VirtualizedTimelineItemShellProps) {
+}: CustomItemComponentProps) {
   const preserveVisibility = React.useContext(
     PreserveVirtualizedItemVisibilityContext,
   );
   return (
     <div
-      ref={ref}
+      ref={ref as React.Ref<HTMLDivElement>}
       style={preserveVisibility ? style : { ...style, visibility: undefined }}
     >
       {children}
@@ -419,6 +430,7 @@ function VirtualizedTimelineRows({
   historyExhausted,
   hideDayDividers,
   leadingContent,
+  trailingContent,
   onAtBottomStateChange,
   onStartReached,
   onVirtualizerApiChange,
@@ -459,8 +471,15 @@ function VirtualizedTimelineRows({
         leadingContent,
         historyExhausted,
         !hideDayDividers,
+        trailingContent,
       ),
-    [dayGroups, hideDayDividers, historyExhausted, leadingContent],
+    [
+      dayGroups,
+      hideDayDividers,
+      historyExhausted,
+      leadingContent,
+      trailingContent,
+    ],
   );
   const keys = React.useMemo(() => items.map(virtualizedItemKey), [items]);
   const dayDividerItems = React.useMemo(
@@ -759,6 +778,9 @@ function VirtualizedTimelineRows({
               );
             }
             if (item.kind === "leading-content") {
+              return <div key={virtualizedItemKey(item)}>{item.content}</div>;
+            }
+            if (item.kind === "trailing-content") {
               return <div key={virtualizedItemKey(item)}>{item.content}</div>;
             }
             if (item.kind === "day-divider") {
