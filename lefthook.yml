@@ -8,6 +8,10 @@
 # branch's last push (firing mobile/desktop/rust lanes on unrelated pushes), and
 # on a brand-new branch falls back to a stale remote's tip (a full-suite run).
 # The three-dot diff scopes every lane to what this branch actually changed.
+# Both the three-dot diff and lefthook's stock discovery inspect the checked-out
+# HEAD, so pushing a non-HEAD ref (explicit refspec, `--all`) validates HEAD's
+# tree, not the pushed commit — the always-on `push-head-scope` lane warns when
+# they diverge and CI remains the authoritative gate for that ref.
 # Deliberate deviations:
 # - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
 #   is omitted; a CI-workflow-only edit doesn't need a local test run.
@@ -76,6 +80,13 @@ pre-push:
   commands:
     branch-skew:
       run: ./scripts/check-branch-skew.sh
+    push-head-scope:
+      # Warn-only: the scoped lanes below validate the checked-out HEAD, so a
+      # non-HEAD ref push (explicit refspec, --all) relies on CI for its
+      # path-scoped checks. This lane reads the pushed refs from stdin and
+      # warns when any pushed commit is not HEAD. It never fails the push.
+      use_stdin: true
+      run: ./scripts/check-push-head-scope.sh
     file-size-check:
       # The ratchet computes its own merge-base diff, so path filtering here
       # would only duplicate policy and create another place for coverage drift.
