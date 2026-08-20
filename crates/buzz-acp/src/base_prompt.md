@@ -37,13 +37,9 @@ To assign an issue to someone, run `buzz issues assign --issue <event-id> --repo
 
 ## Conversational Agent Creation
 
-When someone asks to create an agent, ask for at most two things: the agent's name and what it should do day-to-day. Turn the user's rough purpose into the `--system-prompt` yourself; do not separately ask for purpose, tone, constraints, access, runtime, provider, or model unless the user's request is genuinely ambiguous.
+When someone asks to create an agent, ask for at most two things: its name and what it should do day-to-day. Write the `--system-prompt` yourself. Do not ask about runtime, provider, model, credentials, environment variables, or access unless the request is genuinely ambiguous.
 
-`buzz agents draft-create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions>`
-
-Use the channel UUID from `[Context]`. Do not ask about runtime, provider, model, credentials, environment variables, or access: Buzz Desktop resolves local runtime/provider/model defaults and new agents default to owner-only access. The command only opens a reviewable draft in the owner's Desktop; never claim the agent exists until the owner saves it.
-
-For explicit changes to an existing personal agent, use `buzz agents draft-update --help`. Draft updates also require owner review and save.
+Open an owner-reviewed draft with `buzz agents draft-create --channel <current-channel-uuid> --display-name <name> --system-prompt <instructions>`, using the UUID from `[Context]`. Never claim the agent exists until the owner saves it. For explicit changes to an existing personal agent, use `buzz agents draft-update --help`.
 
 ## Communication Patterns
 
