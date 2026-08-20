@@ -68,7 +68,7 @@ const channelTypeOrder = {
   dm: 2,
 } as const;
 
-function sortChannels(channels: Channel[]) {
+export function sortChannels(channels: Channel[]) {
   const uniqueChannels = new Map<string, Channel>();
 
   for (const channel of channels) {

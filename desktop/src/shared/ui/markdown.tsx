@@ -63,6 +63,7 @@ import {
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import {
+  AuthoredDeepLinkAnchor,
   ChannelDeepLinkAnchor,
   MarkdownChannelDeepLink,
   MarkdownChannelReference,
@@ -118,7 +119,6 @@ import {
 } from "./markdown/imageLightbox";
 import { MarkdownTable } from "./markdown/MarkdownTable";
 import { ProgressiveImage } from "./markdown/ProgressiveImage";
-import { BuzzInlineLink } from "./markdown/BuzzLinkChip";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
 import { useMessageLinkPreviews } from "./markdown/useMessageLinkPreviews";
@@ -1277,6 +1277,7 @@ export function createMarkdownComponents(
       onOpenMessageLink,
       onImportSnapshotFromUrl,
       relayOrigin,
+      resolveChannelReferences,
       snapshotSharedBy,
     } = useMarkdownRuntime();
     if (!interactive) {
@@ -1288,8 +1289,7 @@ export function createMarkdownComponents(
 
     const label = getReactNodeText(children);
 
-    // Snapshot attachment (agent or team): classify before generic FileCard.
-    // resolveSnapshotCard checks the filename suffix + SHA-256 field.
+    // Classify verified agent/team snapshots before generic files.
     const snapshotCard = resolveSnapshotCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1317,9 +1317,7 @@ export function createMarkdownComponents(
       );
     }
 
-    // Generic file attachment: a `[filename](url)` link whose href matches an
-    // imeta entry with a non-image, non-video MIME. Render a download card
-    // instead of a plain link. (Media uses the `img` renderer, not this path.)
+    // Render non-media imeta links as download cards; media uses `img`.
     const card = resolveFileCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1331,8 +1329,7 @@ export function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so
-    // clicks navigate in-app instead of opening the URL in the OS browser.
+    // Keep Buzz channel/message navigation in-app.
     if (href) {
       if (parseChannelLink(href).ok) {
         return (
@@ -1358,22 +1355,23 @@ export function createMarkdownComponents(
               link={messageLinkTarget.link}
               onOpenChannel={onOpenChannel}
               onOpenMessageLink={onOpenMessageLink}
+              resolveChannelReference={resolveChannelReferences}
             />
           );
         }
 
         return (
-          <BuzzInlineLink
-            title={href}
+          <AuthoredDeepLinkAnchor
+            channelId={messageLinkTarget.link.channelId}
+            href={href}
             interactive={interactive}
-            onOpenLink={() => onOpenMessageLink(messageLinkTarget.link)}
+            messageLink={messageLinkTarget.link}
           >
             {children}
-          </BuzzInlineLink>
+          </AuthoredDeepLinkAnchor>
         );
       }
-      // Malformed message deep link — fall through to the default
-      // anchor (renders as a normal external link).
+      // Malformed message deep links fall through to external handling.
     }
 
     // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones
@@ -1678,8 +1676,8 @@ export function createMarkdownComponents(
     }: {
       children?: React.ReactNode;
     }) {
-      const { channels, onOpenChannel, onOpenMessageLink } =
-        useMarkdownRuntime();
+      const runtime = useMarkdownRuntime();
+      const { channels, onOpenChannel, onOpenMessageLink } = runtime;
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1693,6 +1691,7 @@ export function createMarkdownComponents(
           link={parsed.value}
           onOpenChannel={onOpenChannel}
           onOpenMessageLink={onOpenMessageLink}
+          resolveChannelReference={runtime.resolveChannelReferences}
         />
       );
     },
@@ -1804,6 +1803,7 @@ function MarkdownInner({
       onOpenEntityLink,
       onOpenMessageLink,
       relayOrigin,
+      resolveChannelReferences: true,
       snapshotSharedBy,
       onImportSnapshotFromUrl: (
         fileBytes: number[],

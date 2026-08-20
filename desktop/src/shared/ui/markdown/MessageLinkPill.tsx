@@ -1,6 +1,11 @@
 import * as React from "react";
 
+import {
+  isChannelReferenceOpenable,
+  useChannelReference,
+} from "@/features/channels/openChannelDirectory";
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
+import { getMessageLinkLabel } from "@/features/messages/lib/messageLinkLabel";
 import { cn } from "@/shared/lib/cn";
 import {
   Tooltip,
@@ -14,7 +19,6 @@ import { BuzzLinkChip } from "./BuzzLinkChip";
 import { useInlineTooltipPosition } from "./useInlineTooltipPosition";
 import { useMessageLinkMetadata } from "./useMessageLinkMetadata";
 import type { MessageLinkPillProps } from "./types";
-import { getMessageLinkLabel } from "@/features/messages/lib/messageLinkLabel";
 
 const graphemeSegmenter =
   typeof Intl.Segmenter === "function"
@@ -22,20 +26,6 @@ const graphemeSegmenter =
     : null;
 const emojiGraphemePattern =
   /(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[\uFE0F\u20E3])/u;
-
-function formatMessageAge(createdAt: number): string {
-  const elapsedMinutes = Math.max(
-    0,
-    Math.floor((Date.now() - createdAt * 1_000) / 60_000),
-  );
-  if (elapsedMinutes < 1) return "just now";
-  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
-  const elapsedHours = Math.floor(elapsedMinutes / 60);
-  if (elapsedHours < 24) return `${elapsedHours}h ago`;
-  const elapsedDays = Math.floor(elapsedHours / 24);
-  if (elapsedDays < 7) return `${elapsedDays}d ago`;
-  return `${Math.floor(elapsedDays / 7)}w ago`;
-}
 
 function segmentLinkLabel(label: string): Array<{
   isEmoji: boolean;
@@ -59,6 +49,20 @@ function segmentLinkLabel(label: string): Array<{
     }
   }
   return segments;
+}
+
+function formatMessageAge(createdAt: number): string {
+  const elapsedMinutes = Math.max(
+    0,
+    Math.floor((Date.now() - createdAt * 1_000) / 60_000),
+  );
+  if (elapsedMinutes < 1) return "just now";
+  if (elapsedMinutes < 60) return `${elapsedMinutes}m ago`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}h ago`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 7) return `${elapsedDays}d ago`;
+  return `${Math.floor(elapsedDays / 7)}w ago`;
 }
 
 function MessageLinkMetadataTooltip({
@@ -129,8 +133,21 @@ function MessageLinkMetadataTooltip({
   );
 }
 
-export function MessageLinkPill({
-  channels,
+function ResolvedMessageLinkPill(props: MessageLinkPillProps) {
+  const channel = useChannelReference(props.link.channelId);
+  const openable = isChannelReferenceOpenable(channel);
+  return (
+    <MessageLinkPillContents
+      {...props}
+      channel={openable ? channel : undefined}
+      channelLabel={openable ? channel.name : undefined}
+      openable={openable}
+    />
+  );
+}
+
+function MessageLinkPillContents({
+  channel,
   href,
   interactive,
   link,
@@ -138,18 +155,19 @@ export function MessageLinkPill({
   onOpenMessageLink,
   threadExcerpt,
   variant = "default",
-}: MessageLinkPillProps) {
+  channelLabel: resolvedChannelLabel,
+  openable = true,
+}: MessageLinkPillProps & {
+  channel?: NonNullable<MessageLinkPillProps["channels"]>[number];
+  channelLabel?: string;
+  openable?: boolean;
+}) {
   const [isHovered, setIsHovered] = React.useState(false);
-  const channel = channels.find((c) => c.id === link.channelId);
-  const channelLabel = channel?.name ?? link.channelId.slice(0, 8);
-  const channelReadable =
-    channel !== undefined &&
-    (channel.isMember || channel.visibility === "open");
-  const shouldLoadMetadata =
-    channelReadable && interactive && variant === "default";
-  const metadata = useMessageLinkMetadata(link, shouldLoadMetadata);
+  const channelLabel = resolvedChannelLabel ?? link.channelId.slice(0, 8);
   const isSentFromThread = variant === "sent-from-thread";
   const permalink = href ?? buildMessageLink(link);
+  const shouldLoadMetadata = openable && interactive && variant === "default";
+  const metadata = useMessageLinkMetadata(link, shouldLoadMetadata);
   const destination =
     channel?.channelType === "dm" ? channelLabel : `#${channelLabel}`;
   const tooltipFooter = link.threadRootId
@@ -166,9 +184,8 @@ export function MessageLinkPill({
   });
 
   if (!isSentFromThread) {
-    // Inline message chips stay at the channel label only: fetched metadata and
-    // the event-hash fallback both live in the tooltip, so the chip keeps the
-    // same width before, during, and after metadata resolution.
+    // Keep fetched metadata and identity out of the visible label so resolution
+    // never changes the chip width.
     const chipLabel = truncateInlineChipLabel(channelLabel);
     const isDeleted = metadata.state.kind === "deleted";
     const chip = (
@@ -178,18 +195,21 @@ export function MessageLinkPill({
         href={permalink}
         icon="message"
         aria-label={
-          isDeleted
-            ? link.threadRootId
-              ? `Open thread in channel ${channelLabel}; linked message was deleted`
-              : `Open channel ${channelLabel}; linked message was deleted`
-            : `Open message in channel ${channelLabel}`
+          !openable
+            ? `Message in channel ${channelLabel}`
+            : isDeleted
+              ? link.threadRootId
+                ? `Open thread in channel ${channelLabel}; linked message was deleted`
+                : `Open channel ${channelLabel}; linked message was deleted`
+              : `Open message in channel ${channelLabel}`
         }
         className={cn(
           metadata.state.kind === "unavailable" && "buzz-link-unavailable",
           isDeleted && "buzz-link-deleted",
         )}
-        interactive={interactive}
+        interactive={openable && interactive}
         onOpenLink={() => {
+          if (!openable) return;
           if (!isDeleted) {
             onOpenMessageLink(link);
             return;
@@ -218,7 +238,7 @@ export function MessageLinkPill({
     );
   }
 
-  if (!interactive) {
+  if (!interactive || !openable) {
     return (
       <span className="inline-block max-w-80 truncate" data-message-link="">
         {label}
@@ -239,9 +259,7 @@ export function MessageLinkPill({
       )}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
-      onClick={() => {
-        onOpenMessageLink(link);
-      }}
+      onClick={() => onOpenMessageLink(link)}
     >
       {segmentLinkLabel(label).map((segment) =>
         segment.isEmoji ? (
@@ -263,4 +281,22 @@ export function MessageLinkPill({
       )}
     </button>
   );
+}
+
+export function MessageLinkPill(props: MessageLinkPillProps) {
+  const knownChannel = props.channels?.find(
+    (channel) => channel.id === props.link.channelId,
+  );
+
+  if (knownChannel || !props.resolveChannelReference) {
+    return (
+      <MessageLinkPillContents
+        {...props}
+        channel={knownChannel}
+        channelLabel={knownChannel?.name}
+      />
+    );
+  }
+
+  return <ResolvedMessageLinkPill {...props} />;
 }

@@ -2,8 +2,8 @@ import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getSentFromThreadReference } from "@/features/messages/lib/sentFromThread";
-import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import { MessageLinkPill } from "@/shared/ui/markdown/MessageLinkPill";
 import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 
@@ -48,6 +48,7 @@ export function SentFromThreadLine({
           void goChannel(targetChannelId);
         }}
         onOpenMessageLink={onOpenMessageLink}
+        resolveChannelReference
         threadExcerpt={reference.rootExcerpt}
         variant="sent-from-thread"
       />
