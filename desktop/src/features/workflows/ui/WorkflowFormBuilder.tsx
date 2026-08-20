@@ -24,6 +24,7 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
+import { WorkflowEmojiField } from "./WorkflowEmojiField";
 import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEditor";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
@@ -94,16 +95,17 @@ function TriggerConfigFields({
           <FieldLabel htmlFor="wf-trigger-emoji">
             Emoji filter (optional)
           </FieldLabel>
-          <Input
-            autoCapitalize="off"
+          <WorkflowEmojiField
+            ariaLabel="Choose trigger emoji"
+            clearAriaLabel="Clear trigger emoji"
             disabled={disabled}
             id="wf-trigger-emoji"
-            onChange={(event) =>
-              onUpdate({ ...trigger, emoji: event.target.value })
-            }
-            placeholder="e.g. thumbsup"
+            onChange={(emoji) => onUpdate({ ...trigger, emoji })}
             value={trigger.emoji ?? ""}
           />
+          <p className="text-xs text-muted-foreground">
+            Empty matches any reaction.
+          </p>
         </div>
       );
     case "webhook":
