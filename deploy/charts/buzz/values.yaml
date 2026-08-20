@@ -4,8 +4,10 @@
 #
 #   PRODUCTION (default) — external Postgres/Redis/S3, existingSecret
 #   refs everywhere, no chart-side autogeneration, GitOps-safe (ArgoCD/Flux).
-#   HA-ready: replicaCount >= 2 (requires Redis; git state is object-store-
-#   backed, so no ReadWriteMany volume is needed — RWO per replica is fine).
+#   Redis is required at any replica count (buzz-pubsub + NIP-98 replay
+#   protection, not just HA fan-out). HA-ready: replicaCount >= 2 (git state
+#   is object-store-backed, so no ReadWriteMany volume is needed — RWO per
+#   replica is fine).
 #
 #   QUICKSTART — bundles in-cluster Postgres + Redis + MinIO and
 #   auto-generates relay secrets via the `lookup` pattern (NOT GitOps-safe —
