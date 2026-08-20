@@ -5255,6 +5255,15 @@ void main() {
             ?.fontSize,
         AppTheme.light().textTheme.bodySmall?.fontSize,
       );
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(const ValueKey('channel-header-member-count')),
+            )
+            .style
+            ?.color,
+        AppTheme.light().colorScheme.primary.withValues(alpha: 0.8),
+      );
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Channel actions'), findsNothing);
 
