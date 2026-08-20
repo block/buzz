@@ -159,14 +159,15 @@ impl Drop for SttPipeline {
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
 /// How many 16 kHz samples of silence before we flush to STT.
-/// 300 ms × 16 000 Hz / 256 samples-per-frame ≈ 19 frames.
-/// Previous value (28 frames / 450 ms) felt sluggish in conversation.
+/// 500 ms × 16 000 Hz / 256 samples-per-frame ≈ 31 frames.
+/// This favors natural conversational pauses over the lower latency of the
+/// previous 19-frame / 304 ms window.
 ///
 /// This window is a turn-taking quality knob, not a latency lever: an earlier
 /// env override (`BUZZ_STT_FLUSH_MS`) let it be lowered to 150 ms, which split
 /// natural mid-sentence pauses into separate messages and confused the
 /// listening agents. Reverted — the window is fixed at the production value.
-const SILENCE_FLUSH_FRAMES: usize = 19;
+const SILENCE_FLUSH_FRAMES: usize = 31;
 
 /// earshot requires exactly 256 samples per frame at 16 kHz.
 const VAD_FRAME_SAMPLES: usize = 256;
