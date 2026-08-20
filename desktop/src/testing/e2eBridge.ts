@@ -8950,6 +8950,7 @@ async function handleGetManagedAgentLog(args: {
 async function handleUpdateManagedAgent(args: {
   input: {
     pubkey: string;
+    backend?: RawManagedAgent["backend"];
     name?: string;
     model?: string | null;
     systemPrompt?: string | null;
@@ -8959,6 +8960,26 @@ async function handleUpdateManagedAgent(args: {
   };
 }): Promise<{ agent: RawManagedAgent; profile_sync_error: string | null }> {
   const agent = getMockManagedAgent(args.input.pubkey);
+  if (args.input.backend !== undefined) {
+    const backendChanged =
+      JSON.stringify(agent.backend) !== JSON.stringify(args.input.backend);
+    if (backendChanged && agent.backend.type === "provider") {
+      throw new Error(
+        "Changing an existing provider-backed agent's run location is not supported.",
+      );
+    }
+    if (
+      backendChanged &&
+      (agent.status === "running" || agent.status === "deployed")
+    ) {
+      throw new Error("Stop this agent before changing where it runs");
+    }
+    if (backendChanged) {
+      agent.backend = structuredClone(args.input.backend);
+      agent.backend_agent_id = null;
+      agent.start_on_app_launch = false;
+    }
+  }
   if (args.input.name !== undefined) {
     agent.name = args.input.name;
   }

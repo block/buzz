@@ -1,5 +1,54 @@
 use super::*;
 
+fn prepare_backend_update(requested: Option<&BackendKind>) -> Result<Option<String>, String> {
+    let Some(BackendKind::Provider { id, config }) = requested else {
+        return Ok(None);
+    };
+    crate::managed_agents::validate_provider_config(config)?;
+    crate::managed_agents::resolve_provider_binary(id).map(|path| Some(path.display().to_string()))
+}
+
+fn apply_backend_update(
+    record: &mut ManagedAgentRecord,
+    requested: Option<&BackendKind>,
+    provider_binary_path: Option<&str>,
+    runtime_active: bool,
+) -> Result<bool, String> {
+    let Some(requested) = requested else {
+        return Ok(false);
+    };
+    if requested == &record.backend {
+        return Ok(false);
+    }
+    match (&record.backend, requested) {
+        (BackendKind::Local, BackendKind::Provider { .. }) => {
+            if runtime_active || record.runtime_pid.is_some() {
+                return Err(
+                    "Stop this agent before changing where it runs; its local runtime is still active."
+                        .to_string(),
+                );
+            }
+            let provider_binary_path = provider_binary_path.ok_or_else(|| {
+                "provider binary was not resolved before backend migration".to_string()
+            })?;
+            record.backend = requested.clone();
+            record.backend_agent_id = None;
+            record.provider_binary_path = Some(provider_binary_path.to_string());
+            record.provider_policy_pending = false;
+            // A migration is saved but not deployed. Requiring the owner's
+            // explicit first Deploy keeps an app restart from crossing that
+            // lifecycle boundary automatically.
+            record.start_on_app_launch = false;
+            Ok(true)
+        }
+        (BackendKind::Provider { .. }, _) => Err(
+            "Changing an existing provider-backed agent's run location is not supported."
+                .to_string(),
+        ),
+        (BackendKind::Local, BackendKind::Local) => Ok(false),
+    }
+}
+
 pub(crate) fn managed_agent_access_policy_changed(
     current_mode: crate::managed_agents::RespondTo,
     current_allowlist: &[String],
@@ -63,6 +112,10 @@ pub async fn update_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
+    // Provider discovery executes a trusted external binary. Finish that
+    // validation before taking the store/process locks or mutating a record.
+    let prepared_provider_binary = prepare_backend_update(input.backend.as_ref())?;
+
     // Phase 1: local save (synchronous, under lock)
     let (mut summary, sync_params, rollback, access_policy_changed, access_restart_relays) = {
         let _store_guard = state
@@ -80,8 +133,30 @@ pub async fn update_managed_agent(
             state.clear_agent_session_caches(pubkey);
         }
 
+        let runtime_active =
+            !crate::managed_agents::managed_agent_runtime_keys(&runtimes, &input.pubkey).is_empty();
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
+
+        let backend_will_change = input
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend != &record.backend);
+        let name_will_change = input.name.as_ref().is_some_and(|name| {
+            let trimmed = name.trim();
+            !trimmed.is_empty() && trimmed != record.name
+        });
+        if backend_will_change && name_will_change {
+            return Err(
+                "Save the agent name separately before changing where it runs.".to_string(),
+            );
+        }
+        apply_backend_update(
+            record,
+            input.backend.as_ref(),
+            prepared_provider_binary.as_deref(),
+            runtime_active,
+        )?;
 
         let mut name_changed = false;
         if let Some(name_update) = input.name {

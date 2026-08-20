@@ -5,9 +5,7 @@ import { summarizeRunOn } from "./runOnSummary";
 /**
  * Read-only "Run on" summary for the edit-agent dialog.
  *
- * Read-only on purpose: `UpdateManagedAgentRequest` has no backend field —
- * where an agent runs is fixed at creation (a provider-backed agent's
- * deployment holds its private key; there is no migrate operation). This
+ * Provider-backed agents and active local agents are read-only here. This
  * section shows the *saved* provider config from the record, without probing
  * the provider binary: an edit dialog must not do executable work as a side
  * effect, and a live probe would show today's schema defaults instead of
@@ -18,8 +16,10 @@ import { summarizeRunOn } from "./runOnSummary";
  */
 export function RunOnSummarySection({
   backend,
+  migrationBlockedReason,
 }: {
   backend: ManagedAgentBackend;
+  migrationBlockedReason?: string;
 }) {
   const summary = summarizeRunOn(backend);
 
@@ -64,9 +64,10 @@ export function RunOnSummarySection({
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        These are the settings saved when the agent was created. Where an agent
-        runs can&apos;t be changed afterwards — create a new agent to run
-        somewhere else.
+        {migrationBlockedReason ??
+          (summary.location === "provider"
+            ? "Provider-backed agents cannot change run location yet."
+            : "This agent runs on your computer.")}
       </p>
     </div>
   );

@@ -127,6 +127,10 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+   A stopped local instance may also migrate once to a discovered provider from
+   Edit. Saving preserves its identity and settings, disables start on app
+   launch, and leaves it stopped until an explicit Deploy. Active local agents
+   and provider-backed agents keep a read-only `Run on` summary.
 10. **Catalog visibility is community-scoped relay state, never a global
     definition field.** `AgentDefinition.shared` is only the active
     relay+owner projection returned to the UI. Durable heads and pending

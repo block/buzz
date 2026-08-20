@@ -672,9 +672,9 @@ export type RuntimeConfigSurface = {
   /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
   effortOptions?: AcpConfigOptionValue[];
 };
-
 export type UpdateManagedAgentInput = {
   pubkey: string;
+  backend?: ManagedAgentBackend;
   name?: string;
   model?: string | null;
   provider?: string | null;

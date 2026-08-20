@@ -249,6 +249,31 @@ fn update_request_provider_tristate_value_means_set() {
     );
 }
 
+#[test]
+fn update_request_deserializes_provider_backend_migration() {
+    let request: super::UpdateManagedAgentRequest = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "backend": {
+                "type": "provider",
+                "id": "kubernetes",
+                "config": { "namespace": "buzz-agents", "workspace_gib": 5 }
+            }
+        }"#,
+    )
+    .expect("provider backend update should deserialize");
+    assert_eq!(
+        request.backend,
+        Some(super::BackendKind::Provider {
+            id: "kubernetes".to_string(),
+            config: serde_json::json!({
+                "namespace": "buzz-agents",
+                "workspace_gib": 5
+            }),
+        })
+    );
+}
+
 use super::{CreateManagedAgentRequest, RelayMeshConfig};
 
 /// Wire-shape test: the create request arrives from TS as camelCase
