@@ -61,6 +61,7 @@ fn goose_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_token_env_vars: &[],
     }
 }
 

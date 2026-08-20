@@ -64,6 +64,16 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Environment variables that, when set to a non-empty value, are
+    /// themselves proof the runtime can authenticate.
+    ///
+    /// `auth_probe_args` runs a *sibling* CLI. For `claude` that is the Claude
+    /// Code CLI, while the runtime Buzz actually spawns is `claude-agent-acp`,
+    /// which resolves credentials differently -- it also honours
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, which the CLI probe cannot see. A token set
+    /// here means the spawned runtime authenticates no matter what the sibling
+    /// CLI reports, so it is checked first and short-circuits the probe.
+    pub auth_token_env_vars: &'static [&'static str],
 }
 
 impl KnownAcpRuntime {
