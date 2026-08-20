@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-cli = { path = "../buzz-cli" }
+buzz-sdk = { workspace = true }
 git-credential-nostr = { path = "../git-credential-nostr" }
 git-sign-nostr = { path = "../git-sign-nostr" }
 nostr = { workspace = true }
@@ -42,6 +43,9 @@ buzz-core = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"] }
 
 # Windows Job Object APIs for the shell tool's timeout kill path: terminating a
 # job kills the bash child AND every MSYS grandchild it forked, the Windows
