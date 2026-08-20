@@ -168,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         read_database_url: config.read_database_url.clone(),
         replica_read_max_age_ms: config.replica_read_max_age_ms,
         max_connections: config.db_pool_size,
+        min_connections: config.db_pool_min_size,
         read_max_connections: config.db_read_pool_size,
         ..DbConfig::default()
     };

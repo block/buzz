@@ -13,6 +13,11 @@ use tracing::warn;
 /// NIP-44 encryption overhead.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
 
+/// Default minimum idle connections in the Postgres writer pool.
+///
+/// Named so the value is asserted in tests rather than duplicated as a literal.
+pub const DEFAULT_DB_POOL_MIN_SIZE: u32 = 20;
+
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -94,6 +99,21 @@ pub struct Config {
     /// the per-pod pool and requests fail on acquire timeout while the
     /// database sits idle.
     pub db_pool_size: u32,
+    /// Minimum idle connections kept in the Postgres writer pool
+    /// (`BUZZ_DB_MIN_POOL_SIZE`). Defaults to 20.
+    ///
+    /// Pre-warming the pool keeps the first requests after a deploy or an
+    /// idle period off the connect path, which against Aurora costs a TLS
+    /// handshake per connection. Clamped to [`Self::db_pool_size`]: sqlx
+    /// obeys the maximum regardless, but stores the requested minimum
+    /// verbatim, so an unclamped pair would misreport itself in
+    /// `pool.options()` for no behavioural gain.
+    ///
+    /// Applies to the writer pool only. The read-replica pool is built lazily
+    /// with a pinned minimum of 0 so a replica that is down at boot cannot
+    /// gate relay startup — pre-warming it would reintroduce exactly that
+    /// coupling.
+    pub db_pool_min_size: u32,
     /// Maximum connections in the Postgres read-replica pool
     /// (`BUZZ_DB_READ_POOL_SIZE`). Defaults to `db_pool_size`. Sized
     /// independently so reader capacity can be tuned against the replica's
@@ -530,6 +550,21 @@ impl Config {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&v| v > 0);
+
+        // Unlike the pool maxima, `0` is honoured rather than rejected: a
+        // minimum of zero is a meaningful setting (a fully lazy pool, which is
+        // what the read-replica pool pins deliberately), whereas a maximum of
+        // zero is not. Rejecting it would make the one value an operator would
+        // reach for to stop pre-warming mean the opposite. Unparsable values
+        // still fall back to the default.
+        let db_pool_min_size = std::env::var("BUZZ_DB_MIN_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_DB_POOL_MIN_SIZE)
+            // sqlx never opens more than `max_connections` regardless, but it
+            // reports back whatever minimum it was handed; clamping here keeps
+            // the pool's own introspection honest.
+            .min(db_pool_size);
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -995,6 +1030,7 @@ impl Config {
             redis_url,
             redis_pool_size,
             db_pool_size,
+            db_pool_min_size,
             db_read_pool_size,
             relay_url,
             pairing_relay_url,
@@ -1116,6 +1152,7 @@ mod tests {
         assert!(!config.redis_url.is_empty());
         assert_eq!(config.redis_pool_size, 16);
         assert_eq!(config.db_pool_size, 50);
+        assert_eq!(config.db_pool_min_size, DEFAULT_DB_POOL_MIN_SIZE);
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
@@ -1262,6 +1299,93 @@ mod tests {
         assert_eq!(overridden, 80);
         assert_eq!(zero, 50, "zero must fall back to the default");
         assert_eq!(junk, 50, "unparsable value must fall back to the default");
+    }
+
+    #[test]
+    fn db_pool_min_size_env_override_and_invalid_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_DB_MIN_POOL_SIZE");
+
+        std::env::remove_var("BUZZ_DB_MIN_POOL_SIZE");
+        let unset = Config::from_env().expect("config").db_pool_min_size;
+
+        std::env::set_var("BUZZ_DB_MIN_POOL_SIZE", "35");
+        let overridden = Config::from_env().expect("config").db_pool_min_size;
+
+        // `0` is a meaningful minimum (fully lazy pool), so unlike the maxima
+        // it must be honoured rather than falling back to the default.
+        std::env::set_var("BUZZ_DB_MIN_POOL_SIZE", "0");
+        let zero = Config::from_env().expect("config").db_pool_min_size;
+
+        std::env::set_var("BUZZ_DB_MIN_POOL_SIZE", "not-a-number");
+        let junk = Config::from_env().expect("config").db_pool_min_size;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_DB_MIN_POOL_SIZE", value);
+        } else {
+            std::env::remove_var("BUZZ_DB_MIN_POOL_SIZE");
+        }
+
+        assert_eq!(
+            unset, DEFAULT_DB_POOL_MIN_SIZE,
+            "unset must use the default minimum"
+        );
+        assert_eq!(overridden, 35);
+        assert_eq!(zero, 0, "zero must be honoured, not treated as unset");
+        assert_eq!(
+            junk, DEFAULT_DB_POOL_MIN_SIZE,
+            "unparsable value must fall back to the default"
+        );
+    }
+
+    /// The minimum must never exceed the maximum. sqlx obeys the maximum
+    /// regardless, but stores the requested minimum verbatim, so without this
+    /// clamp `pool.options()` would report an impossible pair.
+    #[test]
+    fn db_pool_min_size_is_clamped_to_max() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_min = std::env::var_os("BUZZ_DB_MIN_POOL_SIZE");
+        let previous_max = std::env::var_os("BUZZ_DB_POOL_SIZE");
+
+        // Explicit minimum above an explicit maximum.
+        std::env::set_var("BUZZ_DB_POOL_SIZE", "8");
+        std::env::set_var("BUZZ_DB_MIN_POOL_SIZE", "30");
+        let explicit = Config::from_env().expect("config");
+
+        // Default minimum (20) against a smaller explicit maximum: the clamp
+        // must fire without the operator naming a minimum at all.
+        std::env::remove_var("BUZZ_DB_MIN_POOL_SIZE");
+        let defaulted = Config::from_env().expect("config");
+
+        // A maximum above the minimum must leave the minimum untouched.
+        std::env::set_var("BUZZ_DB_POOL_SIZE", "60");
+        std::env::set_var("BUZZ_DB_MIN_POOL_SIZE", "30");
+        let headroom = Config::from_env().expect("config");
+
+        for (key, value) in [
+            ("BUZZ_DB_MIN_POOL_SIZE", previous_min),
+            ("BUZZ_DB_POOL_SIZE", previous_max),
+        ] {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+
+        assert_eq!(explicit.db_pool_size, 8);
+        assert_eq!(
+            explicit.db_pool_min_size, 8,
+            "explicit minimum above the maximum must clamp to the maximum"
+        );
+        assert_eq!(
+            defaulted.db_pool_min_size, 8,
+            "default minimum above a smaller maximum must clamp to the maximum"
+        );
+        assert_eq!(
+            headroom.db_pool_min_size, 30,
+            "a minimum below the maximum must pass through unchanged"
+        );
     }
 
     #[test]
