@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeAllowlist, parsePubkeyInput } from "./respondToAllowlist.ts";
+import {
+  allowlistChipPresentation,
+  mergeAllowlist,
+  parsePubkeyInput,
+} from "./respondToAllowlist.ts";
 
 const HEX_A = "a".repeat(64);
 const HEX_B = "b".repeat(64);
@@ -59,4 +63,39 @@ test("mergeAllowlist skips invalid additions silently", () => {
   // Invalid additions are caller-validated; merge ignores them defensively.
   const merged = mergeAllowlist([HEX_A], ["not-hex", HEX_B]);
   assert.deepEqual(merged, [HEX_A, HEX_B]);
+});
+
+test("allowlistChipPresentation prefers the display name", () => {
+  assert.deepEqual(
+    allowlistChipPresentation({
+      displayName: "Ada Lovelace",
+      nip05Handle: "ada@example.com",
+      avatarUrl: "https://example.com/a.png",
+    }),
+    { name: "Ada Lovelace", avatarUrl: "https://example.com/a.png" },
+  );
+});
+
+test("allowlistChipPresentation falls back to the NIP-05 handle", () => {
+  assert.deepEqual(
+    allowlistChipPresentation({
+      displayName: "   ",
+      nip05Handle: "ada@example.com",
+      avatarUrl: null,
+    }),
+    { name: "ada@example.com", avatarUrl: null },
+  );
+});
+
+test("allowlistChipPresentation reports no name when nothing resolved", () => {
+  // The caller renders the truncated pubkey for a null name — an unresolved
+  // profile must not turn into an empty-looking chip.
+  assert.deepEqual(allowlistChipPresentation(undefined), {
+    name: null,
+    avatarUrl: null,
+  });
+  assert.deepEqual(
+    allowlistChipPresentation({ displayName: null, nip05Handle: "  " }),
+    { name: null, avatarUrl: null },
+  );
 });
