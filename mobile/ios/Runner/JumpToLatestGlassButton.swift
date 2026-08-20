@@ -171,7 +171,7 @@ final class ChannelBackGlassButtonPlatformView: NSObject, FlutterPlatformView {
     containerView.backgroundColor = .clear
     containerView.isOpaque = false
     let buttonCenterX =
-      ((args as? [String: Any])?["buttonCenterX"] as? NSNumber)?.doubleValue ?? 35
+      ((args as? [String: Any])?["buttonCenterX"] as? NSNumber)?.doubleValue ?? 37
 
     var configuration: UIButton.Configuration
     if #available(iOS 26.0, *) {

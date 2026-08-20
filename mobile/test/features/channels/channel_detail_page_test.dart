@@ -5196,7 +5196,7 @@ void main() {
 
   group('App bar', () {
     testWidgets(
-      'uses a native iOS glass back button with clear channel icon spacing',
+      'keeps the native iOS glass header aligned at large text sizes',
       (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -5211,6 +5211,7 @@ void main() {
         await tester.pumpWidget(
           _buildTestable(
             messages: [message],
+            textScaler: const TextScaler.linear(2),
             users: const {
               'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
             },
@@ -5245,12 +5246,12 @@ void main() {
         );
         expect(
           (nativeView.creationParams as Map<String, Object>)['buttonCenterX'],
-          35.0,
+          37.0,
         );
         final backButtonRect = tester.getRect(
           find.byKey(const ValueKey('channel-ios-glass-back')),
         );
-        expect(backButtonRect.width, 55);
+        expect(backButtonRect.width, 57);
         final channelIconRect = tester.getRect(
           find.byKey(const ValueKey('channel-header-avatar')),
         );
@@ -5258,6 +5259,11 @@ void main() {
           channelIconRect.left - backButtonRect.right,
           moreOrLessEquals(Grid.xs),
         );
+        expect(
+          backButtonRect.center.dy,
+          moreOrLessEquals(channelIconRect.center.dy),
+        );
+        expect(tester.takeException(), isNull);
         debugDefaultTargetPlatformOverride = null;
       },
     );

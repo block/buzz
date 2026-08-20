@@ -8,7 +8,7 @@ class _ChannelIosGlassBackButton extends HookWidget {
   const _ChannelIosGlassBackButton();
 
   static const _viewType = 'buzz/channel_back_glass';
-  static const _buttonCenterX = 35.0;
+  static const _buttonCenterX = 37.0;
 
   @override
   Widget build(BuildContext context) {
@@ -42,7 +42,7 @@ class _ChannelIosGlassBackButton extends HookWidget {
 
     return SizedBox(
       key: const ValueKey('channel-ios-glass-back'),
-      width: 55,
+      width: 57,
       height: 48,
       child: UiKitView(
         viewType: _viewType,
@@ -142,10 +142,13 @@ class _ChannelAppBarTitle extends ConsumerWidget {
               ),
               const SizedBox(width: Grid.twelve),
               Expanded(
-                child: SizedBox(
+                child: ConstrainedBox(
                   key: const ValueKey('channel-header-text-stack'),
-                  height: _channelHeaderAvatarSize,
+                  constraints: const BoxConstraints(
+                    minHeight: _channelHeaderAvatarSize,
+                  ),
                   child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
