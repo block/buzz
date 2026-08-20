@@ -291,6 +291,11 @@ pub struct Config {
     /// Whether the configured web bundle serves Git browser routes in addition
     /// to the public invite landing page. Defaults to false.
     pub serve_git_web_gui: bool,
+
+    /// Comma-separated list of default channel UUIDs to seat users into when
+    /// they claim an invite. When empty or unset, no default channel seating occurs.
+    /// Set via `BUZZ_DEFAULT_CHANNEL_IDS` (e.g. "12345678-....,87654321-...").
+    pub default_channel_ids: Vec<uuid::Uuid>,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -986,6 +991,25 @@ impl Config {
             ));
         }
 
+        // Parse default channel IDs for invite seating.
+        let default_channel_ids: Vec<uuid::Uuid> = std::env::var("BUZZ_DEFAULT_CHANNEL_IDS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        uuid::Uuid::parse_str(s).map_err(|e| {
+                            ConfigError::InvalidValue(format!(
+                                "BUZZ_DEFAULT_CHANNEL_IDS contains invalid UUID '{s}': {e}"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -1041,6 +1065,7 @@ impl Config {
             admin,
             web_dir,
             serve_git_web_gui,
+            default_channel_ids,
         })
     }
 }
