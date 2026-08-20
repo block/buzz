@@ -32,6 +32,14 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     category: "Navigation",
   },
   {
+    id: "go-to",
+    label: "Go to",
+    description: "Jump to a section of the app",
+    keys: "⌘G",
+    keysWindows: "Ctrl+G",
+    category: "Navigation",
+  },
+  {
     id: "browse-channels",
     label: "Browse channels",
     description: "Open the channel browser",
@@ -274,4 +282,49 @@ export function getPlatformKeys(shortcut: KeyboardShortcut): string {
 export function getPlatformKeysById(id: string): string | null {
   const shortcut = KEYBOARD_SHORTCUTS.find((s) => s.id === id);
   return shortcut ? getPlatformKeys(shortcut) : null;
+}
+
+/**
+ * Shortcut ids surfaced on every view in the global shortcut status bar,
+ * regardless of location. These are the universal anchors worth teaching
+ * everywhere. Ids reference {@link KEYBOARD_SHORTCUTS} so labels and keys
+ * stay in sync with the canonical registry.
+ */
+export const GLOBAL_SHORTCUT_HINT_IDS: readonly string[] = [
+  "quick-search",
+  "go-to",
+];
+
+/**
+ * Per-view shortcut ids for the global shortcut status bar, keyed by the app's
+ * `selectedView` (see `AppShell.helpers.ts`). Intentionally sparse: hints are
+ * added incrementally as each view gains view-specific shortcuts worth
+ * surfacing. Ids reference {@link KEYBOARD_SHORTCUTS}. Unknown ids are ignored
+ * by {@link getShortcutHintsForView}.
+ */
+export const VIEW_SHORTCUT_HINT_IDS: Readonly<
+  Record<string, readonly string[]>
+> = {};
+
+/**
+ * Resolve the ordered, de-duplicated shortcuts to show in the global status
+ * bar for a given view. View-specific hints come first, then the global
+ * anchors. Ids that do not resolve to a known shortcut are dropped so the bar
+ * never renders an empty chip.
+ */
+export function getShortcutHintsForView(view: string): KeyboardShortcut[] {
+  const ids = [
+    ...(VIEW_SHORTCUT_HINT_IDS[view] ?? []),
+    ...GLOBAL_SHORTCUT_HINT_IDS,
+  ];
+  const seen = new Set<string>();
+  const hints: KeyboardShortcut[] = [];
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    const shortcut = KEYBOARD_SHORTCUTS.find((s) => s.id === id);
+    if (!shortcut) continue;
+    seen.add(id);
+    hints.push(shortcut);
+  }
+  return hints;
 }

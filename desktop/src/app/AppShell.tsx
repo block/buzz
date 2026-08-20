@@ -8,8 +8,12 @@ import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
+import { ShortcutStatusBar } from "@/app/ShortcutStatusBar";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
+import type { GoToDestinationId } from "@/features/navigation/lib/goToDestinations";
+import { GoToPalette } from "@/features/navigation/ui/GoToPalette";
+import { useGoToPalette } from "@/features/navigation/useGoToPalette";
 import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
@@ -661,6 +665,22 @@ export function AppShell() {
     onSearchCurrentChannel: handleOpenChannelSearch,
     onSearchEverything: handleOpenSearch,
   });
+  const handleGoTo = React.useCallback(
+    (id: GoToDestinationId) => {
+      if (id === "inbox") {
+        void goHome();
+        return;
+      }
+      if (id === "agents") {
+        void goAgents();
+      }
+    },
+    [goAgents, goHome],
+  );
+  const goToPalette = useGoToPalette({
+    disabled: isHuddleRoom,
+    onNavigate: handleGoTo,
+  });
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
@@ -723,6 +743,11 @@ export function AppShell() {
           }}
         >
           <AppHuddleShell
+            bottomBar={
+              !settingsOpen && !isHuddleRoom ? (
+                <ShortcutStatusBar view={selectedView} />
+              ) : null
+            }
             currentPubkey={identityQuery.data?.pubkey}
             isCompanionOpen={isHuddleCompanionOpen}
             isDrawerOpen={isHuddleDrawerOpen}
@@ -945,6 +970,7 @@ export function AppShell() {
                   }}
                   relayUrl={communitiesHook.activeCommunity?.relayUrl}
                 />
+                <GoToPalette state={goToPalette} />
                 <SendFeedbackController
                   onOpenChange={setIsSendFeedbackOpen}
                   open={isSendFeedbackOpen}
