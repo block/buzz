@@ -5419,6 +5419,47 @@ function buildMockChannelWindowBounds(
  * This is the window read-model surface the overhaul introduced; without it the
  * relay-mode bridge has no handler and the timeline renders empty.
  */
+async function handleGetChannelReconnectRepair(
+  args: {
+    channelId: string;
+    since: number;
+    limit: number;
+    until?: number | null;
+    beforeId?: string | null;
+  },
+  config: E2eConfig | undefined,
+): Promise<RelayEvent[]> {
+  const kinds = new Set([
+    5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 48100,
+    48101, 48102, 48103,
+  ]);
+  const filter: Record<string, unknown> = {
+    "#h": [args.channelId],
+    kinds: [...kinds],
+    since: args.since,
+    limit: args.limit,
+  };
+  if (args.until != null) filter.until = args.until;
+  if (args.beforeId != null) filter.before_id = args.beforeId;
+
+  if (getIdentity(config)) return relayQuery(config, [filter]);
+  return getMockMessageStore(args.channelId)
+    .filter(
+      (event) =>
+        kinds.has(event.kind) &&
+        event.created_at >= args.since &&
+        (args.until == null ||
+          event.created_at < args.until ||
+          (event.created_at === args.until &&
+            (args.beforeId == null || event.id > args.beforeId))),
+    )
+    .sort(
+      (left, right) =>
+        right.created_at - left.created_at || left.id.localeCompare(right.id),
+    )
+    .slice(0, args.limit);
+}
+
 async function handleGetChannelWindow(
   args: {
     channelId: string;
@@ -13365,6 +13406,11 @@ export function maybeInstallE2eTauriMocks() {
       case "get_channel_messages_before":
         return handleGetChannelMessagesBefore(
           payload as Parameters<typeof handleGetChannelMessagesBefore>[0],
+          activeConfig,
+        );
+      case "get_channel_reconnect_repair":
+        return handleGetChannelReconnectRepair(
+          payload as Parameters<typeof handleGetChannelReconnectRepair>[0],
           activeConfig,
         );
       case "get_channel_window":
