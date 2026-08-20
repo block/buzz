@@ -5,6 +5,8 @@ import {
   isProjectAccessibleToViewer,
   isProjectMine,
   isRepositoryAccessibleToViewer,
+  listRowDescription,
+  nextRepositoryEntryLimit,
   relativeTime,
 } from "./projectsViewHelpers.ts";
 
@@ -218,4 +220,28 @@ test("relativeTime includes the year only across a year boundary", () => {
     relativeTime(crossYearCreatedAt, crossYearNow),
     crossYearExpected,
   );
+});
+
+test("repository entry pagination advances and clamps to the total", () => {
+  assert.equal(nextRepositoryEntryLimit(200, 450), 400);
+  assert.equal(nextRepositoryEntryLimit(400, 450), 450);
+  assert.equal(nextRepositoryEntryLimit(450, 450), 450);
+});
+
+test("listRowDescription keeps real copy and drops empty or title-duplicate text", () => {
+  assert.equal(
+    listRowDescription("The complete Buzz community platform."),
+    "The complete Buzz community platform.",
+  );
+  assert.equal(listRowDescription("   "), undefined);
+  assert.equal(listRowDescription(""), undefined);
+  assert.equal(listRowDescription(null), undefined);
+  assert.equal(
+    listRowDescription(
+      "Fix reconnect backoff jitter",
+      "Fix reconnect backoff jitter",
+    ),
+    undefined,
+  );
+  assert.equal(listRowDescription("**Hello** world"), "Hello world");
 });

@@ -867,9 +867,11 @@ test("project pull request author rollover stays identity-only", async ({
     ),
   ).toBeVisible();
 
-  const authorLabel = (
-    await author.getByTestId("projects-pr-author-label").innerText()
-  ).trim();
+  const authorLabel =
+    (
+      await author.getByTestId("projects-pr-author-label").textContent()
+    )?.trim() ?? "";
+  expect(authorLabel.length).toBeGreaterThan(0);
   await author.hover();
   const rollover = page.getByTestId("projects-pr-author-rollover");
   await expect(rollover).toBeVisible();
@@ -898,9 +900,11 @@ test("project issue author rollover matches pull requests", async ({
     ),
   ).toBeVisible();
 
-  const authorLabel = (
-    await author.getByTestId("projects-issue-author-label").innerText()
-  ).trim();
+  const authorLabel =
+    (
+      await author.getByTestId("projects-issue-author-label").textContent()
+    )?.trim() ?? "";
+  expect(authorLabel.length).toBeGreaterThan(0);
   await author.hover();
   const rollover = page.getByTestId("projects-issue-author-rollover");
   await expect(rollover).toBeVisible();
@@ -993,7 +997,7 @@ test("project overview reports aggregate work-item failures", async ({
   );
 });
 
-test("project overview does not paint a background behind its cards", async ({
+test("project overview presents collapsible context beside grouped activity", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
@@ -1005,16 +1009,138 @@ test("project overview does not paint a background behind its cards", async ({
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
+  await expect(page.getByTestId("projects-overview-layout")).toHaveAttribute(
+    "data-project-context-detached",
+    "true",
+  );
+  const overviewLayout = page.getByTestId("projects-overview-layout");
+  const overviewContentPod = page.getByTestId("projects-overview-content-pod");
+  const appContentSurface = page
+    .locator("[data-buzz-content-surface]")
+    .filter({ has: overviewLayout })
+    .first();
+  await expect(appContentSurface).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(appContentSurface).toHaveCSS("border-radius", "0px");
+  await expect(overviewContentPod).toHaveCSS("border-radius", "16px");
+  await expect(page.getByTestId("projects-workspace-chrome")).toContainText(
+    "Projects",
+  );
+  await expect(page.getByTestId("projects-workspace-chrome")).toContainText(
+    "Activity",
+  );
+  await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
+  await expect(page.getByTestId("projects-page-header")).toContainText(
+    "Welcome to Activity",
+  );
+  await expect(page.getByTestId("projects-activity-search")).toBeVisible();
+  await expect(page.getByTestId("projects-activity-intro")).toContainText(
+    "Keep up with commits, reviews, and tasks",
+  );
+  await expect(
+    page.getByTestId("projects-overview-context-panel"),
+  ).toBeVisible();
+  await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "Projects",
+  );
+  expect(
+    Math.round(
+      (await page.getByTestId("projects-overview-context-panel").boundingBox())
+        ?.width ?? 0,
+    ),
+  ).toBe(280);
+  await expect(
+    page.getByTestId("projects-overview-create-project"),
+  ).toContainText("Create project");
+  await expect(
+    page
+      .getByTestId("projects-overview-context-panel")
+      .getByTestId("projects-create-menu"),
+  ).toBeVisible();
+  await expect(page.getByTestId("projects-overview-stats-pod")).toBeVisible();
+  await expect(
+    page
+      .getByTestId("projects-overview-context-panel")
+      .getByTestId("projects-overview-people"),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("projects-overview-stats-pod")
+      .getByTestId("projects-overview-people"),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("projects-overview-context-panel")
+      .getByTestId("projects-overview-context-title"),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("projects-overview-context-panel")
+      .getByRole("heading", { name: "Details" }),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("projects-overview-context-panel")
+      .getByRole("heading", { name: "Activity" }),
+  ).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("projects-overview-context-panel")
+      .getByTestId("projects-overview-activity"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("projects-activity-group").first(),
+  ).toContainText(/This week|Last week|Earlier/);
+  const searchBox = await page
+    .getByTestId("projects-activity-search")
+    .boundingBox();
+  const tabMenuBox = await page.getByTestId("projects-page-tabs").boundingBox();
+  const firstTabBox = await page
+    .getByTestId("projects-section-all")
+    .boundingBox();
+  const introBox = await page
+    .getByTestId("projects-activity-intro")
+    .boundingBox();
+  const feedBox = await page
+    .getByTestId("projects-activity-group")
+    .first()
+    .boundingBox();
+  const contentPodBox = await overviewContentPod.boundingBox();
+  expect(searchBox).toBeTruthy();
+  expect(tabMenuBox).toBeTruthy();
+  expect(firstTabBox).toBeTruthy();
+  expect(introBox).toBeTruthy();
+  expect(feedBox).toBeTruthy();
+  expect(contentPodBox).toBeTruthy();
+  expect(searchBox?.x ?? 0).toBeLessThan(firstTabBox?.x ?? 0);
+  expect(Math.abs((searchBox?.y ?? 0) - (firstTabBox?.y ?? 0))).toBeLessThan(8);
+  expect(tabMenuBox?.y ?? 0).toBeLessThan(introBox?.y ?? 0);
+  expect(introBox?.y ?? 0).toBeLessThan(feedBox?.y ?? 0);
+  expect(feedBox?.width ?? 0).toBeLessThan((contentPodBox?.width ?? 0) - 48);
+  const feedCenter = (feedBox?.x ?? 0) + (feedBox?.width ?? 0) / 2;
+  const contentCenter =
+    (contentPodBox?.x ?? 0) + (contentPodBox?.width ?? 0) / 2;
+  expect(Math.abs(feedCenter - contentCenter)).toBeLessThan(24);
 
   const stats = page.getByTestId("projects-overview-stat");
-  await expect(stats).toHaveCount(4);
-  for (let index = 0; index < 4; index += 1) {
-    await expect(stats.nth(index)).toHaveCSS(
-      "background-color",
-      "rgba(0, 0, 0, 0)",
-    );
-    await expect(stats.nth(index)).toHaveCSS("border-style", "solid");
-  }
+  await expect(stats).toHaveCount(5);
+  await expect(stats.nth(2)).toContainText("Channels");
+  const createBox = await page
+    .getByTestId("projects-overview-create-project")
+    .boundingBox();
+  const lastStatBox = await stats.last().boundingBox();
+  const peopleBox = await page
+    .getByTestId("projects-overview-people")
+    .boundingBox();
+  expect(createBox).toBeTruthy();
+  expect(lastStatBox).toBeTruthy();
+  expect(peopleBox).toBeTruthy();
+  expect(peopleBox?.y ?? 0).toBeGreaterThan(createBox?.y ?? 0);
+  expect(peopleBox?.y ?? 0).toBeGreaterThan(
+    (lastStatBox?.y ?? 0) + (lastStatBox?.height ?? 0) - 1,
+  );
 
   const activityCards = page.getByTestId("projects-activity-card");
   await expect(activityCards.first()).toBeVisible();
@@ -1026,6 +1152,104 @@ test("project overview does not paint a background behind its cards", async ({
     );
     await expect(activityCards.nth(index)).toHaveCSS("border-style", "solid");
   }
+
+  await page.getByTestId("projects-section-channels").click();
+  await expect(page.getByTestId("projects-page-header")).toContainText(
+    "Channels",
+  );
+  await expect(
+    page.getByTestId("projects-overview-context-panel"),
+  ).toBeVisible();
+  await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "Channels",
+  );
+  await expect(
+    page.getByTestId("projects-overview-create-project"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("projects-overview-people")).toHaveCount(0);
+  await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
+  await expect(stats).toHaveCount(3);
+  await expect(stats.first()).toContainText("Channels");
+  await expect(page.getByTestId("projects-overview-layout")).toHaveAttribute(
+    "data-project-context-detached",
+    "true",
+  );
+  const channelRows = page.getByTestId("project-channel-row");
+  // One row per project or repository binding: buzz, buzz · relay-tools,
+  // design-system, and relay-tools all bind the shared mock channel.
+  await expect(channelRows).toHaveCount(4);
+  await expect(channelRows.first()).toContainText("#general");
+  const channelsList = page.getByTestId("projects-channels-list");
+  await expect(channelsList).toContainText("buzz");
+  await expect(channelsList).toContainText("relay-tools");
+  await expect(channelsList).toContainText("design-system");
+  await expect(page.getByTestId("project-channel-project")).toHaveCount(4);
+  await expect(page.getByTestId("project-channel-repository")).toHaveCount(4);
+  await page.getByTestId("projects-section-projects").click();
+  await expect(page.getByTestId("projects-page-header")).toContainText(
+    "Projects",
+  );
+  await expect(
+    page.getByTestId("projects-overview-context-panel"),
+  ).toBeVisible();
+  await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "Projects",
+  );
+  await expect(
+    page.getByTestId("projects-overview-create-project"),
+  ).toBeVisible();
+  await expect(page.getByTestId("projects-overview-people")).toBeVisible();
+  await expect(page.getByTestId("projects-overview-activity")).toBeVisible();
+  await page.getByTestId("projects-section-repositories").click();
+  await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "Repositories",
+  );
+  await expect(
+    page.getByTestId("projects-overview-create-project"),
+  ).toHaveCount(0);
+  await expect(stats.nth(1)).toContainText("Active tasks");
+  await expect(page.getByTestId("projects-overview-activity")).toBeVisible();
+  await page.getByTestId("projects-section-issues").click();
+  await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "Tasks",
+  );
+  await expect(
+    page.getByTestId("projects-overview-create-issue"),
+  ).toContainText("Create task");
+  await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
+  await page.getByTestId("projects-section-prs").click();
+  await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "Reviews",
+  );
+  await expect(
+    page.getByTestId("projects-overview-create-pull-request"),
+  ).toContainText("Create review");
+  await expect(page.getByTestId("projects-overview-people")).toBeVisible();
+  await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
+  await page.getByTestId("projects-section-all").click();
+  await expect(
+    page.getByTestId("projects-overview-context-panel"),
+  ).toBeVisible();
+  await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
+    "Projects",
+  );
+  await expect(page.getByTestId("projects-overview-activity")).toBeVisible();
+
+  await page.getByTestId("projects-overview-create-project").click();
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+
+  await page.getByTestId("projects-overview-context-toggle").click();
+  await expect(
+    page.getByTestId("projects-overview-context-panel"),
+  ).not.toBeVisible();
+  await expect(
+    page.getByTestId("projects-overview-layout"),
+  ).not.toHaveAttribute("data-project-context-detached", "true");
+  await expect(stats).toHaveCount(0);
+  await expect(activityCards.first()).toBeVisible();
+  await expect(page.getByTestId("projects-create-menu")).toBeVisible();
 });
 
 test("repository rows identify their git host", async ({ page }) => {
@@ -1081,7 +1305,6 @@ test("project subsections do not paint backgrounds behind list or grid items", a
         "background-color",
         "rgba(0, 0, 0, 0)",
       );
-      await expect(listItems.nth(index)).toHaveCSS("border-style", "solid");
     }
 
     await page.getByRole("button", { name: "Grid layout" }).click();
@@ -1419,6 +1642,73 @@ test("external repositories stay on local source after a branch round trip", asy
   await expect(page.getByText("Code hosted on github.com")).toHaveCount(0);
 });
 
+test("repository files beyond the eager preview limit load on demand", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    const deferredFiles = [
+      ...Array.from({ length: 250 }, (_, index) => ({
+        path: `.agents/generated-${String(index).padStart(3, "0")}.txt`,
+        kind: "blob",
+        size: 7,
+        preview_content: "preview",
+        last_changed_at: null,
+        latest_commit: null,
+      })),
+      {
+        path: "README.md",
+        kind: "blob",
+        size: 17,
+        preview_content: null,
+        last_changed_at: null,
+        latest_commit: null,
+      },
+      {
+        path: "src/application.rs",
+        kind: "blob",
+        size: 16,
+        preview_content: null,
+        last_changed_at: null,
+        latest_commit: null,
+      },
+    ];
+    window.__BUZZ_E2E_PROJECT_LOCAL_REPO_SNAPSHOT__ = {
+      path: "/tmp/buzz/REPOS/relay-tools",
+      snapshot: {
+        latest_commit: null,
+        commits: [],
+        contributors: [],
+        files: deferredFiles,
+      },
+    };
+    window.__BUZZ_E2E_PROJECT_REPO_FILE_CONTENTS__ = {
+      "README.md": "# Deferred README",
+      "src/application.rs": "fn deferred() {}",
+    };
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await addProjectToSidebar(page, "buzz");
+  await page.getByTestId("sidebar-project-repository-relay-tools").click();
+
+  await expect(
+    page.getByRole("heading", { name: "Deferred README" }),
+  ).toBeVisible();
+
+  await page.getByRole("tab", { name: "Files" }).click();
+  await page.getByRole("row", { name: "Open directory src" }).click();
+  await page.getByRole("row", { name: "Open file application.rs" }).click();
+  await expect(
+    page.getByText("fn deferred() {}", { exact: true }),
+  ).toBeVisible();
+
+  const commands = await page.evaluate(
+    () => window.__BUZZ_E2E_COMMANDS__ ?? [],
+  );
+  expect(commands).toContain("get_project_local_repo_file_content");
+});
+
 test("pushed local branch can open a pull request", async ({ page }) => {
   await enableProjectsFeature(page);
   await page.addInitScript(() => {
@@ -1527,4 +1817,69 @@ test("project task can be created with a category from the tasks header", async 
     "Document the broken workflow",
   ]);
   expect(createdEvent?.tags).toContainEqual(["t", "change-request"]);
+});
+
+test("narrow layouts keep section context reachable through a sheet", async ({
+  page,
+}) => {
+  await page.setViewportSize({ height: 720, width: 900 });
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+
+  // Below the detached breakpoint the docked rail never renders, but the
+  // context toggle stays available.
+  await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
+  await expect(page.getByTestId("projects-overview-context-panel")).toHaveCount(
+    0,
+  );
+  const contextToggle = page.getByTestId("projects-overview-context-toggle");
+  await expect(contextToggle).toBeVisible();
+  await expect(contextToggle).toHaveAttribute("aria-pressed", "false");
+
+  // Keyboard journey into the Tasks section: open the sheet from the toggle.
+  await page.getByTestId("projects-section-issues").click();
+  await expect(page.getByTestId("projects-page-header")).toContainText("Tasks");
+  await contextToggle.focus();
+  await page.keyboard.press("Enter");
+  const contextSheet = page.getByTestId("projects-overview-context-sheet");
+  await expect(contextSheet).toBeVisible();
+  await expect(
+    contextSheet.getByTestId("projects-overview-context-title"),
+  ).toHaveText("Tasks");
+  await expect(contextToggle).toHaveAttribute("aria-pressed", "true");
+
+  // Escape dismisses the sheet and returns focus to the toggle.
+  await page.keyboard.press("Escape");
+  await expect(contextSheet).toBeHidden();
+  await expect(contextToggle).toBeFocused();
+  await expect(contextToggle).toHaveAttribute("aria-pressed", "false");
+
+  // The same journey follows the Reviews section.
+  await page.getByTestId("projects-section-prs").click();
+  await expect(page.getByTestId("projects-page-header")).toContainText(
+    "Reviews",
+  );
+  await contextToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(contextSheet).toBeVisible();
+  await expect(
+    contextSheet.getByTestId("projects-overview-context-title"),
+  ).toHaveText("Reviews");
+  await page.keyboard.press("Escape");
+  await expect(contextSheet).toBeHidden();
+
+  // Selecting a section inside the sheet navigates and dismisses it: the
+  // Activity context lists every section as a stat row.
+  await page.getByTestId("projects-section-all").click();
+  await contextToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(contextSheet).toBeVisible();
+  await contextSheet
+    .getByTestId("projects-overview-stat")
+    .filter({ hasText: "Tasks" })
+    .click();
+  await expect(contextSheet).toBeHidden();
+  await expect(page.getByTestId("projects-page-header")).toContainText("Tasks");
 });

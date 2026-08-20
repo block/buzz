@@ -6,7 +6,7 @@ import {
 } from "@/features/terminal/terminalPanelStore";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import terminalIcon from "@/shared/ui/assets/terminal.svg";
+import { TerminalPanelIcon } from "@/shared/ui/TerminalPanelIcon";
 
 export type ProjectRightPanelMode = "chat" | "repository";
 
@@ -95,16 +95,10 @@ export function ProjectRightPanelControls({
         type="button"
         variant="ghost"
       >
-        <span
-          aria-hidden="true"
-          className="h-4 w-[1.1rem] bg-current [mask-position:center] [mask-repeat:no-repeat]"
+        <TerminalPanelIcon
+          className="w-[1.1rem]"
           data-testid="project-terminal-icon"
-          style={{
-            maskImage: `url("${terminalIcon}")`,
-            maskSize: "calc(100% - 2px) calc(100% - 2px)",
-            WebkitMaskImage: `url("${terminalIcon}")`,
-            WebkitMaskSize: "calc(100% - 2px) calc(100% - 2px)",
-          }}
+          open={terminalOpen}
         />
       </Button>
     </div>

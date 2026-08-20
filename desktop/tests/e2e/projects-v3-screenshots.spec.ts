@@ -18,6 +18,32 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await projectEntry.click();
 }
 
+test("projects activity overview screenshot", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "light");
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await expect(page.getByTestId("projects-page-tabs")).toBeVisible();
+  await expect(page.getByTestId("projects-page-header")).toBeVisible();
+  await expect(page.getByTestId("projects-activity-search")).toBeVisible();
+  await expect(page.getByTestId("projects-activity-intro")).toContainText(
+    "Welcome to Activity",
+  );
+  await expect(
+    page.getByTestId("projects-overview-context-panel"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("projects-overview-create-project"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("projects-activity-group").first(),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/00-projects-pulse.png` });
+});
+
 test("sidebar project add flow browses before creating", async ({ page }) => {
   await installMockBridge(page);
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -473,20 +499,24 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
     "Hide project context",
   );
   await expect(terminalIcon).toBeVisible();
+  // The icon is an inline SVG drawn with currentColor, so it must inherit
+  // the toggle button's text color to stay tinted with button state.
   expect(
-    await terminalIcon.evaluate((element) => {
-      const style = getComputedStyle(element);
-      return {
-        backgroundColor: style.backgroundColor,
-        maskImage: style.maskImage || style.webkitMaskImage,
-        parentColor: getComputedStyle(element.parentElement ?? element).color,
-      };
-    }),
+    await terminalIcon.evaluate((element) => ({
+      color: getComputedStyle(element).color,
+      strokesCurrentColor: Array.from(element.querySelectorAll("rect")).some(
+        (rect) =>
+          rect.getAttribute("stroke") === "currentColor" ||
+          rect.getAttribute("fill") === "currentColor",
+      ),
+      tagName: element.tagName.toLowerCase(),
+    })),
   ).toMatchObject({
-    backgroundColor: await terminalButton.evaluate(
+    color: await terminalButton.evaluate(
       (element) => getComputedStyle(element).color,
     ),
-    maskImage: expect.not.stringMatching(/^none$/),
+    strokesCurrentColor: true,
+    tagName: "svg",
   });
   const [repositoryTabBounds, chatTabBounds] = await Promise.all([
     repositoryPanelTab.boundingBox(),
@@ -511,6 +541,9 @@ test("projects v3 workspace screenshot states", async ({ page }) => {
   await expect(agentContext).toBeVisible();
   await expect(agentContext).toContainText("Overview");
   await expect(agentContext).not.toContainText("Buzz /");
+  // The context rail reveals the chat panel with a width transition; measure
+  // only after it settles or the panel's unclipped box overhangs the rail.
+  await waitForAnimations(page);
   const [
     attachedSharedHeaderBackdropBounds,
     tabMenuHeaderBounds,
@@ -1012,25 +1045,33 @@ test("projects v3 work-item list metadata", async ({ page }) => {
   await page.getByTestId("open-projects-view").click();
 
   await page.getByTestId("projects-section-prs").click();
-  const reviewTable = page.getByTestId("projects-list-container");
-  await expect(reviewTable.locator("thead")).toHaveClass(/sr-only/);
+  const reviewList = page.getByTestId("projects-list-container");
+  await expect(reviewList).toBeVisible();
   const pullRequestRow = page.getByTestId(/^projects-pr-row-/).first();
   await expect(pullRequestRow).toBeVisible();
-  await expect(pullRequestRow).toContainText("Review");
-  await expect(pullRequestRow).toContainText("opened this in");
-  await expect(pullRequestRow).toContainText(/from\s*feature\/mock-2-0/);
-  await expect(pullRequestRow).not.toContainText(/#[0-9a-f]{8}/);
+  await expect(pullRequestRow).toContainText(/relay-tools|buzz|design-system/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/05-pr-list-metadata.png` });
 
   await page.getByTestId("projects-section-issues").click();
-  const taskTable = page.getByTestId("projects-list-container");
-  await expect(taskTable.locator("thead")).toHaveClass(/sr-only/);
+  const taskList = page.getByTestId("projects-list-container");
+  await expect(taskList).toBeVisible();
   const issueRow = page.getByTestId(/^projects-issue-row-/).first();
   await expect(issueRow).toBeVisible();
-  await expect(issueRow).toContainText("Issue");
-  await expect(issueRow).toContainText(/opened this in\s*relay-tools/);
-  await expect(issueRow).not.toContainText(/#[0-9a-f]{8}/);
+  await expect(issueRow).toContainText(/relay-tools|buzz|design-system/);
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/06-issue-list-metadata.png` });
+
+  await page.getByTestId("projects-section-channels").click();
+  const channelRow = page.getByTestId("project-channel-row").first();
+  await expect(channelRow).toBeVisible();
+  await expect(channelRow).toContainText("#general");
+  await expect(
+    page.getByTestId("project-channel-project").first(),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("project-channel-repository").first(),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: `${SHOTS}/07-channels-list.png` });
 });
