@@ -460,7 +460,7 @@ class MediaUploadService {
       cancellationToken: cancellationToken,
     );
     return descriptor.withFilename(
-      isCalendar
+      descriptor.type == 'text/calendar'
           ? _safeCalendarAttachmentFilename(pickedFile.name)
           : _safeAttachmentFilename(pickedFile.name),
     );

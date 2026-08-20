@@ -167,6 +167,19 @@ fn sanitize_calendar_filename(name: &str) -> String {
     )
 }
 
+fn attachment_filename(name: &str, descriptor_mime: &str) -> String {
+    if descriptor_mime == "text/calendar" {
+        sanitize_calendar_filename(name)
+    } else {
+        sanitize_filename(name)
+    }
+}
+
+fn set_attachment_filename(descriptor: &mut BlobDescriptor, name: Option<&str>) {
+    let filename = name.map(|name| attachment_filename(name, &descriptor.mime_type));
+    descriptor.filename = filename;
+}
+
 /// Sanitize a filename for use as a display label in the imeta `filename` field.
 ///
 /// Strips any directory components (keeps only the final path segment), removes
@@ -440,6 +453,13 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
     )
 }
 
+fn should_retry_upload_on_legacy(
+    status: reqwest::StatusCode,
+    file_extension: Option<&str>,
+) -> bool {
+    file_extension.is_none() && should_retry_legacy_upload(status)
+}
+
 pub(crate) async fn upload_image_bytes(
     body: Vec<u8>,
     state: &AppState,
@@ -498,7 +518,7 @@ async fn do_upload(
         },
     )
     .await?;
-    if file_extension.is_none() && should_retry_legacy_upload(resp.status()) {
+    if should_retry_upload_on_legacy(resp.status(), file_extension) {
         resp = send_upload_attempt(
             state,
             UploadAttempt {
@@ -568,7 +588,12 @@ pub async fn upload_media(
         (detect_and_validate_mime(&body)?, None)
     };
     let body = sanitize_image_for_upload(body, &mime)?;
-    do_upload(body, &mime, &state, None, None, file_extension).await
+    let mut descriptor = do_upload(body, &mime, &state, None, None, file_extension).await?;
+    set_attachment_filename(
+        &mut descriptor,
+        path.file_name().and_then(|name| name.to_str()),
+    );
+    Ok(descriptor)
 }
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
@@ -668,13 +693,10 @@ async fn process_picked_path(
         }
     }
 
-    descriptor.filename = path.file_name().and_then(|n| n.to_str()).map(|name| {
-        if calendar_metadata.is_some() {
-            sanitize_calendar_filename(name)
-        } else {
-            sanitize_filename(name)
-        }
-    });
+    set_attachment_filename(
+        &mut descriptor,
+        path.file_name().and_then(|name| name.to_str()),
+    );
 
     Ok(descriptor)
 }
@@ -861,13 +883,7 @@ pub(super) async fn upload_media_bytes_inner(
         }
     }
 
-    descriptor.filename = filename.as_deref().map(|name| {
-        if calendar_metadata.is_some() {
-            sanitize_calendar_filename(name)
-        } else {
-            sanitize_filename(name)
-        }
-    });
+    set_attachment_filename(&mut descriptor, filename.as_deref());
 
     Ok(descriptor)
 }
@@ -886,6 +902,34 @@ mod tests {
         );
         assert_eq!(calendar_upload_metadata(Some("Planning.txt")), None);
         assert_eq!(calendar_upload_metadata(None), None);
+    }
+
+    #[test]
+    fn authoritative_calendar_descriptor_normalizes_generic_input_filename() {
+        assert_eq!(
+            attachment_filename("Planning.txt", "text/calendar"),
+            "Planning.ics"
+        );
+        assert_eq!(
+            attachment_filename("Planning.txt", "application/octet-stream"),
+            "Planning.txt"
+        );
+    }
+
+    #[test]
+    fn calendar_upload_never_retries_on_legacy_media_route() {
+        assert!(!should_retry_upload_on_legacy(
+            reqwest::StatusCode::NOT_FOUND,
+            Some("ics")
+        ));
+        assert!(should_retry_upload_on_legacy(
+            reqwest::StatusCode::NOT_FOUND,
+            None
+        ));
+        assert!(!should_retry_upload_on_legacy(
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            None
+        ));
     }
 
     #[test]
