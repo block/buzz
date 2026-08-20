@@ -461,26 +461,35 @@ pub enum MessagesCmd {
     },
     /// Retrieve messages from a channel
     #[command(
-        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
+        after_help = "Pagination:\n  Returns up to --limit messages (default 50, max 200), NEWEST-first.\n  For channels larger than the cap, page backwards with --before:\n\n  buzz messages get --channel <UUID> --limit 200\n  buzz messages get --channel <UUID> --limit 200 \\\n      --before <created_at of oldest message seen> --before-id <its event id>\n\n  --before alone is INCLUSIVE (<=), so a timestamp-only cursor re-returns\n  every message sharing that second; if one second holds more messages than\n  --limit, paging stalls. Pass --before-id to make the cursor exclusive.\n\nKind scope:\n  Without --kinds this returns kinds 9,40002,40008,45001,45003 (message,\n  message v2, diff, forum post, forum comment) and NOTHING ELSE. Notably\n  EXCLUDED: reactions (7), deletions (5), and message edits (40003) — a\n  channel can hold many events this command never shows, and it cannot\n  report a channel total. --kinds REPLACES that list; it does not add to\n  it, and an unparseable token is an error rather than a silent default.\n  `messages thread` uses a DIFFERENT default list (it includes edits 40003\n  and omits forum posts 45001), so counts from the two commands are not\n  comparable.\n\nExamples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
     )]
     Get {
         /// Channel UUID
         #[arg(long)]
         channel: String,
-        /// Maximum number of results to return
+        /// Maximum number of results to return (default 50, max 200)
         #[arg(long)]
         limit: Option<u32>,
-        /// Unix timestamp — return messages before this time
+        /// Unix timestamp — return messages before this time (inclusive
+        /// unless paired with --before-id)
         #[arg(long)]
         before: Option<i64>,
+        /// Event ID cursor — tiebreak for messages sharing the cursor second
+        /// (composite pagination with --before)
+        #[arg(long)]
+        before_id: Option<String>,
         /// Unix timestamp — return messages after this time
         #[arg(long)]
         since: Option<i64>,
-        /// Comma-separated event kinds to filter (e.g. 1,1984)
+        /// Comma-separated event kinds, REPLACING the default list (e.g.
+        /// 1,1984). Unparseable tokens are rejected, not ignored
         #[arg(long)]
         kinds: Option<String>,
     },
     /// Get a message thread (replies to a root message)
+    #[command(
+        after_help = "Pagination:\n  Returns up to --limit replies (default 100, max 500) plus the root event.\n  Replies without a cursor and without --depth-limit are NEWEST-first; either\n  one selects the OLDEST-first walk, so the cursor picks which end you see.\n\n  To page a thread larger than the cap, walk FORWARD from the oldest reply.\n  Seed with --after 0, then pass the newest reply of each page back in:\n\n  buzz messages thread --channel <UUID> --event <ID> --limit 500 --after 0\n  buzz messages thread --channel <UUID> --event <ID> --limit 500 \\\n      --after <created_at of newest reply seen> --after-id <its event id>\n\n  Always pass --after-id. The timestamp-only cursor is STRICTLY greater-than,\n  so a page boundary landing inside a second shared by several replies skips\n  the rest of that second silently (rc=0). --after-id carries the tiebreak, so\n  no reply is skipped regardless of where the boundary lands.\n\nServer path and counts:\n  The cursor is honoured only on the depth-limited server path; a filter\n  without a depth bound routes to a generic query that has no cursor. So\n  --depth-limit selects WHICH server code path serves the request, which\n  its name does not suggest. Passing --after implies a depth bound meaning\n  \"no effective limit\" so the cursor is always reached.\n\n  Those two paths answer DIFFERENT QUESTIONS, not the same question at\n  different speeds. The depth-limited path returns DESCENDANTS BY THREAD\n  ANCESTRY, built from rows the relay writes at ingest only for events that\n  carry a NIP-10 MARKED e tag (root/reply). The path without a depth bound\n  returns every event that REFERENCES the id by any e tag. Two measured\n  consequences: message edits (40003) carry a bare e tag, get no ancestry\n  row, and are ABSENT from the depth-limited path; and a thread requested on\n  a MID-THREAD event returns that event ALONE there, because no ancestry row\n  names it as a root. Since --after implies a depth bound, a forward walk\n  pays both. The ancestry path also ignores the filter kinds, so the two\n  result sets are not nested in either direction by construction.\n\n  The root event is fetched by a SECOND filter that carries no cursor, no\n  depth bound and its own limit of 1. It therefore reappears on every page\n  and does not consume a reply slot: expect --limit + 1 events per page,\n  and dedupe the root when concatenating pages.\n\nKind scope:\n  Replies are limited to kinds 9,40002,40003,40008,45003 (message, message\n  v2, edit, diff, forum comment) and NOTHING ELSE. Notably EXCLUDED:\n  reactions (7) and deletions (5) — on a busy thread these outnumber the\n  replies, and no flag here surfaces them, so a reply count is not a thread\n  event count. This list intentionally differs from `messages get`, which\n  omits edits (40003) and includes forum posts (45001).\n  This list is applied on the path WITHOUT a depth bound; the ancestry path\n  ignores it, so --depth-limit and --after change the kind mix too."
+    )]
     Thread {
         /// Channel UUID
         #[arg(long)]
@@ -488,12 +497,26 @@ pub enum MessagesCmd {
         /// Root message event ID (64-char hex)
         #[arg(long)]
         event: String,
-        /// Maximum number of results to return
+        /// Maximum number of replies to return (default 100, max 500).
+        /// The root event arrives on its own filter, so a page holds
+        /// --limit replies PLUS the root
         #[arg(long)]
         limit: Option<u32>,
-        /// Maximum reply nesting depth to include
+        /// Maximum reply nesting depth to include. Also selects the
+        /// oldest-first reply ordering, the cursor-capable server path, and a
+        /// result set defined by thread ancestry rather than e-tag reference
+        /// (see Pagination below)
         #[arg(long)]
         depth_limit: Option<u32>,
+        /// Unix timestamp cursor — return replies created after this time
+        /// (STRICTLY after; pass --after 0 to seed a forward walk)
+        #[arg(long)]
+        after: Option<i64>,
+        /// Event ID cursor — tiebreak for replies sharing the cursor second
+        /// (composite pagination with --after). Always pass this when paging:
+        /// without it a page boundary inside a shared second skips replies
+        #[arg(long)]
+        after_id: Option<String>,
     },
     /// Full-text search across messages
     #[command(

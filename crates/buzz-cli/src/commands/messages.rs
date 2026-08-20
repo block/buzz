@@ -350,38 +350,109 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+/// Composite cursor grammar: the event-id half is meaningless without the
+/// timestamp half. The relay rejects it outright (`before_id requires until to
+/// be set`, `bridge.rs`), and a half cursor silently demoted to a head request
+/// is the dup/loss bug the composite form exists to kill — so refuse locally
+/// rather than spend a round trip on a 400.
+fn validate_cursor_pair(
+    ts: Option<i64>,
+    id: Option<&str>,
+    id_flag: &str,
+    ts_flag: &str,
+) -> Result<(), CliError> {
+    if let Some(id) = id {
+        if ts.is_none() {
+            return Err(CliError::Usage(format!("{id_flag} requires {ts_flag}")));
+        }
+        validate_hex64(id)?;
+    }
+    Ok(())
+}
+
+/// Kinds returned by `messages get` when `--kinds` is omitted.
+///
+/// Quoted by file:line in field notes, because the CLI has no way to report
+/// the kind universe of a channel — a pull can only ever state which kinds it
+/// asked for.
+const DEFAULT_MESSAGE_KINDS: [u64; 5] = [9, 40002, 40008, 45001, 45003];
+
+/// Parse a `--kinds` list, refusing anything that is not an event kind.
+///
+/// The previous form was `filter_map(|s| s.trim().parse().ok())`, which
+/// discarded unparseable tokens silently: `--kinds '*'` and `--kinds all`
+/// produced an empty list, left the default kinds in place, and exited 0 — so
+/// a caller measuring a widened pull was handed the narrow default while being
+/// told it succeeded. A typo is now a usage error naming the token.
+fn parse_kinds(kinds: &str) -> Result<Vec<u64>, CliError> {
+    kinds
+        .split(',')
+        .map(|token| {
+            let token = token.trim();
+            token.parse::<u64>().map_err(|_| {
+                CliError::Usage(format!(
+                    "--kinds: `{token}` is not an event kind (expected comma-separated integers, e.g. 9,1984)"
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Build the filter for a channel message query.
+///
+/// Split out from [`cmd_get_messages`] so the cursor grammar is testable
+/// without a live relay.
+fn build_messages_filter(
+    channel_id: &str,
+    limit: u32,
+    before: Option<i64>,
+    before_id: Option<&str>,
+    since: Option<i64>,
+    kinds: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    let mut filter = serde_json::json!({
+        "kinds": DEFAULT_MESSAGE_KINDS,
+        "#h": [channel_id],
+        "limit": limit
+    });
+
+    // If specific kinds requested, override. Parsing happens here rather than
+    // at the caller so no code path can reach the wire with a partially
+    // discarded kind list.
+    if let Some(k) = kinds {
+        filter["kinds"] = serde_json::json!(parse_kinds(k)?);
+    }
+
+    if let Some(b) = before {
+        filter["until"] = serde_json::json!(b);
+        // Both or neither: the id half only rides along with the timestamp.
+        if let Some(bid) = before_id {
+            filter["before_id"] = serde_json::json!(bid);
+        }
+    }
+    if let Some(s) = since {
+        filter["since"] = serde_json::json!(s);
+    }
+
+    Ok(filter)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
     limit: Option<u32>,
     before: Option<i64>,
+    before_id: Option<&str>,
     since: Option<i64>,
     kinds: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
+    validate_cursor_pair(before, before_id, "--before-id", "--before")?;
     let limit = limit.unwrap_or(50).min(200);
 
-    let mut filter = serde_json::json!({
-        "kinds": [9, 40002, 40008, 45001, 45003],
-        "#h": [channel_id],
-        "limit": limit
-    });
-
-    // If specific kinds requested, override
-    if let Some(k) = kinds {
-        let kind_list: Vec<u64> = k.split(',').filter_map(|s| s.trim().parse().ok()).collect();
-        if !kind_list.is_empty() {
-            filter["kinds"] = serde_json::json!(kind_list);
-        }
-    }
-
-    if let Some(b) = before {
-        filter["until"] = serde_json::json!(b);
-    }
-    if let Some(s) = since {
-        filter["since"] = serde_json::json!(s);
-    }
+    let filter = build_messages_filter(channel_id, limit, before, before_id, since, kinds)?;
 
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
@@ -391,30 +462,82 @@ pub async fn cmd_get_messages(
     Ok(())
 }
 
-pub async fn cmd_get_thread(
-    client: &BuzzClient,
+/// Depth bound sent when `--thread-cursor` is used without `--depth-limit`.
+///
+/// The relay only reads the thread cursor on the depth-limited code path
+/// (`bridge.rs`: filters without `depth_limit` fall through to the generic
+/// catch-all query, which has no cursor), so reaching the cursor at all
+/// requires sending *some* depth bound. This value expresses "no effective
+/// bound": it is `i32::MAX`, and thread nesting cannot approach it.
+///
+/// It is deliberately `i32::MAX` rather than `u32::MAX` — the relay binds the
+/// depth as `i32`, so any value above `i32::MAX` wraps negative and matches
+/// zero rows.
+const THREAD_CURSOR_DEPTH_SENTINEL: u32 = i32::MAX as u32;
+
+/// Build the reply filter for a thread query.
+///
+/// Split out from [`cmd_get_thread`] so the cursor/depth interaction is
+/// testable without a live relay.
+fn build_thread_reply_filter(
     channel_id: &str,
     event_id: &str,
-    limit: Option<u32>,
+    limit: u32,
     depth_limit: Option<u32>,
-    format: &crate::OutputFormat,
-) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
-    validate_hex64(event_id)?;
-    let limit = limit.unwrap_or(100).min(500);
-
-    // Two filters ORed in a single HTTP call:
-    // 1. Replies referencing this event via e-tag (no kind restriction)
-    // 2. The root event itself by ID
+    thread_cursor: Option<i64>,
+    thread_cursor_id: Option<&str>,
+) -> serde_json::Value {
     let mut reply_filter = serde_json::json!({
         "kinds": [9, 40002, 40003, 40008, 45003],
         "#h": [channel_id],
         "#e": [event_id],
         "limit": limit
     });
-    if let Some(d) = depth_limit {
-        reply_filter["depth_limit"] = serde_json::json!(d);
+    // A cursor is only honoured on the depth-limited path, so an explicit
+    // cursor implies a depth bound even when the caller gave none.
+    match (depth_limit, thread_cursor) {
+        (Some(d), _) => reply_filter["depth_limit"] = serde_json::json!(d),
+        (None, Some(_)) => {
+            reply_filter["depth_limit"] = serde_json::json!(THREAD_CURSOR_DEPTH_SENTINEL)
+        }
+        (None, None) => {}
     }
+    if let Some(c) = thread_cursor {
+        reply_filter["thread_cursor"] = serde_json::json!(c);
+        if let Some(id) = thread_cursor_id {
+            reply_filter["thread_cursor_id"] = serde_json::json!(id);
+        }
+    }
+    reply_filter
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn cmd_get_thread(
+    client: &BuzzClient,
+    channel_id: &str,
+    event_id: &str,
+    limit: Option<u32>,
+    depth_limit: Option<u32>,
+    thread_cursor: Option<i64>,
+    thread_cursor_id: Option<&str>,
+    format: &crate::OutputFormat,
+) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
+    validate_hex64(event_id)?;
+    validate_cursor_pair(thread_cursor, thread_cursor_id, "--after-id", "--after")?;
+    let limit = limit.unwrap_or(100).min(500);
+
+    // Two filters ORed in a single HTTP call:
+    // 1. Replies referencing this event via e-tag (no kind restriction)
+    // 2. The root event itself by ID
+    let reply_filter = build_thread_reply_filter(
+        channel_id,
+        event_id,
+        limit,
+        depth_limit,
+        thread_cursor,
+        thread_cursor_id,
+    );
     let root_filter = serde_json::json!({
         "ids": [event_id],
         "limit": 1
@@ -948,6 +1071,7 @@ pub async fn dispatch(
             channel,
             limit,
             before,
+            before_id,
             since,
             kinds,
         } => {
@@ -956,6 +1080,7 @@ pub async fn dispatch(
                 &channel,
                 limit,
                 before,
+                before_id.as_deref(),
                 since,
                 kinds.as_deref(),
                 format,
@@ -967,7 +1092,21 @@ pub async fn dispatch(
             event,
             limit,
             depth_limit,
-        } => cmd_get_thread(client, &channel, &event, limit, depth_limit, format).await,
+            after,
+            after_id,
+        } => {
+            cmd_get_thread(
+                client,
+                &channel,
+                &event,
+                limit,
+                depth_limit,
+                after,
+                after_id.as_deref(),
+                format,
+            )
+            .await
+        }
         MessagesCmd::Search {
             query,
             author,
@@ -1371,5 +1510,268 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod thread_cursor_tests {
+    use super::{build_thread_reply_filter, THREAD_CURSOR_DEPTH_SENTINEL};
+
+    const CH: &str = "3928fe05-df61-4b5d-b9c7-d623b9b10ea1";
+    const ROOT: &str = "f6f7a5212b1a6451f1906406e224c01834dc950826c337046b74b18ecc5785ce";
+    const CURSOR_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn no_cursor_and_no_depth_sends_neither_field() {
+        // The default pull must keep its existing shape: absent `depth_limit`
+        // is what routes the filter to the catch-all (newest-anchored) path,
+        // so adding the cursor flags must not perturb it.
+        let f = build_thread_reply_filter(CH, ROOT, 100, None, None, None);
+        assert!(f.get("depth_limit").is_none());
+        assert!(f.get("thread_cursor").is_none());
+        assert!(f.get("thread_cursor_id").is_none());
+    }
+
+    #[test]
+    fn cursor_without_depth_limit_supplies_the_sentinel() {
+        // The relay only reads the cursor on the depth-limited path, so a
+        // cursor with no explicit depth must still carry a depth bound or the
+        // cursor is silently ignored and the caller re-reads page one forever.
+        let f = build_thread_reply_filter(CH, ROOT, 500, None, Some(1_786_800_000), None);
+        assert_eq!(
+            f["depth_limit"],
+            serde_json::json!(THREAD_CURSOR_DEPTH_SENTINEL)
+        );
+        assert_eq!(f["thread_cursor"], serde_json::json!(1_786_800_000_i64));
+    }
+
+    #[test]
+    fn sentinel_is_representable_as_i32() {
+        // buzz-db binds the depth as i32 (`dl as i32`); any value above
+        // i32::MAX wraps negative and `depth <= -N` matches zero replies.
+        // Measured live at bff3110a0: --depth-limit 2147483648 returns n=1
+        // (root only) while 2147483647 returns the full thread.
+        assert!(i32::try_from(THREAD_CURSOR_DEPTH_SENTINEL).is_ok());
+        assert_eq!(THREAD_CURSOR_DEPTH_SENTINEL, i32::MAX as u32);
+    }
+
+    #[test]
+    fn explicit_depth_limit_wins_over_the_sentinel() {
+        // A caller who asks for depth 2 while paging must get depth 2, not the
+        // sentinel — otherwise the cursor plumbing would silently widen an
+        // explicit depth bound.
+        let f = build_thread_reply_filter(CH, ROOT, 500, Some(2), Some(1_786_800_000), None);
+        assert_eq!(f["depth_limit"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn composite_cursor_carries_the_tiebreak_id() {
+        let f =
+            build_thread_reply_filter(CH, ROOT, 500, None, Some(1_786_800_000), Some(CURSOR_ID));
+        assert_eq!(f["thread_cursor"], serde_json::json!(1_786_800_000_i64));
+        assert_eq!(f["thread_cursor_id"], serde_json::json!(CURSOR_ID));
+    }
+
+    #[test]
+    fn cursor_id_is_dropped_without_a_cursor_timestamp() {
+        // Defense in depth: cmd_get_thread rejects this combination up front,
+        // but the builder must not emit a lone `thread_cursor_id` either —
+        // the relay's cursor grammar requires both or neither.
+        let f = build_thread_reply_filter(CH, ROOT, 500, None, None, Some(CURSOR_ID));
+        assert!(f.get("thread_cursor_id").is_none());
+        assert!(f.get("thread_cursor").is_none());
+    }
+
+    #[test]
+    fn limit_and_targeting_fields_are_unchanged_by_paging() {
+        let f = build_thread_reply_filter(CH, ROOT, 500, None, Some(1), None);
+        assert_eq!(f["limit"], serde_json::json!(500));
+        assert_eq!(f["#h"], serde_json::json!([CH]));
+        assert_eq!(f["#e"], serde_json::json!([ROOT]));
+    }
+
+    #[test]
+    fn a_zero_cursor_is_a_real_cursor_and_seeds_the_forward_walk() {
+        // `--after 0` is how a caller opts into the oldest-anchored walk
+        // without also constraining depth. `Some(0)` must therefore be treated
+        // as present, not folded into `None` by a falsy check — otherwise the
+        // filter routes to the newest-anchored catch-all and the walk
+        // terminates after one page.
+        let f = build_thread_reply_filter(CH, ROOT, 500, None, Some(0), None);
+        assert_eq!(f["thread_cursor"], serde_json::json!(0_i64));
+        assert_eq!(
+            f["depth_limit"],
+            serde_json::json!(THREAD_CURSOR_DEPTH_SENTINEL)
+        );
+    }
+
+    #[test]
+    fn the_tiebreak_id_is_sent_whenever_it_is_supplied() {
+        // Polarity asymmetry, measured at bff3110a0: the forward (thread)
+        // legacy cursor is STRICT `>` (buzz-db/src/thread.rs:443) while the
+        // backward (messages get) one is INCLUSIVE `<=` (event.rs:505). So on
+        // this path a timestamp-only cursor whose page boundary lands inside a
+        // shared second skips the remainder of that second silently — there is
+        // no inclusive re-return to recover it, and no timestamp-only step rule
+        // is safe at every boundary alignment. Live: thread 7f2cea28, tie
+        // second 1785163671 (multiplicity 2 by pinned probe), ts-only drops at
+        // caps {1,2,11,22} while the composite cursor recovers 2/2 at all of
+        // 1..24. The tiebreak must therefore ride along on every paged call.
+        let f =
+            build_thread_reply_filter(CH, ROOT, 500, None, Some(1_785_163_671), Some(CURSOR_ID));
+        assert_eq!(f["thread_cursor_id"], serde_json::json!(CURSOR_ID));
+    }
+}
+
+#[cfg(test)]
+mod messages_cursor_tests {
+    use super::{build_messages_filter, validate_cursor_pair};
+
+    const CH: &str = "3928fe05-df61-4b5d-b9c7-d623b9b10ea1";
+    const BEFORE_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn head_request_sends_no_cursor_fields() {
+        // The default pull must keep its existing wire shape.
+        let f = build_messages_filter(CH, 50, None, None, None, None).expect("no kinds to parse");
+        assert!(f.get("until").is_none());
+        assert!(f.get("before_id").is_none());
+        assert_eq!(f["limit"], serde_json::json!(50));
+        assert_eq!(f["#h"], serde_json::json!([CH]));
+    }
+
+    #[test]
+    fn timestamp_only_cursor_still_works() {
+        // Back-compat: `--before` alone is the existing (inclusive) cursor and
+        // must keep sending a bare `until`, never a half composite.
+        let f = build_messages_filter(CH, 200, Some(1_786_800_000), None, None, None)
+            .expect("no kinds to parse");
+        assert_eq!(f["until"], serde_json::json!(1_786_800_000_i64));
+        assert!(f.get("before_id").is_none());
+    }
+
+    #[test]
+    fn composite_cursor_sends_both_halves() {
+        // Wire-verified discriminator (buzz-security corpus, `bff3110a0`):
+        // window B=1785282528, cap=7, tie second T=1785163671 with
+        // multiplicity 2. A decrement-always backward walk recovers 1/2 there
+        // (drops `fa81da0b`); the same walk with `--before-id` recovers 2/2.
+        // So the composite cursor removes a correctness dependency on the
+        // caller's loop shape, not merely a truncation at a large tie.
+        let f = build_messages_filter(CH, 200, Some(1_786_800_000), Some(BEFORE_ID), None, None)
+            .expect("no kinds to parse");
+        assert_eq!(f["until"], serde_json::json!(1_786_800_000_i64));
+        assert_eq!(f["before_id"], serde_json::json!(BEFORE_ID));
+    }
+
+    #[test]
+    fn cursor_id_is_dropped_without_a_timestamp() {
+        // The relay 400s on `before_id` without `until`; the builder must not
+        // emit a half cursor even if the caller-level guard is bypassed.
+        let f = build_messages_filter(CH, 200, None, Some(BEFORE_ID), None, None)
+            .expect("no kinds to parse");
+        assert!(f.get("before_id").is_none());
+        assert!(f.get("until").is_none());
+    }
+
+    #[test]
+    fn since_and_kinds_survive_a_composite_cursor() {
+        let f = build_messages_filter(
+            CH,
+            200,
+            Some(1_786_800_000),
+            Some(BEFORE_ID),
+            Some(1_786_000_000),
+            Some("9,1984"),
+        )
+        .expect("a well-formed kind list parses");
+        assert_eq!(f["since"], serde_json::json!(1_786_000_000_i64));
+        assert_eq!(f["kinds"], serde_json::json!([9, 1984]));
+        assert_eq!(f["before_id"], serde_json::json!(BEFORE_ID));
+    }
+
+    #[test]
+    fn lone_cursor_id_is_a_usage_error() {
+        let err = validate_cursor_pair(None, Some(BEFORE_ID), "--before-id", "--before")
+            .expect_err("lone --before-id must be refused");
+        assert!(
+            err.to_string().contains("--before-id requires --before"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn malformed_cursor_id_is_rejected_locally() {
+        // The relay rejects a non-64-hex `before_id` with a 400; refusing it
+        // here means the caller never spends a round trip to learn that.
+        assert!(validate_cursor_pair(
+            Some(1_786_800_000),
+            Some("not-a-hex-id"),
+            "--before-id",
+            "--before"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_full_composite_cursor_validates() {
+        assert!(validate_cursor_pair(
+            Some(1_786_800_000),
+            Some(BEFORE_ID),
+            "--before-id",
+            "--before"
+        )
+        .is_ok());
+        // And a bare timestamp cursor is legal on both surfaces.
+        assert!(validate_cursor_pair(Some(1_786_800_000), None, "--before-id", "--before").is_ok());
+    }
+
+    // ── `--kinds` must not substitute the default for what you asked for ──
+    //
+    // Measured at bff3110a0, before this change: `--kinds ''`, `--kinds '*'`
+    // and `--kinds all` all exited 0 having sent the DEFAULT kind list, so a
+    // caller trying to widen a pull was handed the narrow default and told it
+    // worked. Each shape below is one of those commands.
+
+    #[test]
+    fn a_wildcard_kind_list_is_refused_instead_of_silently_defaulting() {
+        for garbage in ["*", "all", "", "9,*", "9, ,1984", "-1", "1984abc"] {
+            let err = build_messages_filter(CH, 50, None, None, None, Some(garbage))
+                .expect_err("unparseable --kinds must be a usage error");
+            assert!(
+                err.to_string().contains("is not an event kind"),
+                "unexpected error for {garbage:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_kind_list_never_reaches_the_wire_as_the_default() {
+        // The specific failure this closes: the error must not be recoverable
+        // into a filter at all, so there is no shape where `*` measures [9].
+        assert!(build_messages_filter(CH, 50, None, None, None, Some("*")).is_err());
+        let ok = build_messages_filter(CH, 50, None, None, None, Some("7"))
+            .expect("a real token still works");
+        assert_eq!(ok["kinds"], serde_json::json!([7]));
+    }
+
+    #[test]
+    fn whitespace_around_real_tokens_is_still_tolerated() {
+        // Positive control for the stricter parser: it must reject typos
+        // without also rejecting the documented ` 9, 1984 ` spelling.
+        let f = build_messages_filter(CH, 50, None, None, None, Some(" 9 , 1984 "))
+            .expect("padded integers parse");
+        assert_eq!(f["kinds"], serde_json::json!([9, 1984]));
+    }
+
+    #[test]
+    fn omitting_kinds_sends_the_documented_default_list() {
+        // The default is what `--help` and any field note must quote; pin it so
+        // a change to the list is a deliberate edit here.
+        let f = build_messages_filter(CH, 50, None, None, None, None).expect("no kinds to parse");
+        assert_eq!(
+            f["kinds"],
+            serde_json::json!([9, 40002, 40008, 45001, 45003])
+        );
     }
 }
