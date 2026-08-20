@@ -3,10 +3,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { parseEntityLink } from "@/shared/lib/entityLink";
 import { useOpenEntityLink } from "@/shared/ui/markdown/entityLinks";
-import {
-  type WorkstreamPullRequestDisplayState,
-  type WorkstreamPullRequestReference,
-  useWorkstreamPullRequestStatuses,
+import type {
+  WorkstreamPullRequestDisplayState,
+  WorkstreamPullRequestReference,
 } from "@/features/workstream-board/lib/workstreamPullRequestStatus";
 
 function lifecycleLabel(
@@ -42,10 +41,11 @@ function referenceLabel(reference: WorkstreamPullRequestReference) {
 
 export function WorkstreamPullRequests({
   references,
+  states,
 }: {
   references: readonly WorkstreamPullRequestReference[];
+  states: ReadonlyMap<string, WorkstreamPullRequestDisplayState>;
 }) {
-  const states = useWorkstreamPullRequestStatuses(references);
   const openEntityLink = useOpenEntityLink();
 
   return (

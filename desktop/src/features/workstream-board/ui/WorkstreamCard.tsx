@@ -2,11 +2,22 @@ import * as React from "react";
 import { Hash } from "lucide-react";
 
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
-import { useCanvasQuery } from "@/features/channels/hooks";
+import {
+  useCanvasQuery,
+  useChannelDetailsQuery,
+} from "@/features/channels/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import { parseWorkstreamPullRequestReferences } from "@/features/workstream-board/lib/workstreamPullRequestStatus";
+import {
+  parseWorkstreamPullRequestReferences,
+  useWorkstreamPullRequestStatuses,
+} from "@/features/workstream-board/lib/workstreamPullRequestStatus";
+import {
+  waitsForCard,
+  type WorkstreamWait,
+} from "@/features/workstream-board/lib/workstreamWaits";
 import { buildWorkstreamCardViewModel } from "@/features/workstream-board/lib/workstreamCardViewModel";
 import { WorkstreamPullRequests } from "@/features/workstream-board/ui/WorkstreamPullRequests";
+import { WorkstreamWaits } from "@/features/workstream-board/ui/WorkstreamWaits";
 import { WorkstreamWorkingIndicator } from "@/features/workstream-board/ui/WorkstreamWorkingIndicator";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -15,6 +26,10 @@ type WorkstreamCardProps = {
   activeWorking?: ActiveChannelTurnSummary;
   channel: Channel;
   profiles?: UserProfileLookup;
+  onWaitsChange?: (
+    waits: readonly WorkstreamWait[],
+    createdAt: string | null | undefined,
+  ) => void;
   onSelect: (channelId: string) => void;
 };
 
@@ -22,9 +37,11 @@ export function WorkstreamCard({
   activeWorking,
   channel,
   onSelect,
+  onWaitsChange,
   profiles,
 }: WorkstreamCardProps) {
   const canvasQuery = useCanvasQuery(channel.id);
+  const detailsQuery = useChannelDetailsQuery(channel.id);
   const viewModel = buildWorkstreamCardViewModel({
     canvasContent: canvasQuery.data?.content,
     isLoading: canvasQuery.isLoading,
@@ -37,6 +54,17 @@ export function WorkstreamCard({
         : [],
     [viewModel],
   );
+  const pullRequestStates = useWorkstreamPullRequestStatuses(references);
+  const waits = React.useMemo(
+    () =>
+      viewModel.status === "ready"
+        ? waitsForCard(viewModel.card, references, pullRequestStates)
+        : [],
+    [pullRequestStates, references, viewModel],
+  );
+  React.useEffect(() => {
+    onWaitsChange?.(waits, detailsQuery.data?.createdAt);
+  }, [detailsQuery.data?.createdAt, onWaitsChange, waits]);
 
   return (
     <div
@@ -52,13 +80,11 @@ export function WorkstreamCard({
       >
         <span className="sr-only">Open #{channel.name}</span>
       </button>
-
       <div className="pointer-events-none relative z-10 flex h-full min-h-40 flex-col">
         <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
           <Hash className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate">{channel.name}</span>
         </div>
-
         {viewModel.status === "ready" ? (
           <>
             <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-foreground">
@@ -84,8 +110,12 @@ export function WorkstreamCard({
                 </div>
               ) : null}
               {references.length > 0 ? (
-                <WorkstreamPullRequests references={references} />
+                <WorkstreamPullRequests
+                  references={references}
+                  states={pullRequestStates}
+                />
               ) : null}
+              <WorkstreamWaits waits={waits} />
             </div>
           </>
         ) : viewModel.status === "loading" ? (

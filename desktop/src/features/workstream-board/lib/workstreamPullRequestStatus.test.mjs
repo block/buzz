@@ -236,6 +236,51 @@ test("workstream status hook preserves a synchronous live callback", async () =>
   cleanup();
 });
 
+test("workstream status hook keeps subscriptions stable across equivalent rerenders", async () => {
+  const { act, cleanup, renderHook } = await import("@testing-library/react");
+  const { useWorkstreamPullRequestStatuses } = await import(
+    "./workstreamPullRequestStatus.ts"
+  );
+  const reference = parseWorkstreamPullRequestReference(
+    "https://github.com/block/buzz/pull/42",
+  );
+  let subscribes = 0;
+  let unsubscribes = 0;
+  const registry = {
+    subscribe: (_reference, listener) => {
+      subscribes += 1;
+      listener({ status: "loading" });
+      return () => {
+        unsubscribes += 1;
+      };
+    },
+  };
+  const { rerender, unmount } = renderHook(
+    ({ refs }) => useWorkstreamPullRequestStatuses(refs, registry),
+    { initialProps: { refs: [reference] } },
+  );
+
+  await act(async () => {
+    rerender({ refs: [{ ...reference }] });
+    rerender({ refs: [{ ...reference }] });
+  });
+  assert.equal(subscribes, 1);
+  assert.equal(unsubscribes, 0);
+
+  const replacement = parseWorkstreamPullRequestReference(
+    "https://github.com/block/buzz/pull/43",
+  );
+  await act(async () => {
+    rerender({ refs: [replacement] });
+  });
+  assert.equal(subscribes, 2);
+  assert.equal(unsubscribes, 1);
+
+  unmount();
+  assert.equal(unsubscribes, 2);
+  cleanup();
+});
+
 test("workstream status hook removes stale references and preserves unsupported state", async () => {
   const { act, cleanup, renderHook } = await import("@testing-library/react");
   const { useWorkstreamPullRequestStatuses } = await import(

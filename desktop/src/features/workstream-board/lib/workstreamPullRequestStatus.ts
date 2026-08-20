@@ -519,11 +519,26 @@ export function useWorkstreamPullRequestStatuses(
   const [states, setStates] = React.useState<
     ReadonlyMap<string, WorkstreamPullRequestDisplayState>
   >(() => new Map());
-  const referencesByIdentity = React.useMemo(() => {
+  // Cards rebuild parsed references on every render. Subscribe by their
+  // semantic identity instead of that transient array/object identity so a
+  // synchronous registry listener cannot cause an effect resubscribe loop.
+  const referenceIdentityKey = references
+    .map((reference) => reference.identity)
+    .sort()
+    .join("\u0000");
+  const referencesByIdentityRef = React.useRef<{
+    identityKey: string;
+    references: ReadonlyMap<string, WorkstreamPullRequestReference>;
+  } | null>(null);
+  if (referencesByIdentityRef.current?.identityKey !== referenceIdentityKey) {
     const next = new Map<string, WorkstreamPullRequestReference>();
     for (const reference of references) next.set(reference.identity, reference);
-    return next;
-  }, [references]);
+    referencesByIdentityRef.current = {
+      identityKey: referenceIdentityKey,
+      references: next,
+    };
+  }
+  const referencesByIdentity = referencesByIdentityRef.current.references;
 
   React.useEffect(() => {
     const initial = new Map<string, WorkstreamPullRequestDisplayState>();
