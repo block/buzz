@@ -312,8 +312,8 @@ authorization-relevant; clients cannot select the declaration.
 For a relevant body, the NIP-98 event contains exactly one `payload` tag equal
 to lowercase hexadecimal SHA-256 of the **body bytes**: the complete content
 after transfer decoding and before any content decoding. Absence, duplication,
-mismatch, validation of only a prefix, or
-post-validation transformation denies. For an irrelevant body, no
+mismatch, validation of only a prefix, or substitution of the body bytes after
+validation denies. For an irrelevant body, no
 Authorization decision, target, capability, or effect selector derives from a
 body field not bound by NIP-98. A `payload` tag present on an operation whose
 body is declared authorization-irrelevant is validated identically against the
