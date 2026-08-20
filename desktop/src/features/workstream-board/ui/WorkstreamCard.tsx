@@ -1,16 +1,26 @@
 import { Hash } from "lucide-react";
 
+import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { useCanvasQuery } from "@/features/channels/hooks";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { buildWorkstreamCardViewModel } from "@/features/workstream-board/lib/workstreamCardViewModel";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { WorkstreamWorkingIndicator } from "@/features/workstream-board/ui/WorkstreamWorkingIndicator";
 
 type WorkstreamCardProps = {
+  activeWorking?: ActiveChannelTurnSummary;
   channel: Channel;
+  profiles?: UserProfileLookup;
   onSelect: (channelId: string) => void;
 };
 
-export function WorkstreamCard({ channel, onSelect }: WorkstreamCardProps) {
+export function WorkstreamCard({
+  activeWorking,
+  channel,
+  onSelect,
+  profiles,
+}: WorkstreamCardProps) {
   const canvasQuery = useCanvasQuery(channel.id);
   const viewModel = buildWorkstreamCardViewModel({
     canvasContent: canvasQuery.data?.content,
@@ -82,6 +92,12 @@ export function WorkstreamCard({ channel, onSelect }: WorkstreamCardProps) {
             ) : null}
           </div>
         )}
+        {activeWorking ? (
+          <WorkstreamWorkingIndicator
+            activeWorking={activeWorking}
+            profiles={profiles}
+          />
+        ) : null}
       </div>
     </div>
   );

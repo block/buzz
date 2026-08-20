@@ -1,6 +1,11 @@
+import * as React from "react";
+
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useActiveAgentTurnsByChannel } from "@/features/agents/activeAgentTurnsStore";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { filterWorkstreamChannels } from "@/features/workstream-board/lib/discoverWorkstreamChannels";
+import { getActiveWorkstreamTurns } from "@/features/workstream-board/lib/activeWorkstreamTurns";
 import { WorkstreamCard } from "@/features/workstream-board/ui/WorkstreamCard";
 import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
@@ -13,6 +18,21 @@ export function WorkstreamBoardScreen() {
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data ?? [];
   const workstreamChannels = filterWorkstreamChannels(channels);
+  const activeTurnsByChannel = useActiveAgentTurnsByChannel();
+  const activeWorkstreamTurns = React.useMemo(
+    () => getActiveWorkstreamTurns(workstreamChannels, activeTurnsByChannel),
+    [activeTurnsByChannel, workstreamChannels],
+  );
+  const activeTurnsByChannelId = React.useMemo(
+    () => new Map(activeWorkstreamTurns.map((turn) => [turn.channelId, turn])),
+    [activeWorkstreamTurns],
+  );
+  const activeAgentPubkeys = React.useMemo(
+    () => activeWorkstreamTurns.flatMap((turn) => turn.agentPubkeys),
+    [activeWorkstreamTurns],
+  );
+  const activeProfilesQuery = useUsersBatchQuery(activeAgentPubkeys);
+  const activeProfiles = activeProfilesQuery.data?.profiles;
 
   return (
     <div
@@ -53,8 +73,10 @@ export function WorkstreamBoardScreen() {
             <div className={WORKSTREAM_CARD_GRID_CLASS}>
               {workstreamChannels.map((channel) => (
                 <WorkstreamCard
+                  activeWorking={activeTurnsByChannelId.get(channel.id)}
                   channel={channel}
                   key={channel.id}
+                  profiles={activeProfiles}
                   onSelect={(channelId) => void goChannel(channelId)}
                 />
               ))}
