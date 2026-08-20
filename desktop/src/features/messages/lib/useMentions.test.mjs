@@ -221,8 +221,17 @@ test("ignores mentions in fenced code blocks", () => {
 });
 
 test("ignores mentions in indented code blocks", () => {
-  assert.equal(hasMention("before\n    @Alice\nafter", "Alice"), false);
-  assert.equal(hasMention("before\n\t@Alice\nafter", "Alice"), false);
+  // An indented code block cannot interrupt a paragraph (CommonMark 4.4), so
+  // the chunk needs a blank line before it. Checked against react-markdown:
+  //   "before\n    @Alice\nafter"     -> <p>before @Alice after</p>
+  //   "before\n\n    @Alice\n\nafter" -> <p>before</p><pre><code>@Alice</code></pre>
+  // The first form used to be masked here, which dropped the p tag from a
+  // mention every reader could see — including a nested list item, the common
+  // way four spaces of indent turn up in chat.
+  assert.equal(hasMention("before\n\n    @Alice\n\nafter", "Alice"), false);
+  assert.equal(hasMention("before\n\n\t@Alice\n\nafter", "Alice"), false);
+  assert.equal(hasMention("before\n    @Alice\nafter", "Alice"), true);
+  assert.equal(hasMention("before\n\t@Alice\nafter", "Alice"), true);
 });
 
 test("still matches prose mentions around code", () => {

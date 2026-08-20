@@ -1,3 +1,17 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+
+// Structural view of the mdast nodes this file cares about. Declared locally
+// because `@types/mdast` is not a dependency here and the full node union is
+// far more than a masker needs: a type, source offsets, and children.
+type MarkdownNode = {
+  type: string;
+  position?: {
+    start: { offset?: number };
+    end: { offset?: number };
+  };
+  children?: MarkdownNode[];
+};
+
 /**
  * Escape special regex characters in a string.
  */
@@ -18,114 +32,63 @@ function maskRange(
 
 /**
  * Replace Markdown code with spaces while retaining offsets and line endings.
- * Handles fenced blocks, four-space/tab-indented lines, and backtick code spans.
+ *
+ * The block rules here are not worth reimplementing. An indented code block
+ * cannot interrupt a paragraph, but it does not universally need a preceding
+ * blank line either — it can open straight after a fenced block, an ATX
+ * heading or a thematic break — while `- item` + blank + `    @alice` is a
+ * visible second paragraph in the list item, not code. A hand-rolled line
+ * classifier gets one of those two classes wrong whichever way it is written,
+ * and a mention wrongly kept notifies people (and wakes agents) for text the
+ * UI shows as code.
+ *
+ * So the parser decides. Desktop already depends on `mdast-util-from-markdown`
+ * — the same micromark parse `react-markdown` runs to render the message — and
+ * we mask the source ranges of its `code` and `inlineCode` nodes. Whatever the
+ * renderer puts inside a `<code>`, this masks; the two cannot drift.
  */
-function maskMarkdownCode(text: string): string {
+function computeMaskedMarkdownCode(text: string): string {
+  let tree: MarkdownNode;
+  try {
+    tree = fromMarkdown(text) as MarkdownNode;
+  } catch {
+    // A parse failure must not silently un-mask code: leaving the text
+    // unmasked is the permissive direction, but the alternative (masking
+    // everything) would drop every legitimate mention in the message.
+    return text;
+  }
+
   const chars = text.split("");
-  const lines: Array<{ start: number; end: number; content: string }> = [];
-
-  let lineStart = 0;
-  while (lineStart < text.length) {
-    let lineEnd = lineStart;
-    while (
-      lineEnd < text.length &&
-      text[lineEnd] !== "\n" &&
-      text[lineEnd] !== "\r"
+  const visit = (node: MarkdownNode): void => {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (
+      (node.type === "code" || node.type === "inlineCode") &&
+      start !== undefined &&
+      end !== undefined
     ) {
-      lineEnd += 1;
+      maskRange(chars, text, start, end);
+      return;
     }
-    lines.push({
-      start: lineStart,
-      end: lineEnd,
-      content: text.slice(lineStart, lineEnd),
-    });
-    if (text[lineEnd] === "\r" && text[lineEnd + 1] === "\n") lineEnd += 1;
-    lineStart = lineEnd + 1;
-  }
-
-  let fence: { marker: string; length: number } | null = null;
-  for (const line of lines) {
-    if (fence) {
-      maskRange(chars, text, line.start, line.end);
-      const closing = line.content.match(/^ {0,3}(`+|~+)[ \t]*$/);
-      if (
-        closing &&
-        closing[1][0] === fence.marker &&
-        closing[1].length >= fence.length
-      ) {
-        fence = null;
-      }
-      continue;
+    for (const child of node.children ?? []) {
+      visit(child);
     }
-
-    const opening = line.content.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (opening && !(opening[1][0] === "`" && opening[2].includes("`"))) {
-      fence = { marker: opening[1][0], length: opening[1].length };
-      maskRange(chars, text, line.start, line.end);
-      continue;
-    }
-
-    if (/^(?: {4}|\t)/.test(line.content)) {
-      maskRange(chars, text, line.start, line.end);
-    }
-  }
-
-  const isMasked = (index: number) =>
-    chars[index] === " " && text[index] !== " ";
-  const isEscaped = (index: number) => {
-    let slashCount = 0;
-    for (
-      let cursor = index - 1;
-      cursor >= 0 && text[cursor] === "\\";
-      cursor -= 1
-    ) {
-      slashCount += 1;
-    }
-    return slashCount % 2 === 1;
   };
-
-  for (let index = 0; index < text.length; ) {
-    if (text[index] !== "`" || isMasked(index) || isEscaped(index)) {
-      index += 1;
-      continue;
-    }
-
-    let openerEnd = index + 1;
-    while (
-      openerEnd < text.length &&
-      text[openerEnd] === "`" &&
-      !isMasked(openerEnd)
-    ) {
-      openerEnd += 1;
-    }
-    const delimiterLength = openerEnd - index;
-    let closer = openerEnd;
-
-    while (closer < text.length) {
-      if (text[closer] !== "`" || isMasked(closer)) {
-        closer += 1;
-        continue;
-      }
-      let closerEnd = closer + 1;
-      while (
-        closerEnd < text.length &&
-        text[closerEnd] === "`" &&
-        !isMasked(closerEnd)
-      ) {
-        closerEnd += 1;
-      }
-      if (closerEnd - closer === delimiterLength) {
-        maskRange(chars, text, index, closerEnd);
-        index = closerEnd;
-        break;
-      }
-      closer = closerEnd;
-    }
-
-    if (closer >= text.length) index = openerEnd;
-  }
+  visit(tree);
 
   return chars.join("");
+}
+
+// One-entry memo. Mention extraction asks about every member name in the
+// community, so a single draft is masked once per name; the parse is the
+// expensive part and the text is identical across those calls.
+let maskedCache: { text: string; masked: string } | null = null;
+
+function maskMarkdownCode(text: string): string {
+  if (maskedCache?.text === text) return maskedCache.masked;
+  const masked = computeMaskedMarkdownCode(text);
+  maskedCache = { text, masked };
+  return masked;
 }
 
 /**
