@@ -9,6 +9,7 @@ import {
   buildChannelLink,
   parseChannelLink,
 } from "@/features/messages/lib/channelLink";
+import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import type { Channel } from "@/shared/api/types";
 
 import { BuzzInlineLink, BuzzLinkChip } from "./BuzzLinkChip";
@@ -68,22 +69,16 @@ function ResolvedChannelPermalinkChip(props: ChannelPermalinkChipProps) {
   );
 }
 
+type AuthoredMessageLink = ParsedMessageLink;
+
 type AuthoredDeepLinkProps = {
   channelId: string;
   children: React.ReactNode;
   href: string;
   interactive: boolean;
-  messageLink: {
-    channelId: string;
-    messageId: string;
-    threadRootId: null;
-  } | null;
+  messageLink: AuthoredMessageLink | null;
   onOpenChannel: (channelId: string) => void;
-  onOpenMessageLink: (link: {
-    channelId: string;
-    messageId: string;
-    threadRootId: null;
-  }) => void;
+  onOpenMessageLink: (link: AuthoredMessageLink) => void;
 };
 
 function ResolvedAuthoredDeepLink({
@@ -117,6 +112,71 @@ function ResolvedAuthoredDeepLink({
     >
       {children}
     </BuzzInlineLink>
+  );
+}
+
+/**
+ * Renders an intentionally-labeled `buzz://channel|message` deep link through
+ * the shared visibility gate. Known channels are interactive immediately;
+ * unknown ids without a runtime resolver stay inert; otherwise a bounded
+ * per-id lookup decides openability. Both parser families
+ * (`buzz://channel/...` and `buzz://message?...`) share this decision so a
+ * private destination can never render clickable via a custom label.
+ */
+export function AuthoredDeepLinkAnchor({
+  channelId,
+  children,
+  href,
+  interactive,
+  messageLink,
+}: {
+  channelId: string;
+  children: React.ReactNode;
+  href: string;
+  interactive: boolean;
+  messageLink: AuthoredMessageLink | null;
+}) {
+  const {
+    channels,
+    onOpenChannel,
+    onOpenMessageLink,
+    resolveChannelReferences,
+  } = useMarkdownRuntime();
+  const openLink = () =>
+    messageLink ? onOpenMessageLink(messageLink) : onOpenChannel(channelId);
+  const label = getReactNodeText(children);
+  const knownChannel = channels?.find((c) => c.id === channelId);
+  if (knownChannel) {
+    return (
+      <BuzzInlineLink
+        href={href}
+        title={href}
+        aria-label={`${messageLink ? "Open message" : "Open channel"}: ${label}`}
+        interactive={interactive}
+        onOpenLink={openLink}
+      >
+        {children}
+      </BuzzInlineLink>
+    );
+  }
+  if (!resolveChannelReferences) {
+    return (
+      <span className="font-medium text-current" data-buzz-link={href}>
+        {children}
+      </span>
+    );
+  }
+  return (
+    <ResolvedAuthoredDeepLink
+      channelId={channelId}
+      href={href}
+      interactive={interactive}
+      messageLink={messageLink}
+      onOpenChannel={onOpenChannel}
+      onOpenMessageLink={onOpenMessageLink}
+    >
+      {children}
+    </ResolvedAuthoredDeepLink>
   );
 }
 
@@ -161,45 +221,17 @@ export function ChannelDeepLinkAnchor({
         threadRootId: null,
       }
     : null;
-  const openLink = () =>
-    messageLink
-      ? onOpenMessageLink(messageLink)
-      : onOpenChannel(parsed.value.channelId);
   const authoredLabel = getReactNodeText(children);
   if (authoredLabel !== href) {
-    const { channelId } = parsed.value;
-    const knownChannel = channels?.find((c) => c.id === channelId);
-    if (knownChannel) {
-      return (
-        <BuzzInlineLink
-          href={href}
-          title={href}
-          aria-label={`${messageLink ? "Open message" : "Open channel"}: ${authoredLabel}`}
-          interactive={interactive}
-          onOpenLink={openLink}
-        >
-          {children}
-        </BuzzInlineLink>
-      );
-    }
-    if (!resolveChannelReferences) {
-      return (
-        <span className="font-medium text-current" data-buzz-link={href}>
-          {children}
-        </span>
-      );
-    }
     return (
-      <ResolvedAuthoredDeepLink
-        channelId={channelId}
+      <AuthoredDeepLinkAnchor
+        channelId={parsed.value.channelId}
         href={href}
         interactive={interactive}
         messageLink={messageLink}
-        onOpenChannel={onOpenChannel}
-        onOpenMessageLink={onOpenMessageLink}
       >
         {children}
-      </ResolvedAuthoredDeepLink>
+      </AuthoredDeepLinkAnchor>
     );
   }
   if (messageLink) {

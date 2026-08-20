@@ -62,6 +62,7 @@ import {
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import {
+  AuthoredDeepLinkAnchor,
   ChannelDeepLinkAnchor,
   MarkdownChannelDeepLink,
   MarkdownChannelReference,
@@ -117,7 +118,6 @@ import {
 } from "./markdown/imageLightbox";
 import { MarkdownTable } from "./markdown/MarkdownTable";
 import { ProgressiveImage } from "./markdown/ProgressiveImage";
-import { BuzzInlineLink } from "./markdown/BuzzLinkChip";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { renderCachedMarkdown } from "./markdown/nodeCache";
 import { useMessageLinkPreviews } from "./markdown/useMessageLinkPreviews";
@@ -1364,17 +1364,17 @@ export function createMarkdownComponents(
         }
 
         return (
-          <BuzzInlineLink
-            title={href}
+          <AuthoredDeepLinkAnchor
+            channelId={messageLinkTarget.link.channelId}
+            href={href}
             interactive={interactive}
-            onOpenLink={() => onOpenMessageLink(messageLinkTarget.link)}
+            messageLink={messageLinkTarget.link}
           >
             {children}
-          </BuzzInlineLink>
+          </AuthoredDeepLinkAnchor>
         );
       }
-      // Malformed message deep link — fall through to the default
-      // anchor (renders as a normal external link).
+      // Malformed message deep link — fall through to the default anchor.
     }
 
     // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones

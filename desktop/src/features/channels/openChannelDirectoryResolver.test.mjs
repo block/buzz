@@ -545,17 +545,27 @@ test("markdown message links resolve private destinations without a directory sc
 });
 
 test("authored-label channel and message links respect the private-destination gate", async () => {
-  // buzz://channel/<uuid> and buzz://channel/<uuid>/<event-id> with an authored
-  // label both go through ChannelDeepLinkAnchor. The authored-label branch must
-  // route through the same bounded detail lookup + openable gate as the pill
-  // paths — a private channel must render inert regardless of the display text.
+  // Authored-label deep links must route through the same bounded detail
+  // lookup + openable gate as the pill paths, regardless of parser family:
+  //   - buzz://channel/<uuid> and buzz://channel/<uuid>/<event-id> reach the
+  //     gate via ChannelDeepLinkAnchor's authored branch, and
+  //   - the canonical buzz://message?channel=&id= form (produced by
+  //     buildMessageLink) reaches it via resolveMessageLinkRenderTarget's
+  //     "label" branch.
+  // A private channel must render inert on every route regardless of the
+  // display text.
   const channelId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const messageId = "b".repeat(64);
   const channelLink = `buzz://channel/${channelId}`;
-  const messageLinkUrl = `buzz://channel/${channelId}/${messageId}`;
+  const channelMessageLink = `buzz://channel/${channelId}/${messageId}`;
+  const canonicalMessageLink = `buzz://message?channel=${channelId}&id=${messageId}`;
   const renderPaths = [
     ["channel variant", `[private channel](${channelLink})`],
-    ["message variant", `[private message](${messageLinkUrl})`],
+    [
+      "channel-path message variant",
+      `[private message](${channelMessageLink})`,
+    ],
+    ["canonical message variant", `[private message](${canonicalMessageLink})`],
   ];
 
   for (const [path, content] of renderPaths) {
