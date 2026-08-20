@@ -21,19 +21,13 @@ import type {
 import {
   formatExactTimestamp,
   getProjectUpdatedAt,
+  listRowDescription,
   relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
 import { projectTerminalLabel } from "@/features/projects/ui/useOpenProjectTerminal";
-import {
-  PROJECT_LIST_ROW_CLASS,
-  PROJECT_LIST_ROW_DATE_CLASS,
-  PROJECT_LIST_ROW_META_TEXT_CLASS,
-  PROJECT_LIST_ROW_PREVIEW_CLASS,
-  PROJECT_LIST_ROW_TITLE_CLASS,
-  PROJECT_LIST_ROW_TRAILING_CLASS,
-} from "@/features/projects/ui/projectListRowStyles";
+import { PROJECT_LIST_ROW_META_TEXT_CLASS } from "@/features/projects/ui/projectListRowStyles";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -52,6 +46,7 @@ import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
+import { ProjectEntityListRow } from "./ProjectEntityListRow";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 
 function ProjectUpdatedLabel({
@@ -575,89 +570,46 @@ export function ProjectListRow({
   onOpen,
   onOpenTerminal,
 }: ProjectItemProps) {
+  const repositoryCount = project.repositoryAddresses.length;
   return (
-    <div
-      className={cn(PROJECT_LIST_ROW_CLASS, "py-3")}
-      data-testid={`project-row-${project.dtag}`}
-    >
-      <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="pointer-events-none relative z-10 flex min-w-0 items-center gap-2.5">
-        <div className="flex min-w-0 flex-1 items-center gap-2.5">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
-            <Folders className="h-4.5 w-4.5 text-muted-foreground" />
-          </span>
-          <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className={PROJECT_LIST_ROW_TITLE_CLASS}>
-                {project.name}
-              </span>
-              <StatusPill status={project.status} />
-            </div>
-            <p className={PROJECT_LIST_ROW_PREVIEW_CLASS}>
-              {project.description || "A shared space for internal git work."}
-            </p>
-          </div>
-        </div>
-
-        <div
-          className={cn(PROJECT_LIST_ROW_TRAILING_CLASS, "pointer-events-auto")}
-        >
-          <div
-            className="hidden w-24 shrink-0 text-xs text-muted-foreground md:block"
-            data-testid="projects-row-context"
-          >
-            {project.repositoryAddresses.length}{" "}
-            {project.repositoryAddresses.length === 1
-              ? "repository"
-              : "repositories"}
-          </div>
-          <div
-            className="flex w-6 shrink-0 justify-center"
-            data-testid="projects-row-repository-status"
-          >
+    <ProjectEntityListRow
+      affiliation={`${repositoryCount} ${
+        repositoryCount === 1 ? "repository" : "repositories"
+      }`}
+      affiliationTestId="projects-row-context"
+      dateSeconds={getProjectUpdatedAt(project, summary)}
+      dateTestId="projects-row-date"
+      description={listRowDescription(project.description, project.name)}
+      descriptionTestId="projects-row-description"
+      icon={<Folders className="h-3.5 w-3.5 text-muted-foreground/70" />}
+      onClick={() => onOpen(project)}
+      people={people}
+      peopleTestId="projects-row-people"
+      profiles={profiles}
+      testId={`project-row-${project.dtag}`}
+      title={
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate">{project.name}</span>
+          <StatusPill status={project.status} />
+          <span data-testid="projects-row-repository-status">
             <RepositoryUnavailableIndicator
               reason={repositoryUnavailableReason}
             />
-          </div>
-          <div
-            className="hidden items-center xl:flex"
-            data-testid="projects-row-summary"
-          >
-            <div className="w-32 shrink-0">
-              <ProjectActivityBar summary={summary} />
-            </div>
-          </div>
-          <div
-            className="hidden w-24 shrink-0 justify-end lg:flex"
-            data-testid="projects-row-people"
-          >
-            <ProjectPeopleStack
-              profiles={profiles}
-              pubkeys={people}
-              workOwnerPubkey={project.owner}
-            />
-          </div>
-          <div
-            className={PROJECT_LIST_ROW_DATE_CLASS}
-            data-testid="projects-row-date"
-          >
-            <ProjectUpdatedLabel
-              profiles={profiles}
-              project={project}
-              summary={summary}
-            />
-          </div>
-          <ProjectActionsMenu
-            canDelete={canDelete}
-            disabled={deleteDisabled}
-            hasLocal={hasLocal}
-            onDelete={onDelete}
-            onOpenTerminal={onOpenTerminal}
-            project={project}
-          />
-        </div>
-      </div>
-    </div>
+          </span>
+        </span>
+      }
+      titleAttr={project.name}
+      trailing={
+        <ProjectActionsMenu
+          canDelete={canDelete}
+          disabled={deleteDisabled}
+          hasLocal={hasLocal}
+          onDelete={onDelete}
+          onOpenTerminal={onOpenTerminal}
+          project={project}
+        />
+      }
+    />
   );
 }
 

@@ -11,10 +11,12 @@ const MENU_ITEM_CLASS =
   "flex min-h-9 w-full items-center gap-2 rounded-lg py-2 pl-2 pr-4 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:text-foreground focus-visible:ring-1 focus-visible:ring-ring [&_svg]:size-4 [&_svg]:shrink-0";
 
 export function ProjectsCreateMenu({
+  compact = false,
   onCreateIssue,
   onCreateProject,
   onCreatePullRequest,
 }: {
+  compact?: boolean;
   onCreateIssue: () => void;
   onCreateProject: () => void;
   onCreatePullRequest: () => void;
@@ -70,12 +72,16 @@ export function ProjectsCreateMenu({
         aria-expanded={open}
         aria-haspopup="menu"
         aria-label="Create"
-        className="h-8 w-8 rounded-full"
+        className={
+          compact
+            ? "h-6 w-6 shrink-0 rounded-md text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+            : "h-8 w-8 rounded-full"
+        }
         data-testid="projects-create-menu"
         onClick={() => setOpen(true)}
         size="icon"
         type="button"
-        variant="default"
+        variant={compact ? "ghost" : "default"}
       >
         <Plus className="h-4 w-4" />
       </Button>
