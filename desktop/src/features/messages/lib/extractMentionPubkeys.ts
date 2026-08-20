@@ -3,6 +3,7 @@ import { getMentionOffsets } from "./hasMention";
 export type MentionPubkeyCandidate = {
   displayName: string | null;
   isMember: boolean;
+  isAgent?: boolean;
   pubkey?: string;
 };
 
@@ -36,6 +37,16 @@ export function extractMentionPubkeys({
       normalizeDisplayName,
     ),
   );
+  const memberAgentNames = new Set(
+    memberCandidates
+      .filter(
+        (candidate) =>
+          candidate.isAgent === true &&
+          candidate.isMember &&
+          candidate.displayName,
+      )
+      .map((candidate) => normalizeDisplayName(candidate.displayName!)),
+  );
   const matchesByOffset = new Map<number, MentionMatch[]>();
 
   const addMatches = (displayName: string, pubkey?: string) => {
@@ -58,9 +69,18 @@ export function extractMentionPubkeys({
   for (const candidate of memberCandidates) {
     if (
       candidate.pubkey &&
-      candidate.isMember &&
       candidate.displayName &&
-      !selectedNames.has(normalizeDisplayName(candidate.displayName))
+      candidate.isAgent === true &&
+      (candidate.isMember ||
+        selectedNames.has(normalizeDisplayName(candidate.displayName)) ||
+        memberAgentNames.has(normalizeDisplayName(candidate.displayName))) &&
+      // A display name is not a unique identity: a Custom agent definition
+      // and its managed instance can legitimately share the same label. Keep
+      // same-name candidates so an @mention wakes every matching agent.
+      (!selectedNames.has(normalizeDisplayName(candidate.displayName)) ||
+        [...selectedMentions.values()].every(
+          (pubkey) => pubkey !== candidate.pubkey,
+        ))
     ) {
       addMatches(candidate.displayName, candidate.pubkey);
     }

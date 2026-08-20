@@ -205,6 +205,49 @@ test("keeps manually typed prefix member mentions at distinct offsets", () => {
   assert.deepEqual(pubkeys, ["codex-pubkey", "fast-fizz-pubkey"]);
 });
 
+test("mentions every agent sharing the same display name", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Debug hi",
+    selectedMentions: new Map([["Debug", "definition-pubkey"]]),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "instance-pubkey",
+        displayName: "Debug",
+        isMember: false,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["definition-pubkey", "instance-pubkey"]);
+});
+
+test("typed duplicate agent names include the non-member instance", () => {
+  const pubkeys = extractMentionPubkeys({
+    text: "@Debug hi",
+    selectedMentions: new Map(),
+    memberCandidates: [
+      {
+        kind: "identity",
+        pubkey: "definition-pubkey",
+        displayName: "Debug",
+        isMember: true,
+        isAgent: true,
+      },
+      {
+        kind: "identity",
+        pubkey: "instance-pubkey",
+        displayName: "Debug",
+        isMember: false,
+        isAgent: true,
+      },
+    ],
+  });
+
+  assert.deepEqual(pubkeys, ["definition-pubkey", "instance-pubkey"]);
+});
+
 // ── Markdown code ─────────────────────────────────────────────────────
 
 test("ignores mentions in inline code", () => {
