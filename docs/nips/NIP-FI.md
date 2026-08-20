@@ -561,7 +561,7 @@ policy revision. NIP-FI-CONF defines evidence and mutation-adequacy rules.
 | ID | Required outcome |
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, mixed, URL, and fallback variants deny. |
-| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and ambiguity negative denies. |
+| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, ambiguity, and missing-configuration negative denies. |
 | `FI-TRACE-TOKEN-CLASS` | An `at+jwt` access token and a dedicated `nip-fi+jwt` assertion pass only their selected class. ID tokens, wrong/generic types outside a named compatibility policy, client-only audiences, absent or ambiguous `client_id`, resource-owner/client-subject ambiguity, and every attempted cross-class fallback deny. |
 | `FI-TRACE-CONTRACT-IDENTITIES` | Mutate each assertion semantic, transport semantic, and mutable dependency independently: semantic mutations change only their owning contract ID; snapshot/binding/lifecycle/policy/resource/status mutations change neither ID but force current revalidation. |
 | `FI-TRACE-VERIFIER-PARITY` | Equal authoritative input and policy produce the same canonical normalized result. |

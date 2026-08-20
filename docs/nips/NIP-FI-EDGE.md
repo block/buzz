@@ -171,10 +171,10 @@ time.
 
 No authorization decision, target, resource, capability, or effect selector
 derives from any request or connection component outside the protected pre-MAC
-components, except an independent Nostr proof validated on its own signature —
-the NIP-98 event in `Authorization` or the NIP-42 event after connect — which
-the MAC does not protect; body interpretation follows the server-resolved body
-semantics, never unprotected transport metadata such as `Content-Type` or
+components, except an independent Nostr proof validated on its own signature,
+such as the NIP-98 event in `Authorization` or the NIP-42 event after connect,
+which the MAC does not protect; body interpretation follows the server-resolved
+body semantics, never unprotected transport metadata such as `Content-Type` or
 `Content-Encoding`.
 
 ### Freshness, replay, and key rotation
