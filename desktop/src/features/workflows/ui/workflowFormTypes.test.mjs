@@ -4,7 +4,9 @@ import { parse as parseYaml } from "yaml";
 
 import {
   formStateToYaml,
+  isThreadReplyEligibleTrigger,
   supportsMessageTextCondition,
+  withTriggerType,
   yamlToFormState,
   DEFAULT_FORM_STATE,
 } from "./workflowFormTypes.ts";
@@ -227,6 +229,22 @@ test("reply_in_thread is emitted only when the checkbox is on", () => {
   assert.doesNotMatch(unset, /reply_in_thread/);
 });
 
+test("switching from Message Posted clears reply_in_thread before save", () => {
+  const messagePosted = sendMessageState({ replyInThread: true });
+
+  for (const triggerType of ["schedule", "webhook"]) {
+    const switched = withTriggerType(messagePosted, triggerType);
+    assert.equal(switched.trigger.on, triggerType);
+    assert.equal(switched.steps[0].replyInThread, false);
+    assert.doesNotMatch(formStateToYaml(switched), /reply_in_thread/);
+  }
+});
+
+test("reply_in_thread eligibility follows trigger capability", () => {
+  assert.equal(isThreadReplyEligibleTrigger("message_posted"), true);
+  assert.equal(isThreadReplyEligibleTrigger("schedule"), false);
+  assert.equal(isThreadReplyEligibleTrigger("webhook"), false);
+});
 test("reply_in_thread round-trips YAML -> form -> YAML", () => {
   const yaml = formStateToYaml(sendMessageState({ replyInThread: true }));
   const parsed = yamlToFormState(yaml);

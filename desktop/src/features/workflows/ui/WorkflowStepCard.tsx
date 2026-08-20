@@ -11,6 +11,7 @@ import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEdit
 import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
 import { WorkflowWebhookHeadersEditor } from "./WorkflowWebhookHeadersEditor";
 import {
+  isThreadReplyEligibleTrigger,
   supportsMessageTextCondition,
   type StepFormState,
   type TriggerType,
@@ -184,7 +185,7 @@ function StepConfigFields({
               ) : null}
             </div>
           )}
-          {triggerType !== "webhook" && triggerType !== "schedule" ? (
+          {isThreadReplyEligibleTrigger(triggerType) ? (
             <div className="flex items-center gap-2">
               <Checkbox
                 checked={step.replyInThread === true}

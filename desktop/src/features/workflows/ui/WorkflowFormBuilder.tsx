@@ -39,6 +39,7 @@ import {
   formStateToYaml,
   nextStepId,
   supportsMessageTextCondition,
+  withTriggerType,
   yamlToFormState,
 } from "./workflowFormTypes";
 import { defaultScheduleTrigger } from "./workflowSchedule";
@@ -744,23 +745,27 @@ export const WorkflowFormBuilder = React.forwardRef<
                                 ariaLabel="Trigger event"
                                 disabled={disabled}
                                 labels={TRIGGER_LABELS}
-                                onChange={(triggerType) =>
+                                onChange={(triggerType) => {
+                                  const next = withTriggerType(
+                                    formState,
+                                    triggerType,
+                                  );
                                   updateFormState({
-                                    ...formState,
+                                    ...next,
                                     steps: supportsMessageTextCondition(
                                       triggerType,
                                     )
-                                      ? formState.steps
-                                      : formState.steps.map((step) => ({
+                                      ? next.steps
+                                      : next.steps.map((step) => ({
                                           ...step,
                                           condition: undefined,
                                         })),
                                     trigger:
                                       triggerType === "schedule"
                                         ? defaultScheduleTrigger()
-                                        : { on: triggerType },
-                                  })
-                                }
+                                        : next.trigger,
+                                  });
+                                }}
                                 options={SELECTABLE_TRIGGER_TYPES}
                                 value={formState.trigger.on}
                               />

@@ -196,6 +196,27 @@ function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
   return fields;
 }
 
+export function isThreadReplyEligibleTrigger(trigger: TriggerType): boolean {
+  return trigger !== "webhook" && trigger !== "schedule";
+}
+
+export function withTriggerType(
+  state: WorkflowFormState,
+  triggerType: TriggerType,
+): WorkflowFormState {
+  return {
+    ...state,
+    trigger: { on: triggerType },
+    steps: isThreadReplyEligibleTrigger(triggerType)
+      ? state.steps
+      : state.steps.map((step) =>
+          step.action === "send_message" && step.replyInThread
+            ? { ...step, replyInThread: false }
+            : step,
+        ),
+  };
+}
+
 export function formStateToYaml(state: WorkflowFormState): string {
   const trigger: Record<string, unknown> = { on: state.trigger.on };
   if (
@@ -270,7 +291,12 @@ const TRIGGER_KEYS: Record<TriggerType, ReadonlySet<string>> = {
 const COMMON_STEP_KEYS = ["id", "name", "action", "if", "timeout_secs"];
 const ACTION_STEP_KEYS: Record<ActionType, ReadonlySet<string>> = {
   delay: new Set([...COMMON_STEP_KEYS, "duration"]),
-  send_message: new Set([...COMMON_STEP_KEYS, "text", "channel"]),
+  send_message: new Set([
+    ...COMMON_STEP_KEYS,
+    "text",
+    "channel",
+    "reply_in_thread",
+  ]),
   send_dm: new Set([...COMMON_STEP_KEYS, "to", "text"]),
   call_webhook: new Set([
     ...COMMON_STEP_KEYS,

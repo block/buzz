@@ -826,10 +826,12 @@ pub(crate) async fn resolve_nip10_thread_meta(
 /// Recover a reply's thread ancestry from its *parent's* NIP-10 tags when the
 /// parent has **no** `thread_metadata` row (legacy or not-yet-indexed events).
 ///
-/// The parent's own marked `root` (else `reply`) `e` tag names the thread root;
-/// absent both, the parent is itself top-level and is its own root. Depth is 1
-/// when the parent is the root and 2 otherwise — a reply to a nested-but-
-/// unindexed parent must not be mistaken for a top-level reply.
+/// The parent's markers are first collapsed through `ThreadMarkers::resolve()`:
+/// a `root`+`reply` parent carries its marked root, a `reply`-only parent carries
+/// its reply target as root, and a root-only/malformed/unmarked parent is itself
+/// top-level and its own root. Depth is 1 when the parent is the root and 2
+/// otherwise — a reply to a nested-but-unindexed parent must not be mistaken for
+/// a top-level reply.
 ///
 /// Shared by [`resolve_nip10_thread_meta`] (client path) and
 /// [`resolve_relay_reply_thread_meta`] (workflow path) so the two cannot
@@ -844,10 +846,10 @@ async fn derive_ancestry_from_parent_tags(
     let marked_ancestor = |id_hex: &str| hex::decode(id_hex).ok().filter(|b| b.len() == 32);
     let markers = buzz_core::nip10::parse_thread_markers(&parent_event.tags);
     let parent_root = markers
-        .root
+        .resolve()
+        .map(|(root, _)| root)
         .as_deref()
         .and_then(marked_ancestor)
-        .or_else(|| markers.reply.as_deref().and_then(marked_ancestor))
         .unwrap_or_else(|| parent_bytes.to_vec());
 
     if parent_root.as_slice() == parent_bytes {

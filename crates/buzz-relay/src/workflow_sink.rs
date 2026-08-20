@@ -890,7 +890,7 @@ mod integration_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn workflow_reply_to_metadata_less_nested_parent_recovers_depth_2() {
+    async fn workflow_replies_recover_metadata_less_parent_ancestry() {
         // A parent that carries NIP-10 root/reply markers but has NO
         // thread_metadata row (legacy or not-yet-indexed) must be recognized as
         // nested: the workflow reply threads at depth 2 onto the parent's own
@@ -1028,6 +1028,55 @@ mod integration_tests {
         };
         assert_eq!(marker("root").as_deref(), Some(root_hex.as_str()));
         assert_eq!(marker("reply").as_deref(), Some(parent_hex.as_str()));
+
+        // A root-only parent is top-level under the shared collapse rule, even
+        // without metadata. A workflow reply therefore starts a thread at P,
+        // rather than incorrectly inheriting the marker's unrelated root R.
+        let root_only_parent =
+            EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "root-only parent")
+                .tags([
+                    Tag::parse(["h", &channel_hex]).expect("h tag"),
+                    Tag::parse(["e", &root_hex, "", "root"]).expect("root tag"),
+                ])
+                .sign_with_keys(&author)
+                .expect("sign root-only parent");
+        let root_only_parent_hex = root_only_parent.id.to_hex();
+        let root_only_parent_bytes = root_only_parent.id.as_bytes().to_vec();
+        state
+            .db
+            .insert_event(community, &root_only_parent, Some(channel.id))
+            .await
+            .expect("insert root-only parent");
+
+        let root_only_reply_hex = RelayActionSink::new(&state)
+            .send_message(
+                community,
+                &channel_hex,
+                "workflow reply to root-only parent",
+                &author_hex,
+                Some(&root_only_parent_hex),
+            )
+            .await
+            .expect("send root-only reply");
+        let root_only_reply_bytes = nostr::EventId::from_hex(&root_only_reply_hex)
+            .expect("reply id")
+            .as_bytes()
+            .to_vec();
+        let root_only_meta = state
+            .db
+            .get_thread_metadata_by_event(community, &root_only_reply_bytes)
+            .await
+            .expect("query root-only reply meta")
+            .expect("root-only reply has thread metadata");
+        assert_eq!(root_only_meta.depth, 1);
+        assert_eq!(
+            root_only_meta.parent_event_id.as_deref(),
+            Some(root_only_parent_bytes.as_slice())
+        );
+        assert_eq!(
+            root_only_meta.root_event_id.as_deref(),
+            Some(root_only_parent_bytes.as_slice())
+        );
     }
 
     #[tokio::test]
