@@ -125,8 +125,13 @@ clippy (workspace + Tauri), desktop TypeScript typechecking (`tsc --noEmit`),
 and fast unit tests in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter)
 — no overlap with pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix
 all formatting in one shot. Run `just ci` for the full local gate. Run `just
-hooks` to re-install hooks after env changes. Before agents run Git or hooks,
-activate the repo's Hermit environment (`. ./bin/activate-hermit`); do not
+hooks` to re-install hooks after env changes. Each globbed pre-push lane is
+scoped to the branch's merge-base diff against `origin/main` (`git diff
+origin/main...HEAD`), matching CI's paths-filter — so a lane only fires when this
+branch actually changed a file it covers, never because `origin/main` moved.
+Before agents run Git or hooks, activate the repo's Hermit environment
+(`. ./bin/activate-hermit`) so `./bin` leads `PATH` and the pinned toolchain
+(flutter, dart, lefthook) wins over any Homebrew version; do not
 rewrite hook commands to compensate for an unconfigured shell `PATH`.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
