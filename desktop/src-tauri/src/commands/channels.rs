@@ -11,6 +11,9 @@ use crate::{
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
 
 const DIRECTORY_PAGE_SIZE: usize = 500;
+// Keep this aligned with the relay's aggregate explicit-`#h` request bound.
+// Each filter carries one channel so the relay can use its channel_id index.
+const LAST_MESSAGE_QUERY_CHANNEL_BATCH_SIZE: usize = 128;
 const STARTER_CHANNEL_NAMESPACE: uuid::Uuid = uuid::uuid!("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0");
 
 struct StarterChannelSpec {
@@ -147,6 +150,23 @@ fn compute_channels_hash(channels: &[ChannelInfo]) -> String {
 
 // ── Core fetch implementation ─────────────────────────────────────────────────
 
+fn last_message_filter_batches(filters: &[serde_json::Value]) -> Vec<&[serde_json::Value]> {
+    filters
+        .chunks(LAST_MESSAGE_QUERY_CHANNEL_BATCH_SIZE)
+        .collect()
+}
+
+async fn query_last_messages(
+    state: &AppState,
+    filters: &[serde_json::Value],
+) -> Result<Vec<nostr::Event>, String> {
+    let mut messages = Vec::with_capacity(filters.len());
+    for batch in last_message_filter_batches(filters) {
+        messages.extend(query_relay(state, batch).await?);
+    }
+    Ok(messages)
+}
+
 /// Fetch the full channel list from the relay. Called by both `get_channels`
 /// (the Tauri command, which wraps the result with hash-based short-circuit
 /// logic) and `ensure_starter_channels` (which needs the raw list directly).
@@ -155,7 +175,9 @@ fn compute_channels_hash(channels: &[ChannelInfo]) -> String {
 /// - Phase 1 (parallel): member-chain (kind:39002→kind:39000), open directory
 ///   (kind:39000 all-open), and hidden-DM snapshot (kind:30622).
 /// - Phase 2 (parallel): member counts (kind:39002 batch) and last-message
-///   timestamps (per-channel kind:9/40002).
+///   timestamps (bounded per-channel kind:9/40002 batches). Member-count
+///   failures degrade to zero; timestamp failures abort so cached recency is
+///   never replaced by a false authoritative empty result.
 async fn fetch_channels(state: &AppState) -> Result<Vec<ChannelInfo>, String> {
     #[cfg(debug_assertions)]
     let _profile_start = std::time::Instant::now();
@@ -305,8 +327,8 @@ async fn fetch_channels(state: &AppState) -> Result<Vec<ChannelInfo>, String> {
     }
 
     // Phase 2 — concurrent: member counts (step 4) and last-message timestamps
-    // (step 5). Both tolerate failures — empty defaults leave counts at 0 and
-    // timestamps at None rather than aborting.
+    // (step 5). Member-count failures degrade to zero. Timestamp failures
+    // abort this refresh so the frontend keeps its previous Recent ordering.
     let all_channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
     if !all_channel_ids.is_empty() {
         let last_msg_filters: Vec<serde_json::Value> = all_channel_ids
@@ -330,10 +352,14 @@ async fn fetch_channels(state: &AppState) -> Result<Vec<ChannelInfo>, String> {
         let (members_result, message_result) = tokio::join!(
             // Step 4: batch-fetch kind:39002 for member counts.
             query_relay(state, &member_count_filters),
-            // Step 5: per-channel last-message filter. Uses per-channel `#h`
-            // so the relay can push each query to its indexed channel_id column.
-            query_relay(state, &last_msg_filters),
+            // Step 5: preserve one indexed filter per channel while keeping
+            // every relay request within its aggregate explicit-channel cap.
+            query_last_messages(state, &last_msg_filters),
         );
+        // Message timestamps drive the user-selected Recent ordering. Unlike
+        // member counts, a failed query must not masquerade as an authoritative
+        // empty result and clear every cached timestamp in the frontend.
+        let messages = message_result?;
 
         let membership = collect_members_by_channel(&members_result.unwrap_or_default());
         for channel in &mut channels {
@@ -345,7 +371,7 @@ async fn fetch_channels(state: &AppState) -> Result<Vec<ChannelInfo>, String> {
 
         let mut last_message_by_channel: std::collections::HashMap<String, u64> =
             std::collections::HashMap::new();
-        for ev in &message_result.unwrap_or_default() {
+        for ev in &messages {
             if let Some(ch_id) = ev.tags.iter().find_map(|t| {
                 let s = t.as_slice();
                 (s.len() >= 2 && s[0] == "h").then(|| s[1].clone())

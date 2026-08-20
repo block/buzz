@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge } from "../helpers/bridge";
+import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/channel-sort";
 
@@ -26,6 +26,42 @@ async function openApp(page: Page) {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+}
+
+async function waitForMockLiveSubscription(page: Page, channelName: string) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (name) =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: name,
+          }) ?? false,
+        channelName,
+      ),
+    )
+    .toBe(true);
+}
+
+async function emitMockMessage(
+  page: Page,
+  channelName: string,
+  createdAt: number,
+) {
+  await page.evaluate(
+    ({ channelName, createdAt, pubkey }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) {
+        throw new Error("Mock message emitter is not installed");
+      }
+      emit({
+        channelName,
+        content: "Fresh activity for Recent ordering",
+        createdAt,
+        pubkey,
+      });
+    },
+    { channelName, createdAt, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
 }
 
 function streamNames(page: Page) {
@@ -60,6 +96,14 @@ test.describe("per-group channel sort", () => {
   }) => {
     await installMockBridge(page);
     await openApp(page);
+
+    // Prime a live subscription while A–Z keeps engineering rendered, then move
+    // away so the later message exercises sidebar recency rather than routing.
+    await page.getByTestId("channel-engineering").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+    await waitForMockLiveSubscription(page, "engineering");
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
 
     // Hover the Channels header to reveal the action cluster, then open the
     // sort dropdown and choose Recent.
@@ -101,6 +145,18 @@ test.describe("per-group channel sort", () => {
     expect(names.slice(0, rendered.length)).toEqual(rendered);
     await waitForAnimations(page);
     await page.screenshot({ path: `${SHOTS}/03-channels-recent.png` });
+
+    // A fresh message must advance the matching channel immediately. The mock
+    // fixture intentionally pins all-replies in 2999, so use 3000 to prove the
+    // live cache update outranks even that deterministic sentinel.
+    await emitMockMessage(
+      page,
+      "engineering",
+      Math.floor(Date.parse("3000-01-01T00:00:00.000Z") / 1_000),
+    );
+    await expect
+      .poll(async () => (await streamNames(page)).slice(0, 3))
+      .toEqual(["engineering", "all-replies", "deep-history"]);
 
     // Persisted for this identity.
     const stored = await page.evaluate((key) => {
