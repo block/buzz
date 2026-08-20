@@ -10,13 +10,16 @@ const persona = {
 };
 
 test("Codex task agents stay in Custom agents after persona backfill", () => {
-  const result = buildUnifiedGroups([persona], [
-    {
-      name: "Debug",
-      personaId: "debug-definition",
-      codexTaskBinding: { taskId: "task-1" },
-    },
-  ]);
+  const result = buildUnifiedGroups(
+    [persona],
+    [
+      {
+        name: "Debug",
+        personaId: "debug-definition",
+        codexTaskBinding: { taskId: "task-1" },
+      },
+    ],
+  );
 
   assert.equal(result.groups[0].agents.length, 0);
   assert.equal(result.ungrouped.length, 1);
@@ -24,9 +27,10 @@ test("Codex task agents stay in Custom agents after persona backfill", () => {
 });
 
 test("ordinary persona-linked agents remain grouped", () => {
-  const result = buildUnifiedGroups([persona], [
-    { name: "Debug", personaId: "debug-definition" },
-  ]);
+  const result = buildUnifiedGroups(
+    [persona],
+    [{ name: "Debug", personaId: "debug-definition" }],
+  );
 
   assert.equal(result.groups[0].agents.length, 1);
   assert.equal(result.ungrouped.length, 0);

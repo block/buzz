@@ -311,7 +311,7 @@ test("mergeStores: a fresh at-capacity unstar defeats an older remote star", () 
       { starred: true, updatedAt: index + 1 },
     ]),
   );
-  channels["unstarred"] = { starred: false, updatedAt: 9999 };
+  channels.unstarred = { starred: false, updatedAt: 9999 };
   const bounded = boundStarStore({ version: 1, channels });
 
   const result = mergeStores(bounded, {
