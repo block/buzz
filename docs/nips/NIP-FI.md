@@ -477,10 +477,10 @@ private-posture rule, even `key_mismatch` joins the private-state anonymity set.
 | required current dependency unreadable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; `authorization unavailable\n` |
 
 Nostr text is the exact UTF-8 text after an applicable NIP-42/NIP-01 prefix.
-A denial decided on a WebSocket upgrade request — the assertion is absent or
-rejected before any NIP-42 proof exists — is the HTTP response in the table,
-sent instead of `101`; a denial decided after the connection is established
-is the Nostr text. For HTTP, the compared denial contract is closed over the
+A denial decided on a WebSocket upgrade request, before any NIP-42 proof
+exists, is the HTTP response in the table, sent instead of `101`; a denial
+decided after the connection is established is the Nostr text. For HTTP, the
+compared denial contract is closed over the
 status, complete body,
 and exact values of only the header fields named in the table; header order and
 other fields are outside that contract and their values cannot depend on the
@@ -583,7 +583,7 @@ policy revision. NIP-FI-CONF defines evidence and mutation-adequacy rules.
 | `FI-TRACE-LIFECYCLE-AUTHORITY` | Unprivileged/stale transitions deny; authorized retirement/revocation/rotation is atomic. |
 | `FI-TRACE-LEASE-BOUND` | A lease ends at its earliest bound; equality at any bound is expired. |
 | `FI-TRACE-MULTI-KEY-SESSION` | One actor's lease never authorizes another key on the same connection. |
-| `FI-TRACE-DENIAL-ORACLE` | Each private row produces its exact fixed bytes on HTTP, on a WebSocket upgrade, and after connect; all private-state rows compare byte-identical. |
+| `FI-TRACE-DENIAL-ORACLE` | Each private row produces its exact fixed bytes on every surface where its condition can be decided — HTTP, a WebSocket upgrade, or after connect; all private-state rows compare byte-identical. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | Each unreadable authoritative dependency denies. |
 | `FI-TRACE-AUTHORITY-UNIFORM` | Every protected ingress reaches one current final-admission authority. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal subjects across issuers and equal pairs across domains remain distinct. |

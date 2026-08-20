@@ -284,8 +284,10 @@ so that a mismatch can be explained from fields outside the compared object.
 
 The test passes when outputs compare equal over their compared objects and
 each implementation accepts the other's valid request and reproduces the
-other's denials. A divergence traced to an underspecified value is a defect in
-the specification, not in either implementation, and is fixed there.
+other's denials. Exit evidence includes the exchanged artifacts and each
+implementation's statement of independence. A divergence traced to an
+underspecified value is a defect in the specification, not in either
+implementation, and is fixed there.
 
 **Negative control.** One implementation is patched to emit a denial that
 differs from the other only outside the compared object — a header core does

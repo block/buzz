@@ -165,7 +165,7 @@ time.
   before content-coding decompression. These are exactly the octets forwarded by the
   edge and exposed to verification. HTTP framing, chunk delimiters, and trailers are
   excluded; `Content-Encoding` is not decoded. A WebSocket upgrade uses the empty
-  payload. Any transformation after the protected snapshot is forbidden.
+  payload. Substitution of the protected octets after the snapshot denies.
 - **Proof transport:** Serialize exactly one assigned octet from the registry below.
 - **Client peer:** Serialize the exact canonical ASCII field value.
 
