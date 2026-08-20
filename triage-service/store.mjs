@@ -42,12 +42,22 @@ function sortOpen(fibres) {
   });
 }
 
+function sortDone(fibres) {
+  return [...fibres].sort(
+    (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
+  );
+}
+
 export function listFibres(pubkey) {
   return bucket("fibres", pubkey);
 }
 
 export function listOpenFibres(pubkey) {
   return sortOpen(listFibres(pubkey).filter((fibre) => fibre.status === "open"));
+}
+
+export function listDoneFibres(pubkey) {
+  return sortDone(listFibres(pubkey).filter((fibre) => fibre.status === "done"));
 }
 
 export function clearedCount(pubkey) {
@@ -119,9 +129,12 @@ export function listFeedback(pubkey) {
 
 export function fibresPayload(pubkey) {
   const open = listOpenFibres(pubkey);
+  const done = listDoneFibres(pubkey);
   return {
     fibres: open,
+    done,
     openCount: open.length,
+    doneCount: done.length,
     clearedCount: clearedCount(pubkey),
   };
 }

@@ -433,26 +433,25 @@ export function AppShell() {
     unreadThreadFeedItems,
   ]);
 
-  const { homeBadgeCountExcludingHighPriority } =
-    useHomeFeedNotificationState(
-      homeFeedQuery.data,
-      identityQuery.data?.pubkey,
-      notificationSettings.settings,
-      notificationSettings.setDesktopEnabled,
-      !isHuddleRoom,
-      selectedView === "home" && !settingsOpen,
-      getChannelReadAt,
-      readStateVersion,
-      highPriorityUnreadChannelIds,
-      feedProfilesQuery.data?.profiles,
-      mutedChannelIds,
-      feedItemState.unreadSet,
-      threadActivityFeedItems,
-      getThreadReadAt,
-      getMessageReadAt,
-      channels,
-      huddleBackingChannelIds,
-    );
+  const { homeBadgeCountExcludingHighPriority } = useHomeFeedNotificationState(
+    homeFeedQuery.data,
+    identityQuery.data?.pubkey,
+    notificationSettings.settings,
+    notificationSettings.setDesktopEnabled,
+    !isHuddleRoom,
+    selectedView === "home" && !settingsOpen,
+    getChannelReadAt,
+    readStateVersion,
+    highPriorityUnreadChannelIds,
+    feedProfilesQuery.data?.profiles,
+    mutedChannelIds,
+    feedItemState.unreadSet,
+    threadActivityFeedItems,
+    getThreadReadAt,
+    getMessageReadAt,
+    channels,
+    huddleBackingChannelIds,
+  );
   const isNotifiedForThread = React.useCallback(
     (rootId: string) =>
       !mutedRootIds.has(rootId) &&

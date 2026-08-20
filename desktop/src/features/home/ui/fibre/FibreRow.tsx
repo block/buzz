@@ -4,7 +4,13 @@ import {
   fibreSourceLabel,
   formatFibreAge,
 } from "@/features/home/ui/fibre/fibreFormat";
-import { fibreKindMeta } from "@/features/home/ui/fibre/fibreKinds";
+import { fibreActivityAt } from "@/features/home/ui/fibre/fibreSort";
+import {
+  FIBRE_UNSEEN_DOT,
+  FIBRE_UPDATED_DOT,
+  fibreKindMeta,
+} from "@/features/home/ui/fibre/fibreKinds";
+import type { FibreDotState } from "@/features/home/ui/fibre/fibreSeen";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Fibre } from "@/features/triage/api";
 import { cn } from "@/shared/lib/cn";
@@ -16,7 +22,22 @@ type FibreRowProps = {
   nowMs: number;
   onSelect: (id: string) => void;
   profiles?: UserProfileLookup;
+  seen?: FibreDotState | null;
 };
+
+function FibreSeenDot({ state }: { state: FibreDotState }) {
+  const isUpdated = state === "updated";
+  return (
+    <span
+      aria-label={isUpdated ? "Updated" : "Unread"}
+      className="h-2 w-2 shrink-0 rounded-full"
+      data-state={state}
+      data-testid="fibre-seen-dot"
+      role="img"
+      style={{ background: isUpdated ? FIBRE_UPDATED_DOT : FIBRE_UNSEEN_DOT }}
+    />
+  );
+}
 
 export function FibreRow({
   currentPubkey,
@@ -25,20 +46,15 @@ export function FibreRow({
   nowMs,
   onSelect,
   profiles,
+  seen = null,
 }: FibreRowProps) {
   const kind = fibreKindMeta(fibre.kind);
-  const age = formatFibreAge(
-    fibre.artifacts.reduce(
-      (latest, artifact) => Math.max(latest, artifact.createdAt ?? 0),
-      fibre.updatedAt,
-    ) || fibre.updatedAt,
-    nowMs,
-  );
+  const age = formatFibreAge(fibreActivityAt(fibre), nowMs);
 
   return (
     <button
       className={cn(
-        "grid w-full grid-cols-[2.375rem_minmax(0,1fr)] gap-x-3 rounded-lg px-2.5 py-3 text-left transition-colors",
+        "grid w-full grid-cols-[0.75rem_minmax(0,1fr)] gap-x-2 rounded-lg px-2.5 py-3 text-left transition-colors",
         isSelected ? "bg-muted/80" : "hover:bg-muted/40",
       )}
       data-kind={fibre.kind}
@@ -46,11 +62,8 @@ export function FibreRow({
       onClick={() => onSelect(fibre.id)}
       type="button"
     >
-      <span
-        className="flex h-[2.375rem] w-[2.375rem] items-center justify-center rounded-[0.625rem] text-sm font-medium tabular-nums"
-        style={{ color: kind.color, background: kind.tint }}
-      >
-        {fibre.score}
+      <span className="flex h-5 items-center justify-center">
+        {seen ? <FibreSeenDot state={seen} /> : null}
       </span>
       <span className="min-w-0">
         <span className="flex items-center gap-2">

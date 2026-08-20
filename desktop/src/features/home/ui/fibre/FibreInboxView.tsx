@@ -1,12 +1,19 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useCommunities } from "@/features/communities/useCommunities";
 import { FibreDetailPane } from "@/features/home/ui/fibre/FibreDetailPane";
 import { FibreListPane } from "@/features/home/ui/fibre/FibreListPane";
 import {
   collectFibrePubkeys,
   primaryThreadTarget,
 } from "@/features/home/ui/fibre/fibreFormat";
+import {
+  sortFibres,
+  type FibreListTab,
+} from "@/features/home/ui/fibre/fibreSort";
+import { useFibreSeenState } from "@/features/home/ui/fibre/useFibreSeenState";
+import { useFibreSort } from "@/features/home/ui/fibre/useFibreSort";
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Fibre } from "@/features/triage/api";
@@ -43,19 +50,35 @@ export function FibreInboxView({
   onOpenContext,
 }: FibreInboxViewProps) {
   const nowMs = useNow(30_000);
+  const { activeCommunity } = useCommunities();
   const fibresQuery = useFibresQuery(currentPubkey);
   const patchMutation = usePatchFibreMutation(currentPubkey);
   const restoreMutation = useRestoreFibresMutation(currentPubkey);
   const feedbackMutation = useFibreFeedbackMutation();
+  const { markSeen, seenAtById } = useFibreSeenState(
+    currentPubkey,
+    activeCommunity?.relayUrl,
+  );
+  const [listTab, setListTab] = React.useState<FibreListTab>("open");
+  const { setSort, sort } = useFibreSort(listTab);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
-  const fibres = fibresQuery.data?.fibres ?? [];
-  const clearedCount = fibresQuery.data?.clearedCount ?? 0;
+  const openFibres = React.useMemo(
+    () => sortFibres(fibresQuery.data?.fibres ?? [], sort, "activity"),
+    [fibresQuery.data?.fibres, sort],
+  );
+  const doneFibres = React.useMemo(
+    () => sortFibres(fibresQuery.data?.done ?? [], sort, "updated"),
+    [fibresQuery.data?.done, sort],
+  );
+  const fibres = listTab === "done" ? doneFibres : openFibres;
+  const openCount = fibresQuery.data?.openCount ?? openFibres.length;
+  const doneCount = fibresQuery.data?.doneCount ?? doneFibres.length;
   const profilePubkeys = React.useMemo(() => {
-    const pubkeys = collectFibrePubkeys(fibres);
+    const pubkeys = collectFibrePubkeys([...openFibres, ...doneFibres]);
     if (currentPubkey) pubkeys.push(currentPubkey);
     return pubkeys;
-  }, [currentPubkey, fibres]);
+  }, [currentPubkey, doneFibres, openFibres]);
   const profilesQuery = useUsersBatchQuery(profilePubkeys, {
     enabled: profilePubkeys.length > 0,
   });
@@ -71,6 +94,26 @@ export function FibreInboxView({
       setSelectedId(null);
     }
   }, [selected, selectedId]);
+
+  React.useEffect(() => {
+    if (listTab === "open" && selected) {
+      markSeen(selected);
+    }
+  }, [listTab, markSeen, selected]);
+
+  React.useEffect(() => {
+    const root = document.documentElement;
+    const showWallpaper =
+      listTab === "open" && fibresQuery.isSuccess && openCount === 0;
+    if (showWallpaper) {
+      root.setAttribute("data-inbox-zero", "");
+    } else {
+      root.removeAttribute("data-inbox-zero");
+    }
+    return () => {
+      root.removeAttribute("data-inbox-zero");
+    };
+  }, [fibresQuery.isSuccess, listTab, openCount]);
 
   const advanceAfter = React.useCallback(
     (fibreId: string) => {
@@ -102,6 +145,15 @@ export function FibreInboxView({
     [advanceAfter, currentPubkey, feedbackMutation, patchMutation],
   );
 
+  const reopen = React.useCallback(
+    (fibre: Fibre) => {
+      patchMutation.mutate({ id: fibre.id, status: "open" });
+      toast.success("Reopened");
+      advanceAfter(fibre.id);
+    },
+    [advanceAfter, patchMutation],
+  );
+
   React.useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -119,6 +171,20 @@ export function FibreInboxView({
         return;
       }
       if (!selected) return;
+      if (listTab === "done") {
+        if (key === "r") {
+          event.preventDefault();
+          const target = primaryThreadTarget(selected);
+          if (target) {
+            onOpenContext(
+              target.channelId,
+              target.messageId,
+              target.threadRootId,
+            );
+          }
+        }
+        return;
+      }
       if (key === "e") {
         event.preventDefault();
         mark(selected, "done", "Marked done");
@@ -146,7 +212,7 @@ export function FibreInboxView({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [fibres, mark, onOpenContext, selected]);
+  }, [fibres, listTab, mark, onOpenContext, selected]);
 
   if (fibresQuery.isLoading && !fibresQuery.data) {
     return <HomeLoadingState />;
@@ -173,21 +239,29 @@ export function FibreInboxView({
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 overflow-hidden"
+      data-fibre-inbox-tab={listTab}
       data-testid="fibre-inbox"
     >
       <FibreListPane
-        clearedCount={clearedCount}
         currentPubkey={currentPubkey}
+        doneCount={doneCount}
         fibres={fibres}
+        listTab={listTab}
         nowMs={nowMs}
+        onListTabChange={setListTab}
         onSelect={setSelectedId}
+        onSortChange={setSort}
+        openCount={openCount}
         profiles={profiles}
+        seenAtById={seenAtById}
         selectedId={selected?.id ?? null}
+        sort={sort}
       />
       <FibreDetailPane
         currentPubkey={currentPubkey}
         fibre={selected}
-        isZero={fibres.length === 0}
+        isZero={listTab === "open" && openCount === 0}
+        listTab={listTab}
         nowMs={nowMs}
         profiles={profiles}
         onDismiss={(fibre) =>
@@ -199,6 +273,7 @@ export function FibreInboxView({
         }
         onDone={(fibre) => mark(fibre, "done", "Marked done")}
         onOpenContext={onOpenContext}
+        onReopen={reopen}
         onRestore={() => {
           restoreMutation.mutate(undefined, {
             onSuccess: () => toast.success("Restored triaged fibres"),

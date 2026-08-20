@@ -29,6 +29,11 @@ export const FIBRE_KIND_META: Record<
   fyi: { label: "FYI", color: "#A6A6A2", tint: "rgba(255,255,255,0.08)" },
 };
 
+/** Mail-style unread (question-kind blue; theme primary is already purple). */
+export const FIBRE_UNSEEN_DOT = "#7DB2F5";
+/** Fibre updated after it was opened (decision-kind purple). */
+export const FIBRE_UPDATED_DOT = "#A79AE8";
+
 export function fibreKindMeta(kind: string) {
   return (
     FIBRE_KIND_META[kind as FibreKind] ?? {

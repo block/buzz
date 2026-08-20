@@ -28,6 +28,7 @@ type FibreDetailPaneProps = {
   currentPubkey?: string;
   fibre: Fibre | null;
   isZero: boolean;
+  listTab: "open" | "done";
   nowMs: number;
   profiles?: UserProfileLookup;
   onDone: (fibre: Fibre) => void;
@@ -37,6 +38,7 @@ type FibreDetailPaneProps = {
     messageId: string,
     threadRootId?: string | null,
   ) => void;
+  onReopen: (fibre: Fibre) => void;
   onRestore: () => void;
 };
 
@@ -62,10 +64,12 @@ export function FibreDetailPane({
   currentPubkey,
   fibre,
   isZero,
+  listTab,
   nowMs,
   onDone,
   onDismiss,
   onOpenContext,
+  onReopen,
   onRestore,
   profiles,
 }: FibreDetailPaneProps) {
@@ -98,6 +102,7 @@ export function FibreDetailPane({
         event.preventDefault();
         setArtifactsOpen((open) => !open);
       } else if (key === "d") {
+        if (fibre?.status === "done") return;
         event.preventDefault();
         setDelegateOpen((open) => !open);
       } else if (key === "escape") {
@@ -106,7 +111,7 @@ export function FibreDetailPane({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [fibre?.status]);
 
   const jump = React.useCallback(
     (targetFibre: Fibre) => {
@@ -165,17 +170,35 @@ export function FibreDetailPane({
     [currentPubkey, fibre, onDone, profiles],
   );
 
+  if (listTab === "done" && !fibre) {
+    return (
+      <div
+        className="flex flex-1 items-center justify-center p-10"
+        data-testid="fibre-done-empty"
+      >
+        <div className="inbox-zero-copy max-w-sm text-center">
+          <div className="text-xl font-medium tracking-tight">
+            Nothing completed yet
+          </div>
+          <p className="mt-2.5 text-sm leading-relaxed text-muted-foreground">
+            Fibres you mark done will collect here so you can reopen them later.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (isZero || !fibre) {
     return (
       <div
         className="flex flex-1 items-center justify-center p-10"
         data-testid="fibre-zero"
       >
-        <div className="max-w-sm text-center">
+        <div className="inbox-zero-copy max-w-sm text-center">
           <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-muted text-primary">
             <Info className="h-6 w-6" />
           </div>
-          <div className="text-xl font-medium tracking-tight">Fibre Zero</div>
+          <div className="text-xl font-medium tracking-tight">Inbox Zero</div>
           <p className="mt-2.5 text-sm leading-relaxed text-muted-foreground">
             Every idea, decision and ask from your channels has been triaged.
             Buzz keeps reading; new fibres arrive as your team moves.
@@ -375,57 +398,82 @@ export function FibreDetailPane({
       </div>
 
       <div className="relative flex shrink-0 items-center gap-2 border-t border-border/60 px-5 py-3">
-        <Button
-          data-testid="fibre-done"
-          onClick={() => onDone(fibre)}
-          size="sm"
-          type="button"
-        >
-          Done
-          <kbd className={SHORTCUT_KBD} data-testid="fibre-done-kbd">
-            E
-          </kbd>
-        </Button>
-        <Button
-          onClick={() => toast.message("Snooze isn't wired yet")}
-          size="sm"
-          type="button"
-          variant="secondary"
-        >
-          Snooze
-          <kbd className={SHORTCUT_KBD}>H</kbd>
-        </Button>
-        <Button
-          data-testid="fibre-reply"
-          onClick={() => jump(fibre)}
-          size="sm"
-          type="button"
-          variant="secondary"
-        >
-          Reply
-          <kbd className={SHORTCUT_KBD}>R</kbd>
-        </Button>
-        <Button
-          data-testid="fibre-delegate"
-          onClick={() => setDelegateOpen((open) => !open)}
-          size="sm"
-          type="button"
-          variant="secondary"
-        >
-          Delegate to agent
-          <kbd className={SHORTCUT_KBD}>D</kbd>
-        </Button>
-        <Button
-          className="ml-auto"
-          data-testid="fibre-dismiss"
-          onClick={() => onDismiss(fibre)}
-          size="sm"
-          type="button"
-          variant="ghost"
-        >
-          Not a fibre
-          <kbd className={SHORTCUT_KBD}>X</kbd>
-        </Button>
+        {fibre.status === "done" ? (
+          <>
+            <Button
+              data-testid="fibre-reopen"
+              onClick={() => onReopen(fibre)}
+              size="sm"
+              type="button"
+            >
+              Reopen
+            </Button>
+            <Button
+              data-testid="fibre-reply"
+              onClick={() => jump(fibre)}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              Reply
+              <kbd className={SHORTCUT_KBD}>R</kbd>
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              data-testid="fibre-done"
+              onClick={() => onDone(fibre)}
+              size="sm"
+              type="button"
+            >
+              Done
+              <kbd className={SHORTCUT_KBD} data-testid="fibre-done-kbd">
+                E
+              </kbd>
+            </Button>
+            <Button
+              onClick={() => toast.message("Snooze isn't wired yet")}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              Snooze
+              <kbd className={SHORTCUT_KBD}>H</kbd>
+            </Button>
+            <Button
+              data-testid="fibre-reply"
+              onClick={() => jump(fibre)}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              Reply
+              <kbd className={SHORTCUT_KBD}>R</kbd>
+            </Button>
+            <Button
+              data-testid="fibre-delegate"
+              onClick={() => setDelegateOpen((open) => !open)}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              Delegate to agent
+              <kbd className={SHORTCUT_KBD}>D</kbd>
+            </Button>
+            <Button
+              className="ml-auto"
+              data-testid="fibre-dismiss"
+              onClick={() => onDismiss(fibre)}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              Not a fibre
+              <kbd className={SHORTCUT_KBD}>X</kbd>
+            </Button>
+          </>
+        )}
 
         {delegateOpen ? (
           <div

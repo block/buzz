@@ -829,7 +829,7 @@ const FIBRE_ENGINE_CORS = {
 };
 
 /**
- * Default empty fibre engine so `/` renders Fibre Zero without a live
+ * Default empty fibre engine so `/` renders Inbox Zero without a live
  * triage-service. Specs that need seeded fibres should `page.route` the
  * same origin after `installMockBridge` so their handler wins.
  */
@@ -842,7 +842,14 @@ async function mockEmptyFibreEngine(page: Page) {
         return;
       }
       const url = new URL(route.request().url());
-      const empty = { fibres: [], openCount: 0, clearedCount: 0, ingested: 0 };
+      const empty = {
+        fibres: [],
+        done: [],
+        openCount: 0,
+        doneCount: 0,
+        clearedCount: 0,
+        ingested: 0,
+      };
       if (url.pathname === "/health") {
         await route.fulfill({
           headers: FIBRE_ENGINE_CORS,

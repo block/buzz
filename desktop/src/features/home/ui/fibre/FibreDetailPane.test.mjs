@@ -1,5 +1,5 @@
 /**
- * Fibre detail pane: Fibre Zero empty state and Done from a fixture fibre.
+ * Fibre detail pane: Inbox Zero empty state and Done from a fixture fibre.
  * Keyboard Done is covered in the fibre-inbox Playwright spec.
  */
 
@@ -36,10 +36,12 @@ function renderPane(props) {
       createElement(FibreDetailPane, {
         fibre: null,
         isZero: true,
+        listTab: "open",
         nowMs: NOW,
         onDismiss: () => {},
         onDone: () => {},
         onOpenContext: () => {},
+        onReopen: () => {},
         onRestore: () => {},
         ...props,
       }),
@@ -82,14 +84,14 @@ afterEach(() => {
 });
 after(() => dom.window.close());
 
-test("Fibre Zero offers restore", () => {
+test("Inbox Zero offers restore", () => {
   const restored = [];
   renderPane({
     onRestore: () => restored.push(true),
   });
 
   assert.ok(screen.getByTestId("fibre-zero"));
-  assert.match(screen.getByTestId("fibre-zero").textContent, /Fibre Zero/);
+  assert.match(screen.getByTestId("fibre-zero").textContent, /Inbox Zero/);
   fireEvent.click(screen.getByTestId("fibre-restore"));
   assert.equal(restored.length, 1);
 });
@@ -127,4 +129,37 @@ test("Done shortcut inherits button color", () => {
     screen.getByTestId("fibre-artifacts").className.includes("max-h-"),
     false,
   );
+});
+
+test("completed fibre offers Reopen instead of Done", () => {
+  const reopened = [];
+  const fibre = {
+    id: "f1",
+    kind: "ask",
+    status: "done",
+    score: 90,
+    title: "Threadception Inquiry",
+    summary: "A question about the thread.",
+    why: "Unanswered ask.",
+    whyShort: "Unanswered ask.",
+    signals: [],
+    channelId: "c1",
+    channelName: "general",
+    isDm: false,
+    people: [],
+    createdAt: 1_700_000_000,
+    updatedAt: 1_700_000_000,
+    artifacts: [],
+  };
+
+  renderPane({
+    fibre,
+    isZero: false,
+    listTab: "done",
+    onReopen: (item) => reopened.push(item.id),
+  });
+
+  assert.equal(screen.queryByTestId("fibre-done"), null);
+  fireEvent.click(screen.getByTestId("fibre-reopen"));
+  assert.deepEqual(reopened, ["f1"]);
 });

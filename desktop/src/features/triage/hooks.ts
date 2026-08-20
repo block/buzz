@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  emptyFibresResponse,
   fetchFibres,
   ingestMessages,
   patchFibre,
@@ -12,6 +13,11 @@ import {
   type FibreStatus,
   type FibresResponse,
 } from "@/features/triage/api";
+import {
+  moveFibreStatus,
+  normalizeFibresResponse,
+  type FibresPayload,
+} from "@/features/triage/fibreStatus";
 
 /** Keyed by pubkey so a different identity never reads another's fibres. */
 export const fibreQueryKeys = {
@@ -20,24 +26,31 @@ export const fibreQueryKeys = {
 };
 
 export function useFibresQuery(pubkey: string | undefined) {
+  const queryClient = useQueryClient();
   return useQuery({
     enabled: Boolean(pubkey),
     queryKey: fibreQueryKeys.fibres(pubkey),
-    queryFn: async () => fetchFibres(pubkey as string),
+    queryFn: async () => {
+      const payload = await fetchFibres(pubkey as string);
+      return normalizeFibresResponse(
+        payload,
+        queryClient.getQueryData<FibresResponse>(fibreQueryKeys.fibres(pubkey)),
+      );
+    },
     staleTime: 5_000,
     refetchInterval: 15_000,
     retry: 1,
   });
 }
 
-function applyFibresResponse(
+function applyFibresPayload(
   queryClient: ReturnType<typeof useQueryClient>,
   pubkey: string | undefined,
-  response: FibresResponse,
+  payload: FibresPayload,
 ) {
   queryClient.setQueryData<FibresResponse>(
     fibreQueryKeys.fibres(pubkey),
-    response,
+    (current) => normalizeFibresResponse(payload, current),
   );
 }
 
@@ -51,13 +64,13 @@ export function useIngestMessagesMutation(pubkey: string | undefined) {
         return (
           queryClient.getQueryData<FibresResponse>(
             fibreQueryKeys.fibres(pubkey),
-          ) ?? { fibres: [], openCount: 0, clearedCount: 0, ingested: 0 }
+          ) ?? emptyFibresResponse()
         );
       }
       return ingestMessages({ pubkey, messages });
     },
-    onSuccess: (response) => {
-      applyFibresResponse(queryClient, pubkey, response);
+    onSuccess: (payload) => {
+      applyFibresPayload(queryClient, pubkey, payload);
     },
   });
 }
@@ -76,19 +89,7 @@ export function usePatchFibreMutation(pubkey: string | undefined) {
       const previous = queryClient.getQueryData<FibresResponse>(key);
       queryClient.setQueryData<FibresResponse>(key, (current) => {
         if (!current) return current;
-        const fibres = current.fibres.filter((fibre) =>
-          fibre.id === id ? status === "open" : true,
-        );
-        const wasOpen = current.fibres.some(
-          (fibre) => fibre.id === id && fibre.status === "open",
-        );
-        const clearedDelta = status === "open" ? -1 : wasOpen ? 1 : 0;
-        return {
-          ...current,
-          fibres,
-          openCount: fibres.length,
-          clearedCount: Math.max(0, current.clearedCount + clearedDelta),
-        };
+        return moveFibreStatus(current, id, status);
       });
       return { key, previous };
     },
@@ -97,8 +98,8 @@ export function usePatchFibreMutation(pubkey: string | undefined) {
         queryClient.setQueryData(context.key, context.previous);
       }
     },
-    onSuccess: (response) => {
-      applyFibresResponse(queryClient, pubkey, response);
+    onSuccess: (payload) => {
+      applyFibresPayload(queryClient, pubkey, payload);
     },
   });
 }
@@ -111,8 +112,8 @@ export function useRestoreFibresMutation(pubkey: string | undefined) {
       if (!pubkey) throw new Error("No identity available for fibre ingest");
       return restoreFibres(pubkey);
     },
-    onSuccess: (response) => {
-      applyFibresResponse(queryClient, pubkey, response);
+    onSuccess: (payload) => {
+      applyFibresPayload(queryClient, pubkey, payload);
     },
   });
 }

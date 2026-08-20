@@ -81,11 +81,27 @@ export type FibreIngestMessage = {
 
 export type FibresResponse = {
   fibres: Fibre[];
+  done: Fibre[];
   openCount: number;
+  doneCount: number;
   clearedCount: number;
   changes?: unknown[];
   ingested?: number;
 };
+
+export function emptyFibresResponse(
+  extras?: Partial<FibresResponse>,
+): FibresResponse {
+  return {
+    fibres: [],
+    done: [],
+    openCount: 0,
+    doneCount: 0,
+    clearedCount: 0,
+    ingested: 0,
+    ...extras,
+  };
+}
 
 export type FibreFeedbackAction = "done" | "dismissed" | "delegated";
 
@@ -137,33 +153,42 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export function ingestMessages(input: {
+export async function ingestMessages(input: {
   pubkey: string;
   messages: FibreIngestMessage[];
-}): Promise<FibresResponse> {
-  return request("/ingest", {
+}): Promise<Partial<FibresResponse>> {
+  return request<Partial<FibresResponse>>("/ingest", {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
-export function fetchFibres(pubkey: string): Promise<FibresResponse> {
-  return request(`/fibres?pubkey=${encodeURIComponent(pubkey)}`);
+export async function fetchFibres(
+  pubkey: string,
+): Promise<Partial<FibresResponse>> {
+  return request<Partial<FibresResponse>>(
+    `/fibres?pubkey=${encodeURIComponent(pubkey)}`,
+  );
 }
 
-export function patchFibre(input: {
+export async function patchFibre(input: {
   id: string;
   pubkey: string;
   status: FibreStatus;
-}): Promise<FibresResponse & { fibre: Fibre }> {
-  return request(`/fibres/${encodeURIComponent(input.id)}`, {
-    method: "PATCH",
-    body: JSON.stringify({ pubkey: input.pubkey, status: input.status }),
-  });
+}): Promise<Partial<FibresResponse> & { fibre: Fibre }> {
+  return request<Partial<FibresResponse> & { fibre: Fibre }>(
+    `/fibres/${encodeURIComponent(input.id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ pubkey: input.pubkey, status: input.status }),
+    },
+  );
 }
 
-export function restoreFibres(pubkey: string): Promise<FibresResponse> {
-  return request("/fibres/restore", {
+export async function restoreFibres(
+  pubkey: string,
+): Promise<Partial<FibresResponse>> {
+  return request<Partial<FibresResponse>>("/fibres/restore", {
     method: "POST",
     body: JSON.stringify({ pubkey }),
   });

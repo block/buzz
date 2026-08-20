@@ -83,11 +83,13 @@ const FIBRES = [
   },
 ];
 
-function payload(open: typeof FIBRES) {
+function payload(open: typeof FIBRES, done: typeof FIBRES = []) {
   return {
     fibres: open,
+    done,
     openCount: open.length,
-    clearedCount: FIBRES.length - open.length,
+    doneCount: done.length,
+    clearedCount: done.length,
     ingested: 0,
     changes: [],
   };
@@ -98,6 +100,7 @@ async function mockFibreService(
   initial = [...FIBRES],
 ) {
   let open = [...initial];
+  let done: typeof FIBRES = [];
   await page.route(
     /http:\/\/(?:localhost|127\.0\.0\.1):8787\/.*/,
     async (route) => {
@@ -112,26 +115,39 @@ async function mockFibreService(
         return;
       }
       if (url.pathname === "/fibres" && method === "GET") {
-        await route.fulfill({ headers: CORS, json: payload(open) });
+        await route.fulfill({ headers: CORS, json: payload(open, done) });
         return;
       }
       if (url.pathname === "/ingest" && method === "POST") {
-        await route.fulfill({ headers: CORS, json: payload(open) });
+        await route.fulfill({ headers: CORS, json: payload(open, done) });
         return;
       }
       if (url.pathname === "/fibres/restore" && method === "POST") {
         open = [...FIBRES];
-        await route.fulfill({ headers: CORS, json: payload(open) });
+        done = [];
+        await route.fulfill({ headers: CORS, json: payload(open, done) });
         return;
       }
       if (method === "PATCH" && url.pathname.startsWith("/fibres/")) {
         const id = url.pathname.split("/").at(-1);
+        const body = JSON.parse(route.request().postData() ?? "{}") as {
+          status?: string;
+        };
+        const current =
+          open.find((fibre) => fibre.id === id) ??
+          done.find((fibre) => fibre.id === id);
         open = open.filter((fibre) => fibre.id !== id);
+        done = done.filter((fibre) => fibre.id !== id);
+        if (current && body.status === "done") {
+          done = [{ ...current, status: "done" }, ...done];
+        } else if (current && body.status === "open") {
+          open = [{ ...current, status: "open" }, ...open];
+        }
         await route.fulfill({
           headers: CORS,
           json: {
-            fibre: FIBRES.find((fibre) => fibre.id === id) ?? null,
-            ...payload(open),
+            fibre: current ? { ...current, status: body.status } : null,
+            ...payload(open, done),
           },
         });
         return;
@@ -186,12 +202,26 @@ test("fibre inbox keyboard Done marks the selected fibre", async ({ page }) => {
   await expect(page.getByTestId("fibre-row")).toHaveCount(1);
 });
 
-test("fibre inbox empty state is Fibre Zero", async ({ page }) => {
+test("fibre inbox empty state is Inbox Zero", async ({ page }) => {
   await installMockBridge(page);
   await mockFibreService(page, []);
   await page.goto("/");
   await expect(page.getByTestId("fibre-inbox")).toBeVisible();
   await expect(page.getByTestId("fibre-zero")).toBeVisible();
-  await expect(page.getByTestId("fibre-zero")).toContainText("Fibre Zero");
+  await expect(page.getByTestId("fibre-zero")).toContainText("Inbox Zero");
   await expect(page.getByTestId("fibre-restore")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-inbox-zero", "");
+});
+
+test("fibre inbox Done tab lists completed fibres", async ({ page }) => {
+  await installMockBridge(page);
+  await mockFibreService(page);
+  await page.goto("/");
+  await expect(page.getByTestId("fibre-row")).toHaveCount(2);
+  await page.getByTestId("fibre-done").click();
+  await expect(page.getByTestId("fibre-row")).toHaveCount(1);
+  await page.getByTestId("fibre-tab-done").click();
+  await expect(page.getByTestId("fibre-row")).toHaveCount(1);
+  await expect(page.getByTestId("fibre-reopen")).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-inbox-zero");
 });
