@@ -2862,7 +2862,9 @@ const mockChannels: MockChannel[] = [
     description: "Casual forum for async discussions",
     topic: null,
     purpose: null,
-    last_message_at: null,
+    // Authoritative forum-post recency returned by get_channels. This must come
+    // from the native 45001/45003 query, not the stream-only 9/40002 query.
+    last_message_at: isoMinutesAgo(10),
     archived_at: null,
     created_by: ALICE_PUBKEY,
     topic_set_by: null,
@@ -2873,7 +2875,7 @@ const mockChannels: MockChannel[] = [
     max_members: null,
     nip29_group_id: null,
     created_minutes_ago: 900,
-    updated_minutes_ago: 900,
+    updated_minutes_ago: 10,
     members: [
       createMockMember(ALICE_PUBKEY, "owner", 900),
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 750),

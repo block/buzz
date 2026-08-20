@@ -461,3 +461,32 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
     channel.archived_at = Some("2026-07-16T00:00:00Z".to_string());
     assert!(!is_matching_starter_channel(&channel, spec));
 }
+
+#[test]
+fn last_message_filter_covers_all_human_visible_activity_kinds() {
+    let filter = last_message_filter("forum-1");
+
+    assert_eq!(
+        filter,
+        serde_json::json!({
+            "kinds": [9, 40002, 45001, 45003],
+            "#h": ["forum-1"],
+            "limit": 1
+        })
+    );
+}
+
+#[test]
+fn last_message_filters_stay_within_relay_channel_cap() {
+    let filters: Vec<serde_json::Value> = (0..257)
+        .map(|index| serde_json::json!({"#h": [format!("channel-{index}")]}))
+        .collect();
+
+    let batches = last_message_filter_batches(&filters);
+
+    assert_eq!(
+        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+        [128, 128, 1]
+    );
+    assert_eq!(batches.concat(), filters);
+}
