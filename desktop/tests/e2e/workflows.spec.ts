@@ -159,6 +159,31 @@ test("creation reveals the trigger pane only after a one-shot channel pick", asy
   ).toBeVisible();
 });
 
+test("Escape closes the selected inspector before the workflow modal", async ({
+  page,
+}) => {
+  for (const width of [760, 1280]) {
+    await page.setViewportSize({ width, height: 820 });
+    await page.goto(
+      "/#/workflows?view=create&channel=94a444a4-c0a3-5966-ab05-530c6ddc2301&pane=trigger",
+    );
+
+    const dialog = page.getByRole("dialog", { name: "Create workflow" });
+    const inspector = dialog.getByTestId("workflow-node-inspector");
+    await expect(dialog).toBeVisible();
+    await expect(inspector).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(inspector).not.toBeVisible();
+    await expect(dialog).toBeVisible();
+    await expect(page).toHaveURL(/view=create/);
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).not.toBeVisible();
+    await expect(page).toHaveURL(/#\/workflows$/);
+  }
+});
+
 test("creates a workflow via the form builder", async ({ page }) => {
   const workflowName = `test_workflow_${Date.now()}`;
 

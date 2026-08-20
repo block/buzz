@@ -513,6 +513,12 @@ export function WorkflowDialog({
       >
         <DialogContent
           className="flex h-[88vh] max-h-[88vh] w-[calc(100vw-2rem)] max-w-6xl flex-col gap-0 overflow-hidden p-0"
+          onEscapeKeyDown={(event) => {
+            if (formBuilderRef.current?.closeInspector()) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }}
           showCloseButton={false}
         >
           <DialogHeader className="flex flex-shrink-0 flex-row items-center justify-between gap-6 space-y-0 px-6 pt-3 pb-2 text-left">

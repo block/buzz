@@ -143,6 +143,7 @@ type WorkflowFormBuilderProps = {
 
 export type WorkflowFormBuilderHandle = {
   addFirstStep: () => void;
+  closeInspector: () => boolean;
   synchronizeYaml: (yaml: string) => void;
 };
 
@@ -523,6 +524,11 @@ export const WorkflowFormBuilder = React.forwardRef<
     ref,
     () => ({
       addFirstStep: () => insertStep(0, "send_message"),
+      closeInspector: () => {
+        if (!selectedNode) return false;
+        onSelectedNodeChange(null);
+        return true;
+      },
       synchronizeYaml: (nextYaml: string) => {
         const result = yamlToFormState(nextYaml);
         if (!result.ok) return;
@@ -531,7 +537,7 @@ export const WorkflowFormBuilder = React.forwardRef<
         setFormState(result.state);
       },
     }),
-    [insertStep],
+    [insertStep, onSelectedNodeChange, selectedNode],
   );
 
   const removeStep = React.useCallback(
@@ -708,6 +714,12 @@ export const WorkflowFormBuilder = React.forwardRef<
                       exit={{ opacity: 0, width: 0, x: 24 }}
                       initial={{ opacity: 0, width: 0, x: 24 }}
                       key="workflow-node-inspector"
+                      onKeyDown={(event) => {
+                        if (event.key !== "Escape" || !narrowInspector) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onSelectedNodeChange(null);
+                      }}
                       role={narrowInspector ? "dialog" : "complementary"}
                       transition={
                         shouldReduceMotion
