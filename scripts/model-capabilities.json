@@ -373,8 +373,8 @@
       "normalization_policy": "openai-standard"
     },
     {
-      "id": "databricks-kimi-k3",
-      "_comment": "Databricks Kimi K3 aliases share the exact record's upstream Moonshot capabilities. Kimi is absent from the Databricks models.dev catalog, so retain the established MLflow Chat route; upstream models.dev advertises a reasoning toggle and effort values low|high|max, with no documented default.",
+      "id": "dbv2-kimi-k3-exact",
+      "_comment": "Databricks Kimi K3 aliases share the exact record's upstream Moonshot capabilities. Kimi is absent from the Databricks models.dev catalog, so retain the established MLflow Chat route; upstream models.dev advertises a reasoning toggle and effort values low|high|max, with no documented default. The toggle is not representable on the MLflow Chat request schema (only reasoning_effort is), so thinking_mode stays none, matching the kimi-k2-7-code precedent.",
       "match_kind": "exact",
       "match_value": "kimi-k3",
       "providers": [
@@ -1039,7 +1039,7 @@
       "_provenance": "databricks_v2_wire_route: provider fallback (databricks_v2/concrete_unknown); thinking_mode+supported_efforts: models.dev Moonshot Kimi K3 catalog; default_effort: no documented default",
       "_source": "models.dev Moonshot Kimi K3 reasoning_options: toggle + low|high|max",
       "_reconciliation": "adopt",
-      "_reconciliation_note": "models.dev advertises toggleable reasoning with [low, high, max], but no default. The Databricks endpoint is absent from its provider catalog, so retain the established MLflow Chat route, adopt the upstream capability set, and leave the effort unset rather than invent a Databricks default.",
+      "_reconciliation_note": "models.dev advertises toggleable reasoning with [low, high, max], but no default. The Databricks endpoint is absent from its provider catalog, so retain the established MLflow Chat route, adopt the upstream capability set, and leave the effort unset rather than invent a Databricks default. The MLflow Chat request schema cannot express a reasoning toggle (only reasoning_effort is representable), so thinking_mode maps to none rather than the upstream toggle, matching the kimi-k2-7-code precedent.",
       "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-20, SHA-256 7ccb5635f682e4248ad8d39f515fbe3f2bb10e67bbc7fa1b94e66dddb00779e5): providers.moonshotai.models[\"kimi-k3\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]; Databricks endpoint absent from providers.databricks.models"
     },
     {

@@ -403,16 +403,3 @@ export function databricksRegistryLabel(rawModelId: string): string | null {
     MANIFEST.family_tokens,
   );
 }
-
-/**
- * Databricks endpoint-id → display-name registry, derived at runtime from the
- * manifest's `databricks_v2` exact records (the only exact records that carry a
- * `registry_label`). Feeds the providerless registry tier of
- * `resolveModelLabel`. Derived, not hand-listed — the manifest stays the single
- * source of truth, so there is no second table to keep in sync.
- */
-export const DATABRICKS_MODEL_NAMES: ReadonlyMap<string, string> = new Map(
-  MANIFEST.exact_records
-    .filter((rec) => rec.provider === "databricks_v2")
-    .map((rec) => [rec.raw_model_id, rec.registry_label] as const),
-);
