@@ -920,10 +920,7 @@ mod tests {
             attachment_filename("Agenda.markdown", "text/calendar"),
             "Agenda.ics"
         );
-        assert_eq!(
-            attachment_filename("Agenda", "text/calendar"),
-            "Agenda.ics"
-        );
+        assert_eq!(attachment_filename("Agenda", "text/calendar"), "Agenda.ics");
         assert_eq!(
             attachment_filename("Planning.txt", "application/octet-stream"),
             "Planning.txt"
