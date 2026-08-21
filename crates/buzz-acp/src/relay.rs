@@ -454,6 +454,48 @@ impl RestClient {
     }
 }
 
+fn parse_nip11_relay_pubkey(value: &Value) -> Option<nostr::PublicKey> {
+    value
+        .get("self")
+        .and_then(Value::as_str)
+        .and_then(|value| nostr::PublicKey::from_hex(value).ok())
+}
+
+async fn fetch_relay_signing_pubkey(
+    http: &reqwest::Client,
+    relay_url: &str,
+) -> Option<nostr::PublicKey> {
+    let url = format!("{}/", relay_ws_to_http(relay_url));
+    let response = match http
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/nostr+json")
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            warn!(status = %response.status(), "NIP-11 relay identity lookup failed");
+            return None;
+        }
+        Err(error) => {
+            warn!(%error, "NIP-11 relay identity lookup failed");
+            return None;
+        }
+    };
+    let value = match response.json::<Value>().await {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(%error, "NIP-11 relay identity response was invalid");
+            return None;
+        }
+    };
+    let relay_pubkey = parse_nip11_relay_pubkey(&value);
+    if relay_pubkey.is_none() {
+        warn!("NIP-11 response omitted a valid relay signing identity");
+    }
+    relay_pubkey
+}
+
 /// Events the harness cares about.
 #[derive(Debug, Clone)]
 pub struct BuzzEvent {
@@ -577,6 +619,10 @@ pub struct HarnessRelay {
     keys: Keys,
     /// Optional NIP-OA auth tag for relay membership delegation.
     auth_tag: Option<nostr::Tag>,
+    /// Relay signing identity advertised by NIP-11 `self`.
+    ///
+    /// `None` fails closed for relay-attributed workflow authorization.
+    relay_pubkey: Option<nostr::PublicKey>,
     /// Handle to the background task (for clean shutdown).
     /// Wrapped in `Option` so `shutdown()` can take ownership without conflicting
     /// with `Drop` (which only has `&mut self`).
@@ -663,20 +709,32 @@ impl HarnessRelay {
             .await;
         });
 
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?;
+        let relay_pubkey = fetch_relay_signing_pubkey(&http, relay_url).await;
+
         Ok(Self {
             event_rx,
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .build()
-                .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
+            http,
             relay_url: relay_url.to_string(),
             keys: keys.clone(),
             auth_tag,
+            relay_pubkey,
             bg_handle: Some(bg_handle),
         })
+    }
+
+    /// Return the relay signing identity advertised by NIP-11.
+    ///
+    /// The harness uses this only to authenticate relay-signed workflow
+    /// attribution. Missing or invalid NIP-11 metadata fails closed.
+    pub fn relay_signing_pubkey(&self) -> Option<&nostr::PublicKey> {
+        self.relay_pubkey.as_ref()
     }
 
     /// Discover channels the agent is a member of.
@@ -4025,6 +4083,20 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_valid_nip11_relay_identity() {
+        let relay = nostr::Keys::generate();
+        let value = serde_json::json!({ "self": relay.public_key().to_hex() });
+
+        assert_eq!(parse_nip11_relay_pubkey(&value), Some(relay.public_key()));
+    }
+
+    #[test]
+    fn rejects_missing_or_invalid_nip11_relay_identity() {
+        assert!(parse_nip11_relay_pubkey(&serde_json::json!({})).is_none());
+        assert!(parse_nip11_relay_pubkey(&serde_json::json!({ "self": "not-a-pubkey" })).is_none());
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
