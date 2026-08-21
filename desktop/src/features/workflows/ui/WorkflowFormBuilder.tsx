@@ -28,6 +28,7 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
+import { reactionConditionValue } from "./workflowReactionCondition";
 import { WorkflowTriggerConditions } from "./WorkflowTriggerConditions";
 import { workflowStepDescription } from "./workflowStepDescription";
 import { workflowTriggerDescription } from "./workflowTriggerDescription";
@@ -92,12 +93,7 @@ function TriggerConfigFields({
             })
           }
           triggerType={trigger.on}
-          value={
-            trigger.filter ??
-            (trigger.on === "reaction_added" && trigger.emoji
-              ? `trigger_emoji == ${JSON.stringify(trigger.emoji)}`
-              : "")
-          }
+          value={reactionConditionValue(trigger)}
         />
       );
     case "webhook":
