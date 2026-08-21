@@ -99,9 +99,7 @@ pub(crate) mod windows {
                     );
                 }
                 if let Err(error) = ensure_start_menu_shortcut(&app, &app_id) {
-                    eprintln!(
-                        "buzz-desktop: failed to repair Start Menu shortcut AUMID: {error}"
-                    );
+                    eprintln!("buzz-desktop: failed to repair Start Menu shortcut AUMID: {error}");
                 }
             });
         });
@@ -187,8 +185,7 @@ pub(crate) mod windows {
         let wide_app_id = to_wide(app_id);
         // SAFETY: `wide_app_id` is a valid, NUL-terminated UTF-16 buffer that
         // outlives this call.
-        let hresult =
-            unsafe { SetCurrentProcessExplicitAppUserModelID(wide_app_id.as_ptr()) };
+        let hresult = unsafe { SetCurrentProcessExplicitAppUserModelID(wide_app_id.as_ptr()) };
         if hresult < 0 {
             eprintln!(
                 "buzz-desktop: SetCurrentProcessExplicitAppUserModelID failed: 0x{hresult:08X}"
@@ -238,7 +235,9 @@ pub(crate) mod windows {
                 std::ptr::null_mut(),
             );
             if create_status != 0 {
-                return Err(format!("RegCreateKeyExW failed with status {create_status}"));
+                return Err(format!(
+                    "RegCreateKeyExW failed with status {create_status}"
+                ));
             }
 
             let display_name_bytes = std::slice::from_raw_parts(
@@ -270,10 +269,14 @@ pub(crate) mod windows {
             RegCloseKey(hkey);
 
             if display_status != 0 {
-                return Err(format!("RegSetValueExW(DisplayName) failed with status {display_status}"));
+                return Err(format!(
+                    "RegSetValueExW(DisplayName) failed with status {display_status}"
+                ));
             }
             if icon_status != 0 {
-                return Err(format!("RegSetValueExW(IconUri) failed with status {icon_status}"));
+                return Err(format!(
+                    "RegSetValueExW(IconUri) failed with status {icon_status}"
+                ));
             }
         }
 
@@ -315,8 +318,8 @@ pub(crate) mod windows {
         // the wrong path fails to compile rather than silently misbehaving.
         use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
         use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
-            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, STGM_READWRITE,
+            CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED, STGM_READWRITE,
         };
         // No `InitPropVariantFromStringW` here — it doesn't exist in this
         // crate (or in any windows-rs version): the Win32 API of that name
@@ -328,8 +331,8 @@ pub(crate) mod windows {
         // these or it double-frees the string it owns.
         use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
         use windows::Win32::UI::Shell::{
-            PropertiesSystem::IPropertyStore, FOLDERID_Programs, SHGetKnownFolderPath,
-            IShellLinkW, ShellLink, KF_FLAG_CREATE,
+            FOLDERID_Programs, IShellLinkW, PropertiesSystem::IPropertyStore, SHGetKnownFolderPath,
+            ShellLink, KF_FLAG_CREATE,
         };
 
         let product_name = app
@@ -410,9 +413,8 @@ pub(crate) mod windows {
             // (working directory, description, etc.) and only touch the
             // AUMID property. If it doesn't exist yet, fall through and
             // build a fresh one below.
-            let existing = unsafe {
-                persist_file.Load(PCWSTR(shortcut_path_wide.as_ptr()), STGM_READWRITE)
-            };
+            let existing =
+                unsafe { persist_file.Load(PCWSTR(shortcut_path_wide.as_ptr()), STGM_READWRITE) };
             if existing.is_err() {
                 unsafe {
                     shell_link

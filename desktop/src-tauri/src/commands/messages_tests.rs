@@ -130,7 +130,8 @@ fn channel_messages_before_filter_sends_before_id_the_relay_reads() {
     // re-returning the same page forever. Pin the field name here so the
     // client/relay contract can't drift without a red test (the Playwright
     // mock reimplements the keyset in JS and cannot catch this).
-    let filter = build_channel_messages_before_filter("channel-1", Some(1_700_000_000), Some("ab"), 200);
+    let filter =
+        build_channel_messages_before_filter("channel-1", Some(1_700_000_000), Some("ab"), 200);
 
     assert_eq!(filter["until"], serde_json::json!(1_700_000_000));
     assert_eq!(filter["before_id"], serde_json::json!("ab"));

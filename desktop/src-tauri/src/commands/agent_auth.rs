@@ -463,9 +463,8 @@ fn shell_escape(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
-        shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        adapter_terminal_argv, append_inherited_path, is_claude_subscription_login, shell_escape,
+        shell_join, uses_terminal_auth, windows_terminal_args, AcpAuthMethod,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed

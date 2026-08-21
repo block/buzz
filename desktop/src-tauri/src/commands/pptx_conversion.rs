@@ -312,11 +312,10 @@ fn convert_pptx_to_pdf_blocking(bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// async runtime.
 #[tauri::command]
 pub async fn convert_pptx_to_pdf(bytes: Vec<u8>) -> Result<tauri::ipc::Response, String> {
-    let pdf_bytes = tauri::async_runtime::spawn_blocking(move || {
-        convert_pptx_to_pdf_blocking(&bytes)
-    })
-    .await
-    .map_err(|e| format!("conversion task panicked: {e}"))??;
+    let pdf_bytes =
+        tauri::async_runtime::spawn_blocking(move || convert_pptx_to_pdf_blocking(&bytes))
+            .await
+            .map_err(|e| format!("conversion task panicked: {e}"))??;
     Ok(tauri::ipc::Response::new(pdf_bytes))
 }
 
@@ -333,7 +332,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn profile_installation_url_windows_absolute_path() {
-        let url = profile_installation_url(Path::new(r"C:\Users\me\AppData\Local\Temp\buzz-pptx-x\profile"));
+        let url = profile_installation_url(Path::new(
+            r"C:\Users\me\AppData\Local\Temp\buzz-pptx-x\profile",
+        ));
         assert_eq!(
             url,
             "file:///C:/Users/me/AppData/Local/Temp/buzz-pptx-x/profile"

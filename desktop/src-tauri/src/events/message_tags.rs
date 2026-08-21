@@ -3,8 +3,6 @@ use nostr::{EventId, Tag};
 const MAX_THREAD_ROOT_EXCERPT_CHARS: usize = 64;
 const SENT_FROM_THREAD_TAG: &str = "buzz:sent-from-thread";
 
-
-
 pub(super) fn append_sent_from_thread_tag(
     source_tag: Option<&[String]>,
     tags: &mut Vec<Tag>,
@@ -56,10 +54,7 @@ pub(super) fn append_client_tags(
 }
 
 /// Validate and append the `@channel` / `@here` marker.
-pub(super) fn mention_scope_tag(
-    scope: Option<&str>,
-    tags: &mut Vec<Tag>,
-) -> Result<(), String> {
+pub(super) fn mention_scope_tag(scope: Option<&str>, tags: &mut Vec<Tag>) -> Result<(), String> {
     let Some(scope) = scope else {
         return Ok(());
     };
@@ -68,10 +63,7 @@ pub(super) fn mention_scope_tag(
             "mention scope must be 'channel' or 'here' (got {scope:?})"
         ));
     }
-    tags.push(
-        Tag::parse(vec!["mention-scope", scope])
-            .map_err(|e| format!("invalid tag: {e}"))?,
-    );
+    tags.push(Tag::parse(vec!["mention-scope", scope]).map_err(|e| format!("invalid tag: {e}"))?);
     Ok(())
 }
 

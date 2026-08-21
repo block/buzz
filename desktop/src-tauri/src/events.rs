@@ -155,8 +155,6 @@ fn supersedes_tags(supersedes_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Resu
     Ok(())
 }
 
-
-
 /// Validate a hex event id is exactly 64 hex characters.
 fn check_event_id(event_id: &str) -> Result<(), String> {
     if event_id.len() != 64 || !event_id.chars().all(|c| c.is_ascii_hexdigit()) {

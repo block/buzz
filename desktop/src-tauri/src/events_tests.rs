@@ -51,21 +51,17 @@ fn archive_identity_request_matches_spec_vector_1_layout() {
 #[test]
 fn archive_request_rejects_replaced_by_equal_target() {
     const TARGET_HEX: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
-    let err = build_archive_identity_request(TARGET_HEX, "", None, Some(TARGET_HEX), None)
-        .unwrap_err();
+    let err =
+        build_archive_identity_request(TARGET_HEX, "", None, Some(TARGET_HEX), None).unwrap_err();
     assert!(err.contains("replaced-by"));
 }
 
 #[test]
 fn unarchive_request_layout_self_path() {
     const TARGET_HEX: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
-    let builder = build_unarchive_identity_request(
-        TARGET_HEX,
-        "I am active again.",
-        Some("returned"),
-        None,
-    )
-    .unwrap();
+    let builder =
+        build_unarchive_identity_request(TARGET_HEX, "I am active again.", Some("returned"), None)
+            .unwrap();
     let target_secret = nostr::SecretKey::from_hex(
         "0000000000000000000000000000000000000000000000000000000000000002",
     )

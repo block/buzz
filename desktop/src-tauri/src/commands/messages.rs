@@ -17,8 +17,8 @@ use crate::{
     events,
     managed_agents::{find_managed_agent_mut, load_managed_agents, ManagedAgentRecord},
     models::{
-        FeedItemInfo, FeedMeta, FeedResponse, FeedSections,
-        SendChannelMessageResponse, ThreadRepliesResponse,
+        FeedItemInfo, FeedMeta, FeedResponse, FeedSections, SendChannelMessageResponse,
+        ThreadRepliesResponse,
     },
     relay::{query_relay, submit_event, submit_event_with_keys},
 };
@@ -163,8 +163,6 @@ pub async fn get_feed(
         },
     })
 }
-
-
 
 /// Fetch the full reply subtree under a thread root, server-side.
 ///
