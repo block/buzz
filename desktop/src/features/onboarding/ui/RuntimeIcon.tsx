@@ -5,6 +5,7 @@ import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import claudeLogoUrl from "../assets/harness-logos/claude.png?inline";
+import opencodeLogoUrl from "../assets/harness-logos/opencode.svg?inline";
 import { RUNTIME_MARKS } from "./HarnessMarks";
 
 // Bundled logos for compiled-in runtimes (inline base64, no network fetch).
@@ -12,16 +13,16 @@ import { RUNTIME_MARKS } from "./HarnessMarks";
 // `currentColor`, so they adapt to dark/light without bitmap filters.
 const RUNTIME_LOGOS: Record<string, string> = {
   claude: claudeLogoUrl,
+  opencode: opencodeLogoUrl,
 };
 
-// Public-path logos for bundled harnesses. Served from /harness-logos/ at
-// runtime. Keys match harness `id` values — presets and builtins alike (the
-// opencode logo serves its compiled-in entry after its tier-1 promotion).
+// Public-path logos for bundled presets. Served from /harness-logos/ at
+// runtime. Keys match the preset `id` values emitted by the backend
+// PRESET_HARNESSES; builtin runtimes belong in RUNTIME_LOGOS above.
 export const PRESET_LOGOS: Record<string, string> = {
   devin: "/harness-logos/devin.svg",
   omp: "/harness-logos/omp.svg",
   grok: "/harness-logos/grok.svg",
-  opencode: "/harness-logos/opencode.svg",
   kimi: "/harness-logos/kimi.png",
   amp: "/harness-logos/amp.png",
   hermes: "/harness-logos/hermes.png",
