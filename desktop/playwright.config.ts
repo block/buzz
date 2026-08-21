@@ -86,6 +86,7 @@ export default defineConfig({
         "**/home-collapsed-top-chrome.spec.ts",
         "**/top-chrome-zoom-clearance.spec.ts",
         "**/thread-unread.spec.ts",
+        "**/thread-load-failure.spec.ts",
         "**/workspace-rail.spec.ts",
         "**/community-rail.spec.ts",
         "**/boot-splash.spec.ts",
