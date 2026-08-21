@@ -471,7 +471,11 @@ pub async fn reconcile_managed_agent_runtimes(
     for community in communities {
         for record in records
             .iter()
-            .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
+            .filter(|record| {
+                record.start_on_app_launch
+                    && record.backend == BackendKind::Local
+                    && !record.disable_local_spawn
+            })
         // The legacy per-record relay pin is deliberately ignored here — see
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.
