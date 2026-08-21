@@ -11,6 +11,11 @@ willing to read.
 | [`user-mention`](user-mention) | Hands the turn back with an event-level `p`-tag mention of the requesting human |
 | [`read-named-path-outside-workspace`](read-named-path-outside-workspace) | Reads a path the user named explicitly instead of refusing it as out of bounds |
 | [`create-channel-invite-users`](create-channel-invite-users) | Creates a channel with the exact shape, TTL, and membership asked for |
+| [`multiline-message`](multiline-message) | Preserves real newlines and blank-line structure through the CLI publish path |
+| [`narrative-agent-names`](narrative-agent-names) | Names agents in narrative without waking them through `p` tags |
+| [`interleaved-agent-reports`](interleaved-agent-reports) | Retains and synthesizes every report in a batch of agent messages |
+| [`cross-thread-requests`](cross-thread-requests) | Keeps simultaneous top-level requests isolated and replies to both exact threads |
+| [`ambiguous-user-mention`](ambiguous-user-mention) | Resolves duplicate display names and notifies only the intended pubkey |
 
 For `reply-to-thread` and `user-mention` the graded behavior is **deliberately
 absent from `instruction.md`** — it has to come from `buzz-acp`'s production
