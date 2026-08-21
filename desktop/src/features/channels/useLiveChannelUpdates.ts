@@ -322,20 +322,30 @@ export function useLiveChannelUpdates(
       }
     }
 
-    // Merge into the timeline cache for the active channel.
+    // Merge into the timeline cache for the active channel only.
     // useChannelSubscription also writes to this cache, but there's a
     // race window where it hasn't connected yet. Writes are idempotent
     // (mergeTimelineCacheMessages deduplicates by event ID).
-    queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(channelId),
-      (current) => {
-        if (!current) {
-          return current;
-        }
+    //
+    // Inactive channels are skipped on purpose: their cached timelines
+    // are not on screen, and merging every live event into every
+    // visited channel's cache costs a full dedupe + sort per event per
+    // channel (O(channels × events)) and keeps those caches growing
+    // until gcTime evicts them. When an inactive channel is opened
+    // again, its stale query refetches and useChannelSubscription
+    // reconciles the newest window, so no messages are lost.
+    if (channelId === activeChannelId) {
+      queryClient.setQueryData<RelayEvent[]>(
+        channelMessagesKey(channelId),
+        (current) => {
+          if (!current) {
+            return current;
+          }
 
-        return mergeTimelineCacheMessages(current, event);
-      },
-    );
+          return mergeTimelineCacheMessages(current, event);
+        },
+      );
+    }
   });
 
   const handleMentionEvent = React.useEffectEvent((event: RelayEvent) => {
