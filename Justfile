@@ -1025,6 +1025,10 @@ benchmark-check:
 benchmark-down:
     docker compose --project-name buzz-benchmark down
 
+# Run the complete native-review support test suite in an isolated pinned environment.
+native-review-test:
+    ./tools/native-review/bin/test-native-review
+
 # Validate macOS native-review tooling and report required OS permissions.
 native-review-doctor:
     ./tools/native-review/bin/review-native doctor

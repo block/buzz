@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT"
+. "$ROOT/bin/activate-hermit"
+
+uv run --isolated --no-project --with 'pyyaml==6.0.3' \
+  python -m unittest discover -s tools/native-review/tests -p 'test_*.py'
+swift test --package-path tools/native-review/swift
