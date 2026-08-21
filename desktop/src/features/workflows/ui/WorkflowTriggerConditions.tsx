@@ -5,7 +5,7 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { WorkflowEmojiField } from "./WorkflowEmojiField";
-import { FieldLabel, FormSelect } from "./workflowFormPrimitives";
+import { FieldLabel } from "./workflowFormPrimitives";
 import {
   buildConditionExpressions,
   conditionFieldsForTrigger,
@@ -205,38 +205,49 @@ export function WorkflowTriggerConditions({
                 </button>
                 {expanded ? (
                   <div className="animate-in space-y-3 pt-1 fade-in slide-in-from-top-1 duration-150 motion-reduce:animate-none">
-                    <div className="space-y-1.5">
-                      <FieldLabel
-                        htmlFor={`wf-trigger-${field.value}-operator`}
-                      >
-                        Match
-                      </FieldLabel>
-                      <FormSelect
-                        disabled={disabled}
-                        id={`wf-trigger-${field.value}-operator`}
-                        onChange={(operator) => {
-                          const next = {
-                            ...condition,
-                            operator: operator as ConditionOperator,
-                          };
-                          updateConditions([
-                            ...conditions.filter(
-                              (item) => item.field !== field.value,
-                            ),
-                            next,
-                          ]);
-                        }}
-                        value={condition.operator}
+                    <fieldset>
+                      <legend className="sr-only">Match</legend>
+                      <div
+                        className={cn(
+                          "grid gap-2.5",
+                          conditionOperatorsForField(field.value).length === 2
+                            ? "grid-cols-2"
+                            : "grid-cols-2 sm:grid-cols-3",
+                        )}
                       >
                         {conditionOperatorsForField(field.value).map(
-                          (operator) => (
-                            <option key={operator} value={operator}>
-                              {OPERATOR_LABELS[operator]}
-                            </option>
-                          ),
+                          (operator) => {
+                            const selected = condition.operator === operator;
+                            return (
+                              <button
+                                aria-pressed={selected}
+                                className={cn(
+                                  "flex min-h-12 items-center justify-center rounded-lg border px-3 py-2 text-center text-sm font-medium",
+                                  "outline-2 outline-offset-2 outline-transparent transition-[background-color,border-color,color,outline-color] focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                                  selected
+                                    ? "border-border/0 bg-transparent text-foreground outline-foreground/45"
+                                    : "border-border/70 bg-background/35 text-muted-foreground hover:border-border hover:bg-muted/55 hover:text-foreground hover:outline-muted-foreground/20",
+                                )}
+                                disabled={disabled}
+                                key={operator}
+                                onClick={() => {
+                                  const next = { ...condition, operator };
+                                  updateConditions([
+                                    ...conditions.filter(
+                                      (item) => item.field !== field.value,
+                                    ),
+                                    next,
+                                  ]);
+                                }}
+                                type="button"
+                              >
+                                {OPERATOR_LABELS[operator]}
+                              </button>
+                            );
+                          },
                         )}
-                      </FormSelect>
-                    </div>
+                      </div>
+                    </fieldset>
                     {conditionOperatorNeedsValue(condition.operator) ? (
                       field.value === "trigger_emoji" ? (
                         <WorkflowEmojiField

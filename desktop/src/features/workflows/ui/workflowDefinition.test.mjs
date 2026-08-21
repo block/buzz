@@ -6,6 +6,7 @@ import {
   getWorkflowDisplayStatus,
   getWorkflowPrimaryAction,
   getWorkflowPrimaryActionEmoji,
+  getWorkflowTriggerSummary,
   getWorkflowTriggerType,
   withWorkflowEnabled,
 } from "./workflowDefinition.ts";
@@ -145,6 +146,30 @@ test("builds a plain-language workflow card label", () => {
       },
     ),
     "When “FUCK” is posted by Carl, send “{{trigger.text}} yourself”",
+  );
+});
+
+test("builds a concise semantic trigger label for workflow cards", () => {
+  assert.equal(
+    getWorkflowTriggerSummary({
+      trigger: {
+        on: "message_posted",
+        filter: 'str_contains(trigger_text, "deploy")',
+      },
+    }),
+    "Message contains “deploy”",
+  );
+  assert.equal(
+    getWorkflowTriggerSummary({
+      trigger: { on: "reaction_added", emoji: "🔥" },
+    }),
+    "Reaction added",
+  );
+  assert.equal(
+    getWorkflowTriggerSummary({
+      trigger: { on: "schedule", interval: "15m" },
+    }),
+    "Schedule",
   );
 });
 

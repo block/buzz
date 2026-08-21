@@ -196,7 +196,12 @@ test("round-trips and reopens structured message-text conditions", async ({
   const expression = 'str_ends_with(trigger_text, "deploy \\"buzz\\"\\\\path")';
   const dialog = await openCreateWorkflow(page, name);
 
-  await dialog.getByLabel("Match").selectOption("ends_with");
+  await dialog
+    .getByRole("group", { name: "Match" })
+    .getByRole("button", {
+      name: "ends with",
+    })
+    .click();
   await dialog.getByLabel("Message text").fill(text);
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
@@ -205,7 +210,10 @@ test("round-trips and reopens structured message-text conditions", async ({
 
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
-  await expect(dialog.getByLabel("Match")).toHaveValue("ends_with");
+  const matchControls = dialog.getByRole("group", { name: "Match" });
+  await expect(
+    matchControls.getByRole("button", { name: "ends with" }),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect(dialog.getByLabel("Message text")).toHaveValue(text);
   await dialog.getByRole("tab", { name: "Advanced" }).click();
   await expect(dialog.getByLabel("Advanced expression")).toHaveValue(
@@ -217,7 +225,11 @@ test("round-trips and reopens structured message-text conditions", async ({
   await dialog.getByRole("button", { name: "Create" }).click();
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
-  await expect(reopened.getByLabel("Match")).toHaveValue("ends_with");
+  await expect(
+    reopened
+      .getByRole("group", { name: "Match" })
+      .getByRole("button", { name: "ends with" }),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect(reopened.getByLabel("Message text")).toHaveValue(text);
 });
 
@@ -251,9 +263,27 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   const card = page
     .locator('[data-testid^="workflow-card-"]')
     .filter({ hasText: name });
-  await expect(card).toContainText(
+  const triggerSummary = card.getByTestId("workflow-card-trigger-summary");
+  const semanticLabel = card.getByTestId("workflow-card-semantic-label");
+  const workflowName = card.getByTestId("workflow-card-name");
+  const channelName = card.getByTestId("workflow-card-channel");
+  await expect(triggerSummary).toHaveText("Message contains “deploy”");
+  await expect(semanticLabel).toHaveText(
     "When a message contains “deploy”, send “Workflow notification”",
   );
+  await expect(workflowName).toHaveText(name);
+  await expect(channelName).toHaveText("#agents");
+  const triggerBox = await triggerSummary.boundingBox();
+  const semanticBox = await semanticLabel.boundingBox();
+  const nameBox = await workflowName.boundingBox();
+  const channelBox = await channelName.boundingBox();
+  expect(triggerBox).not.toBeNull();
+  expect(semanticBox).not.toBeNull();
+  expect(nameBox).not.toBeNull();
+  expect(channelBox).not.toBeNull();
+  expect(triggerBox?.y).toBeLessThan(semanticBox?.y ?? 0);
+  expect(semanticBox?.y).toBeLessThan(nameBox?.y ?? 0);
+  expect(nameBox?.y).toBeLessThan(channelBox?.y ?? 0);
 });
 
 test("round-trips manual author and reaction message IDs through save and reopen", async ({
@@ -271,7 +301,10 @@ test("round-trips manual author and reaction message IDs through save and reopen
     dialog.getByText("Enter a 64-character hex pubkey."),
   ).toBeVisible();
   await dialog.getByLabel("Author pubkey").fill(author);
-  await dialog.getByLabel("Match").first().selectOption("not_equals");
+  await dialog
+    .getByRole("group", { name: "Match" })
+    .getByRole("button", { name: "is not", exact: true })
+    .click();
 
   await dialog.getByRole("button", { name: "Message event ID" }).click();
   await dialog.getByLabel("Message event ID").fill(messageId);

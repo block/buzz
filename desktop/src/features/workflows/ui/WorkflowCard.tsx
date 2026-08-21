@@ -18,11 +18,11 @@ import type { Workflow } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { WorkflowActionsMenu } from "./WorkflowActionsMenu";
 import {
-  getWorkflowDescription,
   getWorkflowDisplayStatus,
   getWorkflowEnabled,
   getWorkflowCardLabel,
   getWorkflowPrimaryAction,
+  getWorkflowTriggerSummary,
   getWorkflowTriggerType,
 } from "./workflowDefinition";
 
@@ -89,8 +89,8 @@ export function WorkflowCard({
   onDelete,
 }: WorkflowCardProps) {
   const displayStatus = getWorkflowDisplayStatus(workflow);
+  const triggerSummary = getWorkflowTriggerSummary(workflow.definition);
   const cardLabel = getWorkflowCardLabel(workflow.definition);
-  const description = getWorkflowDescription(workflow.definition);
   const triggerType = getWorkflowTriggerType(workflow.definition);
   const actionType = getWorkflowPrimaryAction(workflow.definition);
   const TriggerIcon = triggerType ? TRIGGER_ICONS[triggerType] : undefined;
@@ -151,22 +151,38 @@ export function WorkflowCard({
           </div>
         </div>
 
-        <p className="mt-4 line-clamp-2 text-sm font-semibold leading-snug text-muted-foreground">
-          {cardLabel}
-        </p>
-        <h3 className="mt-1 line-clamp-4 text-xl font-bold leading-tight tracking-tight">
-          {workflow.name}
-        </h3>
-        {description ? (
-          <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-muted-foreground">
-            {description}
+        {triggerSummary ? (
+          <p
+            className="mt-4 line-clamp-1 text-xs font-semibold text-muted-foreground"
+            data-testid="workflow-card-trigger-summary"
+          >
+            {triggerSummary}
           </p>
         ) : null}
+        <h3
+          className="mt-1 line-clamp-4 text-xl font-bold leading-tight tracking-tight"
+          data-testid="workflow-card-semantic-label"
+        >
+          {cardLabel}
+        </h3>
 
         <div className="mt-auto flex min-w-0 items-end justify-between gap-3 pt-5 text-muted-foreground">
-          <p className="min-w-0 truncate text-2xs">
-            {channelName ? `#${channelName}` : "Channel workflow"}
-          </p>
+          <div className="min-w-0">
+            <p
+              className="truncate text-xs font-semibold text-foreground"
+              data-testid="workflow-card-name"
+            >
+              {workflow.name}
+            </p>
+            {channelName ? (
+              <p
+                className="mt-0.5 truncate text-2xs"
+                data-testid="workflow-card-channel"
+              >
+                #{channelName}
+              </p>
+            ) : null}
+          </div>
           <span className="shrink-0 text-2xs">
             {new Date(workflow.updatedAt * 1000).toLocaleDateString()}
           </span>
