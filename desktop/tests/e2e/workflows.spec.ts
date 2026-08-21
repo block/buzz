@@ -380,6 +380,11 @@ test("enables and disables a workflow from its card status toggle", async ({
   });
   await expect(enable).not.toBeChecked();
   await enable.click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await expect(activationConfirmation).toBeVisible();
+  await activationConfirmation.getByRole("button", { name: "Turn on" }).click();
   await expect(
     workflowCard().getByRole("switch", { name: "Disable workflow" }),
   ).toBeChecked();
