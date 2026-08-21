@@ -166,7 +166,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               className={cn(
                 "max-w-full overflow-hidden rounded-xl text-popover-foreground ring-1 ring-border/50 transition-[width] duration-200 ease-out",
                 POPOVER_SURFACE_CLASS,
-                optionsOpen ? "w-72" : "w-[5.75rem]",
+                optionsOpen ? "w-72" : "w-24",
               )}
               ref={optionsSurfaceRef}
               style={POPOVER_SHADOW_STYLE}

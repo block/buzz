@@ -118,6 +118,7 @@ test("options expand in place without replacing the people list", async () => {
 
   const options = view.getByRole("button", { name: "Options" });
   assert.equal(options.getAttribute("aria-expanded"), "false");
+  assert.match(options.parentElement?.className ?? "", /(?:^|\s)w-24(?:\s|$)/);
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
   assert.equal(
     view.queryByRole("switch", { name: "Automatically mention agents" }),
