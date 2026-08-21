@@ -47,7 +47,9 @@ export function resolveAgentReadiness(
   }
 
   if (
-    (preferredRuntime.id === "claude" || preferredRuntime.id === "codex") &&
+    (preferredRuntime.id === "claude" ||
+      preferredRuntime.id === "codex" ||
+      preferredRuntime.id === "antigravity") &&
     (preferredRuntime.authStatus.status === "logged_in" ||
       preferredRuntime.authStatus.status === "not_applicable")
   ) {
@@ -58,7 +60,11 @@ export function resolveAgentReadiness(
     };
   }
 
-  if (preferredRuntime.id !== "buzz-agent" && preferredRuntime.id !== "goose") {
+  if (
+    preferredRuntime.id !== "buzz-agent" &&
+    preferredRuntime.id !== "goose" &&
+    preferredRuntime.id !== "antigravity"
+  ) {
     return { ready: false };
   }
 

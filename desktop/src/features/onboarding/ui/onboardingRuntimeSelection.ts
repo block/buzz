@@ -3,6 +3,7 @@ import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 export const ONBOARDING_RUNTIME_ORDER = [
   "claude",
   "codex",
+  "antigravity",
   "goose",
   "buzz-agent",
 ];
