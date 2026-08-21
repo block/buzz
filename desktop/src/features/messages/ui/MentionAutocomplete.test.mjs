@@ -125,17 +125,17 @@ test("options expand in place without replacing the people list", async () => {
   assert.equal(options.getAttribute("aria-expanded"), "false");
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
   assert.equal(
-    view.queryByRole("switch", { name: "Keep agents pinned" }),
+    view.queryByRole("switch", { name: "Automatically mention agents" }),
     null,
   );
 
   fireEvent.click(options);
   assert.equal(options.getAttribute("aria-expanded"), "true");
   const toggle = view.getByRole("switch", {
-    name: "Keep agents pinned",
+    name: "Automatically mention agents",
   });
   assert.equal(toggle.getAttribute("data-state"), "checked");
-  assert.ok(view.getByText("When you mention them"));
+  assert.ok(view.getByText("After you mention them once"));
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
 
   fireEvent.click(toggle);
@@ -166,7 +166,7 @@ test("options expand in place without replacing the people list", async () => {
     "false",
   );
   assert.equal(
-    view.queryByRole("switch", { name: "Keep agents pinned" }),
+    view.queryByRole("switch", { name: "Automatically mention agents" }),
     null,
   );
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));

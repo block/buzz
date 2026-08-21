@@ -185,14 +185,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                       htmlFor={keepPinnedSwitchId}
                     >
                       <span className="text-sm font-medium">
-                        Keep agents pinned
+                        Automatically mention agents
                       </span>
                       <span className="text-2xs text-muted-foreground">
-                        When you mention them
+                        After you mention them once
                       </span>
                     </label>
                     <Switch
-                      aria-label="Keep agents pinned"
+                      aria-label="Automatically mention agents"
                       checked={keepMentionedAgentsPinned}
                       className="shadow-none [&>span]:shadow-none"
                       data-testid="mention-keep-agents-pinned-toggle"
