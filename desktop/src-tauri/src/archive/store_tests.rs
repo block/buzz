@@ -854,3 +854,95 @@ fn test_read_unindexed_observer_rows_excludes_processed_rows() {
         "ev-old must be excluded from unindexed rows after null-channel_id indexing"
     );
 }
+
+fn insert_owner_observer(
+    conn: &Connection,
+    id: &str,
+    agent: &str,
+    created_at: i64,
+    channel: Option<&str>,
+) {
+    upsert_archived_event(
+        conn,
+        "owner",
+        "wss://r",
+        id,
+        24200,
+        agent,
+        created_at,
+        &format!(r#"{{"id":"{id}","created_at":{created_at}}}"#),
+        created_at,
+    )
+    .unwrap();
+    upsert_event_scope(conn, "owner", "wss://r", id, "owner_p", "owner", created_at).unwrap();
+    if let Some(channel) = channel {
+        upsert_observer_channel_index(conn, "owner", "wss://r", id, Some(channel), created_at)
+            .unwrap();
+    }
+}
+
+#[test]
+fn test_read_archived_observer_events_for_range_pages_without_gaps() {
+    let conn = in_memory();
+    insert_owner_observer(&conn, "z", "agent-a", 1002, Some("ch-1"));
+    insert_owner_observer(&conn, "a", "agent-a", 1002, Some("ch-1"));
+    insert_owner_observer(&conn, "old", "agent-b", 1001, Some("ch-2"));
+    insert_owner_observer(&conn, "outside", "agent-a", 999, Some("ch-1"));
+
+    let page_one = read_archived_observer_events_for_range(
+        &conn, "owner", "wss://r", 1000, 1003, None, None, None, None, 1,
+    )
+    .unwrap();
+    assert_eq!(page_one.len(), 1);
+    assert!(page_one[0].contains(r#""id":"z""#));
+
+    let page_two = read_archived_observer_events_for_range(
+        &conn,
+        "owner",
+        "wss://r",
+        1000,
+        1003,
+        None,
+        None,
+        Some(1002),
+        Some("z"),
+        10,
+    )
+    .unwrap();
+    assert_eq!(page_two.len(), 2);
+    assert!(page_two[0].contains(r#""id":"a""#));
+    assert!(page_two[1].contains(r#""id":"old""#));
+
+    let filtered = read_archived_observer_events_for_range(
+        &conn,
+        "owner",
+        "wss://r",
+        1000,
+        1003,
+        Some("agent-a"),
+        Some("ch-1"),
+        None,
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(filtered.len(), 2);
+}
+
+#[test]
+fn test_archived_observer_range_survives_close_and_reopen() {
+    use tempfile::NamedTempFile;
+
+    let db_file = NamedTempFile::new().unwrap();
+    {
+        let conn = open_archive_db(db_file.path()).unwrap();
+        insert_owner_observer(&conn, "persisted", "agent-a", 1001, Some("ch-1"));
+    }
+    let reopened = open_archive_db(db_file.path()).unwrap();
+    let rows = read_archived_observer_events_for_range(
+        &reopened, "owner", "wss://r", 1000, 1002, None, None, None, None, 10,
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].contains(r#""id":"persisted""#));
+}

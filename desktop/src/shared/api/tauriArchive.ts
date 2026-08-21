@@ -456,6 +456,95 @@ export async function readArchivedObserverEventsForChannel(
     .filter((e): e is import("@/shared/api/types").RelayEvent => e !== null);
 }
 
+export type ArchivedObserverRangeCursor = {
+  createdAt: number;
+  id: string;
+};
+
+export type ArchivedObserverRangePage = {
+  events: import("@/shared/api/types").RelayEvent[];
+  hasMore: boolean;
+  nextBefore: ArchivedObserverRangeCursor | null;
+};
+
+/** Read one durable, owner-scoped observer page for a half-open time range. */
+export async function readArchivedObserverEventsForRange(opts: {
+  startCreatedAt: number;
+  endCreatedAt: number;
+  agentPubkey?: string | null;
+  channelId?: string | null;
+  before?: ArchivedObserverRangeCursor | null;
+  limit?: number;
+}): Promise<ArchivedObserverRangePage> {
+  const limit = opts.limit ?? 200;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error(
+      "Archived observer range limit must be an integer from 1 to 500.",
+    );
+  }
+  const rawRows = await invokeTauri<string[]>(
+    "read_archived_observer_events_for_range",
+    {
+      startCreatedAt: opts.startCreatedAt,
+      endCreatedAt: opts.endCreatedAt,
+      agentPubkey: opts.agentPubkey ?? null,
+      channelId: opts.channelId ?? null,
+      beforeCreatedAt: opts.before?.createdAt ?? null,
+      beforeId: opts.before?.id ?? null,
+      limit,
+    },
+  );
+  const events = rawRows
+    .map((raw) => {
+      try {
+        return JSON.parse(raw) as import("@/shared/api/types").RelayEvent;
+      } catch {
+        console.warn(
+          "[tauriArchive] failed to parse ranged observer raw_json:",
+          raw,
+        );
+        return null;
+      }
+    })
+    .filter(
+      (event): event is import("@/shared/api/types").RelayEvent =>
+        event !== null,
+    );
+  const oldest = events.at(-1) ?? null;
+  return {
+    events,
+    hasMore: rawRows.length === limit,
+    nextBefore: oldest ? { createdAt: oldest.created_at, id: oldest.id } : null,
+  };
+}
+
+/** Exhaust the paginated range without silently truncating a busy Today view. */
+export async function readAllArchivedObserverEventsForRange(opts: {
+  startCreatedAt: number;
+  endCreatedAt: number;
+  agentPubkey?: string | null;
+  channelId?: string | null;
+  pageSize?: number;
+}): Promise<import("@/shared/api/types").RelayEvent[]> {
+  const all: import("@/shared/api/types").RelayEvent[] = [];
+  let before: ArchivedObserverRangeCursor | null = null;
+  for (;;) {
+    const page = await readArchivedObserverEventsForRange({
+      ...opts,
+      before,
+      limit: opts.pageSize ?? 200,
+    });
+    all.push(...page.events);
+    if (!page.hasMore) return all;
+    if (!page.nextBefore) {
+      throw new Error(
+        "Archived observer range reported more rows without a cursor.",
+      );
+    }
+    before = page.nextBefore;
+  }
+}
+
 /**
  * Index one or more archived observer frames by channelId.
  *

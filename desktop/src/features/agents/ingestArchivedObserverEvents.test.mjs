@@ -154,6 +154,12 @@ describe("ingestArchivedObserverEvents", () => {
     );
     assert.equal(archivedEvents.length, 1, "archive must contain 1 raw event");
     assert.equal(archivedEvents[0].seq, 1);
+    assert.equal(archivedEvents[0].sourceEventId, "e".repeat(64));
+    assert.equal(archivedEvents[0].sourcePubkey, AGENT_PUBKEY);
+    assert.equal(archivedEvents[0].sourceKind, 24200);
+    assert.equal(archivedEvents[0].sourceCreatedAt, 1000);
+    assert.equal(archivedEvents[0].sourceSignature, "s".repeat(128));
+    assert.equal(archivedEvents[0].origin, "historical_backfill");
     // Also verify the live snapshot is untouched — archive separation.
     const snap = getAgentObserverSnapshot(AGENT_PUBKEY, true);
     assert.equal(
@@ -181,6 +187,28 @@ describe("ingestArchivedObserverEvents", () => {
       1,
       "dedup: identical (seq, timestamp) must produce exactly 1 entry in the archive window",
     );
+  });
+
+  it("test_signed_ids_keep_same_seq_timestamp_frames_distinct", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const sameDecodedFrame = makeObserverEvent({
+      seq: 5,
+      timestamp: "2026-01-01T00:00:05.000Z",
+    });
+    await ingestArchivedObserverEvents(
+      [
+        makeRawEvent({ id: "e".repeat(64) }),
+        makeRawEvent({ id: "f".repeat(64) }),
+      ],
+      () => Promise.resolve(sameDecodedFrame),
+    );
+
+    const archiveEvents = _testGetArchivedChannelEvents(AGENT_PUBKEY, "chan-1");
+    assert.equal(archiveEvents.length, 2);
+    assert.deepEqual(archiveEvents.map((event) => event.sourceEventId).sort(), [
+      "e".repeat(64),
+      "f".repeat(64),
+    ]);
   });
 
   it("test_older_archived_event_sorts_before_live", async () => {
@@ -235,7 +263,11 @@ describe("ingestArchivedObserverEvents", () => {
     const decryptFn = () => Promise.resolve(events[callIdx++]);
     // All three raw events pass the guards (same pubkey/agent tag).
     await ingestArchivedObserverEvents(
-      [makeRawEvent(), makeRawEvent(), makeRawEvent()],
+      [
+        makeRawEvent({ id: "1".repeat(64) }),
+        makeRawEvent({ id: "2".repeat(64) }),
+        makeRawEvent({ id: "3".repeat(64) }),
+      ],
       decryptFn,
     );
     // All have channelId "chan-1" — verify archive window, not live snapshot.

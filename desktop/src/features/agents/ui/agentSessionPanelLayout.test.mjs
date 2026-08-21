@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deriveLatestSessionId,
+  mergeObserverEventWindows,
   observerEventScrollId,
   resolveDisplayEvents,
   resolveRawRailLayout,
@@ -117,4 +118,22 @@ test("observerEventScrollId returns distinct ids for same seq across a restart",
   const before = { seq: 1, timestamp: "2026-07-13T20:00:00.000Z" };
   const after = { seq: 1, timestamp: "2026-07-13T21:00:00.000Z" };
   assert.notEqual(observerEventScrollId(before), observerEventScrollId(after));
+});
+
+test("mergeObserverEventWindows preserves signed frames with colliding seq and timestamp", () => {
+  const timestamp = "2026-07-13T21:00:00.000Z";
+  const live = { seq: 1, timestamp, sourceEventId: "a".repeat(64) };
+  const archived = { seq: 1, timestamp, sourceEventId: "b".repeat(64) };
+  const merged = mergeObserverEventWindows([live], [archived]);
+  assert.equal(merged.length, 2);
+});
+
+test("mergeObserverEventWindows deduplicates the same signed frame", () => {
+  const timestamp = "2026-07-13T21:00:00.000Z";
+  const sourceEventId = "a".repeat(64);
+  const live = { seq: 1, timestamp, sourceEventId };
+  const archived = { seq: 9, timestamp, sourceEventId };
+  const merged = mergeObserverEventWindows([live], [archived]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0], live);
 });

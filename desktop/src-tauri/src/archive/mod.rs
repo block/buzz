@@ -578,6 +578,45 @@ pub async fn read_archived_observer_events_for_channel(
     .await
 }
 
+/// Read a paginated owner-scoped observer page for a half-open time range.
+#[tauri::command]
+pub fn read_archived_observer_events_for_range(
+    state: State<'_, AppState>,
+    start_created_at: i64,
+    end_created_at: i64,
+    agent_pubkey: Option<String>,
+    channel_id: Option<String>,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
+    limit: Option<i64>,
+) -> Result<Vec<String>, String> {
+    if start_created_at >= end_created_at {
+        return Err("archive range must have start_created_at < end_created_at".into());
+    }
+    if before_created_at.is_some() != before_id.is_some() {
+        return Err("archive range cursor requires both before_created_at and before_id".into());
+    }
+    let limit = limit.unwrap_or(DEFAULT_READ_LIMIT);
+    if !(1..=500).contains(&limit) {
+        return Err("archive range limit must be between 1 and 500".into());
+    }
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let conn = open_db()?;
+    store::read_archived_observer_events_for_range(
+        &conn,
+        &identity_pk,
+        &relay_url,
+        start_created_at,
+        end_created_at,
+        agent_pubkey.as_deref(),
+        channel_id.as_deref(),
+        before_created_at,
+        before_id.as_deref(),
+        limit,
+    )
+}
+
 // ── index_observer_channel_id ─────────────────────────────────────────────────
 
 /// Index one or more archived observer frame ids with their decoded channelId.

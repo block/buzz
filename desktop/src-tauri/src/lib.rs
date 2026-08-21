@@ -839,6 +839,7 @@ pub fn run() {
             archive::delete_save_subscription,
             archive::read_archived_events,
             archive::read_archived_observer_events_for_channel,
+            archive::read_archived_observer_events_for_range,
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
             archive::get_agent_usage_series,

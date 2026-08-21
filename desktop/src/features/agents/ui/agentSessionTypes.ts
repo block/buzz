@@ -4,11 +4,23 @@ export type ObserverEvent = {
   seq: number;
   timestamp: string;
   kind: string;
+  /** Signed outer relay-event provenance; attached after successful decrypt. */
+  sourceEventId?: string | null;
+  sourcePubkey?: string | null;
+  sourceKind?: number | null;
+  sourceCreatedAt?: number | null;
+  sourceSignature?: string | null;
+  origin?: "live_observer" | "historical_backfill" | null;
   agentIndex: number | null;
   channelId: string | null;
   sessionId: string | null;
   turnId: string | null;
   startedAt?: string | null;
+  /** Optional semantic fields used only by explicit journal events. */
+  journalKey?: string | null;
+  ownerModifiedAt?: string | null;
+  ownerModifiedBy?: string | null;
+  ownerModified?: boolean;
   payload: unknown;
 };
 

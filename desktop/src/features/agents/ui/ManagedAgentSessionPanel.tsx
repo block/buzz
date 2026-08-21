@@ -8,9 +8,15 @@ import {
 } from "lucide-react";
 
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import {
+  buildMissionJournal,
+  normalizeActivityEvents,
+  type MissionJournal,
+} from "@/features/agents/activityLedger";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Spinner } from "@/shared/ui/spinner";
@@ -127,6 +133,14 @@ export function ManagedAgentSessionPanel({
     () => deriveLatestSessionId(displayEvents),
     [displayEvents],
   );
+  const journalAsOf = useNow(60_000);
+  const latestJournal = React.useMemo(
+    () =>
+      buildMissionJournal(normalizeActivityEvents(combinedEvents), {
+        asOf: new Date(journalAsOf),
+      }),
+    [combinedEvents, journalAsOf],
+  );
 
   return (
     <section
@@ -144,6 +158,10 @@ export function ManagedAgentSessionPanel({
           hasObserver={hasObserver}
           latestSessionId={latestSessionId}
         />
+      ) : null}
+
+      {latestJournal.eventCount > 0 ? (
+        <MissionJournalSummary journal={latestJournal} />
       ) : null}
 
       <SessionBody
@@ -167,6 +185,41 @@ export function ManagedAgentSessionPanel({
         transcriptVariant={transcriptVariant}
       />
     </section>
+  );
+}
+
+function journalStatusLabel(status: MissionJournal["status"]): string {
+  switch (status) {
+    case "in_progress":
+      return "In progress";
+    case "ended_unverified":
+      return "Ended, proof needed";
+    case "incomplete":
+      return "Incomplete";
+    case "completed":
+      return "Execution ended";
+    case "failed":
+      return "Failed";
+    case "observed":
+      return "Observed";
+  }
+}
+
+function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
+  return (
+    <div className="mt-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Mission journal
+        </span>
+        <Badge variant="secondary">{journalStatusLabel(journal.status)}</Badge>
+        <Badge variant="outline">{journal.proofState}</Badge>
+        {journal.claimedCompletionWithoutEvidence ? (
+          <Badge variant="destructive">Evidence gap</Badge>
+        ) : null}
+      </div>
+      <p className="mt-2 text-sm text-foreground">{journal.summary}</p>
+    </div>
   );
 }
 
