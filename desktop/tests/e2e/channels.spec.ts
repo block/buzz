@@ -1746,8 +1746,15 @@ test("empty channel shows intro actions", async ({ page }) => {
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
+  const addAgentsAction = page.getByTestId("channel-intro-action-create-agent");
+  await expect(addAgentsAction).toBeVisible();
   await expect(
-    page.getByTestId("channel-intro-action-create-agent"),
+    addAgentsAction.getByText("Add agents", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    addAgentsAction.getByText("Bring them in.", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByTestId("channel-intro-action-add-people"),
@@ -1767,7 +1774,7 @@ test("empty channel shows intro actions", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
 
-  await page.getByTestId("channel-intro-action-create-agent").click();
+  await addAgentsAction.click();
   await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
 
   await page.keyboard.press("Escape");
