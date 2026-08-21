@@ -197,8 +197,8 @@ test("round-trips and reopens structured message-text conditions", async ({
   const expression = 'str_ends_with(trigger_text, "deploy \\"buzz\\"\\\\path")';
   const dialog = await openCreateWorkflow(page, name);
 
-  await dialog.getByText("ends with", { exact: true }).click();
-  await dialog.getByLabel("Text to match").fill(text);
+  await dialog.getByLabel("Match").selectOption("ends_with");
+  await dialog.getByLabel("Message text").fill(text);
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
   const definition = parseYaml(await yamlEditor.inputValue());
@@ -206,8 +206,8 @@ test("round-trips and reopens structured message-text conditions", async ({
 
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog, "Message Posted");
-  await expect(dialog.getByText("ends with", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel("Text to match")).toHaveValue(text);
+  await expect(dialog.getByLabel("Match")).toHaveValue("ends_with");
+  await expect(dialog.getByLabel("Message text")).toHaveValue(text);
   await dialog.getByRole("tab", { name: "Advanced" }).click();
   await expect(dialog.getByLabel("Advanced expression")).toHaveValue(
     expression,
@@ -218,8 +218,54 @@ test("round-trips and reopens structured message-text conditions", async ({
   await dialog.getByRole("button", { name: "Create" }).click();
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened, "Message Posted");
-  await expect(reopened.getByText("ends with", { exact: true })).toBeVisible();
-  await expect(reopened.getByLabel("Text to match")).toHaveValue(text);
+  await expect(reopened.getByLabel("Match")).toHaveValue("ends_with");
+  await expect(reopened.getByLabel("Message text")).toHaveValue(text);
+});
+
+test("round-trips manual author and reaction message IDs through save and reopen", async ({
+  page,
+}) => {
+  const name = `manual_trigger_ids_${Date.now()}`;
+  const author = "a".repeat(64);
+  const messageId = "b".repeat(64);
+  const dialog = await openCreateWorkflow(page, name);
+  await selectTrigger(page, dialog, "Reaction Added");
+
+  await dialog.getByRole("button", { name: "Author pubkey" }).click();
+  await dialog.getByLabel("Author pubkey").fill("not-hex");
+  await expect(
+    dialog.getByText("Enter a 64-character hex pubkey."),
+  ).toBeVisible();
+  await dialog.getByLabel("Author pubkey").fill(author);
+  await dialog.getByLabel("Match").first().selectOption("not_equals");
+
+  await dialog.getByRole("button", { name: "Message event ID" }).click();
+  await dialog.getByLabel("Message event ID").fill(messageId);
+
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
+  let definition = parseYaml(await yamlEditor.inputValue());
+  expect(definition.trigger).toEqual({
+    on: "reaction_added",
+    filter: `trigger_author != "${author}" && trigger_message_id == "${messageId}"`,
+  });
+
+  await dialog.getByRole("tab", { name: "Form" }).click();
+  await openTriggerInspector(dialog, "Reaction Added");
+  await addMessageStep(page, dialog);
+  await dialog.getByRole("button", { name: "Create" }).click();
+
+  const reopened = await reopenWorkflow(page, name);
+  await openTriggerInspector(reopened, "Reaction Added");
+  await reopened.getByRole("button", { name: "Author pubkey" }).click();
+  await expect(reopened.getByLabel("Author pubkey")).toHaveValue(author);
+  await reopened.getByRole("button", { name: "Message event ID" }).click();
+  await expect(reopened.getByLabel("Message event ID")).toHaveValue(messageId);
+  await reopened.getByRole("tab", { name: "YAML" }).click();
+  definition = parseYaml(
+    await reopened.getByRole("textbox", { name: "Workflow YAML" }).inputValue(),
+  );
+  expect(definition.trigger.filter).toContain(messageId);
 });
 
 test("hides and clears message-text step conditions for schedule triggers", async ({

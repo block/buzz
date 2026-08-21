@@ -21,15 +21,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
-import { WorkflowEmojiField } from "./WorkflowEmojiField";
-import { WorkflowMessageTextCondition } from "./WorkflowMessageTextConditionEditor";
+import { WorkflowTriggerConditions } from "./WorkflowTriggerConditions";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
+import type { ParsedConditionExpression } from "./workflowConditionExpression";
 import type { WorkflowEditorPane } from "./workflowEditorPane";
-import { FieldLabel } from "./workflowFormPrimitives";
 import {
   DEFAULT_FORM_STATE,
   ACTION_LABELS,
@@ -52,62 +50,44 @@ import type {
 } from "./workflowFormTypes";
 
 function TriggerConfigFields({
+  conditionDrafts,
   disabled,
   trigger,
+  onConditionDraftsChange,
   onUpdate,
 }: {
+  conditionDrafts: ParsedConditionExpression[] | null;
   disabled?: boolean;
   trigger: TriggerConfig;
+  onConditionDraftsChange: (drafts: ParsedConditionExpression[] | null) => void;
   onUpdate: (trigger: TriggerConfig) => void;
 }) {
   switch (trigger.on) {
     case "message_posted":
-      return (
-        <WorkflowMessageTextCondition
-          disabled={disabled}
-          onChange={(filter) => onUpdate({ ...trigger, filter })}
-          value={trigger.filter ?? ""}
-        />
-      );
     case "diff_posted":
-      return (
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-filter">
-            Condition (optional)
-          </FieldLabel>
-          <Input
-            autoCapitalize="off"
-            disabled={disabled}
-            id="wf-trigger-filter"
-            onChange={(event) =>
-              onUpdate({ ...trigger, filter: event.target.value })
-            }
-            placeholder='e.g. str_contains(trigger_text, "deploy")'
-            value={trigger.filter ?? ""}
-          />
-          <p className="text-xs text-muted-foreground">
-            Evalexpr. Empty matches all events.
-          </p>
-        </div>
-      );
     case "reaction_added":
       return (
-        <div className="space-y-1.5">
-          <FieldLabel htmlFor="wf-trigger-emoji">
-            Emoji filter (optional)
-          </FieldLabel>
-          <WorkflowEmojiField
-            ariaLabel="Choose trigger emoji"
-            clearAriaLabel="Clear trigger emoji"
-            disabled={disabled}
-            id="wf-trigger-emoji"
-            onChange={(emoji) => onUpdate({ ...trigger, emoji })}
-            value={trigger.emoji ?? ""}
-          />
-          <p className="text-xs text-muted-foreground">
-            Empty matches any reaction.
-          </p>
-        </div>
+        <WorkflowTriggerConditions
+          key={trigger.on}
+          conditionDrafts={conditionDrafts}
+          disabled={disabled}
+          onConditionDraftsChange={onConditionDraftsChange}
+          onChange={(filter) =>
+            onUpdate({
+              ...trigger,
+              emoji:
+                trigger.on === "reaction_added" ? undefined : trigger.emoji,
+              filter,
+            })
+          }
+          triggerType={trigger.on}
+          value={
+            trigger.filter ??
+            (trigger.on === "reaction_added" && trigger.emoji
+              ? `trigger_emoji == ${JSON.stringify(trigger.emoji)}`
+              : "")
+          }
+        />
       );
     case "webhook":
       return (
@@ -383,6 +363,9 @@ export const WorkflowFormBuilder = React.forwardRef<
       ? initialParseRef.current.state
       : DEFAULT_FORM_STATE,
   );
+  const [triggerConditionDrafts, setTriggerConditionDrafts] = React.useState<
+    ParsedConditionExpression[] | null
+  >(null);
   const selectedNode =
     selectedRouteNode?.type === "trigger" ||
     (selectedRouteNode?.type === "step" &&
@@ -746,6 +729,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                                 disabled={disabled}
                                 labels={TRIGGER_LABELS}
                                 onChange={(triggerType) => {
+                                  setTriggerConditionDrafts(null);
                                   const next = withTriggerType(
                                     formState,
                                     triggerType,
@@ -842,7 +826,11 @@ export const WorkflowFormBuilder = React.forwardRef<
                               {selectedNode.type === "trigger" ? (
                                 <div>
                                   <TriggerConfigFields
+                                    conditionDrafts={triggerConditionDrafts}
                                     disabled={disabled}
+                                    onConditionDraftsChange={
+                                      setTriggerConditionDrafts
+                                    }
                                     onUpdate={(trigger) =>
                                       updateFormState({ ...formState, trigger })
                                     }
