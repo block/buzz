@@ -140,6 +140,10 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
 
             // If the avatar or display_name changed, propagate to linked agent
             // records and collect relay profile sync params for the async phase.
+            // The respond_to propagation is handled by the frontend's
+            // personaManagedAgentUpdate, which builds a patch for the single
+            // linked agent whose profile the user edited — not a global
+            // backend overwrite of every linked instance (#6026).
             let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
