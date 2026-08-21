@@ -777,8 +777,8 @@ pub fn push_audio_pcm(
 pub async fn download_voice_models(state: State<'_, AppState>) -> Result<(), String> {
     let manager = models::global_model_manager()
         .ok_or("model manager unavailable (home directory could not be resolved)")?;
-    manager.start_stt_download(state.http_client.clone());
-    manager.start_tts_download(state.http_client.clone());
+    manager.start_stt_download(state.http_client.current());
+    manager.start_tts_download(state.http_client.current());
     Ok(())
 }
 

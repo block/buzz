@@ -225,9 +225,9 @@ pub(crate) async fn post_connect_setup(
     // Prepare voice models. Agent presence may have auto-enabled transcription;
     // explicit user choices remain authoritative.
     if let Some(mgr) = models::global_model_manager() {
-        mgr.start_tts_download(state.http_client.clone());
+        mgr.start_tts_download(state.http_client.current());
         if state.huddle()?.transcription_enabled {
-            mgr.start_stt_download(state.http_client.clone());
+            mgr.start_stt_download(state.http_client.current());
         }
     }
 
@@ -392,7 +392,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
 /// Start STT after agent presence automatically enables transcription.
 pub(crate) async fn start_auto_enabled_transcription(state: &AppState, ephemeral_channel_id: &str) {
     if let Some(manager) = models::global_model_manager() {
-        manager.start_stt_download(state.http_client.clone());
+        manager.start_stt_download(state.http_client.current());
     }
     if let Err(error) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
         eprintln!("buzz-desktop: auto-enabled STT failed to start: {error}");
@@ -620,7 +620,7 @@ pub(crate) fn spawn_transcription_task(
     // Capture the current generation at spawn time.
     let spawned_gen = session_generation.load(Ordering::Acquire);
 
-    let http_client = state.http_client.clone();
+    let http_client = state.http_client.current();
     let keys = match state.keys.lock() {
         Ok(k) => k.clone(),
         Err(_) => return,

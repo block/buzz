@@ -362,7 +362,7 @@ pub fn run() {
             // Start the localhost media streaming proxy. Uses the shared HTTP
             // client so VPN tunnelling applies. The port is stored in AppState
             // and exposed to the frontend via the `get_media_proxy_port` command.
-            let proxy_client = state.http_client.clone();
+            let proxy_client = state.http_client.current();
             let proxy_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 let port = media_proxy::spawn_media_proxy(proxy_client, proxy_handle.clone()).await;
@@ -432,8 +432,8 @@ pub fn run() {
             try_regenerate_nest(&app_handle);
 
             if let Some(mgr) = huddle::models::global_model_manager() {
-                mgr.start_stt_download(state.http_client.clone());
-                mgr.start_tts_download(state.http_client.clone());
+                mgr.start_stt_download(state.http_client.current());
+                mgr.start_tts_download(state.http_client.current());
             }
 
             // Handle deep link URLs received while the app is running (macOS)
