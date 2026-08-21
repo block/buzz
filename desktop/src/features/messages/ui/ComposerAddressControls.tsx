@@ -229,105 +229,26 @@ export function ComposerMentionButton({
 }
 
 export function ComposerSendButton({
-  agents,
   isSending,
-  onRemove,
-  pulseVersionByPubkey = {},
   sendDisabled,
-  shakeVersionByPubkey = {},
-  showAgents,
-}: AddressAgentsProps & {
+}: {
   isSending: boolean;
-  onRemove: (pubkey: string) => void;
   sendDisabled: boolean;
-  showAgents: boolean;
 }) {
-  const visibleAgents = showAgents ? agents.slice(0, VISIBLE_AGENT_LIMIT) : [];
-  const hiddenCount = showAgents ? agents.length - visibleAgents.length : 0;
-  const hasAgents = visibleAgents.length > 0;
-  const newlyAddedAgentPubkeys = useNewlyAddedAgentPubkeys(visibleAgents);
-
-  if (!hasAgents) {
-    return (
-      <button
-        aria-label={isSending ? "Sending" : "Send message"}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
-        data-testid="send-message"
-        disabled={sendDisabled || isSending}
-        type="submit"
-      >
-        {isSending ? (
-          <SendSpinner />
-        ) : (
-          <ArrowUp aria-hidden className="h-4 w-4" />
-        )}
-      </button>
-    );
-  }
-
   return (
-    <motion.div
-      className="flex h-8 items-center gap-0.5 rounded-full bg-primary p-1 pl-1.5 text-primary-foreground shadow"
-      data-testid="composer-address-send"
-      layout
+    <button
+      aria-label={isSending ? "Sending" : "Send message"}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground shadow transition-colors hover:bg-primary/90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+      data-testid="send-message"
+      disabled={sendDisabled || isSending}
+      type="submit"
     >
-      <span
-        className="flex items-center gap-1"
-        data-testid="composer-address-locks"
-      >
-        <AnimatePresence mode="popLayout">
-          {visibleAgents.map((agent) => (
-            <Tooltip disableHoverableContent key={agent.pubkey}>
-              <TooltipTrigger asChild>
-                <motion.button
-                  aria-label={`Stop automatically mentioning ${agent.displayName}`}
-                  animate={{ opacity: 1, scale: 1 }}
-                  className="group/address relative rounded-full focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-primary-foreground"
-                  data-testid={`composer-address-lock-remove-${agent.pubkey}`}
-                  disabled={isSending}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  initial={
-                    newlyAddedAgentPubkeys.has(agent.pubkey)
-                      ? { opacity: 0, scale: 0.8 }
-                      : false
-                  }
-                  layout
-                  onClick={() => onRemove(agent.pubkey)}
-                  transition={addressEntryTransition}
-                  type="button"
-                >
-                  <AddressedAgentAvatar
-                    agent={agent}
-                    pulseVersion={pulseVersionByPubkey[agent.pubkey] ?? 0}
-                    shakeVersion={shakeVersionByPubkey[agent.pubkey] ?? 0}
-                  />
-                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full bg-foreground/80 text-background opacity-0 transition-opacity group-hover/address:opacity-100 group-focus-visible/address:opacity-100">
-                    <X aria-hidden="true" className="h-3 w-3" />
-                  </span>
-                </motion.button>
-              </TooltipTrigger>
-              <TooltipContent>
-                Stop automatically mentioning {agent.displayName}
-              </TooltipContent>
-            </Tooltip>
-          ))}
-        </AnimatePresence>
-        <RemainingAgentCount count={hiddenCount} />
-      </span>
-      <button
-        aria-label={isSending ? "Sending" : "Send message"}
-        className="flex h-6 w-7 items-center justify-center rounded-full transition-colors hover:bg-primary-foreground/10 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-primary-foreground disabled:pointer-events-none disabled:opacity-50"
-        data-testid="send-message"
-        disabled={sendDisabled || isSending}
-        type="submit"
-      >
-        {isSending ? (
-          <SendSpinner />
-        ) : (
-          <ArrowUp aria-hidden className="h-4 w-4" />
-        )}
-      </button>
-    </motion.div>
+      {isSending ? (
+        <SendSpinner />
+      ) : (
+        <ArrowUp aria-hidden className="h-4 w-4" />
+      )}
+    </button>
   );
 }
 

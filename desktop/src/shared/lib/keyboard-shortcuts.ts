@@ -172,14 +172,6 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     category: "Messages",
   },
   {
-    id: "toggle-composer-address-prototype",
-    label: "Toggle composer address prototype",
-    description: "Move addressed agents between Mention and Send",
-    keys: "⇧⌘M",
-    keysWindows: "Ctrl+Shift+M",
-    category: "Messages",
-  },
-  {
     id: "publish-note",
     label: "Publish note",
     description: "Publish a Pulse note",

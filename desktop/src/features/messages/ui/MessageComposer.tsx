@@ -64,7 +64,6 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
 import { useAddressMentionPulse } from "./useAddressMentionPulse";
 import { useAlwaysAddressShortcut } from "./useAlwaysAddressShortcut";
-import { useComposerAddressPrototype } from "./useComposerAddressPrototype";
 import { useComposerMentionPicker } from "./useComposerMentionPicker";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
@@ -302,7 +301,6 @@ function MessageComposerImpl({
   const persistentAudience = usePersistentAgentAudience(audienceScope);
   const keepMentionedAgentsPinned = useKeepMentionedAgentsPinned();
   const addressPulse = useAddressMentionPulse();
-  const addressPrototype = useComposerAddressPrototype();
   const openMentionOptionsRef = React.useRef<() => void>(() => {});
   const addInlineAgentMentionsToAudience = React.useCallback(
     (pubkeys: readonly string[]) => {
@@ -955,7 +953,6 @@ function MessageComposerImpl({
               layoutMode === "standalone" &&
                 "backdrop-blur-md dark:backdrop-blur-xl",
             )}
-            data-address-prototype={addressPrototype}
             data-testid="message-composer"
             onDragEnter={ownsDropZone ? media.handleDragEnter : undefined}
             onDragLeave={ownsDropZone ? media.handleDragLeave : undefined}
@@ -1074,7 +1071,6 @@ function MessageComposerImpl({
 
             <ComposerDockToolbar
               addressedAgents={editTarget == null ? lockedAgents : []}
-              addressPrototype={addressPrototype}
               layoutMode={layoutMode}
               composerDisabled={composerDisabled}
               editor={richText.editor}

@@ -13,7 +13,6 @@ import {
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
-import type { ComposerAddressPrototype } from "./useComposerAddressPrototype";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -27,7 +26,6 @@ const ignoreAddressRemoval = () => {};
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
     addressedAgents = NO_ADDRESSED_AGENTS,
-    addressPrototype = "mention-button",
     composerDisabled,
     editor,
     extraActions,
@@ -49,7 +47,6 @@ export const MessageComposerToolbar = React.memo(
     shakeVersionByPubkey,
   }: {
     addressedAgents?: readonly ComposerAddressAgent[];
-    addressPrototype?: ComposerAddressPrototype;
     composerDisabled: boolean;
     editor: Editor | null;
     extraActions?: React.ReactNode;
@@ -184,7 +181,7 @@ export const MessageComposerToolbar = React.memo(
                   onRemove={onRemoveAddressedAgent}
                   pulseVersionByPubkey={pulseVersionByPubkey}
                   shakeVersionByPubkey={shakeVersionByPubkey}
-                  showAgents={addressPrototype === "mention-button"}
+                  showAgents
                 />
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
@@ -242,13 +239,8 @@ export const MessageComposerToolbar = React.memo(
         <div className="flex items-center gap-2">
           {extraActions}
           <ComposerSendButton
-            agents={addressedAgents}
             isSending={isSending}
-            onRemove={onRemoveAddressedAgent}
-            pulseVersionByPubkey={pulseVersionByPubkey}
             sendDisabled={sendDisabled}
-            shakeVersionByPubkey={shakeVersionByPubkey}
-            showAgents={addressPrototype === "send-button"}
           />
         </div>
       </div>

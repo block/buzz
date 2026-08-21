@@ -41,7 +41,7 @@ const thirdAgent = {
   pubkey: "third-agent-pubkey",
 };
 
-test("mention-button prototype expands the mention control with addressed agents", async () => {
+test("mention control expands with automatically mentioned agents", async () => {
   const React = await import("react");
   const { fireEvent, render } = await import("@testing-library/react");
   const { TooltipProvider } = await import("@/shared/ui/tooltip");
@@ -124,47 +124,4 @@ test("mention-button prototype expands the mention control with addressed agents
     view.getByRole("button", { name: "Manage automatic agent mentions" }),
   );
   assert.equal(opened, 1);
-});
-
-test("send-button prototype exposes each addressed avatar as a remove control", async () => {
-  const React = await import("react");
-  const { fireEvent, render } = await import("@testing-library/react");
-  const { TooltipProvider } = await import("@/shared/ui/tooltip");
-  const { ComposerSendButton } = await import("./ComposerAddressControls.tsx");
-  const removed = [];
-  const renderButton = (agents) =>
-    React.createElement(
-      TooltipProvider,
-      null,
-      React.createElement(ComposerSendButton, {
-        agents,
-        isSending: false,
-        onRemove: (pubkey) => removed.push(pubkey),
-        sendDisabled: true,
-        showAgents: true,
-      }),
-    );
-  const view = render(renderButton([agent]));
-  view.rerender(renderButton([agent, secondAgent, thirdAgent]));
-
-  assert.ok(view.getByTestId("composer-address-send"));
-  for (const addedAgent of [secondAgent, thirdAgent]) {
-    const addedAvatar = view.getByTestId(
-      `composer-address-lock-${addedAgent.pubkey}`,
-    );
-    assert.equal(addedAvatar.parentElement?.style.opacity, "0");
-    assert.match(
-      addedAvatar.parentElement?.style.transform ?? "",
-      /scale\(0.8\)/,
-    );
-  }
-  const remove = view.getByRole("button", {
-    name: "Stop automatically mentioning Agent Ada",
-  });
-  assert.match(
-    remove.querySelector("span.absolute")?.className ?? "",
-    /group-hover\/address:opacity-100/,
-  );
-  fireEvent.click(remove);
-  assert.deepEqual(removed, ["agent-pubkey"]);
 });
