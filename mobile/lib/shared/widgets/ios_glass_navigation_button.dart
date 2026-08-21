@@ -86,34 +86,43 @@ class IosGlassNavigationButton extends HookWidget {
     Widget buildControl({required bool suppressNativeView}) {
       if (suppressNativeView) {
         final resolvedButtonCenterX = buttonCenterX ?? width / 2;
-        return Stack(
-          key: const ValueKey('ios-glass-navigation-flutter-fallback'),
-          children: [
-            Positioned(
-              left: resolvedButtonCenterX - 20,
-              top: (height - 40) / 2,
-              width: 40,
-              height: 40,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: context.colors.surface.withValues(alpha: 0.72),
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    color: context.colors.inverseSurface.withValues(
-                      alpha: 0.07,
+        return Semantics(
+          container: true,
+          button: true,
+          enabled: enabled,
+          label: semanticLabel,
+          onTap: onPressed,
+          child: ExcludeSemantics(
+            child: Stack(
+              key: const ValueKey('ios-glass-navigation-flutter-fallback'),
+              children: [
+                Positioned(
+                  left: resolvedButtonCenterX - 20,
+                  top: (height - 40) / 2,
+                  width: 40,
+                  height: 40,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: context.colors.surface.withValues(alpha: 0.72),
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: context.colors.inverseSurface.withValues(
+                          alpha: 0.07,
+                        ),
+                      ),
+                    ),
+                    child: Icon(
+                      icon == IosGlassNavigationIcon.back
+                          ? Icons.arrow_back_ios_new_rounded
+                          : Icons.close_rounded,
+                      size: 20,
+                      color: effectiveForeground,
                     ),
                   ),
                 ),
-                child: Icon(
-                  icon == IosGlassNavigationIcon.back
-                      ? Icons.arrow_back_ios_new_rounded
-                      : Icons.close_rounded,
-                  size: 20,
-                  color: effectiveForeground,
-                ),
-              ),
+              ],
             ),
-          ],
+          ),
         );
       }
       return UiKitView(
@@ -146,13 +155,8 @@ class IosGlassNavigationButton extends HookWidget {
             ? buildControl(suppressNativeView: false)
             : ValueListenableBuilder<bool>(
                 valueListenable: nativeViewSuppressed!,
-                builder: (context, suppressNativeView, _) => IgnorePointer(
-                  ignoring: suppressNativeView,
-                  child: ExcludeSemantics(
-                    excluding: suppressNativeView,
-                    child: buildControl(suppressNativeView: suppressNativeView),
-                  ),
-                ),
+                builder: (context, suppressNativeView, _) =>
+                    buildControl(suppressNativeView: suppressNativeView),
               ),
       ),
     );

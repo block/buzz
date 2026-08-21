@@ -56,6 +56,15 @@ class RunnerTests: XCTestCase {
         foregroundColor: accent.color,
         interfaceStyle: .light
       )
+      var red: CGFloat = 0
+      var green: CGFloat = 0
+      var blue: CGFloat = 0
+      var alpha: CGFloat = 0
+      XCTAssertTrue(
+        background.getRed(&red, green: &green, blue: &blue, alpha: &alpha),
+        accent.name
+      )
+      XCTAssertEqual(alpha, 1, accuracy: 0.001, accent.name)
       XCTAssertGreaterThanOrEqual(
         NavigationGlassButtonPlatformView.contrastRatio(
           foregroundColor: accent.color,

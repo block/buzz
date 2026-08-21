@@ -3,6 +3,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -135,6 +136,7 @@ void main() {
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final suppressNativeView = ValueNotifier(false);
     addTearDown(suppressNativeView.dispose);
+    var pressCount = 0;
 
     await tester.pumpWidget(
       MaterialApp(
@@ -143,7 +145,7 @@ void main() {
           body: IosGlassNavigationButton(
             icon: IosGlassNavigationIcon.back,
             semanticLabel: 'Back',
-            onPressed: () {},
+            onPressed: () => pressCount++,
             nativeViewSuppressed: suppressNativeView,
           ),
         ),
@@ -155,6 +157,7 @@ void main() {
       find.byKey(const ValueKey('ios-glass-navigation-flutter-fallback')),
       findsNothing,
     );
+    expect(find.bySemanticsLabel('Back'), findsNothing);
 
     suppressNativeView.value = true;
     await tester.pump();
@@ -164,6 +167,27 @@ void main() {
       find.byKey(const ValueKey('ios-glass-navigation-flutter-fallback')),
       findsOneWidget,
     );
+    final fallbackFinder = find.bySemanticsLabel('Back');
+    expect(fallbackFinder, findsOneWidget);
+    final fallbackSemantics = tester.getSemantics(fallbackFinder);
+    expect(fallbackSemantics.flagsCollection.isButton, isTrue);
+    expect(
+      fallbackSemantics.flagsCollection.isEnabled.toString(),
+      'Tristate.isTrue',
+    );
+    expect(
+      fallbackSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    tester.binding.performSemanticsAction(
+      SemanticsActionEvent(
+        type: SemanticsAction.tap,
+        viewId: tester.view.viewId,
+        nodeId: fallbackSemantics.id,
+      ),
+    );
+    await tester.pump();
+    expect(pressCount, 1);
 
     suppressNativeView.value = false;
     await tester.pump();
