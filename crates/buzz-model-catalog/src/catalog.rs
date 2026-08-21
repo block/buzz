@@ -3,7 +3,7 @@
 //! Exposes [`discover_databricks_models`] — an async helper that lists
 //! available models for the `databricks` and `databricks_v2` providers
 //! without triggering a browser OAuth flow. Auth is acquired in-process via
-//! [`build_token_source`](crate::llm::build_token_source):
+//! [`build_token_source`]:
 //!
 //! - Static bearer (`DATABRICKS_TOKEN`): returned immediately.
 //! - PKCE cache hit: returned from disk without a network round-trip.
@@ -17,11 +17,49 @@ use std::sync::Arc;
 use reqwest::Client;
 
 use crate::{
-    auth::TokenSource,
+    auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource},
     config::{Config, Provider},
-    llm::build_token_source,
     types::AgentError,
 };
+
+const DATABRICKS_CLIENT_ID: &str = "databricks-cli";
+const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
+
+/// Acquire a bearer for Databricks model discovery.
+///
+/// Lifted verbatim from the deleted `llm.rs:1529-1555`. Goose owns provider
+/// auth for the agent loop now, but the desktop model picker calls
+/// [`discover_databricks_models`] directly as a library
+/// (`desktop/src-tauri/src/commands/agent_models.rs:791`), so this path is
+/// still ours and must keep its exact no-browser semantics: a PKCE cache miss
+/// returns `Err(LlmAuth)` and the caller falls back to a subprocess probe.
+fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
+    match cfg.provider {
+        Provider::Anthropic | Provider::OpenAi => {
+            Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
+        }
+        Provider::Databricks | Provider::DatabricksV2 => {
+            if !cfg.api_key.is_empty() {
+                return Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())));
+            }
+            let discovery_url = format!(
+                "{}/oidc/.well-known/oauth-authorization-server",
+                cfg.base_url.trim_end_matches('/')
+            );
+            let pkce = PkceOAuthConfig {
+                discovery_url,
+                client_id: DATABRICKS_CLIENT_ID.into(),
+                scopes: DATABRICKS_OAUTH_SCOPES
+                    .iter()
+                    .map(|s| (*s).into())
+                    .collect(),
+                cache_namespace: "databricks".into(),
+                cache_dir_override: None,
+            };
+            Ok(PkceOAuthTokenSource::new(pkce)?)
+        }
+    }
+}
 
 /// A discovered model entry: `id` is the picker value (the raw endpoint id, and
 /// the wire/config value), `name` is the display label. The Databricks API has

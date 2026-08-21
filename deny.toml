@@ -41,6 +41,10 @@ allow = [
     # bzip2/libbzip2's permissive BSD-like license. New via desktop zip/bzip2
     # transitive deps; compatible with Apache-2.0 distribution.
     "bzip2-1.0.6",
+    # MIT No Attribution — MIT minus the attribution requirement; OSI approved.
+    # New via the goose dep: goose → jsonschema → referencing → fluent-uri →
+    # borrow-or-share.
+    "MIT-0",
 ]
 confidence-threshold = 0.8
 

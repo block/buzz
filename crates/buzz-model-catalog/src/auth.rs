@@ -18,6 +18,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -139,6 +140,9 @@ pub struct PkceOAuthTokenSource {
     /// Single-flight guard: only one refresh/browser flow at a time, even
     /// if many tool calls land concurrently.
     state: Mutex<Option<CachedToken>>,
+    /// Set synchronously by provider retry hooks after a 401. The next async
+    /// bearer request consumes it and refreshes the currently cached token.
+    current_bearer_rejected: AtomicBool,
 }
 
 impl PkceOAuthTokenSource {
@@ -154,7 +158,17 @@ impl PkceOAuthTokenSource {
             http: Client::new(),
             cache_path,
             state: Mutex::new(initial),
+            current_bearer_rejected: AtomicBool::new(false),
         }))
+    }
+
+    /// Mark the current access token as rejected by the provider.
+    ///
+    /// This synchronous edge is designed for transport retry hooks. No I/O is
+    /// performed here; the next [`TokenSource::bearer_no_browser`] call does
+    /// the refresh under the source's async single-flight lock.
+    pub fn reject_current_bearer(&self) {
+        self.current_bearer_rejected.store(true, Ordering::Release);
     }
 
     /// Discover authorization + token endpoints from the well-known URL.
@@ -368,6 +382,20 @@ impl PkceOAuthTokenSource {
     /// Used by model-discovery paths that must not block on user interaction.
     pub(crate) async fn try_bearer_no_browser(&self) -> Result<String, AgentError> {
         let mut state = self.state.lock().await;
+
+        // A provider retry hook reported that the locally-fresh access token
+        // was rejected. Refresh it unconditionally instead of trusting expiry.
+        if self.current_bearer_rejected.swap(false, Ordering::AcqRel) {
+            let rejected = state
+                .as_ref()
+                .map(|token| token.access_token.clone())
+                .or_else(|| read_cache(&self.cache_path).map(|token| token.access_token))
+                .ok_or_else(|| {
+                    AgentError::LlmAuth("token rejected and no cached token available".into())
+                })?;
+            drop(state);
+            return self.refresh_now(&rejected).await;
+        }
 
         // 1. In-memory cache hit, still fresh.
         if let Some(tok) = state.as_ref() {
@@ -984,6 +1012,34 @@ mod tests {
             err_msg.contains("oauth discovery"),
             "expected discovery error, got: {err_msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_current_bearer_does_not_reuse_a_locally_fresh_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://invalid.example.test/.well-known".into(),
+            client_id: "test-client".into(),
+            scopes: vec!["offline_access".into()],
+            cache_namespace: "test".into(),
+            cache_dir_override: Some(dir.path().to_path_buf()),
+        };
+        let source = PkceOAuthTokenSource::new(cfg).unwrap();
+        let future_expiry = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        *source.state.lock().await = Some(CachedToken {
+            access_token: "rejected-but-locally-fresh".into(),
+            refresh_token: None,
+            expires_at: Some(future_expiry),
+        });
+
+        source.reject_current_bearer();
+        let result = source.try_bearer_no_browser().await;
+
+        assert!(matches!(result, Err(AgentError::LlmAuth(_))));
     }
 
     /// `try_bearer_no_browser` with an empty cache and no refresh token must
