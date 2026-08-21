@@ -314,7 +314,6 @@ export function useMentionSendFlow({
       provisionPersonaAgentMutation,
     ],
   );
-
   const clearComposer = React.useCallback(() => {
     setPendingNonMemberSend(null);
     setNonMemberPromptError(null);
@@ -340,17 +339,14 @@ export function useMentionSendFlow({
     clearQueuedAttachments,
     setSpoileredAttachmentUrls,
   ]);
-
   React.useEffect(() => {
     if (previousChannelIdRef.current === channelId) {
       return;
     }
-
     previousChannelIdRef.current = channelId;
     setPendingNonMemberSend(null);
     setNonMemberPromptError(null);
   }, [channelId]);
-
   const completeSend = React.useCallback(
     async (
       draft: PendingNonMemberMentionSend,
@@ -360,11 +356,9 @@ export function useMentionSendFlow({
       if (isCompleteSendPendingRef.current) {
         return;
       }
-
       const sendSignal = draft.preparedLinkPreviews?.signal;
       const isSendCancelled = () => sendSignal?.aborted === true;
       if (isSendCancelled()) return draft.preparedLinkPreviews?.release();
-
       isCompleteSendPendingRef.current = true;
       setIsCompleteSendPending(true);
       const preparedUpload =
@@ -504,7 +498,6 @@ export function useMentionSendFlow({
             return;
           }
         }
-
         const agentReadiness = await ensureManagedAgentMentionsReady(
           managedMentionPubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
@@ -631,7 +624,6 @@ export function useMentionSendFlow({
             return restoreComposerAfterFailure();
           }
         }
-
         if (!preparedUpload) {
           try {
             await finishSend([]);
@@ -694,7 +686,6 @@ export function useMentionSendFlow({
       if (isMentionSendPendingRef.current) {
         return;
       }
-
       isMentionSendPendingRef.current = true;
       setIsMentionSendPending(true);
       const isSendCancelled = () =>
@@ -724,7 +715,6 @@ export function useMentionSendFlow({
           toast.error(dmThreadAgentMentionErrorMessage);
           return;
         }
-
         let effectiveChannelId = capturedChannelId;
         if (!effectiveChannelId && onPrepareSendChannel) {
           effectiveChannelId = await onPrepareSendChannel();
@@ -733,7 +723,6 @@ export function useMentionSendFlow({
             return;
           }
         }
-
         const personaMentionResult = await createMentionedPersonaAgents(
           trimmed,
           effectiveChannelId ?? "",
@@ -750,7 +739,6 @@ export function useMentionSendFlow({
           toast.error(message);
           return;
         }
-
         const createdPersonaAgentPubkeys = personaMentionResult.pubkeys;
         const createdPersonaAgentPubkeySet = new Set(
           createdPersonaAgentPubkeys.map(normalizePubkey),
@@ -780,7 +768,6 @@ export function useMentionSendFlow({
             !mentions.isManagedAgentPubkey(pubkey) &&
             !createdPersonaAgentPubkeySet.has(normalizePubkey(pubkey)),
         );
-
         if (promptNonMemberPubkeys.length > 0) {
           try {
             const managedAgentsByPubkey = await getManagedAgentsByPubkey();
@@ -790,7 +777,6 @@ export function useMentionSendFlow({
             );
           } catch {}
         }
-
         const savedMentionRefs = mentions.getDraftMentionRefs(trimmed);
         const pendingDraft: PendingNonMemberMentionSend = {
           addressedAgentPubkeys: uniqueNormalizedPubkeys(addressedAgentPubkeys),
@@ -819,13 +805,11 @@ export function useMentionSendFlow({
           recoveryDraftKey,
           savedMentionRefs,
         };
-
         if (promptNonMemberPubkeys.length > 0) {
           setNonMemberPromptError(null);
           setPendingNonMemberSend(pendingDraft);
           return;
         }
-
         sendPromoted = true;
         await completeSend(pendingDraft, pubkeys);
       } finally {
@@ -858,16 +842,13 @@ export function useMentionSendFlow({
   );
   const pendingNonMemberNames = React.useMemo(() => {
     if (!pendingNonMemberSend) return [];
-
     return pendingNonMemberSend.nonMemberPubkeys.map(
       (pubkey) =>
         mentions.getMentionDisplayName(pubkey) ?? truncatePubkey(pubkey),
     );
   }, [mentions.getMentionDisplayName, pendingNonMemberSend]);
-
   const handleSendWithoutInviting = React.useCallback(() => {
     if (!pendingNonMemberSend) return;
-
     const nonMemberPubkeys = new Set(
       pendingNonMemberSend.nonMemberPubkeys.map((pubkey) =>
         normalizePubkey(pubkey),
@@ -916,14 +897,12 @@ export function useMentionSendFlow({
         if (managedAgentsByPubkey.has(pubkey)) {
           continue;
         }
-
         if (mentions.isAgentPubkey(pubkey)) {
           relayAgentPubkeys.push(pubkey);
         } else {
           peoplePubkeys.push(pubkey);
         }
       }
-
       const errors: string[] = [];
       if (peoplePubkeys.length > 0) {
         const result = await addMembersMutation.mutateAsync({
@@ -933,7 +912,6 @@ export function useMentionSendFlow({
         });
         errors.push(...result.errors.map((error) => error.error));
       }
-
       if (relayAgentPubkeys.length > 0) {
         const result = await addMembersMutation.mutateAsync({
           channelId: pendingNonMemberSend.capturedChannelId ?? undefined,
@@ -942,12 +920,10 @@ export function useMentionSendFlow({
         });
         errors.push(...result.errors.map((error) => error.error));
       }
-
       if (errors.length > 0) {
         setNonMemberPromptError(errors.join("; "));
         return;
       }
-
       await completeSend(
         {
           ...pendingNonMemberSend,
@@ -971,7 +947,6 @@ export function useMentionSendFlow({
     mentions.revalidateMentionPubkeys,
     pendingNonMemberSend,
   ]);
-
   const dismissNonMemberPrompt = React.useCallback(() => {
     setPendingNonMemberSend(null);
     setNonMemberPromptError(null);

@@ -1,14 +1,17 @@
 import * as React from "react";
 import { EditorContent } from "@tiptap/react";
-import { toast } from "sonner";
-import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
+import {
+  useChannelLinks,
+  type ChannelSuggestion,
+} from "@/features/messages/lib/useChannelLinks";
 import { handleAgentSnapshotPaste } from "@/features/messages/lib/agentSnapshotClipboard";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
-import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
-import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
-import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
+import {
+  useEmojiAutocomplete,
+  type EmojiSuggestion,
+} from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import {
   findSpoileredImetaMediaUrls,
@@ -26,9 +29,7 @@ import {
 } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
-  getPersistentAgentAudienceSnapshot,
   getPersistentAgentAudienceScope,
-  removePersistentAgentAudienceMember,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
 import {
@@ -51,7 +52,6 @@ import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposer
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -65,6 +65,7 @@ import { useAgentAddressLockPicker } from "./useAgentAddressLockPicker";
 import { useAddressMentionPulse } from "./useAddressMentionPulse";
 import { useAlwaysAddressShortcut } from "./useAlwaysAddressShortcut";
 import { useComposerMentionPicker } from "./useComposerMentionPicker";
+import { useAutoPinMentionedAgents } from "./useAutoPinMentionedAgents";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { submitMessageEdit } from "./submitMessageEdit";
@@ -210,7 +211,6 @@ function MessageComposerImpl({
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
   const isUploadingRef = React.useRef(media.isUploading);
-  // Sync lock: taken before any async send so rapid Enter can't double-submit.
   const isSubmitLockedRef = React.useRef(false);
   const onSendRef = React.useRef(onSend);
   const onEditSaveRef = React.useRef(onEditSave);
@@ -234,9 +234,6 @@ function MessageComposerImpl({
     emojiAutocomplete.isEmojiAutocompleteOpen;
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
-  // Set after `useLinkEditor` exists below; the editor's link-click handler
-  // delegates through this ref to break the hook ordering cycle (the editor
-  // needs `onEditLink`, but the link editor needs the editor's `richText`).
   const onEditLinkRef = React.useRef<
     ((info: LinkSelectionInfo) => void) | null
   >(null);
@@ -267,8 +264,6 @@ function MessageComposerImpl({
     customEmoji,
     onSubmit: () => submitMessageRef.current(),
     onEditLastOwnMessage: () => {
-      // Never re-enter edit from an empty edit (e.g. image-only edit whose
-      // text body is empty) — `editTarget` means we're already editing.
       if (editTargetRef.current) return false;
       const handler = onEditLastOwnMessageRef.current;
       return handler ? handler() : false;
@@ -302,65 +297,14 @@ function MessageComposerImpl({
   const keepMentionedAgentsPinned = useKeepMentionedAgentsPinned();
   const addressPulse = useAddressMentionPulse();
   const openMentionOptionsRef = React.useRef<() => void>(() => {});
-  const addInlineAgentMentionsToAudience = React.useCallback(
-    (pubkeys: readonly string[]) => {
-      if (!audienceScope || !keepMentionedAgentsPinned) return;
-      const pinnedPubkeys = new Set(
-        getPersistentAgentAudienceSnapshot().audiences[audienceScope] ?? [],
-      );
-      const newlyPinnedPubkeys: string[] = [];
-      for (const pubkey of pubkeys) {
-        const normalizedPubkey = normalizePubkey(pubkey);
-        if (!pinnedPubkeys.has(normalizedPubkey)) {
-          pinnedPubkeys.add(normalizedPubkey);
-          newlyPinnedPubkeys.push(normalizedPubkey);
-        }
-        persistentAudience.addPubkey(normalizedPubkey);
-        addressPulse.pulseOne(normalizedPubkey);
-      }
-      if (newlyPinnedPubkeys.length === 0) return;
-
-      const undoAutomaticMentions = () => {
-        for (const pubkey of newlyPinnedPubkeys) {
-          removePersistentAgentAudienceMember(audienceScope, pubkey);
-        }
-      };
-      const showAutoPinToast = (title: string) => {
-        toast.success(title, {
-          action: {
-            label: "Undo",
-            onClick: () => {
-              undoAutomaticMentions();
-              openMentionOptionsRef.current();
-            },
-          },
-        });
-      };
-
-      if (newlyPinnedPubkeys.length === 1) {
-        const displayName = mentions
-          .getMentionDisplayName(newlyPinnedPubkeys[0])
-          ?.trim();
-        showAutoPinToast(
-          displayName
-            ? `${displayName} will be mentioned automatically`
-            : "Agent will be mentioned automatically",
-        );
-        return;
-      }
-
-      showAutoPinToast(
-        `${newlyPinnedPubkeys.length} agents will be mentioned automatically`,
-      );
-    },
-    [
-      addressPulse.pulseOne,
-      audienceScope,
-      keepMentionedAgentsPinned,
-      mentions.getMentionDisplayName,
-      persistentAudience.addPubkey,
-    ],
-  );
+  const addInlineAgentMentionsToAudience = useAutoPinMentionedAgents({
+    audienceScope,
+    enabled: keepMentionedAgentsPinned,
+    addPubkey: persistentAudience.addPubkey,
+    getDisplayName: mentions.getMentionDisplayName,
+    onOpenOptions: () => openMentionOptionsRef.current(),
+    onPulse: addressPulse.pulseOne,
+  });
   const mentionSendFlow = useMentionSendFlow({
     channelId,
     channelLinks,
@@ -400,9 +344,6 @@ function MessageComposerImpl({
         queuedAttachments: [...media.queuedAttachmentsRef.current],
         spoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
       };
-      // Strip the trailing `![image|video](url)` lines that correspond to
-      // imeta attachments — the user manages those via the attachments row,
-      // not via raw markdown in the editor.
       const editableImeta = restoreImetaMediaDisplayLabels(
         editTarget.body,
         editTarget.imetaMedia ?? [],
@@ -410,15 +351,12 @@ function MessageComposerImpl({
       const editableBody = stripImetaMediaLines(editTarget.body, editableImeta);
       setComposerContent(editableBody);
       richText.setContent(editableBody);
-      // Seed pending imeta with removable originals before saving the edit.
-      // New attachments can then be added through the same row.
       mentions.restoreDraftMentionRefs(editTarget.mentionRefs ?? []);
       media.setPendingImeta(editableImeta);
       media.clearQueuedAttachments();
       setSpoileredAttachmentUrls(
         findSpoileredImetaMediaUrls(editTarget.body, editableImeta),
       );
-      // Defer focus to the next frame so it runs after any focus-
       // restoration the trigger UI (e.g. the message-row context menu)
       // fires on close. Without this, Radix-style focus-restoration races
       // our call and leaves DOM focus on the message row — global keybinds
@@ -720,7 +658,6 @@ function MessageComposerImpl({
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (handleAlwaysAddressShortcut(event)) return;
-
       // Let autocomplete handle keys first
       const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
       if (emojiResult.handled) {
@@ -853,11 +790,9 @@ function MessageComposerImpl({
       media.pendingImeta.length === 0 &&
       media.queuedAttachments.length === 0);
   const handleCaptureSelection = React.useCallback(() => {}, []);
-
   const handlePaperclipClick = React.useCallback(() => {
     void media.handlePaperclip();
   }, [media.handlePaperclip]);
-
   const handleRemoveAttachment = React.useCallback(
     (url: string) => {
       setSpoileredAttachmentUrls((current) => {
@@ -870,14 +805,12 @@ function MessageComposerImpl({
     },
     [media.removeAttachment],
   );
-
   const { handleAttachmentEditSave, handleAttachmentRevert } =
     useAttachmentEditing({
       revertAttachment: media.revertAttachment,
       setSpoileredAttachmentUrls,
       uploadEditedAttachment: media.uploadEditedAttachment,
     });
-
   const handleToggleAttachmentSpoiler = React.useCallback((url: string) => {
     setSpoileredAttachmentUrls((current) => {
       const next = new Set(current);
@@ -889,7 +822,6 @@ function MessageComposerImpl({
       return next;
     });
   }, []);
-
   return (
     <>
       <footer
@@ -996,7 +928,6 @@ function MessageComposerImpl({
                 </button>
               </div>
             ) : null}
-
             {composerLinkPreviews}
             <output
               aria-live="polite"
@@ -1031,7 +962,6 @@ function MessageComposerImpl({
                 ) : null}
               </div>
             )}
-
             {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
             <div
               className="rich-text-composer relative max-h-32 overflow-y-auto"
@@ -1041,7 +971,6 @@ function MessageComposerImpl({
             >
               <EditorContent editor={richText.editor} />
             </div>
-
             <ComposerDockToolbar
               addressedAgents={editTarget == null ? lockedAgents : []}
               layoutMode={layoutMode}
@@ -1068,13 +997,10 @@ function MessageComposerImpl({
           </form>
         </div>
       </footer>
-
       <NonMemberMentionDialog {...mentionSendFlow.nonMemberPromptProps} />
-
       {linkEditor.card}
       {linkEditor.dialog}
     </>
   );
 }
-
 export const MessageComposer = React.memo(MessageComposerImpl);
