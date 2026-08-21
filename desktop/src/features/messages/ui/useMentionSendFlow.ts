@@ -10,10 +10,8 @@ import {
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
-import {
-  useAddChannelMembersMutation,
-  useCanAddChannelMembers,
-} from "@/features/channels/hooks";
+import { useAddChannelMembersMutation } from "@/features/channels/hooks";
+import { useCanAddChannelMembers } from "@/features/channels/useCanAddChannelMembers";
 import { PRIVATE_CHANNEL_ADD_DENIED_MESSAGE } from "@/features/channels/lib/channelMemberAdmission";
 import { dmThreadAgentMentionError } from "@/features/messages/lib/dmThreadAgentMentionError";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
