@@ -230,7 +230,7 @@ fn signed_event_json(snapshot: &OwnerTodaySnapshot) -> Result<String, String> {
         .map(|tag| {
             serde_json::Value::Array(
                 tag.as_slice()
-                    .into_iter()
+                    .iter()
                     .map(|value| serde_json::Value::String(value.clone()))
                     .collect(),
             )

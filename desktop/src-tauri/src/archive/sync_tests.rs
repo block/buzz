@@ -159,14 +159,14 @@ fn matched(subscription_id: &str) -> MatchedEvent {
 /// Runs `run_sync` on a task, handing back the controls the tests drive it
 /// with. Every test cancels and joins, so a loop that fails to observe
 /// cancellation hangs the test rather than passing silently.
-fn spawn_sync(
-    io: Arc<FakeIo>,
-) -> (
+type SpawnedSync = (
     mpsc::Sender<MatchedEvent>,
     Arc<Notify>,
     CancellationToken,
     tokio::task::JoinHandle<Result<(), String>>,
-) {
+);
+
+fn spawn_sync(io: Arc<FakeIo>) -> SpawnedSync {
     let (tx, rx) = mpsc::channel(64);
     let reload = Arc::new(Notify::new());
     let cancel = CancellationToken::new();

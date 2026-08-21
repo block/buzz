@@ -598,9 +598,9 @@ pub async fn read_archived_observer_events_for_channel(
 }
 
 /// Read a paginated owner-scoped observer page for a half-open time range.
-#[tauri::command]
-pub async fn read_archived_observer_events_for_range(
-    state: State<'_, AppState>,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedObserverRangeInput {
     start_created_at: i64,
     end_created_at: i64,
     agent_pubkey: Option<String>,
@@ -608,7 +608,22 @@ pub async fn read_archived_observer_events_for_range(
     before_created_at: Option<i64>,
     before_id: Option<String>,
     limit: Option<i64>,
+}
+
+#[tauri::command]
+pub async fn read_archived_observer_events_for_range(
+    state: State<'_, AppState>,
+    input: ArchivedObserverRangeInput,
 ) -> Result<Vec<String>, String> {
+    let ArchivedObserverRangeInput {
+        start_created_at,
+        end_created_at,
+        agent_pubkey,
+        channel_id,
+        before_created_at,
+        before_id,
+        limit,
+    } = input;
     if start_created_at >= end_created_at {
         return Err("archive range must have start_created_at < end_created_at".into());
     }

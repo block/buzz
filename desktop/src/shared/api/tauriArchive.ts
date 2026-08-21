@@ -485,13 +485,15 @@ export async function readArchivedObserverEventsForRange(opts: {
   const rawRows = await invokeTauri<string[]>(
     "read_archived_observer_events_for_range",
     {
-      startCreatedAt: opts.startCreatedAt,
-      endCreatedAt: opts.endCreatedAt,
-      agentPubkey: opts.agentPubkey ?? null,
-      channelId: opts.channelId ?? null,
-      beforeCreatedAt: opts.before?.createdAt ?? null,
-      beforeId: opts.before?.id ?? null,
-      limit,
+      input: {
+        startCreatedAt: opts.startCreatedAt,
+        endCreatedAt: opts.endCreatedAt,
+        agentPubkey: opts.agentPubkey ?? null,
+        channelId: opts.channelId ?? null,
+        beforeCreatedAt: opts.before?.createdAt ?? null,
+        beforeId: opts.before?.id ?? null,
+        limit,
+      },
     },
   );
   const events = rawRows
