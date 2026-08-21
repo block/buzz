@@ -21,6 +21,7 @@ import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
+import { isMacPlatform } from "@/shared/lib/platform";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 import { Button } from "@/shared/ui/button";
@@ -28,6 +29,7 @@ import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle, useHuddleLevels } from "../HuddleContext";
+import { getAgentVoiceReadiness } from "../lib/agentVoiceReadiness";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import type { HuddleAgentVoiceSettings } from "./AgentVoiceMenu";
 import { MicControls, SpeakerControls } from "./MicControls";
@@ -494,6 +496,15 @@ export function HuddleBar({
   const hasAvailableMic = micConnected;
   const ttsEnabled = barState.tts_enabled;
   const transcriptionEnabled = barState.transcription_enabled;
+  const pushToTalkShortcut = isMacPlatform() ? "⌃Space" : "Ctrl+Space";
+  const agentVoiceReadiness = getAgentVoiceReadiness({
+    hasAgents: barState.agent_pubkeys.length > 0,
+    isMuted,
+    isPttMode,
+    micConnected: hasAvailableMic,
+    pushToTalkShortcut,
+    transcriptionEnabled,
+  });
   // Self-removing detection: remote-peer audio plays through native rodio
   // today (outside the WebView render graph), so the browser's AEC has no
   // far-end reference. The AEC follow-up PR flips this constant in the
@@ -625,6 +636,25 @@ export function HuddleBar({
           <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
             {transcriptError}
           </span>
+        )}
+
+        {agentVoiceReadiness && (
+          <button
+            className={cn(
+              "max-w-[320px] rounded border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-left text-xs text-amber-700 dark:text-amber-300",
+              agentVoiceReadiness.action && "hover:bg-amber-500/20",
+            )}
+            disabled={agentVoiceReadiness.action === null}
+            onClick={() => {
+              if (agentVoiceReadiness.action === "unmute") toggleMute();
+              if (agentVoiceReadiness.action === "enable_transcription") {
+                void handleToggleTranscript();
+              }
+            }}
+            type="button"
+          >
+            {agentVoiceReadiness.message}
+          </button>
         )}
 
         <AddAgentDialog
