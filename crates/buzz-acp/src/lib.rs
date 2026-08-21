@@ -8535,7 +8535,7 @@ mod observer_payload_trim_tests {
         // to 1).
         let sections = [
             "[Base]\nyou are a helpful agent".to_string(),
-            "[System]\npersona text".to_string(),
+            "[Agent Instructions]\npersona text".to_string(),
             "[Agent Memory — core]\nremember this".to_string(),
             "[Context]\nScope: thread".to_string(),
             // The triggering event body, oversized on its own.
@@ -8572,7 +8572,7 @@ mod observer_payload_trim_tests {
         let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
         for header in [
             "[Base]",
-            "[System]",
+            "[Agent Instructions]",
             "[Agent Memory — core]",
             "[Context]",
             "[Buzz event: @mention]",
