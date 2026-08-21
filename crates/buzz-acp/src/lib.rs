@@ -89,8 +89,13 @@ fn current_working_directory() -> Result<String> {
 /// under the crate path. `EnvFilter` matches directives by target prefix, so
 /// `buzz_acp=info` alone silences all of them — warn and error events
 /// included — and leaves a log holding little more than the startup line.
-/// The debug-level targets (`acp::wire` and friends) stay off at `info`.
-const LOG_FILTER: &str = "buzz_acp=info,acp=info,pool=info,canvas=info,engram=info,observer=info";
+///
+/// The families are enabled at `warn`, not `info`: their info-level events
+/// carry conversation content (`acp::stream` logs the model's reply verbatim),
+/// and a default must not persist that. Content stays behind an explicit
+/// `RUST_LOG` opt-in. Keep in sync with the desktop's copy in
+/// `desktop/src-tauri/src/managed_agents/runtime/log_filter.rs`.
+const LOG_FILTER: &str = "buzz_acp=info,acp=warn,pool=warn,canvas=warn,engram=warn,observer=warn";
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///

@@ -68,6 +68,8 @@ mod lifecycle;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
+mod log_filter;
+
 mod spawn_key; // production spawn-key derivation + its regressions
 pub(crate) use spawn_key::bound_runtime_key;
 
@@ -529,7 +531,6 @@ pub fn spawn_agent_child(
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
-    command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
@@ -810,6 +811,12 @@ pub fn spawn_agent_child(
         command.env(key, value);
     }
 
+    // RUST_LOG is resolved after the loop above, for the same reason as effort
+    // below: that loop lets a user value win wholesale, and a saved
+    // `buzz_acp=debug` would drop the other harness families back into the
+    // silence this default exists to fix.
+    log_filter::apply(&mut command, &descriptor.env);
+
     // B5: carry persisted effort; harness resolves thought_level configId at first session.
     // Written AFTER descriptor.env so the canonical persisted value wins over any
     // user-supplied BUZZ_ACP_EFFORT_LEVEL entry, mirroring the A1 model-authority pattern
@@ -928,45 +935,6 @@ pub fn spawn_agent_child(
     })
 }
 
-/// Default `RUST_LOG` for the spawned harness.
-///
-/// `buzz-acp` emits almost everything on its own target families — `acp::*`,
-/// `pool::*`, `canvas::*`, `engram::*`, `observer` — rather than under the
-/// crate path. `EnvFilter` matches those directives by target prefix, so a bare
-/// `buzz_acp=info` matches none of them and the harness log retains only the
-/// startup and reconnect lines that do use the crate target — so an agent can
-/// log an error its owner can never see. Keep in sync with the crate's own
-/// fallback in `crates/buzz-acp/src/lib.rs`.
-const LOG_FILTER: &str = "buzz_acp=info,acp=info,pool=info,canvas=info,engram=info,observer=info";
-
-/// Level names that, on their own, set `EnvFilter`'s global default.
-const BARE_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
-
-fn child_rust_log_filter() -> String {
-    child_rust_log_filter_from(std::env::var("RUST_LOG").ok())
-}
-
-/// Taking the ambient value as an argument keeps the default testable without
-/// mutating process environment from a test.
-fn child_rust_log_filter_from(existing: Option<String>) -> String {
-    let Some(existing) = existing.filter(|value| !value.trim().is_empty()) else {
-        return LOG_FILTER.to_string();
-    };
-    // A bare level such as `debug` is the global default, and a target
-    // directive is more specific than it. Adding ours would *narrow* what the
-    // user asked for, so leave that filter exactly as written.
-    let sets_global_level = existing
-        .split(',')
-        .map(|directive| directive.trim().to_ascii_lowercase())
-        .any(|directive| BARE_LEVELS.contains(&directive.as_str()));
-    if sets_global_level {
-        return existing;
-    }
-    // Defaults first: a later directive for the same target overwrites an
-    // earlier one, so an explicit `buzz_acp=debug` still wins over ours while
-    // the families the user did not name keep their diagnostics.
-    format!("{LOG_FILTER},{existing}")
-}
 
 /// Spawn (or adopt) the runtime pair for `record` on the caller's bound
 /// workspace relay. `workspace_relay` can only be produced by
