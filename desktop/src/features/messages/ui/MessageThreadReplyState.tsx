@@ -1,3 +1,6 @@
+import type { ReactNode } from "react";
+
+import type { ThreadRepliesSurface } from "@/features/messages/lib/timelineSnapshot";
 import { Button } from "@/shared/ui/button";
 
 /**
@@ -60,4 +63,37 @@ export function ThreadRepliesEmptyCard() {
       </p>
     </div>
   );
+}
+
+/**
+ * The single paint decision for the thread reply region, keyed off the surface
+ * `selectThreadRepliesSurface` resolved. Owning the branching here — rather than
+ * inline in `MessageThreadPanel` — keeps the load-bearing invariant inside a
+ * cheap-to-mount unit: a terminal fetch "error" renders the retry card and NEVER
+ * the "empty" "No replies" state (the false-empty guard this change exists to
+ * hold), while "pending" paints nothing (rows stream in on the deferred commit).
+ *
+ * The two heavy branches take render callbacks so the panel keeps ownership of
+ * its skeleton and list construction (Tiptap/React-Query bound, not mountable in
+ * node:test) without dragging them into this component. The mount test drives
+ * the real surface→content mapping through this exported unit, so an unwire in
+ * the panel drops the whole region — a louder regression than a silently dead
+ * card, and one a source scan could not prove reachable.
+ */
+export function ThreadReplyRegion({
+  surface,
+  onRetry,
+  renderSkeleton,
+  renderList,
+}: {
+  surface: ThreadRepliesSurface;
+  onRetry?: () => void;
+  renderSkeleton: () => ReactNode;
+  renderList: () => ReactNode;
+}) {
+  if (surface === "skeleton") return <>{renderSkeleton()}</>;
+  if (surface === "list") return <>{renderList()}</>;
+  if (surface === "error") return <ThreadRepliesErrorCard onRetry={onRetry} />;
+  if (surface === "empty") return <ThreadRepliesEmptyCard />;
+  return null;
 }
