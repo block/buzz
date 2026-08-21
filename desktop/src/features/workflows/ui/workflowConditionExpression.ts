@@ -199,7 +199,10 @@ export function parseConditionExpression(
   return null;
 }
 
-function splitTopLevelConjunctions(expression: string): string[] | null {
+function splitTopLevel(
+  expression: string,
+  operator: "&&" | "||",
+): string[] | null {
   const parts: string[] = [];
   let start = 0,
     depth = 0,
@@ -219,8 +222,8 @@ function splitTopLevelConjunctions(expression: string): string[] | null {
       depth -= 1;
       if (depth < 0) return null;
     } else if (
-      character === "&" &&
-      expression[index + 1] === "&" &&
+      character === operator[0] &&
+      expression[index + 1] === operator[1] &&
       depth === 0
     ) {
       const part = expression.slice(start, index).trim();
@@ -235,6 +238,21 @@ function splitTopLevelConjunctions(expression: string): string[] | null {
   if (!last) return null;
   parts.push(last);
   return parts;
+}
+
+function splitTopLevelConjunctions(expression: string): string[] | null {
+  return splitTopLevel(expression, "&&");
+}
+
+/**
+ * Reports whether `expression` needs parentheses before it can be combined
+ * with `&&`. Conjunction binds tighter than disjunction in evalexpr, so a
+ * top-level `||` would otherwise absorb the added conjunct. Structurally
+ * unparseable expressions are grouped defensively.
+ */
+export function needsConjunctionGrouping(expression: string): boolean {
+  const parts = splitTopLevel(expression, "||");
+  return parts === null || parts.length > 1;
 }
 
 export function parseConditionExpressions(
