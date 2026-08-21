@@ -557,6 +557,23 @@ mod tests {
         }
     }
 
+    /// The fake mirrors the equality-based selector emitted by
+    /// `AgentIdentity::selector`, rather than returning every object in its
+    /// namespace. This keeps tests honest about the isolation supplied by the
+    /// apiserver before reconciliation and GC inspect candidates.
+    fn selector_matches(selector: &str, labels: Option<&BTreeMap<String, String>>) -> bool {
+        let Some(labels) = labels else {
+            return false;
+        };
+
+        selector.split(',').all(|requirement| {
+            let Some((key, value)) = requirement.split_once('=') else {
+                panic!("fake does not support label selector requirement {requirement:?}");
+            };
+            labels.get(key).map(String::as_str) == Some(value)
+        })
+    }
+
     impl Substrate for Fake {
         async fn ensure_namespace(&self, namespace: &str) -> Result<(), String> {
             match &self.namespace_error {
@@ -570,16 +587,27 @@ mod tests {
 
         async fn list_pods(
             &self,
-            _selector: &str,
+            selector: &str,
         ) -> Result<(Vec<Pod>, Option<DateTime<Utc>>), String> {
             Ok((
-                self.pods.borrow().values().cloned().collect(),
+                self.pods
+                    .borrow()
+                    .values()
+                    .filter(|pod| selector_matches(selector, pod.metadata.labels.as_ref()))
+                    .cloned()
+                    .collect(),
                 self.server_now,
             ))
         }
 
-        async fn list_secrets(&self, _selector: &str) -> Result<Vec<Secret>, String> {
-            Ok(self.secrets.borrow().clone())
+        async fn list_secrets(&self, selector: &str) -> Result<Vec<Secret>, String> {
+            Ok(self
+                .secrets
+                .borrow()
+                .iter()
+                .filter(|secret| selector_matches(selector, secret.metadata.labels.as_ref()))
+                .cloned()
+                .collect())
         }
 
         async fn secret_exists(&self, name: &str) -> Result<bool, String> {
@@ -804,6 +832,60 @@ mod tests {
             secret_at < pod_at,
             "pod created before its Secret: {calls:?}"
         );
+    }
+
+    #[test]
+    fn fake_lists_only_objects_matching_the_requested_identity() {
+        let id = identity();
+        let other = identity();
+        let cfg = config();
+        let ours = our_pod(&id, &cfg, Some(running()));
+        let theirs = our_pod(&other, &cfg, Some(running()));
+        let our_secret = crate::pod::build_secret(&id, &cfg.namespace, "gen-ours", env());
+        let their_secret = crate::pod::build_secret(&other, &cfg.namespace, "gen-theirs", env());
+        let fake = Fake::default().with_pod(ours).with_pod(theirs);
+        fake.secrets.borrow_mut().extend([our_secret, their_secret]);
+
+        let (pods, _) = block_on(fake.list_pods(&id.selector())).unwrap();
+        let secrets = block_on(fake.list_secrets(&id.selector())).unwrap();
+
+        assert_eq!(pods.len(), 1);
+        assert_eq!(
+            pods[0].metadata.name.as_deref(),
+            Some(id.pod_name().as_str())
+        );
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(
+            secrets[0].metadata.name.as_deref(),
+            Some(id.secret_name("gen-ours").as_str())
+        );
+    }
+
+    #[test]
+    fn unrelated_tenant_objects_do_not_enter_reconciliation_or_gc() {
+        let id = identity();
+        let other = identity();
+        let cfg = config();
+        let ours = our_pod(&id, &cfg, Some(running()));
+        let theirs = our_pod(&other, &cfg, Some(terminated()));
+        let their_pod_name = theirs.metadata.name.clone().unwrap();
+        let their_secret = crate::pod::build_secret(&other, &cfg.namespace, "gen-existing", env());
+        let their_secret_name = their_secret.metadata.name.clone().unwrap();
+        let fake = Fake::default().with_pod(ours).with_pod(theirs);
+        fake.secrets.borrow_mut().push(their_secret);
+
+        assert_eq!(run(&fake, &id, &cfg).unwrap(), id.pod_name());
+        assert_eq!(
+            fake.mutations(),
+            [format!("ensure_namespace {}", cfg.namespace)],
+            "another tenant affected this deploy"
+        );
+        assert!(fake.pods.borrow().contains_key(&their_pod_name));
+        assert!(fake
+            .secrets
+            .borrow()
+            .iter()
+            .any(|secret| secret.metadata.name.as_deref() == Some(&their_secret_name)));
     }
 
     /// The strict no-op row: a started pod returns its id having mutated

@@ -369,7 +369,7 @@ export async function loadAgentCard(storedFileName: string): Promise<string> {
 export type AgentSnapshotImportPreview = {
   displayName: string;
   /** Source classification shown in the preview; imports remain custom. */
-  isBuiltIn: boolean;
+  isBuiltin: boolean;
   model: string | null;
   runtime: string | null;
   systemPrompt: string | null;

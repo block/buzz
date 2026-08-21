@@ -178,7 +178,7 @@ export function PreviewBody({
       ) : null}
 
       <AgentDefinitionMetadata
-        isBuiltIn={preview.isBuiltIn}
+        isBuiltIn={preview.isBuiltin}
         model={preview.model}
         runtime={preview.runtime}
       />

@@ -29,8 +29,9 @@ image:
   pullSecrets: []
 
 # ── Topology ────────────────────────────────────────────────────────────────
-# replicaCount > 1 hard-requires Redis for buzz-pubsub (in-cluster or external).
-# It does NOT require ReadWriteMany git storage: git ref/object state is
+# Every relay requires Redis for buzz-pubsub (in-cluster or external); with
+# multiple replicas it additionally provides cross-pod fan-out.
+# Multiple replicas do NOT require ReadWriteMany git storage: git ref/object state is
 # object-store-backed (each request hydrates an ephemeral repo from S3; writer
 # serialization is the object-store pointer CAS), and repo-name uniqueness lives
 # in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
@@ -90,7 +91,7 @@ ownerPubkey: ""
 #   BUZZ_GIT_HOOK_HMAC_SECRET     — 32+ chars; required when replicaCount > 1
 #   DATABASE_URL                  — full Postgres URL (preferred over externalPostgresql.url)
 #   READ_DATABASE_URL             — optional Postgres read-replica URL; omit to keep all reads on the writer
-#   REDIS_URL                     — full Redis URL with auth
+#   REDIS_URL                     — full Redis URL with auth; required
 #   BUZZ_S3_ACCESS_KEY            — S3 access key
 #   BUZZ_S3_SECRET_KEY            — S3 secret key
 secrets:

@@ -1,6 +1,9 @@
 //! Durable NIP-PL event matcher and gateway delivery worker.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use base64::Engine as _;
 use buzz_core::filter::{filters_match, reader_authorized_for_event};
@@ -88,10 +91,78 @@ pub async fn run_matcher(state: Arc<AppState>) {
     }
 }
 
+/// One lease plus the lazily prepared form of its immutable subscription JSON.
+///
+/// The cache lives in [`MatchContext`], so every event in one claimed batch
+/// shares it, while the next batch still reloads the current lease snapshot.
+struct PreparedMatchLease {
+    lease: buzz_db::push::MatchLease,
+    prepared: OnceLock<Result<Vec<PreparedSubscription>, String>>,
+    #[cfg(test)]
+    preparation_count: std::sync::atomic::AtomicUsize,
+}
+
+struct PreparedSubscription {
+    filter: Filter,
+    class: String,
+    ignore: Vec<Filter>,
+    suppress: Option<crate::handlers::push_lease::Suppress>,
+}
+
+impl PreparedMatchLease {
+    fn new(lease: buzz_db::push::MatchLease) -> Self {
+        Self {
+            lease,
+            prepared: OnceLock::new(),
+            #[cfg(test)]
+            preparation_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn subscriptions(&self) -> anyhow::Result<&[PreparedSubscription]> {
+        self.prepared
+            .get_or_init(|| {
+                #[cfg(test)]
+                self.preparation_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                prepare_subscriptions(&self.lease.subscriptions)
+            })
+            .as_deref()
+            .map_err(|message| anyhow::anyhow!(message.clone()))
+    }
+}
+
+fn prepare_subscriptions(
+    raw_subscriptions: &serde_json::Value,
+) -> Result<Vec<PreparedSubscription>, String> {
+    let subscriptions: Vec<Subscription> =
+        serde_json::from_value(raw_subscriptions.clone()).map_err(|error| error.to_string())?;
+    subscriptions
+        .into_iter()
+        .map(|subscription| {
+            let filter = serde_json::from_value(serde_json::Value::Object(subscription.filter))
+                .map_err(|error| error.to_string())?;
+            let ignore = subscription
+                .ignore
+                .into_iter()
+                // Preserve the previous matcher semantics: malformed ignore
+                // filters are non-matches rather than poison lease data.
+                .filter_map(|raw| serde_json::from_value(serde_json::Value::Object(raw)).ok())
+                .collect();
+            Ok(PreparedSubscription {
+                filter,
+                class: subscription.class,
+                ignore,
+                suppress: subscription.suppress,
+            })
+        })
+        .collect()
+}
+
 /// Per-batch state shared by every job: the community's active leases and
 /// the exact (channel, lease author) membership pairs the jobs can consult.
 struct MatchContext {
-    leases: Vec<buzz_db::push::MatchLease>,
+    leases: Vec<PreparedMatchLease>,
     memberships: std::collections::HashSet<(uuid::Uuid, Vec<u8>)>,
 }
 
@@ -117,7 +188,7 @@ async fn load_match_context(
         .into_iter()
         .collect();
     Ok(MatchContext {
-        leases,
+        leases: leases.into_iter().map(PreparedMatchLease::new).collect(),
         memberships,
     })
 }
@@ -222,7 +293,8 @@ fn match_job(
     context: &MatchContext,
 ) -> anyhow::Result<Vec<buzz_db::push::WakeRequest>> {
     let mut wakes = Vec::new();
-    for lease in &context.leases {
+    for prepared_lease in &context.leases {
+        let lease = &prepared_lease.lease;
         let author_hex = hex::encode(&lease.author);
         if !reader_authorized_for_event(&job.event.event, &author_hex) {
             continue;
@@ -235,20 +307,17 @@ fn match_job(
                 continue;
             }
         }
-        let subscriptions: Vec<Subscription> = serde_json::from_value(lease.subscriptions.clone())?;
         let mut class: Option<&str> = None;
-        for sub in &subscriptions {
-            let filter: Filter =
-                serde_json::from_value(serde_json::Value::Object(sub.filter.clone()))?;
-            if !push_filter_authorized_for_event(&filter, &job.event.event, &author_hex)
-                || !filters_match(std::slice::from_ref(&filter), &job.event)
+        for sub in prepared_lease.subscriptions()? {
+            if !push_filter_authorized_for_event(&sub.filter, &job.event.event, &author_hex)
+                || !filters_match(std::slice::from_ref(&sub.filter), &job.event)
             {
                 continue;
             }
-            let ignored = sub.ignore.iter().any(|raw| {
-                serde_json::from_value::<Filter>(serde_json::Value::Object(raw.clone()))
-                    .is_ok_and(|f| filters_match(&[f], &job.event))
-            });
+            let ignored = sub
+                .ignore
+                .iter()
+                .any(|filter| filters_match(std::slice::from_ref(filter), &job.event));
             let p_count = job
                 .event
                 .event
@@ -614,6 +683,138 @@ mod tests {
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
+
+    fn match_lease(author: &nostr::Keys, subscriptions: serde_json::Value) -> PreparedMatchLease {
+        PreparedMatchLease::new(buzz_db::push::MatchLease {
+            author: author.public_key().to_bytes().to_vec(),
+            installation_id: "device-1".to_owned(),
+            generation: 7,
+            subscriptions,
+            expires_at: Utc::now().timestamp() + 600,
+        })
+    }
+
+    fn match_job_for(
+        author: &nostr::Keys,
+        channel_id: Option<uuid::Uuid>,
+    ) -> buzz_db::push::BatchedMatch {
+        let event = EventBuilder::new(Kind::TextNote, "hello")
+            .sign_with_keys(author)
+            .unwrap();
+        buzz_db::push::BatchedMatch {
+            event: buzz_core::StoredEvent::new(event, channel_id),
+            attempt: 1,
+        }
+    }
+
+    fn valid_subscriptions(ignore: serde_json::Value) -> serde_json::Value {
+        serde_json::json!([{
+            "filter": {"kinds": [1]},
+            "class": "urgent",
+            "ignore": [ignore],
+            "suppress": null
+        }])
+    }
+
+    #[test]
+    fn match_context_prepares_a_reached_lease_once_for_multiple_jobs() {
+        let author = nostr::Keys::generate();
+        let context = MatchContext {
+            leases: vec![match_lease(
+                &author,
+                serde_json::json!([{
+                    "filter": {"kinds": [1]},
+                    "class": "urgent",
+                    "ignore": [],
+                    "suppress": null
+                }]),
+            )],
+            memberships: Default::default(),
+        };
+
+        let first = match_job(&match_job_for(&author, None), &context).unwrap();
+        let second = match_job(&match_job_for(&author, None), &context).unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].class, "urgent");
+        assert_eq!(second[0].class, "urgent");
+        assert_eq!(
+            context.leases[0]
+                .preparation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_lease_is_parsed_only_after_authorization_and_membership() {
+        let owner = nostr::Keys::generate();
+        let other = nostr::Keys::generate();
+        let private_event =
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_DM_VISIBILITY as u16), "")
+                .tag(Tag::public_key(other.public_key()))
+                .sign_with_keys(&other)
+                .unwrap();
+        let unauthorized = buzz_db::push::BatchedMatch {
+            event: buzz_core::StoredEvent::new(private_event, None),
+            attempt: 1,
+        };
+        let channel = uuid::Uuid::new_v4();
+        let context = MatchContext {
+            leases: vec![match_lease(&owner, serde_json::json!({"malformed": true}))],
+            memberships: Default::default(),
+        };
+
+        assert!(match_job(&unauthorized, &context).unwrap().is_empty());
+        assert_eq!(
+            context.leases[0]
+                .preparation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(match_job(&match_job_for(&owner, Some(channel)), &context)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            context.leases[0]
+                .preparation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(match_job(&match_job_for(&owner, None), &context).is_err());
+        assert_eq!(
+            context.leases[0]
+                .preparation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(match_job(&match_job_for(&owner, None), &context).is_err());
+        assert_eq!(
+            context.leases[0]
+                .preparation_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "preparation failures must be cached too"
+        );
+    }
+
+    #[test]
+    fn malformed_ignore_filter_remains_a_non_match() {
+        let owner = nostr::Keys::generate();
+        let context = MatchContext {
+            leases: vec![match_lease(
+                &owner,
+                valid_subscriptions(serde_json::json!({"kinds": "not-an-array"})),
+            )],
+            memberships: Default::default(),
+        };
+
+        let wakes = match_job(&match_job_for(&owner, None), &context).unwrap();
+
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].class, "urgent");
+    }
 
     #[test]
     fn gift_wrap_match_requires_self_p_filter_and_recipient() {
