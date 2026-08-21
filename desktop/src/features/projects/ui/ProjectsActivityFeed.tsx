@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { useNow } from "@/shared/lib/useNow";
+
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -370,8 +372,8 @@ function startOfWeek(timestamp: number) {
   return Math.floor(date.getTime() / 1_000);
 }
 
-function groupActivityItems(items: ProjectActivityItem[]) {
-  const thisWeek = startOfWeek(Math.floor(Date.now() / 1_000));
+function groupActivityItems(items: ProjectActivityItem[], nowMs: number) {
+  const thisWeek = startOfWeek(Math.floor(nowMs / 1_000));
   const lastWeek = thisWeek - WEEK_SECONDS;
   const groups: ProjectActivityGroup[] = [
     { key: "this-week", label: "This week", items: [] },
@@ -616,7 +618,13 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
     () => buildActivityItems({ issues, projects, pullRequests, snapshots }),
     [issues, projects, pullRequests, snapshots],
   );
-  const groups = React.useMemo(() => groupActivityItems(items), [items]);
+  // Week buckets are clock-derived; ticked so the memo cannot freeze "This
+  // week" across a week boundary. Coarse cadence — the boundary moves weekly.
+  const now = useNow(600_000);
+  const groups = React.useMemo(
+    () => groupActivityItems(items, now),
+    [items, now],
+  );
   const rangeItems = groups.flatMap((group) =>
     group.items.flatMap((item) => {
       const selectionItem = activitySelectionItem(item);

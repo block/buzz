@@ -286,7 +286,10 @@ export function ProjectsIssuesList({
             >
               <ul>
                 {group.rows.map(({ project, issue, repository }) => (
-                  <li key={`${repository.id}:${issue.id}`}>
+                  <li
+                    className="[contain-intrinsic-size:auto_3.5rem] [content-visibility:auto]"
+                    key={`${repository.id}:${issue.id}`}
+                  >
                     <IssueListRow
                       issue={issue}
                       onOpen={onOpen}

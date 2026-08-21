@@ -486,16 +486,21 @@ export function ProjectsView() {
   });
   const handleFilterChange = React.useCallback(
     (nextFilter: ProjectsFilter) => {
-      if (
-        nextFilter === "projects" &&
-        (repositoryScope === "buzz" || repositoryScope === "linked")
-      ) {
-        setRepositoryScope("all");
-        writeStoredRepositoryScope("all");
-      }
-      setSelectionAgentContext(null);
-      setFilter(nextFilter);
       writeStoredFilter(nextFilter);
+      // Tab content swaps mount hundreds of rows/cards at once; a transition
+      // lets React keep the click responsive and paint the previous tab until
+      // the new tree is ready instead of blocking the main thread.
+      React.startTransition(() => {
+        if (
+          nextFilter === "projects" &&
+          (repositoryScope === "buzz" || repositoryScope === "linked")
+        ) {
+          setRepositoryScope("all");
+          writeStoredRepositoryScope("all");
+        }
+        setSelectionAgentContext(null);
+        setFilter(nextFilter);
+      });
     },
     [repositoryScope, setSelectionAgentContext],
   );

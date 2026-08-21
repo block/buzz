@@ -454,7 +454,9 @@ type ProjectItemProps = {
   onOpenTerminal: (project: Project) => Promise<void> | void;
 };
 
-export function ProjectGridCard({
+// Memoized: these cards render in unbounded grids/lists; identity-stable
+// props from the caller keep re-renders scoped to genuinely changed cards.
+export const ProjectGridCard = React.memo(function ProjectGridCard({
   project,
   people,
   profiles,
@@ -469,7 +471,7 @@ export function ProjectGridCard({
 }: ProjectItemProps) {
   return (
     <Card
-      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
+      className="group relative flex h-full min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
       data-projects-grid-card
       data-testid={`project-card-${project.dtag}`}
     >
@@ -541,9 +543,9 @@ export function ProjectGridCard({
       </div>
     </Card>
   );
-}
+});
 
-export function ProjectListRow({
+export const ProjectListRow = React.memo(function ProjectListRow({
   project,
   people,
   profiles,
@@ -617,7 +619,7 @@ export function ProjectListRow({
       }
     />
   );
-}
+});
 
 /** Compact, borderless repository row for the overview side rail. */
 export function ProjectRailRow({

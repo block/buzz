@@ -291,7 +291,10 @@ export function ProjectsPullRequestsList({
             >
               <ul>
                 {group.rows.map(({ project, pullRequest, repository }) => (
-                  <li key={`${repository.id}:${pullRequest.id}`}>
+                  <li
+                    className="[contain-intrinsic-size:auto_3.5rem] [content-visibility:auto]"
+                    key={`${repository.id}:${pullRequest.id}`}
+                  >
                     <PullRequestListRow
                       onOpen={onOpen}
                       profiles={profiles}
