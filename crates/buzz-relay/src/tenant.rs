@@ -263,21 +263,12 @@ mod tests {
         /// RED gate. Configures a resolver with an `""→CommunityId` mapping
         /// (the schema permits it; no CHECK against empty host exists), then
         /// asks `bind_community` to bind an empty raw_host as a request with
-        /// a missing/invalid Host header would. Today this returns
-        /// `Ok(TenantContext{community=X})` — the fence collapses to the
-        /// misconfigured row. The fix: short-circuit in `bind_community` so
-        /// that `normalize_host(raw_host).is_empty()` returns
-        /// `Err(BindError::UnmappedHost)` before any resolver lookup.
+        /// a missing/invalid Host header would.
         ///
         /// Generic-rejection note: we reuse `UnmappedHost` (not a new
         /// `EmptyHost` variant) so the door's response is byte-identical to
         /// any other unmapped host — an unauthenticated caller cannot probe
         /// whether the deployment has an empty-host row.
-        ///
-        /// Delete this `#[ignore]` when the fix lands; verified RED with
-        /// `cargo test -p buzz-relay --include-ignored
-        ///   tenant::tests::redteam_attack2::empty_raw_host_fails_closed_even_if_db_has_empty_host_row`
-
         #[tokio::test]
         async fn empty_raw_host_fails_closed_even_if_db_has_empty_host_row() {
             // Simulate operator misconfig / buggy migration: an empty-host row
@@ -301,9 +292,6 @@ mod tests {
         /// RED gate. Same property, whitespace-only host: `normalize_host`
         /// trims to empty (`buzz-core::tenant::normalize_host_empty_stays_empty`),
         /// so this is the same fence collapse via a different raw input.
-        ///
-        /// Delete `#[ignore]` when the fix lands.
-
         #[tokio::test]
         async fn whitespace_only_raw_host_fails_closed_even_if_db_has_empty_host_row() {
             let r = resolver_with("", 0xdeadbeef);
