@@ -5,9 +5,11 @@ import { getSchema } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 
 import {
+  assignMentionHighlightNames,
   buildHighlightPatterns,
   findHighlightMatches,
   selectionAfterMentionTrailingSpace,
+  shouldAdvanceMentionCaret,
 } from "./mentionHighlightExtension.ts";
 
 // ── buildHighlightPatterns ────────────────────────────────────────────
@@ -199,4 +201,54 @@ test("selectionAfterMentionTrailingSpace does not move without a trailing space"
   const doc = document(paragraph(text("@quinn")));
   const end = 1 + "@quinn".length;
   assert.equal(selectionAfterMentionTrailingSpace(doc, end), end);
+});
+
+test("shouldAdvanceMentionCaret restores a DOM remap while the autocomplete fence is armed", () => {
+  assert.equal(
+    shouldAdvanceMentionCaret({
+      from: 7,
+      next: 8,
+      fenceActive: true,
+      rebuilt: false,
+    }),
+    true,
+  );
+});
+
+test("shouldAdvanceMentionCaret does not steal ArrowLeft after the fence expires", () => {
+  assert.equal(
+    shouldAdvanceMentionCaret({
+      from: 7,
+      next: 8,
+      fenceActive: false,
+      rebuilt: false,
+    }),
+    false,
+  );
+});
+
+test("shouldAdvanceMentionCaret still advances after a decoration rebuild", () => {
+  assert.equal(
+    shouldAdvanceMentionCaret({
+      from: 7,
+      next: 8,
+      fenceActive: false,
+      rebuilt: true,
+    }),
+    true,
+  );
+});
+
+test("assignMentionHighlightNames skips an unchanged list", () => {
+  const storage = { names: ["bob"], agentNames: [], channelNames: [] };
+  assert.equal(assignMentionHighlightNames(storage, ["bob"], [], []), false);
+});
+
+test("assignMentionHighlightNames updates when a new mention is added", () => {
+  const storage = { names: ["bob"], agentNames: [], channelNames: [] };
+  assert.equal(
+    assignMentionHighlightNames(storage, ["bob", "quinn"], [], []),
+    true,
+  );
+  assert.deepEqual(storage.names, ["bob", "quinn"]);
 });

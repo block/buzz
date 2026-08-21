@@ -15,6 +15,133 @@ import {
 
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
 
+const MENTION_CARET_FENCE_MS = 750;
+let mentionCaretFenceUntil = 0;
+
+export function armMentionCaretFence(): void {
+  mentionCaretFenceUntil = Date.now() + MENTION_CARET_FENCE_MS;
+}
+
+export function clearMentionCaretFence(): void {
+  mentionCaretFenceUntil = 0;
+}
+
+export function mentionCaretFenceActive(now = Date.now()): boolean {
+  return now < mentionCaretFenceUntil;
+}
+
+/**
+ * Whether to move an empty caret from `from` to `next` after a mention
+ * trailing space. Autocomplete arms a short fence so DOM selection remaps
+ * (no doc/meta transaction) cannot put the next keystroke before the space.
+ * Arrow keys after the fence expires are left alone.
+ */
+export function shouldAdvanceMentionCaret({
+  from,
+  next,
+  fenceActive,
+  rebuilt,
+}: {
+  from: number;
+  next: number;
+  fenceActive: boolean;
+  rebuilt: boolean;
+}): boolean {
+  return next !== from && (fenceActive || rebuilt);
+}
+
+export type MentionHighlightStorage = {
+  names: string[];
+  agentNames: string[];
+  channelNames: string[];
+};
+
+function sameNameList(current: string[], next: string[]): boolean {
+  return (
+    current.length === next.length &&
+    current.every((name, index) => name === next[index])
+  );
+}
+
+export function assignMentionHighlightNames(
+  storage: MentionHighlightStorage,
+  names: string[],
+  agentNames: string[],
+  channelNames: string[],
+): boolean {
+  if (
+    sameNameList(storage.names, names) &&
+    sameNameList(storage.agentNames, agentNames) &&
+    sameNameList(storage.channelNames, channelNames)
+  ) {
+    return false;
+  }
+  storage.names = names;
+  storage.agentNames = agentNames;
+  storage.channelNames = channelNames;
+  return true;
+}
+
+export function mentionHighlightStorage(editor: {
+  storage: object;
+}): MentionHighlightStorage | undefined {
+  if (!("mentionHighlight" in editor.storage)) return undefined;
+  return editor.storage.mentionHighlight as MentionHighlightStorage;
+}
+
+export function settleAutocompleteMentionInsert(
+  editor: { storage: object },
+  tr: Transaction,
+  text: string,
+): void {
+  const storage = mentionHighlightStorage(editor);
+  const mentionInsert = /(?:^|[\s(])([@#])([^\s]+) $/.exec(text);
+  if (!mentionInsert) return;
+  const prefix = mentionInsert[1];
+  const label = mentionInsert[2];
+  if (storage) {
+    const known = [
+      ...storage.names,
+      ...storage.agentNames,
+      ...storage.channelNames,
+    ];
+    if (!known.some((name) => name.toLowerCase() === label.toLowerCase())) {
+      if (prefix === "#") {
+        storage.channelNames = [...storage.channelNames, label];
+      } else {
+        storage.names = [...storage.names, label];
+      }
+    }
+  }
+  tr.setMeta(mentionHighlightKey, true);
+  armMentionCaretFence();
+}
+
+export function syncMentionHighlightFromProps(
+  editor: {
+    storage: object;
+    state: { tr: Transaction };
+    view: { dispatch: (tr: Transaction) => void };
+  },
+  names: string[] | undefined,
+  agentNames: string[] | undefined,
+  channelNames: string[] | undefined,
+): void {
+  const storage = mentionHighlightStorage(editor);
+  if (
+    !storage ||
+    !assignMentionHighlightNames(
+      storage,
+      names ?? [],
+      agentNames ?? [],
+      channelNames ?? [],
+    )
+  ) {
+    return;
+  }
+  editor.view.dispatch(editor.state.tr.setMeta(mentionHighlightKey, true));
+}
+
 /**
  * TipTap extension that applies inline `mention-chip` decorations
  * to `@Name` and `#channel-name` patterns in the document.
@@ -93,16 +220,21 @@ export const MentionHighlightExtension = Extension.create({
         },
         appendTransaction(transactions, _oldState, newState) {
           if (!newState.selection.empty) return null;
+          const rebuilt = transactions.some(
+            (tr) => tr.docChanged || tr.getMeta(mentionHighlightKey),
+          );
+          const from = newState.selection.from;
+          const next = selectionAfterMentionTrailingSpace(newState.doc, from);
           if (
-            !transactions.some(
-              (tr) => tr.docChanged || tr.getMeta(mentionHighlightKey),
-            )
+            !shouldAdvanceMentionCaret({
+              from,
+              next,
+              fenceActive: mentionCaretFenceActive(),
+              rebuilt,
+            })
           ) {
             return null;
           }
-          const from = newState.selection.from;
-          const next = selectionAfterMentionTrailingSpace(newState.doc, from);
-          if (next === from) return null;
           return newState.tr.setSelection(
             TextSelection.create(newState.doc, next),
           );
@@ -123,6 +255,7 @@ export const MentionHighlightExtension = Extension.create({
               TextSelection.create(tr.doc, tr.mapping.map(next, 1)),
             );
             view.dispatch(tr);
+            armMentionCaretFence();
             return true;
           },
         },

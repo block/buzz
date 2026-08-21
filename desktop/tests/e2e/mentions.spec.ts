@@ -1326,12 +1326,14 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
   );
 
   const input = page.getByTestId("message-input");
-  await input.fill("@quinn");
-  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
-  await expect(quinnRow).toBeVisible();
-  await quinnRow.click();
-  await page.keyboard.type("hello");
-  await expect(input).toHaveText("@quinn hello");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await input.fill("@quinn");
+    const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+    await expect(quinnRow).toBeVisible();
+    await quinnRow.click();
+    await page.keyboard.type("hello");
+    await expect(input).toHaveText("@quinn hello");
+  }
   const baselineCommands = await readCommandLog(page);
   await page.getByTestId("send-message").click();
 
