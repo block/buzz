@@ -148,7 +148,11 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
 /// Cache for the agent's owner pubkey + sibling lookups.
 ///
 /// Siblings are other agents whose NIP-OA auth tag proves the same owner.
-/// Lookup results are cached for the process lifetime (attestations are immutable).
+/// Only *definitive* lookup results are cached for the process lifetime
+/// (attestations are immutable): a verified sibling, or a fetched profile
+/// that carries no valid matching auth tag. A transport/parse failure
+/// attests nothing, so it is never cached — the next event retries the
+/// lookup instead of pinning a transient error as a permanent negative.
 struct OwnerCache {
     pubkey: Option<String>,
     /// author_hex → is_sibling (true = same owner, false = not)
@@ -188,7 +192,8 @@ impl OwnerCache {
 /// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
 ///
 /// For unknown authors, queries their kind:0 profile to extract the NIP-OA
-/// auth tag and verify the owner matches. Result is cached.
+/// auth tag and verify the owner matches. Definitive results are cached;
+/// transient failures are not — the next event retries the lookup.
 async fn is_owner_or_sibling(
     author: &str,
     owner_cache: &OwnerCache,
@@ -210,9 +215,25 @@ async fn is_owner_or_sibling(
     }
 
     // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
-    owner_cache.cache_sibling(author.to_string(), is_sibling);
-    is_sibling
+    match check_sibling_via_profile(author, my_owner, rest_client).await {
+        SiblingCheck::Sibling => {
+            owner_cache.cache_sibling(author.to_string(), true);
+            true
+        }
+        SiblingCheck::NotSibling => {
+            owner_cache.cache_sibling(author.to_string(), false);
+            false
+        }
+        SiblingCheck::Indeterminate => {
+            // Fail closed for THIS event, but do NOT cache: the failure
+            // attested nothing, so the next event retries the lookup.
+            tracing::warn!(
+                author,
+                "sibling lookup indeterminate (transport/parse failure) — failing closed without caching; next event retries"
+            );
+            false
+        }
+    }
 }
 
 /// Inbound author gate decision: does this author's event fire a turn?
@@ -286,49 +307,65 @@ pub(crate) async fn is_dm_channel(
     }
 }
 
+/// Outcome of a sibling lookup via the author's kind:0 profile.
+enum SiblingCheck {
+    /// NIP-OA auth tag fetched and cryptographically verified — same owner.
+    /// Cacheable: attestations are immutable.
+    Sibling,
+    /// The author's profile was fetched and carries no valid matching auth
+    /// tag — a definitive negative. Cacheable.
+    NotSibling,
+    /// Transport/parse failure, or no profile event returned — nothing was
+    /// attested. NOT cacheable: the next event must retry the lookup instead
+    /// of pinning a transient error as a permanent negative.
+    Indeterminate,
+}
+
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
 async fn check_sibling_via_profile(
     author: &str,
     expected_owner: &str,
     rest_client: &relay::RestClient,
-) -> bool {
+) -> SiblingCheck {
+    let agent_pk = match nostr::PublicKey::from_hex(author) {
+        Ok(pk) => pk,
+        // A malformed author pubkey can never carry a valid attestation.
+        Err(_) => return SiblingCheck::NotSibling,
+    };
     let filter = nostr::Filter::new()
         .kind(nostr::Kind::Metadata)
-        .author(match nostr::PublicKey::from_hex(author) {
-            Ok(pk) => pk,
-            Err(_) => return false,
-        })
+        .author(agent_pk)
         .limit(1);
 
     let resp = match tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter]))
         .await
     {
         Ok(Ok(v)) => v,
-        _ => return false, // timeout or error — fail closed
+        // Timeout or transport error — fail closed for this event, but this
+        // is NOT an attestation: the caller must not cache it.
+        _ => return SiblingCheck::Indeterminate,
     };
 
     // Look for an "auth" tag in the profile event.
     let events = match resp.as_array() {
         Some(arr) => arr,
-        None => return false,
+        // Malformed relay response — indeterminate, retry next event.
+        None => return SiblingCheck::Indeterminate,
     };
     let event = match events.first() {
         Some(e) => e,
-        None => return false,
+        // No profile event returned — the relay may simply not have it yet.
+        // Indeterminate: a later event retries once the profile replicates.
+        None => return SiblingCheck::Indeterminate,
     };
     let tags = match event.get("tags").and_then(|t| t.as_array()) {
         Some(t) => t,
-        None => return false,
+        None => return SiblingCheck::NotSibling,
     };
 
     // Find ["auth", owner_pk, conditions, sig] and verify the Schnorr signature.
     // Don't trust the relay — verify ourselves.
-    let agent_pk = match nostr::PublicKey::from_hex(author) {
-        Ok(pk) => pk,
-        Err(_) => return false,
-    };
-
     for tag in tags {
         let parts = match tag.as_array() {
             Some(p) if p.len() >= 4 => p,
@@ -350,7 +387,7 @@ async fn check_sibling_via_profile(
         match buzz_sdk::nip_oa::verify_auth_tag(&tag_json, &agent_pk) {
             Ok(_) => {
                 tracing::debug!(author, expected_owner, "sibling verified via NIP-OA");
-                return true;
+                return SiblingCheck::Sibling;
             }
             Err(e) => {
                 tracing::debug!(author, "NIP-OA auth tag verification failed: {e}");
@@ -358,7 +395,8 @@ async fn check_sibling_via_profile(
         }
     }
 
-    false
+    // Profile fetched; no valid matching auth tag — definitive negative.
+    SiblingCheck::NotSibling
 }
 
 /// Observer frames are published at a global rate of AT MOST ONE relay frame
@@ -2868,7 +2906,11 @@ async fn tokio_main() -> Result<()> {
                                 )
                                 .await;
                                 if !allowed {
-                                    tracing::debug!(
+                                    // warn, not debug: a dropped mention is
+                                    // silent at the default INFO level, which
+                                    // makes a mis-gated event invisible to
+                                    // the operator.
+                                    tracing::warn!(
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
@@ -5595,10 +5637,10 @@ mod author_gate_tests {
         );
     }
 
-    async fn lazy_resolver_with_response(
+    async fn rest_client_with_response(
         response: serde_json::Value,
     ) -> (
-        pool::ChannelInfoResolver,
+        relay::RestClient,
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
         tokio::task::JoinHandle<()>,
     ) {
@@ -5634,6 +5676,17 @@ mod author_gate_tests {
             keys: nostr::Keys::generate(),
             auth_tag_json: None,
         };
+        (rest, requests, server)
+    }
+
+    async fn lazy_resolver_with_response(
+        response: serde_json::Value,
+    ) -> (
+        pool::ChannelInfoResolver,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (rest, requests, server) = rest_client_with_response(response).await;
         (
             pool::ChannelInfoResolver::new(HashMap::new(), rest),
             requests,
@@ -5691,6 +5744,74 @@ mod author_gate_tests {
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
         );
+    }
+
+    // ── Sibling cache: transient failures must not pin a permanent negative ──
+    //
+    // Regression tests for the bug where a `/query` timeout/transport error
+    // during the sibling profile lookup was cached as `false` ("not a
+    // sibling") for the process lifetime — permanently locking a same-owner
+    // sibling out of an OwnerOnly agent after a single transient failure.
+
+    /// A valid 64-char hex pubkey (distinct from OWNER) so the lookup gets
+    /// past pubkey parsing and actually hits the transport.
+    fn stranger_pubkey() -> String {
+        "33".repeat(32)
+    }
+
+    #[tokio::test]
+    async fn test_sibling_lookup_indeterminate_is_not_cached_and_retried() {
+        use std::sync::atomic::Ordering;
+
+        // `{}` is valid JSON but not an event array → the lookup outcome is
+        // indeterminate (nothing was attested).
+        let (rest, requests, server) = rest_client_with_response(serde_json::json!({})).await;
+        let cache = OwnerCache::new(Some(OWNER.into()));
+        let stranger = stranger_pubkey();
+
+        for attempt in 1..=2 {
+            assert!(
+                !is_owner_or_sibling(&stranger, &cache, &rest).await,
+                "attempt {attempt}: an indeterminate lookup must fail closed for this event"
+            );
+            assert_eq!(
+                cache.is_known_sibling(&stranger),
+                None,
+                "attempt {attempt}: an indeterminate lookup must NOT be cached"
+            );
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "each event must retry the lookup instead of serving a cached transient failure"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sibling_lookup_definitive_negative_is_cached() {
+        use std::sync::atomic::Ordering;
+
+        // A fetched profile event carrying no auth tag is a definitive "not
+        // a sibling" — cacheable (attestations are immutable).
+        let (rest, requests, server) =
+            rest_client_with_response(serde_json::json!([{ "tags": [] }])).await;
+        let cache = OwnerCache::new(Some(OWNER.into()));
+        let stranger = stranger_pubkey();
+
+        assert!(!is_owner_or_sibling(&stranger, &cache, &rest).await);
+        assert_eq!(
+            cache.is_known_sibling(&stranger),
+            Some(false),
+            "a fetched profile without a valid auth tag must be cached as a definitive negative"
+        );
+        assert!(!is_owner_or_sibling(&stranger, &cache, &rest).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "the second event must be served from the cache without another HTTP call"
+        );
+        server.abort();
     }
 }
 
