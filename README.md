@@ -123,6 +123,7 @@ Grab a packaged build from the [latest release](https://github.com/block/buzz/re
 | macOS (Apple Silicon) | `Buzz_<version>_aarch64.dmg` |
 | macOS (Intel) | `Buzz_<version>_x64.dmg` |
 | Linux (x86_64) | `Buzz_<version>_amd64.AppImage` or `Buzz_<version>_amd64.deb` |
+| Linux (ARM64) | `Buzz_<version>_aarch64.AppImage` or `Buzz_<version>_arm64.deb` |
 | Windows (x64) | `Buzz_<version>_x64-setup_alpha-unsigned.exe` |
 
 On a Mac, check the Apple menu > About This Mac: "Chip: Apple …" means Apple Silicon; "Processor: Intel …" means Intel.

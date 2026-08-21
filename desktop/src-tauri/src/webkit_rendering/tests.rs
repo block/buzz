@@ -33,6 +33,21 @@ fn env_from(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
     }
 }
 
+/// Keep the existing decision tests independent from the machine running them.
+/// The Spark-specific cases below pass their own synthetic DMI product file.
+fn plan(
+    args: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    env: EnvLookup<'_>,
+    drm_root: &Path,
+) -> Plan {
+    super::plan(
+        args,
+        env,
+        drm_root,
+        Path::new("/nonexistent/dmi/product_name"),
+    )
+}
+
 /// The variables a plan would set, or `None` for a plan that sets nothing.
 fn applied(plan: &Plan) -> Option<&[&str]> {
     match plan {
@@ -96,6 +111,49 @@ fn test_an_appimage_launch_forces_shared_memory_dmabuf_transport() {
         unreachable!()
     };
     assert!(why.contains("AppImage"), "{why}");
+}
+
+#[test]
+fn test_a_dgx_spark_appimage_uses_full_safe_rendering() {
+    let drm = drm(&["0x10de"]);
+    let dmi = tempfile::tempdir().expect("dmi tempdir");
+    let product_name = dmi.path().join("product_name");
+    std::fs::write(&product_name, "NVIDIA_DGX_Spark\n").expect("product name");
+    let env = env_from(&[("APPIMAGE", "/home/u/Buzz.AppImage")]);
+
+    let plan = super::plan(NO_ARGS, &env, drm.path(), &product_name);
+
+    assert_eq!(
+        applied(&plan),
+        Some(
+            &[
+                "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+                "WEBKIT_DISABLE_COMPOSITING_MODE"
+            ][..]
+        )
+    );
+    let Plan::Apply { why, .. } = &plan else {
+        unreachable!()
+    };
+    assert!(why.contains("DGX Spark"), "{why}");
+}
+
+#[test]
+fn test_dgx_spark_source_build_keeps_the_nvidia_heuristic() {
+    let drm = drm(&["0x10de"]);
+    let dmi = tempfile::tempdir().expect("dmi tempdir");
+    let product_name = dmi.path().join("product_name");
+    std::fs::write(&product_name, "nvidia_dgx_spark\n").expect("product name");
+
+    assert_eq!(
+        applied(&super::plan(
+            NO_ARGS,
+            &env_from(&[]),
+            drm.path(),
+            &product_name,
+        )),
+        Some(&["WEBKIT_DMABUF_RENDERER_FORCE_SHM"][..])
+    );
 }
 
 #[test]

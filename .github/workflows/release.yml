@@ -424,9 +424,21 @@ jobs:
             ${{ steps.artifacts.outputs.sig }}
 
   release-linux:
-    name: Release Linux
+    name: Release Linux (${{ matrix.arch }})
     if: github.repository == 'block/buzz'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: desktop-release-linux-x64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: desktop-release-linux-arm64
+    runs-on: ${{ matrix.runner }}
     # Digest-pinned like the SHA-pinned actions below; Renovate keeps it fresh.
     container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     needs: setup
@@ -442,9 +454,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    outputs:
-      archive_name: ${{ steps.linux-artifacts.outputs.archive_name }}
-      sig: ${{ steps.read-sig.outputs.sig }}
     steps:
       - name: Install system dependencies
         env:
@@ -531,23 +540,31 @@ jobs:
           esac
           wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
             "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH_SUFFIX}.AppImage"
-          # SHA256 integrity check. Refuse to run an unverified binary: if a new
-          # arch (e.g. aarch64) is enabled in CI, compute its hash and add it here.
-          if [[ "$ARCH_SUFFIX" == "x86_64" ]]; then
-            echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
-          else
-            echo "::error::No pinned SHA256 for appimagetool-${ARCH_SUFFIX} — add it before enabling this architecture"
-            exit 1
-          fi
+          # SHA256 integrity check. Refuse to run an unverified binary; add a
+          # pinned hash here before enabling any additional architecture.
+          case "$ARCH_SUFFIX" in
+            x86_64)
+              echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+              ;;
+            aarch64)
+              echo "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158  /tmp/appimagetool" | sha256sum -c
+              ;;
+          esac
           install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
           # appimagetool otherwise fetches the AppImage type2 runtime from the
           # MUTABLE `continuous` tag at repack time — the runtime is the first
-          # code users execute, so pin it too. Tag: 20251108, hash is for the
-          # x86_64 asset (non-x86_64 already hard-fails above).
+          # code users execute, so pin it too. Tag: 20251108.
           # (https://github.com/AppImage/type2-runtime/releases/tag/20251108)
           wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
             "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH_SUFFIX}"
-          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+          case "$ARCH_SUFFIX" in
+            x86_64)
+              echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+              ;;
+            aarch64)
+              echo "00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444  /tmp/appimage-runtime" | sha256sum -c
+              ;;
+          esac
           install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
           echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
 
@@ -634,17 +651,11 @@ jobs:
           echo "archive_name=$(basename "$ARCHIVE")" >> "$GITHUB_OUTPUT"
           echo "sig=$SIG" >> "$GITHUB_OUTPUT"
 
-      - name: Read updater signature
-        id: read-sig
-        run: echo "sig=$(cat "$SIG_PATH")" >> "$GITHUB_OUTPUT"
-        env:
-          SIG_PATH: ${{ steps.linux-artifacts.outputs.sig }}
-
       # NOTE: .deb is NOT auto-updatable (Tauri updater constraint — only AppImage supports it on Linux)
       - name: Stage Linux release artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: desktop-release-linux-x64
+          name: ${{ matrix.artifact_name }}
           if-no-files-found: error
           path: |
             ${{ steps.linux-artifacts.outputs.deb }}
@@ -823,6 +834,38 @@ jobs:
             cp "$file" "staged/$name"
           done < <(find staged-by-platform -type f -print0)
 
+      # Matrix job outputs are not deterministic when more than one matrix leg
+      # writes the same output. Resolve both Linux updater artifacts from the
+      # staged files instead, where Tauri's architecture suffix is unambiguous.
+      - name: Resolve staged Linux updater artifacts
+        id: linux-updaters
+        run: |
+          set -euo pipefail
+
+          resolve_linux_updater() {
+            local architecture="$1" output_prefix="$2"
+            mapfile -t appimages < <(find staged -maxdepth 1 -type f -name "*_${architecture}.AppImage")
+            if [[ "${#appimages[@]}" -ne 1 ]]; then
+              echo "::error::Expected exactly one Linux ${architecture} AppImage, found ${#appimages[@]}"
+              exit 1
+            fi
+
+            local archive="${appimages[0]}"
+            if [[ -f "${archive}.tar.gz" ]]; then
+              archive="${archive}.tar.gz"
+            fi
+            if [[ ! -f "${archive}.sig" ]]; then
+              echo "::error::Missing Linux ${architecture} updater signature: ${archive}.sig"
+              exit 1
+            fi
+
+            echo "${output_prefix}_archive=$(basename "$archive")" >> "$GITHUB_OUTPUT"
+            echo "${output_prefix}_sig=${archive}.sig" >> "$GITHUB_OUTPUT"
+          }
+
+          resolve_linux_updater amd64 linux_x64
+          resolve_linux_updater aarch64 linux_arm64
+
       - name: Write signature files
         env:
           RESULT_ARM64: ${{ needs.release.result }}
@@ -831,7 +874,8 @@ jobs:
           RESULT_WIN: ${{ needs.release-windows.result }}
           SIG_ARM64: ${{ needs.release.outputs.sig }}
           SIG_X64: ${{ needs.release-macos-x64.outputs.sig }}
-          SIG_LINUX: ${{ needs.release-linux.outputs.sig }}
+          SIG_LINUX_X64_PATH: ${{ steps.linux-updaters.outputs.linux_x64_sig }}
+          SIG_LINUX_ARM64_PATH: ${{ steps.linux-updaters.outputs.linux_arm64_sig }}
           SIG_WIN: ${{ needs.release-windows.outputs.sig }}
         run: |
           set -euo pipefail
@@ -847,7 +891,12 @@ jobs:
 
           write_sig "$RESULT_ARM64" darwin-aarch64 "$SIG_ARM64"
           write_sig "$RESULT_X64" darwin-x86_64 "$SIG_X64"
-          write_sig "$RESULT_LINUX" linux-x86_64 "$SIG_LINUX"
+          if [[ "$RESULT_LINUX" == "success" ]]; then
+            [[ -f "$SIG_LINUX_X64_PATH" ]] || { echo "::error::Missing signature for successful platform: linux-x86_64"; exit 1; }
+            [[ -f "$SIG_LINUX_ARM64_PATH" ]] || { echo "::error::Missing signature for successful platform: linux-aarch64"; exit 1; }
+            cp "$SIG_LINUX_X64_PATH" /tmp/sigs/linux-x86_64.sig
+            cp "$SIG_LINUX_ARM64_PATH" /tmp/sigs/linux-aarch64.sig
+          fi
           write_sig "$RESULT_WIN" windows-x86_64 "$SIG_WIN"
 
       - name: Verify draft release has every updater archive
@@ -858,7 +907,8 @@ jobs:
           RESULT_WIN: ${{ needs.release-windows.result }}
           ARCHIVE_ARM64: ${{ needs.release.outputs.archive_name }}
           ARCHIVE_X64: ${{ needs.release-macos-x64.outputs.archive_name }}
-          ARCHIVE_LINUX: ${{ needs.release-linux.outputs.archive_name }}
+          ARCHIVE_LINUX_X64: ${{ steps.linux-updaters.outputs.linux_x64_archive }}
+          ARCHIVE_LINUX_ARM64: ${{ steps.linux-updaters.outputs.linux_arm64_archive }}
           ARCHIVE_WIN: ${{ needs.release-windows.outputs.archive_name }}
         run: |
           set -euo pipefail
@@ -866,7 +916,8 @@ jobs:
           for spec in \
             "$RESULT_ARM64:$ARCHIVE_ARM64" \
             "$RESULT_X64:$ARCHIVE_X64" \
-            "$RESULT_LINUX:$ARCHIVE_LINUX" \
+            "$RESULT_LINUX:$ARCHIVE_LINUX_X64" \
+            "$RESULT_LINUX:$ARCHIVE_LINUX_ARM64" \
             "$RESULT_WIN:$ARCHIVE_WIN"; do
             result="${spec%%:*}"
             archive="${spec#*:}"
@@ -884,7 +935,8 @@ jobs:
           RESULT_WIN: ${{ needs.release-windows.result }}
           ARCHIVE_ARM64: ${{ needs.release.outputs.archive_name }}
           ARCHIVE_X64: ${{ needs.release-macos-x64.outputs.archive_name }}
-          ARCHIVE_LINUX: ${{ needs.release-linux.outputs.archive_name }}
+          ARCHIVE_LINUX_X64: ${{ steps.linux-updaters.outputs.linux_x64_archive }}
+          ARCHIVE_LINUX_ARM64: ${{ steps.linux-updaters.outputs.linux_arm64_archive }}
           ARCHIVE_WIN: ${{ needs.release-windows.outputs.archive_name }}
         run: |
           set -euo pipefail
@@ -901,10 +953,11 @@ jobs:
 
           add_triple "$RESULT_ARM64" darwin-aarch64 "$ARCHIVE_ARM64"
           add_triple "$RESULT_X64" darwin-x86_64 "$ARCHIVE_X64"
-          add_triple "$RESULT_LINUX" linux-x86_64 "$ARCHIVE_LINUX"
+          add_triple "$RESULT_LINUX" linux-x86_64 "$ARCHIVE_LINUX_X64"
+          add_triple "$RESULT_LINUX" linux-aarch64 "$ARCHIVE_LINUX_ARM64"
           add_triple "$RESULT_WIN" windows-x86_64 "$ARCHIVE_WIN"
 
-          [ "${#TRIPLES[@]}" -ge 3 ] || { echo "::error::too few platforms (${#TRIPLES[@]})"; exit 1; }
+          [ "${#TRIPLES[@]}" -ge 5 ] || { echo "::error::too few platforms (${#TRIPLES[@]})"; exit 1; }
           bash desktop/scripts/generate-oss-latest-json.sh "$VERSION" "${TRIPLES[@]}" > latest.json
           cat latest.json
           cp latest.json staged/updater-manifest.json

@@ -18,9 +18,19 @@ permissions:
 
 jobs:
   build:
-    name: Build Linux canary
+    name: Build Linux canary (${{ matrix.arch }})
     if: github.repository == 'block/buzz'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     container: ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
     timeout-minutes: 60
     permissions:
@@ -95,16 +105,25 @@ jobs:
           esac
           wget -q --tries=3 --timeout=30 -O /tmp/appimagetool \
             "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${ARCH_SUFFIX}.AppImage"
-          if [[ "$ARCH_SUFFIX" == "x86_64" ]]; then
-            echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
-          else
-            echo "::error::No pinned SHA256 for appimagetool-${ARCH_SUFFIX} — add it before enabling this architecture"
-            exit 1
-          fi
+          case "$ARCH_SUFFIX" in
+            x86_64)
+              echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool" | sha256sum -c
+              ;;
+            aarch64)
+              echo "f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158  /tmp/appimagetool" | sha256sum -c
+              ;;
+          esac
           install -m 755 /tmp/appimagetool /usr/local/bin/appimagetool
           wget -q --tries=3 --timeout=30 -O /tmp/appimage-runtime \
             "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${ARCH_SUFFIX}"
-          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+          case "$ARCH_SUFFIX" in
+            x86_64)
+              echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /tmp/appimage-runtime" | sha256sum -c
+              ;;
+            aarch64)
+              echo "00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444  /tmp/appimage-runtime" | sha256sum -c
+              ;;
+          esac
           install -D -m 644 /tmp/appimage-runtime /usr/local/lib/appimage-runtime
           echo "APPIMAGETOOL_RUNTIME_FILE=/usr/local/lib/appimage-runtime" >> "$GITHUB_ENV"
 
@@ -116,8 +135,8 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
+          key: pnpm-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-${{ matrix.target }}-
 
       - name: Install desktop dependencies
         run: just desktop-install-ci
@@ -156,7 +175,7 @@ jobs:
         run: |
           KEY=$(scripts/desktop-release-cache-key.py \
             --platform "$RUNNER_OS" \
-            --target x86_64-unknown-linux-gnu \
+            --target "${{ matrix.target }}" \
             --features mesh-llm \
             --native-inputs "$NATIVE_TOOLCHAIN_ID")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
@@ -232,7 +251,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          key: pnpm-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
       - name: Locate Linux build artifacts
         id: artifacts
@@ -257,7 +276,7 @@ jobs:
       - name: Upload Linux canary packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: buzz-linux-canary-${{ github.sha }}
+          name: buzz-linux-${{ matrix.arch }}-canary-${{ github.sha }}
           path: |
             ${{ steps.artifacts.outputs.deb }}
             ${{ steps.artifacts.outputs.appimage }}
