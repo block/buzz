@@ -45,6 +45,23 @@ test("classifies branch and network failures", () => {
   );
 });
 
+test("classifies long-path checkout failures as path errors", () => {
+  assert.equal(
+    projectRepoUnavailableReason(
+      new Error(
+        "error: unable to create file <...>/a_file_with_a_long_name.md: Filename too long",
+      ),
+    ),
+    "path",
+  );
+  assert.equal(
+    projectRepoUnavailableReason(
+      new Error("fatal: unable to checkout working tree"),
+    ),
+    "path",
+  );
+});
+
 test("keeps unmatched failures generic", () => {
   assert.equal(
     projectRepoUnavailableReason(new Error("git exited with status 128")),
@@ -105,6 +122,14 @@ test("never rewrites non-missing reasons", () => {
     }),
     "network",
   );
+  assert.equal(
+    refineRepoUnavailableReason({
+      reason: "path",
+      repositoryChannelId: "22222222-2222-4222-8222-222222222222",
+      memberChannelIds: [],
+    }),
+    "path",
+  );
 });
 
 test("presents access failures without exposing the relay's masked 404", () => {
@@ -112,5 +137,13 @@ test("presents access failures without exposing the relay's masked 404", () => {
     description:
       "Repository access is granted through its channel, and you’re not a member. Ask the repository owner for an invite.",
     title: "Repository access restricted",
+  });
+});
+
+test("presents long-path failures with actionable copy", () => {
+  assert.deepEqual(projectRepoUnavailablePresentation("path"), {
+    description:
+      "The repository contains paths longer than the local filesystem allows (Windows MAX_PATH). Enable long paths in your git config or Windows settings, then retry.",
+    title: "Paths exceed local limit",
   });
 });
