@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
     model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport,
+    ModelSwitchMethod, StopReason, SystemPromptTransport, ToolCallSignal,
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -77,6 +77,10 @@ pub struct TaskMeta {
     /// live session. The session ID prevents a late ack from contaminating a
     /// replacement session after task return.
     pub successful_steer_deliveries: HashSet<SuccessfulSteerDelivery>,
+    /// Event IDs of the batch that triggered this turn. Read by the main
+    /// loop when the turn completes to publish the terminal lifecycle
+    /// reaction (✅/❌). Empty for heartbeat tasks.
+    pub triggering_event_ids: Vec<String>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -511,6 +515,7 @@ pub enum TimeoutKind {
 
 /// Outcome of a prompt task.
 #[allow(dead_code)]
+#[derive(Debug)]
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
@@ -634,6 +639,11 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Whether lifecycle status reactions (👀/💬/⚙️ on the triggering message)
+    /// and long-runner status posts are published. Terminal ✅/❌ reactions are
+    /// gated separately in the main loop from `Config`. Disabled via
+    /// `--no-status-reactions` / `BUZZ_ACP_NO_STATUS_REACTIONS`.
+    pub status_reactions_enabled: bool,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
@@ -1745,6 +1755,7 @@ fn send_prompt_result(
     batch: Option<FlushBatch>,
 ) {
     agent.acp.clear_steer_rx();
+    agent.acp.set_turn_status_tx(None);
     let _ = result_tx.send(PromptResult {
         agent,
         source,
@@ -1846,13 +1857,46 @@ pub async fn run_prompt_task(
     let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
 
     // Collects event IDs up front. On drop (any exit path — normal, early
-    // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
+    // return, or panic), spawns best-effort cleanup of 👀, 💬, and ⚙️.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
-    let reaction_ids: Vec<String> = batch
-        .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
-        .unwrap_or_default();
+    // With status reactions disabled the guard gets no IDs, so every
+    // reaction path below (and the cleanup) is a no-op.
+    let reaction_ids: Vec<String> = if ctx.status_reactions_enabled {
+        batch
+            .as_ref()
+            .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    // Per-turn tool-call status watcher: ⚙️ on the first tool call, one
+    // long-runner thread post per turn. The sender rides on the AcpClient
+    // (cleared by `send_prompt_result` at every exit); the guard aborts the
+    // watcher when this task ends. Declared after `_reaction_guard` so drop
+    // order (reverse of declaration) stops the watcher before cleanup runs.
+    let _turn_status_guard = match (&batch, reaction_ids.is_empty()) {
+        (Some(b), false) => {
+            let (status_tx, status_rx) = mpsc::unbounded_channel();
+            agent.acp.set_turn_status_tx(Some(status_tx));
+            let thread_tags = b
+                .events
+                .last()
+                .map(|be| crate::queue::parse_thread_tags(&be.event))
+                .unwrap_or_default();
+            Some(TurnStatusWatcherGuard(tokio::spawn(
+                run_turn_status_watcher(
+                    ctx.rest_client.clone(),
+                    reaction_ids.clone(),
+                    b.channel_id,
+                    thread_tags,
+                    status_rx,
+                ),
+            )))
+        }
+        _ => None,
+    };
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -4479,6 +4523,13 @@ async fn publish_agent_turn_metric(
 
 const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
+const REACTION_TOOLING: &str = "⚙️";
+const REACTION_DONE: &str = "✅";
+const REACTION_FAILED: &str = "❌";
+
+/// How long a single tool call may run before the turn's one long-runner
+/// status post fires.
+const LONG_RUNNER_THRESHOLD: Duration = Duration::from_secs(60);
 
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
@@ -4535,11 +4586,12 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
     }
 }
 
-/// Best-effort: post a visible failure notice (kind:9) to a channel after a
-/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
-/// triggering event was threaded. Errors are logged and swallowed — the
-/// notice must never take down the main loop.
-pub(crate) async fn post_failure_notice(
+/// Best-effort: post a visible notice (kind:9) to a channel — dead-letter
+/// failure notices and long-runner status posts share this path. Replies into
+/// the thread of `thread_tags` when the triggering event was threaded. Errors
+/// are logged and swallowed — the notice must never take down the main loop
+/// or a turn.
+pub(crate) async fn post_thread_notice(
     rest: &crate::relay::RestClient,
     channel_id: Uuid,
     thread_tags: &ThreadTags,
@@ -4561,21 +4613,21 @@ pub(crate) async fn post_failure_notice(
         match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                tracing::warn!(channel = %channel_id, "thread notice: build failed: {e}");
                 return;
             }
         };
     let event = match builder.sign_with_keys(&rest.keys) {
         Ok(e) => e,
         Err(e) => {
-            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            tracing::warn!(channel = %channel_id, "thread notice: sign failed: {e}");
             return;
         }
     };
     match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
-        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "thread notice failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "thread notice timed out"),
     }
 }
 
@@ -4677,18 +4729,157 @@ async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
     }
 }
 
-/// Fire-and-forget: remove both 👀 and 💬 from all events. Spawned on turn complete.
-/// Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to avoid
-/// unbounded HTTP fan-out on large batches.
+/// Fire-and-forget: remove 👀, 💬, and ⚙️ from all events. Spawned on turn
+/// complete. Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to
+/// avoid unbounded HTTP fan-out on large batches. Deliberately leaves the
+/// terminal ✅/❌ (added by the main loop after the turn returns) untouched —
+/// removing ❌ here would race the main loop adding it.
 async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
-    // Each event needs two removals (👀 and 💬); pair them and chunk by
-    // REACTION_CONCURRENCY pairs so the total concurrent requests stay bounded.
+    // Each event needs three removals (👀, 💬, ⚙️); group them and chunk by
+    // REACTION_CONCURRENCY events so the total concurrent requests stay bounded.
     for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
         futures_util::future::join_all(chunk.iter().flat_map(|eid| {
             [
                 reaction_remove(&rest, eid, REACTION_SEEN),
                 reaction_remove(&rest, eid, REACTION_WORKING),
+                reaction_remove(&rest, eid, REACTION_TOOLING),
             ]
+        }))
+        .await;
+    }
+}
+
+/// Aborts the per-turn tool-call status watcher when the turn's task exits.
+///
+/// Held by `run_prompt_task` for the lifetime of the turn; dropping it (any
+/// exit path, including panic unwind) stops the watcher so a long-runner post
+/// can never fire after the turn has ended.
+struct TurnStatusWatcherGuard(JoinHandle<()>);
+
+impl Drop for TurnStatusWatcherGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Render the one-per-turn long-runner status post body.
+fn long_runner_notice(title: &str, elapsed: Duration) -> String {
+    // Floor at 1 minute: the post can only fire at or after the 60s threshold.
+    let minutes = (elapsed.as_secs() / 60).max(1);
+    format!("⚙️ still working — {title} ({minutes}m)")
+}
+
+/// Per-turn tool-call status watcher.
+///
+/// Driven by [`ToolCallSignal`]s forwarded from the ACP session-update stream:
+///
+/// * first `Started` → adds ⚙️ to every triggering event;
+/// * a single tool call running past [`LONG_RUNNER_THRESHOLD`] → posts one
+///   kind:9 thread reply for the whole turn ("⚙️ still working — …"), even
+///   when the tool never emits a `tool_call_update` (the deadline is armed at
+///   `Started`, not polled from updates).
+///
+/// Ends when the sender is dropped or the owning [`TurnStatusWatcherGuard`]
+/// aborts it. Everything here is best-effort — failures are logged by the
+/// underlying publish helpers and never affect the turn.
+async fn run_turn_status_watcher(
+    rest: crate::relay::RestClient,
+    event_ids: Vec<String>,
+    channel_id: Uuid,
+    thread_tags: ThreadTags,
+    mut rx: mpsc::UnboundedReceiver<ToolCallSignal>,
+) {
+    let mut first_tool_seen = false;
+    let mut long_post_sent = false;
+    // Number of tool calls currently running, plus the title and start time
+    // of the one whose long-runner deadline is armed. Signals carry no tool
+    // id, so overlapping calls are tracked as a count: the armed deadline
+    // belongs to the call that started while none were running.
+    let mut running: usize = 0;
+    let mut current: Option<(String, tokio::time::Instant)> = None;
+
+    loop {
+        let deadline = match (&current, long_post_sent) {
+            (Some((_, started)), false) => Some(*started + LONG_RUNNER_THRESHOLD),
+            _ => None,
+        };
+        let long_runner_due = async {
+            match deadline {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            signal = rx.recv() => match signal {
+                None => break,
+                Some(ToolCallSignal::Started { title }) => {
+                    if !first_tool_seen {
+                        first_tool_seen = true;
+                        for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
+                            futures_util::future::join_all(
+                                chunk.iter().map(|eid| reaction_add(&rest, eid, REACTION_TOOLING)),
+                            )
+                            .await;
+                        }
+                    }
+                    running += 1;
+                    if current.is_none() {
+                        current = Some((title, tokio::time::Instant::now()));
+                    }
+                }
+                Some(ToolCallSignal::Finished) => {
+                    running = running.saturating_sub(1);
+                    if running == 0 {
+                        current = None;
+                    }
+                }
+            },
+            _ = long_runner_due => {
+                if let Some((title, started)) = &current {
+                    let content = long_runner_notice(title, started.elapsed());
+                    post_thread_notice(&rest, channel_id, &thread_tags, &content).await;
+                    long_post_sent = true;
+                }
+            }
+        }
+    }
+}
+
+/// Map a completed turn's outcome to its terminal lifecycle reaction.
+///
+/// `None` means "no terminal reaction": cancelled turns (including an
+/// agent-reported `cancelled` stop reason) re-deliver their batch into the
+/// next turn (steer/interrupt merge), so neither ✅ nor ❌ would be truthful
+/// yet. A refusal completes the ACP turn but posts no reply, so it counts as
+/// ❌ alongside errors, exits, and timeouts.
+pub(crate) fn terminal_reaction_for_outcome(outcome: &PromptOutcome) -> Option<&'static str> {
+    match outcome {
+        PromptOutcome::Ok(StopReason::Refusal) => Some(REACTION_FAILED),
+        PromptOutcome::Ok(StopReason::Cancelled) => None,
+        PromptOutcome::Ok(_) => Some(REACTION_DONE),
+        PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_) => None,
+        PromptOutcome::Error(_) | PromptOutcome::AgentExited | PromptOutcome::Timeout(_) => {
+            Some(REACTION_FAILED)
+        }
+    }
+}
+
+/// Best-effort: publish the terminal lifecycle reaction (✅/❌) on all
+/// triggering events. A ✅ first removes any ❌ left by an earlier failed
+/// attempt of the same events, so a retried batch that eventually succeeds
+/// does not display both. Capped at `REACTION_CONCURRENCY` concurrent
+/// requests per chunk.
+pub(crate) async fn react_terminal(
+    rest: crate::relay::RestClient,
+    event_ids: Vec<String>,
+    emoji: &'static str,
+) {
+    for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
+        futures_util::future::join_all(chunk.iter().map(|eid| async {
+            if emoji == REACTION_DONE {
+                reaction_remove(&rest, eid, REACTION_FAILED).await;
+            }
+            reaction_add(&rest, eid, emoji).await;
         }))
         .await;
     }
@@ -4699,6 +4890,102 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    // ── Lifecycle status reactions ──────────────────────────────────────
+
+    /// Shape contract for every status reaction published by `reaction_add`:
+    /// NIP-25 kind 7, content = emoji, a single `e` tag naming the target.
+    /// No `h` tag — the relay derives a reaction's channel from its target
+    /// event (`derive_reaction_channel`), matching the CLI/desktop shape.
+    #[test]
+    fn status_reaction_event_is_kind_7_with_target_e_tag() {
+        let keys = Keys::generate();
+        let target = EventBuilder::new(Kind::Custom(1), "x")
+            .tags([])
+            .sign_with_keys(&keys)
+            .expect("sign target")
+            .id;
+        let event = buzz_sdk::build_reaction(target, REACTION_TOOLING)
+            .expect("build reaction")
+            .sign_with_keys(&keys)
+            .expect("sign reaction");
+
+        assert_eq!(event.kind, Kind::Custom(7));
+        assert_eq!(event.content, REACTION_TOOLING);
+        let e_tags: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|t| t.kind().to_string() == "e")
+            .collect();
+        assert_eq!(e_tags.len(), 1, "exactly one e tag");
+        assert_eq!(e_tags[0].content(), Some(target.to_hex().as_str()));
+        assert!(
+            !event.tags.iter().any(|t| t.kind().to_string() == "h"),
+            "reactions carry no h tag — channel is derived from the target"
+        );
+    }
+
+    #[test]
+    fn terminal_reaction_ok_outcomes_map_to_done() {
+        for stop in [
+            StopReason::EndTurn,
+            StopReason::MaxTokens,
+            StopReason::MaxTurnRequests,
+        ] {
+            assert_eq!(
+                terminal_reaction_for_outcome(&PromptOutcome::Ok(stop)),
+                Some(REACTION_DONE)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_reaction_failures_map_to_failed() {
+        let failures = [
+            PromptOutcome::Ok(StopReason::Refusal),
+            PromptOutcome::Error(AcpError::Protocol("boom".into())),
+            PromptOutcome::AgentExited,
+            PromptOutcome::Timeout(TimeoutKind::Idle),
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: true,
+            }),
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false,
+            }),
+        ];
+        for outcome in &failures {
+            assert_eq!(
+                terminal_reaction_for_outcome(outcome),
+                Some(REACTION_FAILED),
+                "{outcome:?} must map to ❌"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_reaction_cancels_map_to_none() {
+        // Cancelled batches are re-delivered into the next turn, so neither
+        // terminal reaction would be truthful yet.
+        for outcome in [
+            PromptOutcome::Ok(StopReason::Cancelled),
+            PromptOutcome::Cancelled,
+            PromptOutcome::CancelDrainTimeout(Duration::from_secs(5)),
+        ] {
+            assert_eq!(terminal_reaction_for_outcome(&outcome), None);
+        }
+    }
+
+    #[test]
+    fn long_runner_notice_floors_at_one_minute() {
+        assert_eq!(
+            long_runner_notice("shell", Duration::from_secs(60)),
+            "⚙️ still working — shell (1m)"
+        );
+        assert_eq!(
+            long_runner_notice("web_search", Duration::from_secs(150)),
+            "⚙️ still working — web_search (2m)"
+        );
+    }
 
     fn test_mcp_server() -> McpServer {
         McpServer {
@@ -7957,6 +8244,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
+            status_reactions_enabled: true,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }

@@ -387,6 +387,10 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_TYPING")]
     pub no_typing: bool,
 
+    /// Disable lifecycle status reactions and long-runner status posts.
+    #[arg(long, env = "BUZZ_ACP_NO_STATUS_REACTIONS")]
+    pub no_status_reactions: bool,
+
     /// Enable NIP-AE agent core memory injection.
     ///
     /// Memory injection is on by default. When enabled, the harness
@@ -547,6 +551,10 @@ pub struct Config {
     pub max_turns_per_session: u32,
     pub presence_enabled: bool,
     pub typing_enabled: bool,
+    /// Whether lifecycle status reactions (on the triggering message) and
+    /// long-runner status posts are published. On by default; disabled via
+    /// `--no-status-reactions` / `BUZZ_ACP_NO_STATUS_REACTIONS`.
+    pub status_reactions_enabled: bool,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the harness skips the per-session core engram fetch and renders no
     /// `[Agent Memory — core]` section. On by default; disabled via the
@@ -1123,6 +1131,7 @@ impl Config {
             max_turns_per_session: args.max_turns_per_session,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
+            status_reactions_enabled: !args.no_status_reactions,
             memory_enabled: args.memory && !args.no_memory,
             model,
             effort_level: args.effort_level,
@@ -1164,7 +1173,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} status_reactions={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1182,6 +1191,7 @@ impl Config {
             self.max_turns_per_session,
             self.presence_enabled,
             self.typing_enabled,
+            self.status_reactions_enabled,
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
@@ -1499,6 +1509,7 @@ mod tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            status_reactions_enabled: true,
             memory_enabled: true,
             model: None,
             effort_level: None,
@@ -2473,6 +2484,19 @@ channels = "ALL"
     #[test]
     fn idle_timeout_zero_from_deprecated_clamped_to_one() {
         assert_eq!(resolve_idle_timeout(None, Some(0)), 1);
+    }
+
+    #[test]
+    fn status_reactions_default_on_and_reported_in_summary() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        assert!(config.status_reactions_enabled);
+        assert!(
+            config.summary().contains("status_reactions=true"),
+            "summary should report status_reactions: {}",
+            config.summary()
+        );
+        config.status_reactions_enabled = false;
+        assert!(config.summary().contains("status_reactions=false"));
     }
 
     #[test]
