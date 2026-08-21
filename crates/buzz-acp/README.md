@@ -111,6 +111,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_EXTRA_MCP_COMMANDS` | no | — | Comma-separated additional MCP server commands. Each entry is shell-split with POSIX quoting (e.g. `npx -y my-mcp-server`). Extra servers do **not** receive `BUZZ_PRIVATE_KEY`, `BUZZ_RELAY_URL`, or `BUZZ_AUTH_TAG` — they are third-party tools, not Buzz-native MCP. Names are derived from the executable stem, sanitized to ASCII alphanumeric/hyphen, and disambiguated with numeric suffixes. Malformed quoting fails startup with the entry index (the raw command is not logged). |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
