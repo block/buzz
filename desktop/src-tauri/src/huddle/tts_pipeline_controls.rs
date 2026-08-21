@@ -6,9 +6,11 @@ impl TtsPipeline {
     /// Non-blocking. Returns `Err` if the queue is full (bounded at
     /// `TEXT_QUEUE_DEPTH`) — caller may log and discard.
     pub fn speak(&self, text: String) -> Result<(), String> {
+        let floor_epoch = self.human_floor.epoch();
         self.text_tx
             .try_send(QueuedText {
                 generation: self.voice_generation.load(Ordering::Acquire),
+                floor_epoch,
                 route_id: 0,
                 speaker_pubkey: None,
                 speaker_generation: 0,
@@ -28,6 +30,7 @@ impl TtsPipeline {
         TtsTextSender {
             text_tx: self.text_tx.clone(),
             generation: self.voice_generation.load(Ordering::Acquire),
+            human_floor: self.human_floor.clone(),
             speaker_generations: Arc::clone(&self.speaker_generations),
         }
     }
