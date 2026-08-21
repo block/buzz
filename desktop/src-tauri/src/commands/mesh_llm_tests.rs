@@ -27,6 +27,129 @@ fn reported_target(
     target
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_mesh_gpu_sdk_dll_dirs_discovers_versioned_rocm_and_cuda_dirs() {
+    let temp = tempfile::tempdir().unwrap();
+    let program_files = temp.path().join("ProgramFiles");
+    let hip_env = temp.path().join("HIP");
+    let cuda_env = temp.path().join("CUDAEnv");
+    let rocm64 = program_files.join("AMD").join("ROCm").join("6.4");
+    let cuda12 = program_files
+        .join("NVIDIA GPU Computing Toolkit")
+        .join("CUDA")
+        .join("v12.4");
+    for dir in [&hip_env, &cuda_env, &rocm64, &cuda12] {
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+    }
+
+    let dirs = windows_mesh_gpu_sdk_dll_dirs_from(
+        [
+            ("HIP_PATH_64".into(), hip_env.into_os_string()),
+            ("CUDA_PATH_V12_4".into(), cuda_env.into_os_string()),
+        ],
+        Some(program_files.into_os_string()),
+    );
+
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("HIP/bin") || dir.ends_with("HIP\\bin")));
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("ROCm/6.4/bin") || dir.ends_with("ROCm\\6.4\\bin")));
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("CUDAEnv/bin") || dir.ends_with("CUDAEnv\\bin")));
+    assert!(dirs
+        .iter()
+        .any(|dir| dir.ends_with("CUDA/v12.4/bin") || dir.ends_with("CUDA\\v12.4\\bin")));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_mesh_dll_registration_order_prefers_runtime_libs_before_bundled_fallbacks() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_lib = temp
+        .path()
+        .join("native-runtimes")
+        .join(windows_mesh_native_runtime_version())
+        .join("meshllm-native-runtime-windows-x86_64-vulkan")
+        .join("lib");
+    let bundled = temp
+        .path()
+        .join("resources")
+        .join("mesh-llm")
+        .join("windows-x86_64");
+    let gpu_sdk = temp.path().join("ROCm").join("6.4").join("bin");
+    for dir in [&runtime_lib, &bundled, &gpu_sdk] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    let dirs = windows_mesh_dll_registration_order(
+        vec![runtime_lib.clone()],
+        vec![bundled.clone()],
+        vec![gpu_sdk.clone()],
+    );
+
+    assert_eq!(dirs, vec![runtime_lib, bundled, gpu_sdk]);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_mesh_native_runtime_lib_dirs_are_registered_without_bundled_resources() {
+    let temp = tempfile::tempdir().unwrap();
+    let native_root = temp.path().join("native-runtimes");
+    let stale_runtime_lib = native_root
+        .join("0.74.0")
+        .join("meshllm-native-runtime-windows-x86_64-rocm")
+        .join("lib");
+    let runtime_lib = native_root
+        .join(windows_mesh_native_runtime_version())
+        .join("meshllm-native-runtime-windows-x86_64-vulkan")
+        .join("lib");
+    std::fs::create_dir_all(&stale_runtime_lib).unwrap();
+    std::fs::create_dir_all(&runtime_lib).unwrap();
+
+    let runtime_lib_dirs = windows_mesh_native_runtime_lib_dirs_from(
+        &native_root,
+        windows_mesh_native_runtime_version(),
+    );
+    let registered_dirs =
+        windows_mesh_dll_registration_order(runtime_lib_dirs, Vec::new(), Vec::new());
+
+    assert_eq!(registered_dirs, vec![runtime_lib]);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_mesh_native_runtime_version_tracks_mesh_llm_dependency() {
+    assert_eq!(
+        windows_mesh_native_runtime_version(),
+        mesh_llm_host_runtime::VERSION
+    );
+}
+
+#[test]
+fn mesh_runtime_load_error_retry_only_matches_windows_loader_failures() {
+    let load_library = anyhow::anyhow!(
+        "load native runtime meshllm-native-runtime-windows-x86_64-cuda12: LoadLibraryExW failed"
+    );
+    let module_not_found = anyhow::anyhow!(
+        "failed to load native runtime library cublas64_12.dll: OS error 126: The specified module could not be found."
+    );
+    let other = anyhow::anyhow!("model download failed");
+
+    assert!(mesh_runtime_load_error_needs_windows_dependency_retry(
+        &load_library
+    ));
+    assert!(mesh_runtime_load_error_needs_windows_dependency_retry(
+        &module_not_found
+    ));
+    assert!(!mesh_runtime_load_error_needs_windows_dependency_retry(
+        &other
+    ));
+}
+
 #[test]
 fn buzz_mesh_join_uses_the_same_live_member_from_every_other_node() {
     let targets = vec![

@@ -5,6 +5,24 @@ use crate::app_state::AppState;
 type CmdResult<T> = Result<T, String>;
 
 #[tauri::command]
+pub async fn mesh_debug_log(_app: tauri::AppHandle, _message: String) -> CmdResult<()> {
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn mesh_debug_logging_enabled(_app: tauri::AppHandle) -> CmdResult<bool> {
+    Ok(false)
+}
+
+#[tauri::command]
+pub async fn set_mesh_debug_logging_enabled(
+    _app: tauri::AppHandle,
+    enabled: bool,
+) -> CmdResult<bool> {
+    Ok(enabled)
+}
+
+#[tauri::command]
 pub async fn mesh_start_node(
     _app: tauri::AppHandle,
     _state: State<'_, AppState>,
