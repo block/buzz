@@ -1,6 +1,7 @@
 import {
   CircleAlert,
   CircleDot,
+  FolderGit2,
   Folders,
   GitCommit,
   GitPullRequest,
@@ -19,13 +20,15 @@ import type {
   ProjectActivitySummary,
 } from "@/features/projects/hooks";
 import {
-  formatExactTimestamp,
   getProjectUpdatedAt,
   listRowDescription,
-  relativeTime,
 } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
+import {
+  selectionItemFromProject,
+  type ProjectSelectionItem,
+} from "@/features/projects/lib/projectSelection";
 import { projectTerminalLabel } from "@/features/projects/ui/useOpenProjectTerminal";
 import { PROJECT_LIST_ROW_META_TEXT_CLASS } from "@/features/projects/ui/projectListRowStyles";
 import { cn } from "@/shared/lib/cn";
@@ -47,40 +50,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { ProjectEntityListRow } from "./ProjectEntityListRow";
+import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
-
-function ProjectUpdatedLabel({
-  profiles,
-  project,
-  summary,
-}: {
-  profiles?: UserProfileLookup;
-  project: Project;
-  summary: ProjectActivitySummary | undefined;
-}) {
-  const updatedAt = getProjectUpdatedAt(project, summary);
-  const latestCommit = summary?.latestCommit;
-  const authorLabel = latestCommit?.author
-    ? resolveUserLabel({ profiles, pubkey: latestCommit.author })
-    : null;
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="whitespace-nowrap text-xs leading-4 text-muted-foreground/70">
-          {relativeTime(updatedAt)}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-96 break-words">
-        {latestCommit
-          ? `${latestCommit.title || latestCommit.commit.slice(0, 7)}${
-              authorLabel ? ` · ${authorLabel}` : ""
-            } · ${formatExactTimestamp(latestCommit.createdAt)}`
-          : `Created ${formatExactTimestamp(project.createdAt)}`}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
 
 export function ProjectPeopleStack({
   pubkeys,
@@ -167,8 +138,7 @@ const PROJECT_STAT_ITEMS = [
 ] as const;
 
 /**
- * Textual commit/PR/issue counts. Repository lists show these next to the
- * activity bar; project lists show the bar alone (counts via its tooltips).
+ * Textual commit/PR/issue counts for project and repository cards.
  */
 export function ProjectStatsRow({
   summary,
@@ -237,7 +207,10 @@ export function ProjectActivityBar({
                 <Tooltip key={item.barClass}>
                   <TooltipTrigger asChild>
                     <div
+                      aria-label={`${item.count} ${item.text}`}
                       className={cn("h-full", item.barClass)}
+                      data-testid="project-activity-segment"
+                      role="img"
                       style={{ width: `${(item.count / total) * 100}%` }}
                     />
                   </TooltipTrigger>
@@ -325,7 +298,7 @@ function RepositoryUnavailableIndicator({
       </TooltipTrigger>
       <TooltipContent className="max-w-64">
         <p className="font-medium">{label}</p>
-        <p className="text-muted-foreground">{description}</p>
+        <p className="text-secondary-foreground">{description}</p>
       </TooltipContent>
     </Tooltip>
   );
@@ -470,6 +443,7 @@ type ProjectItemProps = {
   project: Project;
   people: string[];
   profiles?: UserProfileLookup;
+  selectionRangeItems?: ProjectSelectionItem[];
   summary: ProjectActivitySummary | undefined;
   repositoryUnavailableReason?: ProjectRepoUnavailableReason;
   hasLocal: boolean;
@@ -495,37 +469,43 @@ export function ProjectGridCard({
 }: ProjectItemProps) {
   return (
     <Card
-      className="group relative flex min-h-44 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
+      className="group relative flex min-h-40 flex-col overflow-hidden border-border/60 bg-transparent shadow-none transition-colors duration-150 hover:bg-muted/20"
       data-projects-grid-card
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
       <div className="pointer-events-none relative z-10 flex min-h-0 flex-1 flex-col">
-        <div className="flex min-w-0 items-center justify-between gap-3 px-4 pt-3">
-          <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-start justify-between gap-3 px-4 pt-3">
+          <div className="flex min-w-0 flex-1 items-start gap-2">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
               <Folders className="h-4.5 w-4.5 text-muted-foreground" />
             </span>
-            <span className="min-w-0 truncate text-sm font-semibold text-foreground">
-              {project.name}
-            </span>
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {project.repositoryAddresses.length}{" "}
-              {project.repositoryAddresses.length === 1
-                ? "repository"
-                : "repositories"}
-            </span>
-            <StatusPill status={project.status} />
-            <RepositoryUnavailableIndicator
-              reason={repositoryUnavailableReason}
-            />
+            <div className="min-w-0 flex-1">
+              <span
+                className="block break-words text-sm font-semibold leading-5 text-foreground"
+                data-projects-text-priority="primary"
+                data-testid="project-grid-card-name"
+              >
+                {project.name}
+              </span>
+              <div
+                className="mt-0.5 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground"
+                data-projects-text-priority="secondary"
+              >
+                <span>
+                  {project.repositoryAddresses.length}{" "}
+                  {project.repositoryAddresses.length === 1
+                    ? "repository"
+                    : "repositories"}
+                </span>
+                <StatusPill status={project.status} />
+                <RepositoryUnavailableIndicator
+                  reason={repositoryUnavailableReason}
+                />
+              </div>
+            </div>
           </div>
-          <div className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-1">
-            <ProjectUpdatedLabel
-              profiles={profiles}
-              project={project}
-              summary={summary}
-            />
+          <div className="pointer-events-auto relative z-10 shrink-0">
             <ProjectActionsMenu
               canDelete={canDelete}
               disabled={deleteDisabled}
@@ -537,7 +517,13 @@ export function ProjectGridCard({
           </div>
         </div>
 
-        <p className="line-clamp-2 min-h-10 px-4 py-2 text-sm text-muted-foreground">
+        <p
+          className={cn(
+            PROJECT_GRID_CARD_BODY_CLASS,
+            "mx-4 my-2 text-muted-foreground",
+          )}
+          data-testid="projects-grid-card-body"
+        >
           {project.description || "A shared space for internal git work."}
         </p>
 
@@ -561,6 +547,7 @@ export function ProjectListRow({
   project,
   people,
   profiles,
+  selectionRangeItems,
   summary,
   repositoryUnavailableReason,
   hasLocal,
@@ -571,21 +558,38 @@ export function ProjectListRow({
   onOpenTerminal,
 }: ProjectItemProps) {
   const repositoryCount = project.repositoryAddresses.length;
+  const selectionItem = selectionItemFromProject({
+    channelId: project.projectChannelId,
+    id: project.id,
+    owner: project.owner,
+    shareLink: projectShareLink(project),
+    title: project.name,
+  });
   return (
     <ProjectEntityListRow
-      affiliation={`${repositoryCount} ${
+      affiliation={
+        <span className="flex items-center justify-end gap-1">
+          <FolderGit2 className="h-3.5 w-3.5" />
+          <span>{repositoryCount}</span>
+        </span>
+      }
+      affiliationClassName="w-auto"
+      affiliationTestId="projects-row-context"
+      affiliationTitle={`${repositoryCount} ${
         repositoryCount === 1 ? "repository" : "repositories"
       }`}
-      affiliationTestId="projects-row-context"
       dateSeconds={getProjectUpdatedAt(project, summary)}
       dateTestId="projects-row-date"
-      description={listRowDescription(project.description, project.name)}
-      descriptionTestId="projects-row-description"
       icon={<Folders className="h-3.5 w-3.5 text-muted-foreground/70" />}
       onClick={() => onOpen(project)}
       people={people}
       peopleTestId="projects-row-people"
       profiles={profiles}
+      selection={
+        selectionRangeItems
+          ? { item: selectionItem, rangeItems: selectionRangeItems }
+          : undefined
+      }
       testId={`project-row-${project.dtag}`}
       title={
         <span className="flex min-w-0 items-center gap-2">
@@ -599,6 +603,8 @@ export function ProjectListRow({
         </span>
       }
       titleAttr={project.name}
+      titleSecondary={listRowDescription(project.description, project.name)}
+      titleSecondaryTestId="projects-row-description"
       trailing={
         <ProjectActionsMenu
           canDelete={canDelete}

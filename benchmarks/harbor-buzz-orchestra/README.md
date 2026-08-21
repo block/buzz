@@ -62,6 +62,64 @@ rather than deletes that channel, leaving the relay/Postgres event timeline
 and the per-agent acp/agent logs (downloaded into the trial's `buzz/`
 artifacts) available for analysis.
 
+### Buzz-native tasks
+
+The local [`benchmarks/buzz-dataset`](../buzz-dataset) suite — a sibling
+directory of this harness, not a subdirectory of it — scores Buzz product
+behavior alongside task correctness. It covers direct thread replies, callback
+user mentions, targeted reads of named paths, exact channel membership,
+multiline delivery, non-waking narrative names, batched reports, cross-thread
+isolation, and ambiguous identities. Run one task with the production base
+prompt from the checked-out source build:
+
+```bash
+just benchmark \
+  --path benchmarks/buzz-dataset/reply-to-thread \
+  --attempts 1 \
+  --manifest benchmarks/harbor-buzz-orchestra/manifests/buzz-native-solo-luna.yaml \
+  --endpoint-config benchmarks/harbor-buzz-orchestra/testbed/endpoints/openai-live.json \
+  --n-concurrent 1
+```
+
+The default condition is `buzz-native-solo-luna.yaml` — one solo agent on
+`gpt-5.6-luna` at `thinking_effort: medium`. What this suite scores comes from
+the base prompt rather than from model strength, so the cheap model at a
+middling effort is the right yardstick: a weak result here is a prompt finding,
+not a model finding. It needs `OPENAI_COMPAT_API_KEY` and the explicit
+`--endpoint-config` above, because `--endpoint-config` defaults to
+`anthropic-live.json`. Swap in `buzz-native-solo-sonnet.yaml` (no
+`--endpoint-config`, needs `ANTHROPIC_API_KEY`) to compare against Sonnet 4.6.
+
+A roster entry that does not pin `generation.thinking_effort` runs at the
+runtime default (`THINKING_EFFORT`, currently `medium`) rather than at whatever
+the provider defaults to, so the level is always recorded. Leaving it unset
+does not change a condition's hash — manifests written before the effort axis
+existed keep their identity and stay comparable to their earlier receipts.
+
+Replace the path with `benchmarks/buzz-dataset/create-channel-invite-users`
+to run the channel task. Its provisioner seeds a stable directory of 50 users
+and 10 bots, while the verifier checks the created channel's TTL and exact
+membership through post-agent CLI evidence.
+
+After the agent stops, the runtime snapshots public relay state (source
+messages plus any task-declared channels and members) to
+`/logs/artifacts/buzz-evidence.json`. The task verifier reads that post-agent
+artifact; relay credentials and database access are never exposed to the model
+or verifier. If the snapshot cannot be exported the trial **fails** rather than
+scoring 0 — a harness fault and a model fault stay distinguishable — and the
+cause is written to the trial's `buzz/buzz-evidence-error.txt`.
+
+Some tasks declare additional signed relay events. The provisioner creates
+their actors as normal channel identities and the runtime publishes the events
+through the production CLI immediately after the task message. Evidence exports
+only public actor metadata and event IDs; their signing credentials never enter
+the task container or verifier artifact.
+
+Each task ships its own `README.md` documenting its reward dimensions and, for
+the tasks whose graded Buzz behavior is deliberately absent from
+`instruction.md` (`reply-to-thread`, `user-mention`), why that omission is the
+point. Read it before editing a task's instruction or verifier.
+
 ## Leaderboard runs
 
 `just benchmark` is the one-command path: it stands up a dedicated Docker

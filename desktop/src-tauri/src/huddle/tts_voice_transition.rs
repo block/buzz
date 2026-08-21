@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use super::{PlaybackCoordinator, SynthesisFlightGuard};
+use super::{HumanFloor, PlaybackCoordinator, SynthesisFlightGuard};
 
 use crate::huddle::pocket::{load_voice_style, VoiceStyle, DEFAULT_VOICE, VOICE_FILE_EXT};
 
@@ -74,6 +74,7 @@ impl fmt::Debug for PlaybackProbe {
 #[derive(Debug)]
 pub(super) struct QueuedText {
     pub(super) generation: u64,
+    pub(super) floor_epoch: u64,
     pub(super) route_id: u64,
     pub(super) speaker_pubkey: Option<String>,
     pub(super) speaker_generation: u64,
@@ -85,6 +86,7 @@ pub(super) struct QueuedText {
 pub(crate) struct TtsTextSender {
     pub(super) text_tx: SyncSender<QueuedText>,
     pub(super) generation: u64,
+    pub(super) human_floor: HumanFloor,
     pub(super) speaker_generations: SpeakerGenerations,
 }
 
@@ -97,9 +99,11 @@ impl TtsTextSender {
         voice_reference: String,
         text: String,
     ) -> Result<(), String> {
+        let floor_epoch = self.human_floor.epoch();
         self.text_tx
             .send(QueuedText {
                 generation: self.generation,
+                floor_epoch,
                 route_id,
                 speaker_pubkey: Some(speaker_pubkey),
                 speaker_generation,
@@ -544,6 +548,7 @@ mod speaker_generation_tests {
 
     fn queued_speech(speaker_pubkey: &str, speaker_generation: u64) -> QueuedText {
         QueuedText {
+            floor_epoch: 0,
             generation: 1,
             route_id: 1,
             speaker_pubkey: Some(speaker_pubkey.to_string()),

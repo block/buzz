@@ -125,9 +125,22 @@ clippy (workspace + Tauri), desktop TypeScript typechecking (`tsc --noEmit`),
 and fast unit tests in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter)
 — no overlap with pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix
 all formatting in one shot. Run `just ci` for the full local gate. Run `just
-hooks` to re-install hooks after env changes. Before agents run Git or hooks,
-activate the repo's Hermit environment (`. ./bin/activate-hermit`); do not
-rewrite hook commands to compensate for an unconfigured shell `PATH`.
+hooks` to re-install hooks after env changes. Each globbed pre-push lane is
+scoped to the branch's merge-base diff against `origin/main` (`git diff
+origin/main...HEAD`), matching CI's paths-filter — so a lane only fires when this
+branch actually changed a file it covers, never because `origin/main` moved.
+These lanes validate the checked-out HEAD; pushing a non-HEAD ref (explicit
+refspec, `--all`) gets a non-fatal `push-head-scope` warning and relies on CI for
+its path-scoped checks.
+Before agents run Git or hooks, activate the repo's Hermit environment
+(`. ./bin/activate-hermit`) so `./bin` leads `PATH` and the pinned toolchain
+(flutter, dart, lefthook) wins over any Homebrew version; do not
+rewrite hook commands to compensate for an unconfigured shell `PATH`. The
+pre-push hook self-pins regardless: `bin/.lefthookrc` (sourced by the generated
+`.git/hooks/*`) prepends the Hermit `bin/` to `PATH` and pins `LEFTHOOK_BIN`, so
+lane subprocesses resolve the pinned flutter/dart/lefthook even when an
+unactivated shell has Homebrew first. Activating Hermit remains recommended for
+non-hook commands.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
@@ -202,15 +215,16 @@ or invoke with the full path.
 ### Deep Links
 
 `buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
-thread. To read the linked thread:
+thread. Pass the link directly to the CLI:
 
 ```bash
-buzz --format compact messages thread --channel <uuid> --event <hex>
+buzz --format compact messages thread --link '<buzz://message?...>'
 ```
 
-Extract `channel` and `id` from the URL query parameters. The optional
-`thread` parameter (root event ID) can be ignored — `messages thread` resolves
-the full thread from the event ID alone.
+The selected message ID is authoritative: `messages thread` verifies its
+channel and derives its containing root. An optional `thread` parameter is
+accepted only when it matches that derived root. The explicit
+`--channel <uuid> --event <hex>` form remains available.
 
 All reads return sig-stripped JSON arrays; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:

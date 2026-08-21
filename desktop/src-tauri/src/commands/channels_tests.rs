@@ -2,6 +2,9 @@
 // channels.rs under the per-file line cap.
 
 use super::*;
+// The relay-backed fetch helpers moved to the `fetch` submodule; its
+// `pub(super)` items are visible here as a descendant of the channels module.
+use super::fetch::*;
 use crate::models::ChannelInfo;
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
@@ -193,6 +196,37 @@ fn pending_overlay_does_not_leak_across_identity_swap() {
 
     assert!(state.is_pending_owned_channel(PK_A, "chan-1"));
     assert!(!state.is_pending_owned_channel(PK_B, "chan-1"));
+}
+
+#[test]
+fn pending_owned_channel_ids_scopes_to_the_asking_identity() {
+    // The member-only poll resolves non-member metadata solely from this
+    // helper (no all-open scan), so it must return exactly the caller's own
+    // not-yet-propagated channels — never another identity's — and nothing
+    // once membership is observed.
+    let state = crate::app_state::build_app_state();
+    state.mark_pending_owned_channel(PK_A, "chan-1");
+    state.mark_pending_owned_channel(PK_A, "chan-2");
+    state.mark_pending_owned_channel(PK_B, "chan-3");
+
+    let mut a_ids = state.pending_owned_channel_ids(PK_A);
+    a_ids.sort();
+    assert_eq!(a_ids, vec!["chan-1".to_string(), "chan-2".to_string()]);
+    assert_eq!(
+        state.pending_owned_channel_ids(PK_B),
+        vec!["chan-3".to_string()]
+    );
+
+    // Once chan-1's real membership lands, it drops out of the overlay set.
+    state.clear_pending_owned_channel(PK_A, "chan-1");
+    assert_eq!(
+        state.pending_owned_channel_ids(PK_A),
+        vec!["chan-2".to_string()]
+    );
+
+    // An identity with no pending creations resolves no non-member metadata,
+    // so the member-only fetch issues no `#d` directory query at all.
+    assert!(state.pending_owned_channel_ids(PK_C).is_empty());
 }
 
 #[test]
@@ -426,4 +460,33 @@ fn starter_match_requires_open_unarchived_stream_by_normalized_name() {
     channel.channel_type = "stream".to_string();
     channel.archived_at = Some("2026-07-16T00:00:00Z".to_string());
     assert!(!is_matching_starter_channel(&channel, spec));
+}
+
+#[test]
+fn last_message_filter_covers_all_human_visible_activity_kinds() {
+    let filter = last_message_filter("forum-1");
+
+    assert_eq!(
+        filter,
+        serde_json::json!({
+            "kinds": [9, 40002, 45001, 45003],
+            "#h": ["forum-1"],
+            "limit": 1
+        })
+    );
+}
+
+#[test]
+fn last_message_filters_stay_within_relay_channel_cap() {
+    let filters: Vec<serde_json::Value> = (0..257)
+        .map(|index| serde_json::json!({"#h": [format!("channel-{index}")]}))
+        .collect();
+
+    let batches = last_message_filter_batches(&filters);
+
+    assert_eq!(
+        batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+        [128, 128, 1]
+    );
+    assert_eq!(batches.concat(), filters);
 }

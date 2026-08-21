@@ -4,7 +4,7 @@ import { Check, Info } from "lucide-react";
 
 import {
   useAcpAuthMethodsQuery,
-  useAcpRuntimesQuery,
+  useAcpRuntimesQueryForced,
   useConnectAcpRuntimeMutation,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
@@ -51,9 +51,9 @@ type InstallResultState = {
 type InstallResultsState = Record<string, InstallResultState>;
 
 function useSetupStepState(): SetupStepState {
-  const runtimesQuery = useAcpRuntimesQuery();
+  const runtimesQuery = useAcpRuntimesQueryForced();
   const items = runtimesQuery.data ?? [];
-  const isChecking = runtimesQuery.isLoading;
+  const isChecking = runtimesQuery.isFetching;
   const errorMessage =
     runtimesQuery.error instanceof Error ? runtimesQuery.error.message : null;
 
@@ -109,7 +109,11 @@ function RuntimeStatus({
       runtime.authStatus.status === "logged_out",
   });
   const connectMutation = useConnectAcpRuntimeMutation();
-  const runtimesQuery = useAcpRuntimesQuery();
+  // Child rows share the surface owner's forced query state + refresh callback
+  // (`useSetupStepState` owns the single force-on-mount). Each row must not
+  // mount its own force effect, or onboarding entry re-runs discovery once per
+  // row instead of once for the surface.
+  const runtimesQuery = useAcpRuntimesQueryForced({ forceOnMount: false });
   const [isWaitingForSignIn, setIsWaitingForSignIn] = React.useState(false);
   const [didSignInCheckTimeOut, setDidSignInCheckTimeOut] =
     React.useState(false);
@@ -125,7 +129,7 @@ function RuntimeStatus({
     if (!isWaitingForSignIn) return;
 
     const interval = window.setInterval(() => {
-      void runtimesQuery.refetch();
+      void runtimesQuery.forceRefresh();
     }, 2_000);
     const timeout = window.setTimeout(() => {
       setIsWaitingForSignIn(false);
@@ -136,7 +140,7 @@ function RuntimeStatus({
       window.clearInterval(interval);
       window.clearTimeout(timeout);
     };
-  }, [isWaitingForSignIn, runtimesQuery.refetch]);
+  }, [isWaitingForSignIn, runtimesQuery.forceRefresh]);
   const authMethods = getOnboardingAuthMethods(
     runtime,
     methodsQuery.data?.methods ?? [],
@@ -157,7 +161,7 @@ function RuntimeStatus({
             if (didSignInCheckTimeOut) {
               setDidSignInCheckTimeOut(false);
               setIsWaitingForSignIn(true);
-              void runtimesQuery.refetch();
+              void runtimesQuery.forceRefresh();
               return;
             }
             if (!authMethod) {
@@ -215,6 +219,40 @@ function RuntimeStatus({
   }
 
   if (runtimeIsReadyForOnboarding(runtime)) {
+    // Cached readiness must not read as freshly confirmed while a warm forced
+    // probe is revalidating (or has rejected) over it. `runtimesQuery` shares
+    // the surface owner's forced-query state, so its fetching/error flags track
+    // the in-flight recheck. Pending → a visible CHECKING… state; a warm
+    // rejection → a recheck affordance (never an unqualified READY). On success
+    // both clear and READY returns. Next stays gated by isChecking/errorMessage
+    // in SetupStepContent, so this only governs the per-card claim.
+    if (runtimesQuery.isFetching) {
+      return (
+        <div
+          aria-label={`Rechecking ${runtime.label}`}
+          className="flex h-5 items-center gap-2 rounded-full bg-[#EBEFEF] px-2.5 font-mono text-badge font-normal uppercase text-foreground"
+          data-testid={`onboarding-runtime-rechecking-${runtime.id}`}
+          role="status"
+        >
+          <Spinner className="h-3 w-3 border-2 text-foreground" />
+          CHECKING…
+        </div>
+      );
+    }
+    if (runtimesQuery.isError) {
+      return (
+        <Button
+          aria-label={`Check ${runtime.label} again`}
+          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+          data-testid={`onboarding-runtime-recheck-${runtime.id}`}
+          onClick={() => void runtimesQuery.forceRefresh()}
+          type="button"
+          variant="ghost"
+        >
+          CHECK AGAIN
+        </Button>
+      );
+    }
     return (
       <Tooltip>
         <TooltipTrigger asChild>
@@ -244,7 +282,7 @@ function RuntimeStatus({
         aria-label={`Check ${runtime.label} again`}
         className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
         disabled={runtimesQuery.isFetching}
-        onClick={() => void runtimesQuery.refetch()}
+        onClick={() => void runtimesQuery.forceRefresh()}
         type="button"
         variant="ghost"
       >
@@ -653,7 +691,10 @@ function RuntimeProvidersSection({
         )}
 
         {errorMessage ? (
-          <p className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive">
+          <p
+            className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive"
+            data-testid="onboarding-setup-error"
+          >
             {errorMessage}
           </p>
         ) : null}
@@ -724,7 +765,11 @@ function SetupStepContent({
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-setup-next"
-          disabled={readyRuntimeIds.length === 0}
+          disabled={
+            readyRuntimeIds.length === 0 ||
+            runtimeProviders.isChecking ||
+            !!runtimeProviders.errorMessage
+          }
           onClick={() => actions.next(readyRuntimeIds)}
           type="button"
         >

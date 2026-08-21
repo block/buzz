@@ -875,47 +875,30 @@ pub struct ThreadTags {
 
 /// Parse NIP-10 thread tags from a Nostr event.
 ///
-/// Detection logic (per research doc §4c):
-/// - Find an `e` tag with `root` marker → its value is `root_event_id`
-/// - Find an `e` tag with `reply` marker → its value is `parent_event_id`
-/// - If only `reply` marker found (direct reply to root), root == parent
-/// - `p` tags → mentioned pubkeys
+/// Marker parsing and the (root, reply) → (root, parent) collapse are delegated
+/// to [`buzz_core::nip10`] so ACP anchoring reads ancestry exactly as relay
+/// ingest does. Only `p`-tag mention collection is local to ACP.
 ///
-/// NOTE: Only handles NIP-10 marker-based format (preferred). The deprecated
-/// positional format (no markers, `["e", id, relay_url]`) is not supported —
-/// Buzz always generates marker-based tags (see relay messages.rs:762-783).
+/// Consequences of sharing the resolver:
+/// - A malformed (non-64-hex) marker id is ignored, never a thread link —
+///   restoring parity with ingest (ACP previously counted it).
+/// - A lone `root` marker (no `reply`) is top-level, not a reply — again
+///   matching ingest.
 pub fn parse_thread_tags(event: &Event) -> ThreadTags {
-    let mut root = None;
-    let mut reply = None;
-    let mut mentions = Vec::new();
-
-    for tag in event.tags.iter() {
-        let parts = tag.as_slice();
-        match parts.first().map(|s| s.as_str()) {
-            Some("e") if parts.len() >= 4 => {
-                let id = &parts[1];
-                let marker = &parts[3];
-                match marker.as_str() {
-                    "root" => root = Some(id.clone()),
-                    "reply" => reply = Some(id.clone()),
-                    _ => {}
-                }
-            }
-            Some("p") if parts.len() >= 2 => {
-                mentions.push(parts[1].clone());
-            }
-            _ => {}
-        }
-    }
-
-    // For direct replies to root: single "reply" tag, no "root" tag.
-    // In that case, root == parent.
-    let (root_event_id, parent_event_id) = match (root, reply) {
-        (Some(r), Some(p)) => (Some(r), Some(p)),
-        (Some(r), None) => (Some(r.clone()), Some(r)),
-        (None, Some(p)) => (Some(p.clone()), Some(p)),
-        (None, None) => (None, None),
+    let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
+    let (root_event_id, parent_event_id) = match markers.resolve() {
+        Some((root, parent)) => (Some(root), Some(parent)),
+        None => (None, None),
     };
+
+    let mentions = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let parts = tag.as_slice();
+            (parts.len() >= 2 && parts[0] == "p").then(|| parts[1].clone())
+        })
+        .collect();
 
     ThreadTags {
         root_event_id,
@@ -3192,28 +3175,31 @@ mod tests {
     #[test]
     fn test_parse_thread_tags_direct_reply() {
         // Direct reply to root: single "reply" tag.
+        let root = "a".repeat(64);
         let event = make_event_with_tags(
             "reply to root",
-            vec![vec!["e".into(), "abc123".into(), "".into(), "reply".into()]],
+            vec![vec!["e".into(), root.clone(), "".into(), "reply".into()]],
         );
         let tags = parse_thread_tags(&event);
-        assert_eq!(tags.root_event_id.as_deref(), Some("abc123"));
-        assert_eq!(tags.parent_event_id.as_deref(), Some("abc123"));
+        assert_eq!(tags.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(tags.parent_event_id.as_deref(), Some(root.as_str()));
     }
 
     #[test]
     fn test_parse_thread_tags_nested_reply() {
         // Nested reply: root + reply tags.
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
         let event = make_event_with_tags(
             "nested reply",
             vec![
-                vec!["e".into(), "root123".into(), "".into(), "root".into()],
-                vec!["e".into(), "parent456".into(), "".into(), "reply".into()],
+                vec!["e".into(), root.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent.clone(), "".into(), "reply".into()],
             ],
         );
         let tags = parse_thread_tags(&event);
-        assert_eq!(tags.root_event_id.as_deref(), Some("root123"));
-        assert_eq!(tags.parent_event_id.as_deref(), Some("parent456"));
+        assert_eq!(tags.root_event_id.as_deref(), Some(root.as_str()));
+        assert_eq!(tags.parent_event_id.as_deref(), Some(parent.as_str()));
     }
 
     #[test]
@@ -3231,15 +3217,36 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_thread_tags_root_only() {
-        // Only root marker, no reply marker — root == parent.
+    fn test_parse_thread_tags_root_only_is_top_level() {
+        // Only a `root` marker, no `reply` — top-level, matching ingest. A lone
+        // `root` tag does not anchor a reply (behavior change from the old
+        // hand-rolled parser, which treated root == parent here).
+        let root = "a".repeat(64);
         let event = make_event_with_tags(
-            "reply",
-            vec![vec!["e".into(), "root123".into(), "".into(), "root".into()]],
+            "root only",
+            vec![vec!["e".into(), root, "".into(), "root".into()]],
         );
         let tags = parse_thread_tags(&event);
-        assert_eq!(tags.root_event_id.as_deref(), Some("root123"));
-        assert_eq!(tags.parent_event_id.as_deref(), Some("root123"));
+        assert!(tags.root_event_id.is_none());
+        assert!(tags.parent_event_id.is_none());
+    }
+
+    #[test]
+    fn test_parse_thread_tags_malformed_id_is_not_a_thread_link() {
+        // A non-64-hex marker id is ignored — parity with relay ingest, which
+        // never treats a malformed id as a thread link.
+        let event = make_event_with_tags(
+            "malformed marker",
+            vec![vec![
+                "e".into(),
+                "garbage".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let tags = parse_thread_tags(&event);
+        assert!(tags.root_event_id.is_none());
+        assert!(tags.parent_event_id.is_none());
     }
 
     #[test]
@@ -3312,7 +3319,7 @@ mod tests {
             "yes go ahead",
             vec![vec![
                 "e".into(),
-                "root123".into(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 "".into(),
                 "reply".into(),
             ]],
@@ -3330,7 +3337,9 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(prompt.contains("Scope: thread"));
-        assert!(prompt.contains("Thread root: root123"));
+        assert!(prompt.contains(
+            "Thread root: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
     }
 
     #[test]
@@ -3340,7 +3349,7 @@ mod tests {
             "yes go ahead",
             vec![vec![
                 "e".into(),
-                "root123".into(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 "".into(),
                 "reply".into(),
             ]],
@@ -3645,7 +3654,7 @@ mod tests {
             "sounds good, do it",
             vec![vec![
                 "e".into(),
-                "root123".into(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 "".into(),
                 "reply".into(),
             ]],
@@ -3698,7 +3707,9 @@ mod tests {
         );
         // Thread structural info should be present.
         assert!(
-            prompt.contains("Thread root: root123"),
+            prompt.contains(
+                "Thread root: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
             "DM reply should include thread root"
         );
         // Thread context should be included.
@@ -3712,7 +3723,7 @@ mod tests {
             "follow up",
             vec![vec![
                 "e".into(),
-                "root123".into(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 "".into(),
                 "reply".into(),
             ]],
@@ -5310,7 +5321,7 @@ mod tests {
             "reply in thread",
             vec![vec![
                 "e".into(),
-                "root123".into(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 "".into(),
                 "reply".into(),
             ]],

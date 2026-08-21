@@ -1,6 +1,7 @@
 import { Info } from "lucide-react";
 import * as React from "react";
 
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
 /**
@@ -13,9 +14,11 @@ import { Button } from "@/shared/ui/button";
  * inspects here is byte-identical to what gets signed under their key.
  */
 export function AgentContextPayloadPreview({
+  iconOnly = false,
   payload,
   triggerLabel,
 }: {
+  iconOnly?: boolean;
   payload: string;
   triggerLabel: string;
 }) {
@@ -25,8 +28,14 @@ export function AgentContextPayloadPreview({
   return (
     <div className="relative shrink-0">
       <Button
+        aria-label={iconOnly ? triggerLabel : undefined}
         aria-expanded={open}
-        className="h-7 gap-1 rounded-full px-2 text-xs text-muted-foreground"
+        className={cn(
+          "h-7 rounded-full text-muted-foreground",
+          iconOnly
+            ? "w-7 p-0 text-muted-foreground/75 hover:text-muted-foreground focus-visible:text-muted-foreground"
+            : "gap-1 px-2 text-xs",
+        )}
         data-testid="agent-context-preview-trigger"
         onClick={() => setOpen((value) => !value)}
         size="sm"
@@ -34,8 +43,8 @@ export function AgentContextPayloadPreview({
         type="button"
         variant="ghost"
       >
-        <Info className="h-3.5 w-3.5" />
-        {triggerLabel}
+        <Info className={iconOnly ? "h-3 w-3" : "h-3.5 w-3.5"} />
+        {iconOnly ? null : triggerLabel}
       </Button>
       {open ? (
         <div

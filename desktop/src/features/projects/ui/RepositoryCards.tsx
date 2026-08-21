@@ -15,10 +15,10 @@ import {
 } from "@/features/projects/lib/projectRepoHost";
 import { repositoryShareLink } from "@/features/projects/lib/projectShareLinks";
 import {
-  formatExactTimestamp,
-  listRowDescription,
-  relativeTime,
-} from "@/features/projects/lib/projectsViewHelpers";
+  selectionItemFromRepository,
+  type ProjectSelectionItem,
+} from "@/features/projects/lib/projectSelection";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
@@ -38,6 +38,7 @@ import {
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
 import { GitHubMark } from "./GitHubMark";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
+import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { projectTerminalLabel } from "./useOpenProjectTerminal";
 
 export type RepositoryListItem = {
@@ -50,6 +51,7 @@ type RepositoryItemProps = RepositoryListItem & {
   onOpen: (project: Project, repository: Repository) => void;
   onOpenTerminal: (repository: Repository) => void;
   profiles?: UserProfileLookup;
+  selectionRangeItems?: ProjectSelectionItem[];
   summary?: ProjectActivitySummary;
 };
 
@@ -149,27 +151,6 @@ function RepositoryIdentity({
   );
 }
 
-function RepositoryUpdatedLabel({
-  repository,
-  summary,
-}: Pick<RepositoryItemProps, "repository" | "summary">) {
-  const updatedAt = summary?.updatedAt || repository.createdAt;
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="whitespace-nowrap text-xs leading-4 text-muted-foreground/70">
-          {relativeTime(updatedAt)}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>
-        {summary?.latestCommit
-          ? `${summary.latestCommit.title || summary.latestCommit.commit.slice(0, 7)} · ${formatExactTimestamp(summary.latestCommit.createdAt)}`
-          : `Created ${formatExactTimestamp(repository.createdAt)}`}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 function repositoryPeople(
   repository: Repository,
   summary: ProjectActivitySummary | undefined,
@@ -246,16 +227,21 @@ export function RepositoryGridCard(props: RepositoryItemProps) {
             />
           </div>
         </div>
-        <p className="line-clamp-2 min-h-10 py-3 text-sm text-muted-foreground">
+        <p
+          className={cn(
+            PROJECT_GRID_CARD_BODY_CLASS,
+            "my-2 text-muted-foreground",
+          )}
+          data-testid="projects-grid-card-body"
+        >
           {repository.description || "A repository in this project."}
         </p>
-        <div className="pointer-events-auto mt-auto flex items-center justify-between gap-3">
+        <div className="pointer-events-auto mt-auto">
           <ProjectPeopleStack
             profiles={profiles}
             pubkeys={repositoryPeople(repository, summary)}
             workOwnerPubkey={repository.owner}
           />
-          <RepositoryUpdatedLabel repository={repository} summary={summary} />
         </div>
         <div className="mt-2">
           <ProjectStatsRow summary={summary} />
@@ -276,25 +262,41 @@ export function RepositoryListRow(props: RepositoryItemProps) {
     profiles,
     project,
     repository,
+    selectionRangeItems,
     summary,
   } = props;
   const updatedAt = summary?.updatedAt || repository.createdAt;
+  const selectionItem = selectionItemFromRepository({
+    channelId: repository.channelId ?? project.projectChannelId,
+    id: repository.id,
+    owner: repository.owner,
+    shareLink: repositoryShareLink(repository),
+    title: repository.name,
+  });
   return (
     <ProjectEntityListRow
-      affiliation={project.name}
-      affiliationTestId="repositories-row-project"
+      beforeDate={
+        <div className="w-44" data-testid="repositories-row-activity-bar">
+          <ProjectActivityBar summary={summary} />
+        </div>
+      }
       dateSeconds={updatedAt}
       dateTestId="repositories-row-date"
-      description={listRowDescription(repository.description, repository.name)}
-      descriptionTestId="repositories-row-description"
       icon={<RepositoryHostIcon compact repository={repository} />}
       onClick={() => onOpen(project, repository)}
       people={repositoryPeople(repository, summary)}
       peopleTestId="repositories-row-people"
       profiles={profiles}
+      selection={
+        selectionRangeItems
+          ? { item: selectionItem, rangeItems: selectionRangeItems }
+          : undefined
+      }
       testId={`repository-row-${repository.dtag}`}
       title={repository.name}
       titleAttr={repository.name}
+      titleSecondary={repository.description || undefined}
+      titleSecondaryTestId="repositories-row-description"
       trailing={
         <RepositoryActionsMenu
           hasLocal={hasLocal}

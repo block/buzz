@@ -12,6 +12,27 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+/**
+ * Inline message chips no longer change their label when metadata resolves, so
+ * a single hover can land while the chip is still the plain (untriggered) span.
+ * Re-arm the pointer until the metadata tooltip is mounted.
+ */
+async function hoverUntilMetadataTooltip(
+  page: import("@playwright/test").Page,
+  chip: import("@playwright/test").Locator,
+) {
+  await expect
+    .poll(async () => {
+      await page.getByTestId("chat-title").hover();
+      await chip.hover();
+      return page
+        .getByRole("tooltip")
+        .locator('[data-buzz-tooltip-metadata-content=""]')
+        .count();
+    })
+    .toBeGreaterThan(0);
+}
+
 async function navigateToWorkflows(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-workflows-view").click();
@@ -24,10 +45,22 @@ async function createWorkflow(
   name: string,
 ) {
   await page.getByRole("button", { name: "Create Workflow" }).click();
-  const dialog = page.getByRole("dialog");
+  const dialog = page.getByRole("dialog", { name: "Create workflow" });
   await expect(dialog).toBeVisible();
-  await dialog.getByLabel("Workflow name").fill(name);
-  await dialog.getByRole("button", { name: "Add step" }).click();
+
+  const channelList = page.getByTestId("channel-combobox-list");
+  await expect(channelList).toBeVisible();
+  await channelList
+    .getByRole("option", { name: "agents", exact: true })
+    .click();
+
+  await dialog.getByRole("button", { name: "Edit workflow name" }).click();
+  await dialog.getByRole("textbox", { name: "Workflow name" }).fill(name);
+  await dialog.getByRole("button", { name: "Save workflow name" }).click();
+
+  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Send Message" }).click();
+  await dialog.getByLabel("Message text").fill("Workflow notification");
   await dialog.getByRole("button", { name: "Create" }).click();
   await expect(dialog).not.toBeVisible();
 }
@@ -124,8 +157,15 @@ test("direct workflow detail links close back to workflows", async ({
 
   await page.goto(`/#/workflows/${workflowId}`);
 
-  await expect(page.getByTestId("workflow-detail-panel")).toBeVisible();
-  await page.getByRole("button", { name: "Close detail panel" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit workflow" });
+  await expect(dialog.getByText(workflowName, { exact: true })).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Trigger: Message Posted" }),
+  ).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Run history" })).toHaveCount(
+    0,
+  );
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
 
   await expect(page).toHaveURL(/#\/workflows$/);
   await expect(page.getByTestId("workflows-view")).toBeVisible();
@@ -370,11 +410,12 @@ test("mixed Buzz permalinks render as chips in the composer", async ({
 
   const chips = composerInput.locator('[data-composer-buzz-link=""]');
   await expect(chips).toHaveCount(5);
-  await expect(chips.nth(0)).toHaveText("general · mock-gen");
+  await expect(chips.nth(0)).toHaveText("general");
   await expect(chips.nth(1)).toHaveText("general");
   await expect(chips.nth(2)).toHaveText("buzz-world");
-  await expect(chips.nth(3)).toHaveText("buzz-world · cccccccc");
-  await expect(chips.nth(4)).toHaveText("buzz-world · bbbbbbbb");
+  // PR and issue chips both use repository identity only, matching rendered chips.
+  await expect(chips.nth(3)).toHaveText("buzz-world");
+  await expect(chips.nth(4)).toHaveText("buzz-world");
   await expect(chips.nth(1)).toHaveClass(/inline-chip-icon-channel/);
   await expect(chips.nth(2)).toHaveClass(/inline-chip-icon-repo/);
   await expect(chips.nth(3)).toHaveClass(/inline-chip-icon-pr/);
@@ -401,6 +442,11 @@ test("message links to visible root messages open the thread panel", async ({
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to general",
   );
+  await page.evaluate(() => {
+    (
+      window as Window & { __BUZZ_E2E_DEFER_GET_EVENT__?: string | null }
+    ).__BUZZ_E2E_DEFER_GET_EVENT__ = "mock-general-welcome";
+  });
 
   const link =
     "buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=mock-general-welcome";
@@ -419,7 +465,7 @@ test("message links to visible root messages open the thread panel", async ({
     );
   }, link);
   const composerLink = composerInput.locator('[data-composer-message-link=""]');
-  await expect(composerLink).toHaveText("general · mock-gen");
+  await expect(composerLink).toHaveText(/general(?: · mock-gen)?/);
   await expect(composerLink).toHaveClass(/mention-chip/);
   await expect(composerLink).toHaveClass(/inline-chip-icon-message/);
   await expect(composerLink).toHaveAttribute("data-buzz-link", "");
@@ -433,14 +479,122 @@ test("message links to visible root messages open the thread panel", async ({
     .last();
   await expect(linkMessage).toBeVisible();
   const rootThreadLink = linkMessage.getByRole("button", {
-    name: "Open message mock-gen in channel general",
+    name: "Open message in channel general",
   });
-  await expect(rootThreadLink).toHaveText("general · mock-gen");
+  await expect(rootThreadLink).toHaveText("general");
+  const pendingChipBox = await rootThreadLink.boundingBox();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number })
+            .__BUZZ_E2E_GET_EVENT_CALL_COUNT__ ?? 0,
+      ),
+    )
+    .toBe(1);
+  await page.evaluate(() => {
+    (
+      window as Window & { __BUZZ_E2E_RELEASE_GET_EVENT__?: () => number }
+    ).__BUZZ_E2E_RELEASE_GET_EVENT__?.();
+  });
+  await expect(rootThreadLink).toHaveText("general");
   await expect(rootThreadLink).toHaveClass(/mention-chip/);
+  await expect(rootThreadLink).toHaveClass(/wrapping-inline-chip/);
+  await expect(rootThreadLink).toHaveCSS("display", "inline");
+  await expect(rootThreadLink).not.toHaveAttribute("title");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__?.filter(
+            ({ command }) => command === "get_event",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
+  await hoverUntilMetadataTooltip(page, rootThreadLink);
+  const messageTooltip = page.getByRole("tooltip");
+  await expect(
+    messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText("Welcome to general");
+  // The tooltip proves metadata resolved; the inline chip must still carry the
+  // channel label at the exact width it had while the fetch was in flight, and
+  // never the fetched snippet or the truncated event hash.
+  await expect(rootThreadLink).toHaveText("general");
+  expect((await rootThreadLink.boundingBox())?.width).toBe(
+    pendingChipBox?.width,
+  );
+  await expect(
+    messageTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveClass(/line-clamp-3/);
+  const messageFooter = messageTooltip.locator(
+    '[data-buzz-tooltip-metadata-type=""]',
+  );
+  await expect(messageFooter).toHaveText(
+    /#general · .+ · (just now|\d+[mhdw] ago)/,
+  );
+  await expect(messageFooter).toHaveCSS("white-space", "nowrap");
+  await expect(messageFooter).toHaveCSS("overflow", "hidden");
+  await expect(messageFooter).toHaveCSS("text-overflow", "ellipsis");
+  const messageChipBox = await rootThreadLink.boundingBox();
+  const messageTooltipBox = await messageTooltip.boundingBox();
+  if (!messageChipBox || !messageTooltipBox) {
+    throw new Error("Expected visible message chip and tooltip");
+  }
+  expect(
+    Math.abs(
+      messageTooltipBox.x +
+        messageTooltipBox.width / 2 -
+        (messageChipBox.x + messageChipBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
+  await page.getByTestId("chat-title").hover();
+  await rootThreadLink.hover();
+  await expect(
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText("Welcome to general");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__?.filter(
+            ({ command }) => command === "get_event",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
   const randomChannelLink = linkMessage.getByRole("button", {
     name: "Open channel random",
   });
   await expect(randomChannelLink).toBeVisible();
+  await expect(randomChannelLink).toHaveClass(/wrapping-inline-chip/);
+  await expect(randomChannelLink).toHaveCSS("display", "inline");
+  await expect(
+    randomChannelLink.locator(".inline-chip-leading-fragment"),
+  ).toHaveText("r");
+  await expect(randomChannelLink).not.toHaveAttribute("title");
+  await randomChannelLink.hover();
+  const channelTooltip = page.getByRole("tooltip");
+  await expect(
+    channelTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText("Off-topic, fun stuff");
+  const channelFooter = channelTooltip.locator(
+    '[data-buzz-tooltip-metadata-type=""]',
+  );
+  await expect(channelFooter).toHaveText("Public channel");
+  await expect(channelFooter).toHaveCSS("white-space", "normal");
+  await expect(channelFooter).toHaveCSS("overflow-wrap", "anywhere");
+  await rootThreadLink.hover();
   await rootThreadLink.click({ button: "right" });
 
   const linkMenu = page.locator("[data-buzz-link-context-menu]");
@@ -481,6 +635,101 @@ test("message links to visible root messages open the thread panel", async ({
   );
 });
 
+test("direct-message tooltip metadata stays on one physical line", async ({
+  page,
+}) => {
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  const dmMessageId = "mock-dm-link-one-line";
+
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await page.evaluate((id) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "alice-tyler",
+      content: "DM source message",
+      id,
+    });
+  }, dmMessageId);
+
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`DM link buzz://message?channel=${dmChannelId}&id=${dmMessageId}`);
+  await page.getByTestId("send-message").click();
+
+  const dmLink = page
+    .getByTestId("message-row")
+    .filter({ hasText: "DM link" })
+    .last()
+    .getByRole("button", { name: "Open message in channel alice-tyler" });
+  await expect(dmLink).toHaveText("alice-tyler");
+  await hoverUntilMetadataTooltip(page, dmLink);
+
+  const footer = page
+    .getByRole("tooltip")
+    .locator('[data-buzz-tooltip-metadata-type=""]');
+  await expect(footer).toContainText("Direct message with alice-tyler");
+  await expect(footer).toHaveCSS("white-space", "nowrap");
+  await expect(footer).toHaveCSS("overflow", "hidden");
+  await expect(footer).toHaveCSS("text-overflow", "ellipsis");
+  await expect
+    .poll(() =>
+      footer.evaluate((element) => {
+        const lineHeight = Number.parseFloat(
+          getComputedStyle(element).lineHeight,
+        );
+        return {
+          fitsOneLine: element.scrollHeight <= Math.ceil(lineHeight),
+          heightIsClipped: element.clientHeight === element.scrollHeight,
+        };
+      }),
+    )
+    .toEqual({ fitsOneLine: true, heightIsClipped: true });
+});
+
+test("message links explain when preview metadata is unavailable", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const missingMessageId = "f".repeat(64);
+  await page
+    .getByTestId("message-input")
+    .fill(
+      `Missing preview buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=${missingMessageId}`,
+    );
+  await page.getByTestId("send-message").click();
+
+  const linkMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Missing preview" })
+    .last();
+  const missingMessageLink = linkMessage.getByRole("button", {
+    name: "Open message in channel general",
+  });
+  await expect(missingMessageLink).toHaveAccessibleName(
+    "Open message in channel general",
+  );
+  await expect(missingMessageLink).toHaveText("general");
+  // The label is metadata-independent now, so gate the hover on the state the
+  // failed lookup does change: the unavailable styling.
+  await expect(missingMessageLink).toHaveClass(/buzz-link-unavailable/);
+  await missingMessageLink.hover();
+  const unavailableTooltip = page.getByRole("tooltip");
+  await expect(unavailableTooltip).toHaveText("Message unavailable");
+  await expect(unavailableTooltip).toHaveCSS("pointer-events", "none");
+
+  const tooltipBox = await unavailableTooltip.boundingBox();
+  if (!tooltipBox) throw new Error("Unavailable tooltip bounds missing");
+  await page.mouse.move(
+    tooltipBox.x + tooltipBox.width / 2,
+    tooltipBox.y + tooltipBox.height / 2,
+  );
+  await expect(unavailableTooltip).toHaveCount(0);
+});
+
 test("message links reopen a closed thread when the same messageId is already in the URL", async ({
   page,
 }) => {
@@ -511,9 +760,9 @@ test("message links reopen a closed thread when the same messageId is already in
     .last();
   await expect(linkMessage).toBeVisible();
   const rootThreadLink = linkMessage.getByRole("button", {
-    name: "Open message mock-gen in channel general",
+    name: "Open message in channel general",
   });
-  await expect(rootThreadLink).toHaveText("general · mock-gen");
+  await expect(rootThreadLink).toHaveText("general");
   await rootThreadLink.click();
 
   await expect(threadPanel).toBeVisible();

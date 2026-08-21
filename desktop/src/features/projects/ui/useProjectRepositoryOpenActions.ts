@@ -1,9 +1,11 @@
-import { openPath } from "@tauri-apps/plugin-opener";
 import * as React from "react";
 import { toast } from "sonner";
 
 import type { Repository } from "@/features/projects/hooks";
-import { openProjectMergeRecoveryTerminal } from "@/shared/api/projectGit";
+import {
+  openProjectMergeRecoveryTerminal,
+  openProjectRepositoryFolder,
+} from "@/shared/api/projectGit";
 import { useOpenProjectTerminal } from "./useOpenProjectTerminal";
 
 type MergeRecoveryInput = {
@@ -36,20 +38,25 @@ export function useProjectRepositoryOpenActions({
   }, [activeBranch, hasLocalCheckout, openTerminal, repository]);
 
   const handleOpenLocalRepository = React.useCallback(async () => {
-    if (!localRepositoryPath) {
+    const cloneUrl = repository?.cloneUrls[0];
+    if (!localRepositoryPath || !repository || !cloneUrl) {
       toast.error("Couldn’t open repository folder", {
         description: "Buzz could not find this repository’s local checkout.",
       });
       return;
     }
     try {
-      await openPath(localRepositoryPath);
+      await openProjectRepositoryFolder({
+        cloneUrl,
+        projectDtag: repository.dtag,
+        reposDir,
+      });
     } catch {
       toast.error("Couldn’t open repository folder", {
         description: "Buzz could not open this checkout in your file browser.",
       });
     }
-  }, [localRepositoryPath]);
+  }, [localRepositoryPath, repository, reposDir]);
 
   const handleOpenMergeRecoveryTerminal = React.useCallback(
     async (input: MergeRecoveryInput) => {
