@@ -114,15 +114,16 @@ async function createWorkflow(
   }
 
   await dialog.getByRole("button", { name: "Create" }).click();
-  const activationConfirmation = page.getByRole("alertdialog", {
-    name: "Enable this workflow now?",
-  });
-  await activationConfirmation
-    .getByRole("button", {
-      name:
-        options?.enabled === false ? "Create disabled" : "Enable and create",
-    })
-    .click();
+  if (!options?.trigger || options.trigger === "message_posted") {
+    const activationConfirmation = page.getByRole("alertdialog", {
+      name: "This workflow may run often",
+    });
+    await activationConfirmation
+      .getByRole("button", {
+        name: options?.enabled === false ? "Keep off" : "Turn on",
+      })
+      .click();
+  }
 
   await expect(
     page.getByRole("heading", { name: "Create Workflow" }),
@@ -136,6 +137,27 @@ test("navigates to workflows view and shows the empty create tile", async ({
 
   await expect(page.getByTestId("new-workflow-card")).toBeVisible();
   await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
+});
+
+test("creates a narrowly triggered workflow without an activation warning", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+  await createWorkflow(page, `safe_webhook_${Date.now()}`, {
+    trigger: "webhook",
+  });
+
+  await expect(
+    page.getByTestId("workflow-activation-confirmation"),
+  ).toHaveCount(0);
+  const yaml = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((candidate) => candidate.command === "create_workflow");
+    return (call?.payload as { yamlDefinition?: string } | undefined)
+      ?.yamlDefinition;
+  });
+  expect(parseYaml(yaml ?? "").enabled).not.toBe(false);
 });
 
 test("creation reveals the trigger pane only after a one-shot channel pick", async ({
@@ -539,7 +561,7 @@ test("duplicates a workflow", async ({ page }) => {
   await selectWorkflowChannel(page, dialog);
   await dialog.getByRole("button", { name: "Create copy" }).click();
   const activationConfirmation = page.getByRole("alertdialog", {
-    name: "Enable this workflow now?",
+    name: "This workflow may run often",
   });
   await expect(activationConfirmation).toBeVisible();
   await activationConfirmation.getByRole("button", { name: "Back" }).click();
@@ -556,7 +578,7 @@ test("duplicates a workflow", async ({ page }) => {
     .toBe(1);
   await dialog.getByRole("button", { name: "Create copy" }).click();
   await activationConfirmation
-    .getByRole("button", { name: "Create disabled" })
+    .getByRole("button", { name: "Keep off" })
     .click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
 

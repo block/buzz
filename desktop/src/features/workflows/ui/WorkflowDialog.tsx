@@ -41,6 +41,7 @@ import {
   type WorkflowFormBuilderHandle,
 } from "./WorkflowFormBuilder";
 import { WorkflowWebhookSecretDialog } from "./WorkflowWebhookSecretDialog";
+import { getWorkflowActivationWarning } from "./workflowActivationWarning";
 import { getWorkflowEnabled } from "./workflowDefinition";
 import type { WorkflowEditorPane } from "./workflowEditorPane";
 import {
@@ -454,7 +455,14 @@ export function WorkflowDialog({
       return;
     }
 
-    const disabledYaml = yamlWithWorkflowEnabled(yamlDefinition, false);
+    const enabledYaml = yamlWithWorkflowEnabled(yamlDefinition, true);
+    if (enabledYaml === null) return;
+    if (getWorkflowActivationWarning(enabledYaml) === null) {
+      void saveWorkflow(enabledYaml);
+      return;
+    }
+
+    const disabledYaml = yamlWithWorkflowEnabled(enabledYaml, false);
     if (disabledYaml === null) return;
     setPendingCreateYaml(disabledYaml);
     setActivationConfirmationOpen(true);
@@ -534,6 +542,10 @@ export function WorkflowDialog({
     setYamlDefinition(nextYaml);
   }, [mutation.reset, workflowEnabled]);
   const showChannelSelector = mode !== "edit";
+  const activationWarning =
+    pendingCreateYaml === null
+      ? null
+      : getWorkflowActivationWarning(pendingCreateYaml);
 
   return (
     <>
@@ -789,10 +801,12 @@ export function WorkflowDialog({
       >
         <AlertDialogContent data-testid="workflow-activation-confirmation">
           <AlertDialogHeader>
-            <AlertDialogTitle>Enable this workflow now?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {activationWarning?.title ?? "Turn on this workflow?"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Enabled workflows can run as soon as they’re created. You can
-              create it disabled and enable it later after reviewing the setup.
+              {activationWarning?.description ??
+                "Turn it on to let it run immediately, or keep it off until you’re ready."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -806,14 +820,14 @@ export function WorkflowDialog({
               type="button"
               variant="outline"
             >
-              Create disabled
+              Keep off
             </Button>
             <AlertDialogAction asChild>
               <Button
                 onClick={() => handleCreateActivation(true)}
                 type="button"
               >
-                Enable and create
+                Turn on
               </Button>
             </AlertDialogAction>
           </AlertDialogFooter>

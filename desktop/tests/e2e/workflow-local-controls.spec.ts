@@ -63,9 +63,11 @@ async function createEnabled(
 ) {
   await dialog.getByRole("button", { name: "Create" }).click();
   const confirmation = page.getByRole("alertdialog", {
-    name: "Enable this workflow now?",
+    name: "This workflow may run often",
   });
-  await confirmation.getByRole("button", { name: "Enable and create" }).click();
+  if (await confirmation.isVisible()) {
+    await confirmation.getByRole("button", { name: "Turn on" }).click();
+  }
 }
 
 async function reopenWorkflow(
@@ -92,7 +94,7 @@ test("confirms activation after create and preserves a safe disabled path", asyn
   ).toHaveCount(0);
   await dialog.getByRole("button", { name: "Create" }).click();
   const confirmation = page.getByRole("alertdialog", {
-    name: "Enable this workflow now?",
+    name: "This workflow may run often",
   });
   await expect(confirmation).toBeVisible();
   await expect(
@@ -114,7 +116,7 @@ test("confirms activation after create and preserves a safe disabled path", asyn
     .toBe(0);
 
   await dialog.getByRole("button", { name: "Create" }).click();
-  await confirmation.getByRole("button", { name: "Create disabled" }).click();
+  await confirmation.getByRole("button", { name: "Keep off" }).click();
   await expect(dialog).toBeHidden();
 
   const yaml = await page.evaluate(() => {
