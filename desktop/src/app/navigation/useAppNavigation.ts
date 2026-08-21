@@ -6,8 +6,7 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 
-import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
-import { resolveSearchHitDestination } from "@/app/navigation/resolveSearchHitDestination";
+import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
 import type { SearchHit } from "@/shared/api/types";
 
 type NavigationBehavior = {
@@ -377,28 +376,16 @@ export function useAppNavigation() {
          * Used by desktop-notification activation so a click is never
          * silently swallowed (block/buzz#3509). */
         force?: boolean;
+        /** Stop notification-driven routing when its owning lifecycle ends. */
+        signal?: AbortSignal;
       },
-    ) => {
-      cacheSearchHitEvent(hit);
-
-      const destination = await resolveSearchHitDestination(hit);
-      if (!destination) {
-        return false;
-      }
-
-      if (destination.kind === "forum-post") {
-        return goForumPost(destination.channelId, destination.postId, {
-          force: behavior?.force,
-          replyId: destination.replyId,
-        });
-      }
-
-      return goChannel(destination.channelId, {
+    ) =>
+      openSearchHitWithNavigation(hit, {
         force: behavior?.force,
-        messageId: destination.messageId,
-        threadRootId: destination.threadRootId,
-      });
-    },
+        goChannel,
+        goForumPost,
+        signal: behavior?.signal,
+      }),
     [goChannel, goForumPost],
   );
 

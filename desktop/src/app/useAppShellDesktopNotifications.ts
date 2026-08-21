@@ -150,13 +150,18 @@ export function useAppShellDesktopNotifications({
   const handleDesktopNotificationAction = React.useEffectEvent(
     async (
       target: import("@/features/notifications/lib/desktop").DesktopNotificationTarget,
+      signal: AbortSignal,
     ) => {
-      await activateDesktopNotificationTarget(target, {
-        goChannel,
-        goHome,
-        openSearchHit,
-        revealWindow: revealDesktopAppWindow,
-      });
+      await activateDesktopNotificationTarget(
+        target,
+        {
+          goChannel,
+          goHome,
+          openSearchHit,
+          revealWindow: revealDesktopAppWindow,
+        },
+        signal,
+      );
     },
   );
 
@@ -165,7 +170,7 @@ export function useAppShellDesktopNotifications({
     let isCancelled = false;
     let cleanup = () => {};
     const activationQueue = createDesktopNotificationActivationQueue(
-      (target) => handleDesktopNotificationAction(target),
+      (target, signal) => handleDesktopNotificationAction(target, signal),
       (error) => {
         console.error("Failed to activate desktop notification", error);
       },

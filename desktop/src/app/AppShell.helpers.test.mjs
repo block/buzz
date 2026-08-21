@@ -82,6 +82,25 @@ test("notification activation queue drops pending targets after cancellation", a
   assert.deepEqual(calls, ["first"]);
 });
 
+test("notification activation queue aborts an in-flight activation", async () => {
+  let observedSignal;
+  let resolveActivation;
+  const queue = createDesktopNotificationActivationQueue((_target, signal) => {
+    observedSignal = signal;
+    return new Promise((resolve) => {
+      resolveActivation = resolve;
+    });
+  });
+
+  queue.enqueue({ channelId: "first", eventId: null, kind: null });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(observedSignal.aborted, false);
+
+  queue.cancel();
+  assert.equal(observedSignal.aborted, true);
+  resolveActivation();
+});
+
 test("notification activation queue reports failures and continues", async () => {
   const calls = [];
   const errors = [];

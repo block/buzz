@@ -142,26 +142,29 @@ export function toSearchHit(
 }
 
 export function createDesktopNotificationActivationQueue(
-  activate: (target: DesktopNotificationTarget) => Promise<void>,
+  activate: (
+    target: DesktopNotificationTarget,
+    signal: AbortSignal,
+  ) => Promise<void>,
   onError?: (error: unknown) => void,
 ): {
   cancel: () => void;
   enqueue: (target: DesktopNotificationTarget) => void;
 } {
-  let isCancelled = false;
+  const controller = new AbortController();
   let pending = Promise.resolve();
 
   return {
     cancel: () => {
-      isCancelled = true;
+      controller.abort();
     },
     enqueue: (target) => {
       // Preserve native click order when macOS drains multiple queued targets.
       // Contain failures so one rejected navigation cannot poison later clicks.
       pending = pending
         .then(() => {
-          if (!isCancelled) {
-            return activate(target);
+          if (!controller.signal.aborted) {
+            return activate(target, controller.signal);
           }
         })
         .catch((error) => {
@@ -185,18 +188,23 @@ export async function activateDesktopNotificationTarget(
     goHome: () => Promise<unknown>;
     openSearchHit: (
       hit: SearchHit,
-      behavior?: { force?: boolean },
+      behavior?: { force?: boolean; signal?: AbortSignal },
     ) => Promise<unknown>;
     revealWindow: () => Promise<void>;
   },
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) {
+    return;
+  }
+
   let navigation: Promise<unknown>;
   if (!target.channelId) {
     navigation = actions.goHome();
   } else {
     const anchor = toSearchHit(target);
     navigation = anchor
-      ? actions.openSearchHit(anchor, { force: true })
+      ? actions.openSearchHit(anchor, { force: true, signal })
       : actions.goChannel(target.channelId, { force: true });
   }
 
