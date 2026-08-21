@@ -391,29 +391,12 @@ test("a manually mentioned agent becomes selected after the message sends", asyn
   const autoPinToast = page
     .locator("[data-sonner-toast][data-removed='false']")
     .filter({ hasText: "Morgarita will be mentioned automatically" });
-  await expect(autoPinToast).toContainText(
+  await expect(autoPinToast).not.toContainText(
     "Future messages in this channel will include this agent.",
   );
-  const toastDescription = autoPinToast.locator("[data-description]");
-  await expect(
-    toastDescription.getByRole("button", { name: "Undo" }),
-  ).toBeVisible();
-  await expect(
-    toastDescription.getByRole("button", { name: "Change this behavior" }),
-  ).toBeVisible();
-  await toastDescription
-    .getByRole("button", { name: "Change this behavior" })
-    .click();
-  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
-  await expect(composer.getByTestId("mention-options-trigger")).toHaveAttribute(
-    "aria-expanded",
-    "true",
-  );
-  await expect(
-    composer.getByTestId("mention-keep-agents-pinned-toggle"),
-  ).toBeVisible();
-  await composer.locator("[data-mention-picker-trigger]").click();
-  await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
+  const undoAction = autoPinToast.locator("[data-action]");
+  await expect(undoAction).toHaveRole("button");
+  await expect(undoAction).toHaveText("Undo");
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita hello"))
     .toContain(AGENT_A);
@@ -447,15 +430,22 @@ test("the auto-pin toast can undo and the picker can restore the agent", async (
   const autoPinToast = page
     .locator("[data-sonner-toast][data-removed='false']")
     .filter({ hasText: "Morgarita will be mentioned automatically" });
-  await autoPinToast
-    .locator("[data-description]")
-    .getByRole("button", { name: "Undo" })
-    .click();
+  await autoPinToast.locator("[data-action]").click();
 
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await expect(composer.getByTestId("mention-options-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(
+    composer.getByTestId("mention-keep-agents-pinned-toggle"),
+  ).toBeVisible();
 
+  await input.press("Escape");
+  await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
   await composer.locator("[data-mention-picker-trigger]").click();
   await composer
     .getByTestId("mention-autocomplete")

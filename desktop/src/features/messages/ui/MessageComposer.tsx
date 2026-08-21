@@ -325,40 +325,15 @@ function MessageComposerImpl({
           removePersistentAgentAudienceMember(audienceScope, pubkey);
         }
       };
-      const showAutoPinToast = (title: string, message: string) => {
-        let toastId: string | number | undefined;
-        const dismissToast = () => {
-          if (toastId !== undefined) toast.dismiss(toastId);
-        };
-        toastId = toast.success(title, {
-          description: (
-            <div>
-              <div>{message}</div>
-              <div className="mt-1 flex items-center gap-2">
-                <button
-                  className="cursor-pointer bg-transparent p-0 font-medium text-foreground underline decoration-foreground/40 underline-offset-2 hover:decoration-foreground"
-                  onClick={() => {
-                    undoAutomaticMentions();
-                    dismissToast();
-                  }}
-                  type="button"
-                >
-                  Undo
-                </button>
-                <span aria-hidden="true">·</span>
-                <button
-                  className="cursor-pointer bg-transparent p-0 font-medium text-foreground underline decoration-foreground/40 underline-offset-2 hover:decoration-foreground"
-                  onClick={() => {
-                    openMentionOptionsRef.current();
-                    dismissToast();
-                  }}
-                  type="button"
-                >
-                  Change this behavior
-                </button>
-              </div>
-            </div>
-          ),
+      const showAutoPinToast = (title: string) => {
+        toast.success(title, {
+          action: {
+            label: "Undo",
+            onClick: () => {
+              undoAutomaticMentions();
+              openMentionOptionsRef.current();
+            },
+          },
         });
       };
 
@@ -370,14 +345,12 @@ function MessageComposerImpl({
           displayName
             ? `${displayName} will be mentioned automatically`
             : "Agent will be mentioned automatically",
-          "Future messages in this channel will include this agent.",
         );
         return;
       }
 
       showAutoPinToast(
         `${newlyPinnedPubkeys.length} agents will be mentioned automatically`,
-        "Future messages in this channel will include these agents.",
       );
     },
     [
