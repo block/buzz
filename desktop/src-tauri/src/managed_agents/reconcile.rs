@@ -21,7 +21,7 @@
 use std::path::Path;
 
 use super::{
-    agent_events::build_agent_event,
+    agent_events::{build_agent_event, directory_record_for_readiness},
     persona_events::monotonic_created_at,
     retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
     ManagedAgentRecord,
@@ -41,7 +41,9 @@ pub(crate) fn reconcile_agents_to_events(
         return;
     };
 
-    match reconcile_agents_in_dir_at(&base_dir, keys, db_path) {
+    let personas = super::load_personas(app).unwrap_or_default();
+    let global = super::load_global_agent_config(app).unwrap_or_default();
+    match reconcile_agents_in_dir_at(&base_dir, keys, db_path, Some((&personas, &global))) {
         Ok(0) => {}
         Ok(reconciled) => {
             eprintln!(
@@ -67,13 +69,14 @@ pub(crate) fn reconcile_agents_to_events(
 /// Returns the number of agents (re)written to the retention store.
 #[cfg(test)]
 pub(crate) fn reconcile_agents_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
-    reconcile_agents_in_dir_at(base_dir, keys, &base_dir.join("retention.db"))
+    reconcile_agents_in_dir_at(base_dir, keys, &base_dir.join("retention.db"), None)
 }
 
 fn reconcile_agents_in_dir_at(
     base_dir: &Path,
     keys: &nostr::Keys,
     db_path: &Path,
+    readiness_inputs: Option<(&[super::AgentDefinition], &super::GlobalAgentConfig)>,
 ) -> Result<u32, String> {
     let store_path = base_dir.join("managed-agents.json");
     if !store_path.exists() {
@@ -104,7 +107,20 @@ fn reconcile_agents_in_dir_at(
             continue;
         }
 
-        if retain_agent_record(&conn, keys, record)? {
+        let projected = if let Some((personas, global)) = readiness_inputs {
+            let command = super::record_agent_command(record, personas);
+            let metadata = super::known_acp_runtime(&command);
+            let effective = super::resolve_effective_agent_env(record, personas, metadata, global);
+            let ready = record.backend != super::BackendKind::Local
+                || matches!(
+                    super::agent_readiness(&effective),
+                    super::AgentReadiness::Ready
+                );
+            directory_record_for_readiness(record, ready)
+        } else {
+            record.clone()
+        };
+        if retain_agent_record(&conn, keys, &projected)? {
             reconciled += 1;
         }
     }

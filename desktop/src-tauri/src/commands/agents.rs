@@ -6,15 +6,17 @@ use super::managed_agent_definition::validate_create_definition;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
+        agent_readiness, build_managed_agent_summary, current_instance_id,
+        discover_provider_candidates, ensure_persona_is_active, find_managed_agent_mut,
+        known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
         load_teams, managed_agent_avatar_url, normalize_agent_args, prepare_codex_task_binding,
-        provider_deploy, resolve_provider_binary, save_agents_with_codex_task_binding,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, BackendKind, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        provider_deploy, record_agent_command, resolve_effective_agent_env,
+        resolve_provider_binary, save_agents_with_codex_task_binding, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config,
+        AgentReadiness, BackendKind, CreateManagedAgentRequest, CreateManagedAgentResponse,
+        ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -54,7 +56,16 @@ pub(super) fn retain_managed_agent_pending(
         // Shared engine with the boot-time reconcile: projection content diff
         // (no republish for runtime-only churn) + monotonic created_at bump
         // past the retained head (NIP-AP step 3).
-        retain_agent_record(&conn, &scope.owner_keys, record).map(|_| ())
+        let personas = load_personas(app).unwrap_or_default();
+        let command = record_agent_command(record, &personas);
+        let metadata = known_acp_runtime(&command);
+        let global = load_global_agent_config(app).unwrap_or_default();
+        let effective = resolve_effective_agent_env(record, &personas, metadata, &global);
+        let ready = record.backend != BackendKind::Local
+            || matches!(agent_readiness(&effective), AgentReadiness::Ready);
+        let directory_record =
+            crate::managed_agents::agent_events::directory_record_for_readiness(record, ready);
+        retain_agent_record(&conn, &scope.owner_keys, &directory_record).map(|_| ())
     })();
     if let Err(e) = result {
         eprintln!("buzz-desktop: agent-retain: {e}");

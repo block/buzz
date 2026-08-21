@@ -190,6 +190,20 @@ with a TypeScript lookup table or an id comparison in a component.
    legacy instances may use a unique case-insensitive non-built-in display-name
    match, but ambiguous names must not expose a sync target. Running instances
    still require a restart after either persisted policy changes.
+   The ordinary instance `Save changes` path is also authoritative: when its
+   instruction-access mode or allowlist changes and a definition target can be
+   resolved, it updates the definition first so the existing propagation path
+   keeps every linked instance aligned. The explicit buttons are recovery and
+   direction-selection tools, not a mandatory second save step.
+14. **Only ready local instances advertise shared access.** The stored instance
+   policy remains the owner's requested policy, but the public kind:30177
+   directory projection must downgrade a NotReady/setup-mode instance to
+   owner-only with an empty allowlist. Otherwise other clients offer a shared
+   @mention target that cannot execute instructions. Interactive retention and
+   boot reconciliation use the same readiness-aware projection; once the
+   effective configuration becomes Ready, the requested public policy is
+   advertised again. Provider-backed remote instances are not evaluated with
+   local credentials and retain their requested public policy.
 
 ## The tests that enforce this
 

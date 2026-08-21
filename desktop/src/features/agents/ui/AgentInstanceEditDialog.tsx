@@ -643,6 +643,10 @@ export function AgentInstanceEditDialog({
     allowNonOwnerDm !== agent.allowNonOwnerDm ||
     (respondTo === "allowlist" &&
       respondToAllowlist.join(",") !== agent.respondToAllowlist.join(","));
+  const instructionAccessSettingsChanged =
+    respondTo !== agent.respondTo ||
+    (respondTo === "allowlist" &&
+      respondToAllowlist.join(",") !== agent.respondToAllowlist.join(","));
 
   async function handleUsePersonaAccess() {
     if (!accessSourcePersona || isSyncingPersonaAccess) return;
@@ -834,6 +838,31 @@ export function AgentInstanceEditDialog({
             ? allowNonOwnerDm
             : undefined,
       };
+
+      // Instance access is the effective runtime policy, while the linked
+      // definition is the default shown in the Agent list and inherited by
+      // sibling instances. A normal Save must keep both views aligned; the
+      // explicit sync buttons below are recovery tools, not a required second
+      // save step.
+      if (instructionAccessSettingsChanged && accessSourcePersona) {
+        await updatePersonaMutation.mutateAsync({
+          id: accessSourcePersona.id,
+          displayName: accessSourcePersona.displayName,
+          avatarUrl: accessSourcePersona.avatarUrl ?? undefined,
+          systemPrompt: accessSourcePersona.systemPrompt,
+          runtime: accessSourcePersona.runtime ?? undefined,
+          model: accessSourcePersona.model ?? undefined,
+          provider: accessSourcePersona.provider ?? undefined,
+          namePool: accessSourcePersona.namePool,
+          envVars: accessSourcePersona.envVars,
+          behavior: {
+            respondTo,
+            respondToAllowlist:
+              respondTo === "allowlist" ? respondToAllowlist : [],
+            parallelism: accessSourcePersona.parallelism ?? undefined,
+          },
+        });
+      }
 
       const result = await updateMutation.mutateAsync(input);
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {

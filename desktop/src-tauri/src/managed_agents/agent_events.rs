@@ -106,6 +106,58 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
     }
 }
 
+/// Build the record projection that is safe to advertise in the community
+/// agent directory. A setup-mode agent cannot execute instructions, so
+/// publishing its stored `anyone`/allowlist policy makes other clients offer
+/// an @mention target that will never answer. Keep the local policy intact for
+/// when configuration becomes ready, but advertise owner-only until then.
+pub(crate) fn directory_record_for_readiness(
+    record: &ManagedAgentRecord,
+    ready: bool,
+) -> ManagedAgentRecord {
+    let mut projected = record.clone();
+    (projected.respond_to, projected.respond_to_allowlist) = directory_access_for_readiness(
+        record.respond_to,
+        record.respond_to_allowlist.clone(),
+        ready,
+    );
+    projected
+}
+
+fn directory_access_for_readiness(
+    mode: RespondTo,
+    allowlist: Vec<String>,
+    ready: bool,
+) -> (RespondTo, Vec<String>) {
+    if ready {
+        (mode, allowlist)
+    } else {
+        (RespondTo::OwnerOnly, Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod readiness_projection_tests {
+    use super::*;
+
+    #[test]
+    fn not_ready_agent_is_advertised_owner_only_without_mutating_local_policy() {
+        let local_allowlist = vec!["a".repeat(64)];
+        let (mode, allowlist) =
+            directory_access_for_readiness(RespondTo::Anyone, local_allowlist.clone(), false);
+
+        assert_eq!(mode, RespondTo::OwnerOnly);
+        assert!(allowlist.is_empty());
+        assert_eq!(local_allowlist, vec!["a".repeat(64)]);
+    }
+
+    #[test]
+    fn ready_agent_keeps_public_access_policy() {
+        let (mode, _) = directory_access_for_readiness(RespondTo::Anyone, Vec::new(), true);
+        assert_eq!(mode, RespondTo::Anyone);
+    }
+}
+
 /// Build a kind:30177 event from a `ManagedAgentRecord`.
 ///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits. The
