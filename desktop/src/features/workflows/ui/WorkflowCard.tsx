@@ -21,8 +21,8 @@ import {
   getWorkflowDescription,
   getWorkflowDisplayStatus,
   getWorkflowEnabled,
+  getWorkflowCardLabel,
   getWorkflowPrimaryAction,
-  getWorkflowTriggerSummary,
   getWorkflowTriggerType,
 } from "./workflowDefinition";
 
@@ -89,7 +89,7 @@ export function WorkflowCard({
   onDelete,
 }: WorkflowCardProps) {
   const displayStatus = getWorkflowDisplayStatus(workflow);
-  const triggerSummary = getWorkflowTriggerSummary(workflow.definition);
+  const cardLabel = getWorkflowCardLabel(workflow.definition);
   const description = getWorkflowDescription(workflow.definition);
   const triggerType = getWorkflowTriggerType(workflow.definition);
   const actionType = getWorkflowPrimaryAction(workflow.definition);
@@ -151,11 +151,9 @@ export function WorkflowCard({
           </div>
         </div>
 
-        {triggerSummary ? (
-          <p className="mt-4 line-clamp-1 text-xs font-semibold text-muted-foreground">
-            {triggerSummary}
-          </p>
-        ) : null}
+        <p className="mt-4 line-clamp-2 text-sm font-semibold leading-snug text-muted-foreground">
+          {cardLabel}
+        </p>
         <h3 className="mt-1 line-clamp-4 text-xl font-bold leading-tight tracking-tight">
           {workflow.name}
         </h3>

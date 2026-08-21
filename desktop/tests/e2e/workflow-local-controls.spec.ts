@@ -40,11 +40,10 @@ async function selectTrigger(
 
 async function openTriggerInspector(
   dialog: import("@playwright/test").Locator,
-  trigger: string,
 ) {
   const menu = dialog.getByRole("button", { name: "Trigger event" });
   if (!(await menu.isVisible())) {
-    await dialog.getByRole("button", { name: `Trigger: ${trigger}` }).click();
+    await dialog.getByRole("button", { name: /^Trigger:/ }).click();
   }
   await expect(menu).toBeVisible();
 }
@@ -138,7 +137,7 @@ test("round-trips schedule presets and saves a custom UTC cron", async ({
   expect(definition.trigger).toEqual({ on: "schedule", interval: "15m" });
 
   await dialog.getByRole("tab", { name: "Form" }).click();
-  await openTriggerInspector(dialog, "Schedule");
+  await openTriggerInspector(dialog);
   await expect(
     dialog.getByRole("radio", { name: "Every 15 minutes" }),
   ).toBeChecked();
@@ -166,7 +165,7 @@ test("round-trips schedule presets and saves a custom UTC cron", async ({
     cron: "5 */2 * * 2-4",
   });
   await dialog.getByRole("tab", { name: "Form" }).click();
-  await openTriggerInspector(dialog, "Schedule");
+  await openTriggerInspector(dialog);
   await expect(
     dialog.getByRole("radio", { name: "Custom cron" }),
   ).toBeChecked();
@@ -177,7 +176,7 @@ test("round-trips schedule presets and saves a custom UTC cron", async ({
   await addMessageStep(page, dialog);
   await dialog.getByRole("button", { name: "Create" }).click();
   const reopened = await reopenWorkflow(page, name);
-  await openTriggerInspector(reopened, "Schedule");
+  await openTriggerInspector(reopened);
   await expect(
     reopened.getByRole("radio", { name: "Custom cron" }),
   ).toBeChecked();
@@ -205,7 +204,7 @@ test("round-trips and reopens structured message-text conditions", async ({
   expect(definition.trigger.filter).toBe(expression);
 
   await dialog.getByRole("tab", { name: "Form" }).click();
-  await openTriggerInspector(dialog, "Message Posted");
+  await openTriggerInspector(dialog);
   await expect(dialog.getByLabel("Match")).toHaveValue("ends_with");
   await expect(dialog.getByLabel("Message text")).toHaveValue(text);
   await dialog.getByRole("tab", { name: "Advanced" }).click();
@@ -217,9 +216,30 @@ test("round-trips and reopens structured message-text conditions", async ({
   await addMessageStep(page, dialog);
   await dialog.getByRole("button", { name: "Create" }).click();
   const reopened = await reopenWorkflow(page, name);
-  await openTriggerInspector(reopened, "Message Posted");
+  await openTriggerInspector(reopened);
   await expect(reopened.getByLabel("Match")).toHaveValue("ends_with");
   await expect(reopened.getByLabel("Message text")).toHaveValue(text);
+});
+
+test("renders deterministic trigger, step, and workflow-card summaries", async ({
+  page,
+}) => {
+  const name = `semantic_summaries_${Date.now()}`;
+  const dialog = await openCreateWorkflow(page, name);
+
+  await dialog.getByLabel("Message text").fill("deploy");
+  await expect(dialog.getByText("Message contains “deploy”")).toBeVisible();
+
+  await addMessageStep(page, dialog);
+  await expect(dialog.getByText("“Workflow notification”")).toBeVisible();
+  await dialog.getByRole("button", { name: "Create" }).click();
+
+  const card = page
+    .locator('[data-testid^="workflow-card-"]')
+    .filter({ hasText: name });
+  await expect(card).toContainText(
+    "When a message contains “deploy”, send “Workflow notification”",
+  );
 });
 
 test("round-trips manual author and reaction message IDs through save and reopen", async ({
@@ -251,12 +271,12 @@ test("round-trips manual author and reaction message IDs through save and reopen
   });
 
   await dialog.getByRole("tab", { name: "Form" }).click();
-  await openTriggerInspector(dialog, "Reaction Added");
+  await openTriggerInspector(dialog);
   await addMessageStep(page, dialog);
   await dialog.getByRole("button", { name: "Create" }).click();
 
   const reopened = await reopenWorkflow(page, name);
-  await openTriggerInspector(reopened, "Reaction Added");
+  await openTriggerInspector(reopened);
   await reopened.getByRole("button", { name: "Author pubkey" }).click();
   await expect(reopened.getByLabel("Author pubkey")).toHaveValue(author);
   await reopened.getByRole("button", { name: "Message event ID" }).click();
@@ -279,9 +299,9 @@ test("hides and clears message-text step conditions for schedule triggers", asyn
   await dialog.getByRole("button", { name: "Run controls" }).click();
   await dialog.getByLabel("Text to match").fill("deploy");
 
-  await dialog.getByRole("button", { name: "Trigger: Message Posted" }).click();
+  await dialog.getByRole("button", { name: /^Trigger:/ }).click();
   await selectTrigger(page, dialog, "Schedule");
-  await dialog.getByRole("button", { name: "Step 1: Send Message" }).click();
+  await dialog.getByRole("button", { name: /^Step 1:/ }).click();
   await dialog.getByRole("button", { name: "Run controls" }).click();
 
   await expect(dialog.getByLabel("Text to match")).toHaveCount(0);
@@ -310,7 +330,7 @@ test("keeps advanced and malformed definitions lossless", async ({ page }) => {
     ),
   );
   await dialog.getByRole("tab", { name: "Form" }).click();
-  await openTriggerInspector(dialog, "Message Posted");
+  await openTriggerInspector(dialog);
   await expect(dialog.getByRole("tab", { name: "Advanced" })).toHaveAttribute(
     "data-state",
     "active",

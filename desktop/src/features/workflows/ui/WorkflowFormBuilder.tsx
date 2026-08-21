@@ -24,6 +24,8 @@ import {
 import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
 import { WorkflowTriggerConditions } from "./WorkflowTriggerConditions";
+import { workflowStepDescription } from "./workflowStepDescription";
+import { workflowTriggerDescription } from "./workflowTriggerDescription";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
 import type { ParsedConditionExpression } from "./workflowConditionExpression";
@@ -620,10 +622,12 @@ export const WorkflowFormBuilder = React.forwardRef<
                   {scopeField ? <div className="mb-3">{scopeField}</div> : null}
                   <ol aria-label="Workflow sequence">
                     <WorkflowNode
-                      description={TRIGGER_LABELS[formState.trigger.on]}
+                      description={workflowTriggerDescription(
+                        formState.trigger,
+                      )}
                       disabled={disabled}
                       icon={<Zap className="h-4 w-4" />}
-                      label={`Trigger: ${TRIGGER_LABELS[formState.trigger.on]}`}
+                      label={`Trigger: ${workflowTriggerDescription(formState.trigger)}`}
                       onAddAfter={(action) => insertStep(0, action)}
                       onClick={() => selectNode({ type: "trigger" })}
                       selected={selectedNode?.type === "trigger"}
@@ -634,13 +638,13 @@ export const WorkflowFormBuilder = React.forwardRef<
                     {formState.steps.map((step, index) => {
                       const stepName = step.name?.trim();
                       const actionLabel = ACTION_LABELS[step.action];
-                      const nodeTitle = stepName || actionLabel;
+                      const nodeDescription = workflowStepDescription(step);
                       return (
                         <WorkflowNode
-                          description={nodeTitle}
+                          description={nodeDescription}
                           disabled={disabled}
                           key={step.id}
-                          label={`Step ${index + 1}: ${nodeTitle}`}
+                          label={`Step ${index + 1}: ${nodeDescription}`}
                           number={index + 1}
                           onAddAfter={(action) => insertStep(index + 1, action)}
                           onClick={() =>
