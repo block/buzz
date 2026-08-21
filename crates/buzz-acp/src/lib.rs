@@ -1638,7 +1638,7 @@ fn inactivity_expired(
 /// arms before their trailing `dispatch_pending`, so the clock reflects the
 /// most recent turn completion — not only the last dispatch.
 fn note_turn_settled(last_activity: &mut tokio::time::Instant) {
-    let _ = last_activity;
+    *last_activity = tokio::time::Instant::now();
 }
 
 /// Whether a woken lazy pool may be torn back down to the empty-slot state.
