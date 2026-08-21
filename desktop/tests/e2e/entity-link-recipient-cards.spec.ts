@@ -5,12 +5,9 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/entity-link-recipient-cards";
 
-// Regression coverage for buzz:// entity links posted WITHOUT sender
-// snapshot tags (CLI / agent senders): #3818 moved external-link previews to
-// sender-authored snapshots, which silently killed the recipient-side
-// buzz://pr|issue|repo cards from #4695. These cards resolve their titles
-// from the active relay itself, so they must render for recipients even when
-// the message carries no link-preview tags.
+// Regression coverage for Buzz-native entity links after standalone cards were
+// removed. Raw and authored entity links keep their inline navigation and
+// relay-backed metadata tooltips, while external sender snapshots still render.
 
 const ALICE_PUBKEY = TEST_IDENTITIES.alice.pubkey;
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
@@ -20,8 +17,9 @@ const PR_SUBJECT = "Restore recipient-side entity cards";
 const ISSUE_ID = `f0${"1a2b".repeat(15)}ee`; // 64-hex event id
 const ISSUE_SUBJECT =
   "Smoke test: issue tracking on relay-tools with a deliberately long title";
+const EXTERNAL_HREF = "https://example.com/entity-chip-control";
 
-test("agent-style message with angle-bracket buzz:// links renders entity cards without snapshot tags", async ({
+test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   page,
 }) => {
   await page.addInitScript(
@@ -75,7 +73,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   // Simulate an agent/CLI sender: plain kind-9 message with angle-bracket
   // buzz:// URLs in a Markdown list and NO link-preview snapshot tags.
   await page.evaluate(
-    ({ prId, issueId, alicePubkey }) => {
+    ({ prId, issueId, alicePubkey, externalHref }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         pubkey: alicePubkey,
@@ -85,11 +83,33 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
           `- Pull request with enough leading context to wrap: <buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools>`,
           `- Issue: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
           `- Repository: <buzz://repo?owner=${alicePubkey}&d=relay-tools>`,
+          `- Labeled issue: [triage this issue](buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools)`,
           `- Missing repo: <buzz://repo?owner=${alicePubkey}&d=missing-repo>`,
+          `- External control: <${externalHref}>`,
         ].join("\n"),
+        extraTags: [
+          [
+            "link-preview",
+            "snapshot",
+            "1",
+            externalHref,
+            "External preview survives",
+            "Example",
+            "Sender-authored external metadata",
+            "",
+            "",
+            "",
+            "",
+          ],
+        ],
       });
     },
-    { prId: PR_ID, issueId: ISSUE_ID, alicePubkey: ALICE_PUBKEY },
+    {
+      prId: PR_ID,
+      issueId: ISSUE_ID,
+      alicePubkey: ALICE_PUBKEY,
+      externalHref: EXTERNAL_HREF,
+    },
   );
 
   const row = page
@@ -98,22 +118,10 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     .last();
   await expect(row).toBeVisible();
 
-  // The PR card resolves builder metadata from the signed root and repository.
-  const prCard = row.locator('[data-link-preview="buzz-pull-request"]');
-  await expect(prCard).toBeVisible();
-  await expect(prCard).toContainText("relay-tools");
-  await expect(prCard).toContainText(PR_SUBJECT);
-  await expect(prCard).not.toContainText(
-    "Open · fix/entity-cards → main · abc1230",
-  );
-  await expect(prCard).toHaveAttribute("data-image-state", "none");
-  await expect(prCard.locator("[data-link-preview-thumbnail]")).toHaveCount(0);
-  await expect(
-    prCard.locator("[data-link-preview-hostname-buzz-mark]"),
-  ).toBeVisible();
-  await expect(
-    prCard.locator("[data-link-preview-hostname-favicon]"),
-  ).toHaveCount(0);
+  await expect(row.locator('[data-link-preview^="buzz-"]')).toHaveCount(0);
+  const externalCard = row.locator('[data-link-preview="generic-link"]');
+  await expect(externalCard).toBeVisible();
+  await expect(externalCard).toContainText("External preview survives");
   const prChip = row.getByRole("button", {
     name: /Open pull request .* in repository relay-tools/,
   });
@@ -158,9 +166,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   expect(tooltipSemanticColors.actual).toEqual(tooltipSemanticColors.expected);
   await expect(prChip).toHaveText("relay-tools");
 
-  const issueChip = row.getByRole("button", {
-    name: /Open issue .* in repository relay-tools/,
-  });
+  const issueChip = row.locator('[data-buzz-link-kind="issue"]');
   // The issue chip is the repository name alone — resolved metadata never
   // reaches the inline label, so it neither absorbs the title nor falls back
   // to the event hash.
@@ -193,27 +199,18 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     issueTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Issue · relay-tools");
 
-  // The repository card uses its signed announcement metadata and remains
-  // image-less.
-  const repoCard = row
-    .locator('[data-link-preview="buzz-repository"]')
-    .filter({ hasText: "relay-tools" });
-  await expect(repoCard).toBeVisible();
-  await expect(repoCard).toContainText("relay-tools");
-  await expect(repoCard).toContainText(
-    "Operator tooling and admin CLI for relay deployments.",
-  );
-  await expect(repoCard).toContainText("active · default: main");
-  await expect(repoCard).toHaveAttribute("data-image-state", "none");
-  await expect(repoCard.locator("[data-link-preview-thumbnail]")).toHaveCount(
-    0,
-  );
+  const labeledIssue = row
+    .getByRole("button", { name: /Open issue .* in repository relay-tools:/ })
+    .filter({ hasText: "triage this issue" });
+  await expect(labeledIssue).toBeVisible();
+  await labeledIssue.hover();
   await expect(
-    repoCard.locator("[data-link-preview-hostname-buzz-mark]"),
-  ).toBeVisible();
-  await expect(
-    repoCard.locator("[data-link-preview-hostname-favicon]"),
-  ).toHaveCount(0);
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText(ISSUE_SUBJECT);
+
+  // Repository metadata remains available from its inline chip.
   const repoChip = row.getByRole("button", {
     name: "Open repository relay-tools",
   });
@@ -257,16 +254,11 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   await expect(missingRepoFooter).toHaveText("Repository");
   await expect(missingRepoFooter).toHaveClass(/text-secondary-foreground\/80/);
   await expect(missingRepoFooter).not.toHaveClass(/text-primary-foreground/);
-  // Default typography is 14px; keep the image-less card compact while
-  // allowing fractional line-height rounding across rendering platforms.
-  expect(
-    await repoCard.evaluate((card) => card.getBoundingClientRect().height),
-  ).toBeLessThan(90);
 
   await waitForAnimations(page);
   await page.screenshot({
     animations: "disabled",
-    path: `${SHOTS}/01-recipient-entity-cards.png`,
+    path: `${SHOTS}/01-recipient-entity-chips.png`,
   });
 });
 
@@ -384,7 +376,7 @@ test("entity tooltip uses project context while relay metadata is delayed", asyn
   ).toHaveText("buzz · The complete Buzz community platform.");
 });
 
-test("desktop composer shows entity card and send is not blocked by missing snapshot", async ({
+test("desktop composer and sent message keep Buzz entities chip-only", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -395,34 +387,34 @@ test("desktop composer shows entity card and send is not blocked by missing snap
   const repoLink = `buzz://repo?owner=${ALICE_PUBKEY}&d=relay-tools`;
   await page.getByTestId("message-input").fill(`Check out ${repoLink}`);
 
-  // buzz:// links never produce snapshot tags, so the composer card must
-  // show as done (not stuck "processing") with zero ready snapshots.
-  const composerCard = page
-    .locator("[data-composer-link-previews]")
-    .locator('[data-link-preview="buzz-repository"]');
-  await expect(composerCard).toBeVisible();
-  await expect(page.locator("[data-composer-link-previews]")).toHaveAttribute(
-    "data-ready-snapshot-count",
-    "0",
-  );
+  // Buzz-native links do not enter the standalone composer-preview surface.
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
 
   await waitForAnimations(page);
   await page.screenshot({
     animations: "disabled",
-    path: `${SHOTS}/02-composer-entity-card.png`,
+    path: `${SHOTS}/02-composer-entity-chip-only.png`,
   });
 
   await page.getByTestId("send-message").click();
 
   const row = page.getByTestId("message-row").last();
-  const repoCard = row.locator('[data-link-preview="buzz-repository"]');
-  await expect(repoCard).toBeVisible();
-  await expect(repoCard).toContainText("relay-tools");
+  await expect(row.locator('[data-link-preview^="buzz-"]')).toHaveCount(0);
+  const repoChip = row.getByRole("button", {
+    name: "Open repository relay-tools",
+  });
+  await expect(repoChip).toBeVisible();
+  await repoChip.hover();
+  await expect(
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText("Operator tooling and admin CLI for relay deployments.");
 
   await waitForAnimations(page);
   await page.screenshot({
     animations: "disabled",
-    path: `${SHOTS}/03-sent-entity-card.png`,
+    path: `${SHOTS}/03-sent-entity-chip-tooltip.png`,
   });
 });
 

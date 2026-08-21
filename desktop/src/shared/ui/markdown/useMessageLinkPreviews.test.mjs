@@ -40,7 +40,7 @@ test("Buzz entity links do not create message preview cards", () => {
   );
 
   assert.deepEqual(
-    mergeMessageLinkPreviews(candidates, snapshots, []).map(
+    mergeMessageLinkPreviews(candidates, snapshots).map(
       ({ href, title, provider }) => ({ href, title, provider }),
     ),
     [

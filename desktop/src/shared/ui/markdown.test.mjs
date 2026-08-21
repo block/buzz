@@ -1243,17 +1243,21 @@ test("authored Buzz permalink labels remain ordinary links", () => {
   });
   const html = renderToStaticMarkup(
     React.createElement(
-      MarkdownRuntimeContext.Provider,
-      {
-        value: {
-          channels: [{ id: channelId, name: "engineering" }],
-          onOpenChannel: () => {},
-          onOpenEntityLink: () => {},
-          onOpenMessageLink: () => {},
-          relayOrigin: null,
+      QueryClientProvider,
+      { client: new QueryClient() },
+      React.createElement(
+        MarkdownRuntimeContext.Provider,
+        {
+          value: {
+            channels: [{ id: channelId, name: "engineering" }],
+            onOpenChannel: () => {},
+            onOpenEntityLink: () => {},
+            onOpenMessageLink: () => {},
+            relayOrigin: null,
+          },
         },
-      },
-      markdown,
+        markdown,
+      ),
     ),
   );
 
