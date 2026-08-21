@@ -55,6 +55,7 @@ import {
   SyntaxHighlightedCode,
 } from "./markdown/CodeBlock";
 import {
+  EntityLinkAnchor,
   renderEntityLinkAnchor,
   useEntityCardOpenHandlers,
   useOpenEntityLink,
@@ -1271,6 +1272,7 @@ export function createMarkdownComponents(
     const {
       channels,
       imetaByUrl,
+      onOpenChannel,
       onOpenEntityLink,
       onOpenMessageLink,
       onImportSnapshotFromUrl,
@@ -1281,17 +1283,13 @@ export function createMarkdownComponents(
     if (!interactive) {
       return <span className="font-medium text-current">{children}</span>;
     }
-
-    // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the image lightbox button inside an anchor.
-    // Keep the image as the lightbox trigger and suppress the parent link activation for block media.
     if (hasBlockMedia(React.Children.toArray(children))) {
       return <>{children}</>;
     }
 
     const label = getReactNodeText(children);
 
-    // Snapshot attachment (agent or team): classify before generic FileCard.
-    // resolveSnapshotCard checks the filename suffix + SHA-256 field.
+    // Classify verified agent/team snapshots before generic files.
     const snapshotCard = resolveSnapshotCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1319,9 +1317,7 @@ export function createMarkdownComponents(
       );
     }
 
-    // Generic file attachment: a `[filename](url)` link whose href matches an
-    // imeta entry with a non-image, non-video MIME. Render a download card
-    // instead of a plain link. (Media uses the `img` renderer, not this path.)
+    // Render non-media imeta links as download cards; media uses `img`.
     const card = resolveFileCard(
       href ? imetaByUrl?.get(href) : undefined,
       href,
@@ -1333,7 +1329,7 @@ export function createMarkdownComponents(
       );
     }
 
-    // Intercept `buzz://channel/<uuid>` and `buzz://message?...` links so clicks navigate in-app instead of opening the URL in the OS browser.
+    // Keep Buzz channel/message navigation in-app.
     if (href) {
       if (parseChannelLink(href).ok) {
         return (
@@ -1357,6 +1353,7 @@ export function createMarkdownComponents(
               channels={channels}
               interactive={interactive}
               link={messageLinkTarget.link}
+              onOpenChannel={onOpenChannel}
               onOpenMessageLink={onOpenMessageLink}
               resolveChannelReference={resolveChannelReferences}
             />
@@ -1374,7 +1371,7 @@ export function createMarkdownComponents(
           </AuthoredDeepLinkAnchor>
         );
       }
-      // Malformed message deep link — fall through to the default anchor.
+      // Malformed message deep links fall through to external handling.
     }
 
     // `buzz://pr|issue|repo?…` entity links navigate in-app; malformed ones
@@ -1668,21 +1665,19 @@ export function createMarkdownComponents(
       const href = String(children ?? "");
       if (!parseEntityLink(href).ok)
         return <span data-entity-link="">{href}</span>;
-      return renderEntityLinkAnchor({
-        children: href,
+      return React.createElement(
+        EntityLinkAnchor,
+        { href, interactive, onOpenEntityLink, relayOrigin },
         href,
-        interactive,
-        onOpenEntityLink,
-        relayOrigin,
-      });
+      );
     },
     "message-link": function MarkdownMessageLink({
       children,
     }: {
       children?: React.ReactNode;
     }) {
-      const { channels, onOpenMessageLink, resolveChannelReferences } =
-        useMarkdownRuntime();
+      const runtime = useMarkdownRuntime();
+      const { channels, onOpenChannel, onOpenMessageLink } = runtime;
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1694,8 +1689,9 @@ export function createMarkdownComponents(
           channels={channels}
           interactive={interactive}
           link={parsed.value}
+          onOpenChannel={onOpenChannel}
           onOpenMessageLink={onOpenMessageLink}
-          resolveChannelReference={resolveChannelReferences}
+          resolveChannelReference={runtime.resolveChannelReferences}
         />
       );
     },
@@ -1713,8 +1709,11 @@ const markdownComponentsByVariant = new Map<string, MarkdownComponentSet>();
 type MarkdownComponentSet = { components: Components; variant: string };
 
 /**
- * Returns the component map and its cache-key `variant` token. The token fully
- * identifies the map, so a new render flag partitions both together.
+ * Returns the component map together with the `variant` token that fully
+ * identifies it. The token doubles as the variant segment of the parse-cache
+ * key (see nodeCache.ts), so the map partitioning and the key partitioning
+ * come from one place and cannot drift apart: a new render flag added here
+ * automatically partitions the cache too.
  */
 function getMarkdownComponents(
   interactive: boolean,

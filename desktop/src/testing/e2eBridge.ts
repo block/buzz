@@ -10066,12 +10066,12 @@ async function resolveGetEvent(
   },
   config: E2eConfig | undefined,
 ) {
+  // Allow test specs to mark specific event IDs as definitively deleted.
+  if (config?.mock?.deletedEventIds?.includes(args.eventId)) {
+    throw new Error("event not found");
+  }
   const identity = getIdentity(config);
   if (!identity) {
-    // Allow test specs to mark specific event IDs as definitively deleted.
-    if (config?.mock?.deletedEventIds?.includes(args.eventId)) {
-      throw new Error("event not found");
-    }
     const knownEvents: RelayEvent[] = [
       ...Array.from(mockMessages.values()).flat(),
       {

@@ -103,9 +103,19 @@ test("issue discussion ignores an author-claimed origin channel", async ({
   await relatedChannel.click();
 
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await expect(page.getByTestId("message-input")).toContainText("ffffffff");
+  const issueDraftChip = page
+    .getByTestId("message-input")
+    .locator('[data-composer-buzz-link=""]', {
+      hasText: "buzz",
+    });
+  await expect(issueDraftChip).toHaveAttribute(
+    "data-href",
+    new RegExp(`id=${forgedIssueId}`),
+  );
   await page.getByTestId("channel-random").click();
-  await expect(page.getByTestId("message-input")).not.toContainText("ffffffff");
+  await expect(
+    page.getByTestId("message-input").locator('[data-composer-buzz-link=""]'),
+  ).toHaveCount(0);
 });
 
 test("issue comments use the project activity timeline", async ({ page }) => {

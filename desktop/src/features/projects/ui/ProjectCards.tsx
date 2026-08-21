@@ -333,7 +333,7 @@ function RepositoryUnavailableIndicator({
       </TooltipTrigger>
       <TooltipContent className="max-w-64">
         <p className="font-medium">{label}</p>
-        <p className="text-muted-foreground">{description}</p>
+        <p className="text-secondary-foreground">{description}</p>
       </TooltipContent>
     </Tooltip>
   );
