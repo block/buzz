@@ -168,13 +168,18 @@ export function eventToProject(
 }
 
 export async function fetchProjects(
-  fetchExhaustively: FetchProjectEventsExhaustively = fetchProjectEventsExhaustively,
+  fetchExhaustively?: FetchProjectEventsExhaustively,
+  signal?: AbortSignal,
 ): Promise<Project[]> {
   // Delegates to `buildProjectsFromFetcher` in `projectEnumeration.ts`, which
   // is the pure, Tauri-free core of this operation. That helper's javadoc
   // explains the fail-closed tombstone contract and the NIP-OA owner-deletion
   // relay-side-suppression decision.
-  return buildProjectsFromFetcher(fetchExhaustively, {
+  const fetcher: FetchProjectEventsExhaustively =
+    fetchExhaustively ??
+    ((kinds, extraFilter) =>
+      fetchProjectEventsExhaustively(kinds, extraFilter, undefined, signal));
+  return buildProjectsFromFetcher(fetcher, {
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
   });
@@ -660,7 +665,7 @@ export const PROJECT_LOCAL_REPOS_STALE_TIME_MS = 2 * 60_000;
 export function useProjectsQuery() {
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: () => fetchProjects(),
+    queryFn: ({ signal }) => fetchProjects(undefined, signal),
     staleTime: PROJECTS_STALE_TIME_MS,
     gcTime: PROJECTS_GC_TIME_MS,
   });
@@ -669,7 +674,7 @@ export function useProjectsQuery() {
 export function useProjectQuery(projectId: string) {
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: () => fetchProjects(),
+    queryFn: ({ signal }) => fetchProjects(undefined, signal),
     select: (projects) =>
       projects.find((project) => projectMatchesRouteId(project, projectId)) ??
       null,
@@ -851,8 +856,21 @@ export function useProjectPullRequestsQuery(
 export function useProjectsWorkItemsQuery(projects: Project[]) {
   return useQuery({
     enabled: projects.length > 0,
-    queryKey: ["projects", "work-items", projects.map((project) => project.id)],
-    queryFn: () => fetchProjectsWorkItems(projects),
+    queryKey: [
+      "projects",
+      "work-items",
+      projects.map((project) => project.id),
+      // Repo attach/detach changes the fan-out inputs without changing
+      // project ids; keying on addresses too prevents a pre-attach result
+      // from serving as fresh for the whole staleTime window.
+      projects
+        .flatMap((project) =>
+          project.repositories.map((repository) => repository.repoAddress),
+        )
+        .sort(),
+    ],
+    queryFn: ({ signal }) =>
+      fetchProjectsWorkItems(projects, undefined, signal),
     staleTime: PROJECT_WORK_ITEMS_STALE_TIME_MS,
   });
 }
