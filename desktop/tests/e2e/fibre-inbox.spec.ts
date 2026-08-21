@@ -178,6 +178,18 @@ test("fibre inbox lists scored fibres and opens detail", async ({ page }) => {
     "Vlad needs you",
   );
   await expect(page.getByTestId("fibre-detail")).toContainText("Ask");
+  await expect(page.getByTestId("fibre-detail")).not.toContainText(
+    "Why this ranks here",
+  );
+  await expect(page.getByTestId("fibre-artifacts")).toContainText(
+    "Source artifacts",
+  );
+
+  await page.getByTestId("fibre-why-trigger").hover();
+  await expect(page.getByTestId("fibre-why-card")).toBeVisible();
+  await expect(page.getByTestId("fibre-why-card")).toContainText(
+    "Why this ranks here",
+  );
 
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOTS}/01-fibre-inbox.png` });

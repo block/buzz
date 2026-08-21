@@ -122,6 +122,14 @@ test("Done shortcut inherits button color", () => {
     screen.getByTestId("fibre-artifacts").className.includes("max-h-"),
     false,
   );
+  assert.ok(
+    screen
+      .getByTestId("fibre-artifacts")
+      .closest('[data-testid="fibre-detail"]'),
+  );
+  assert.ok(screen.getByText("Source artifacts"));
+  assert.equal(screen.queryByText("Why this ranks here"), null);
+  assert.ok(screen.getByTestId("fibre-why-trigger"));
 });
 
 test("completed fibre offers Reopen instead of Done", () => {

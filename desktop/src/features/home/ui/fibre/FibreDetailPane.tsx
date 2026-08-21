@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Info } from "lucide-react";
+import { Info } from "lucide-react";
 import { toast } from "sonner";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
@@ -15,10 +15,15 @@ import { fibreKindMeta } from "@/features/home/ui/fibre/fibreKinds";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Fibre } from "@/features/triage/api";
 import { sendChannelMessage } from "@/shared/api/tauri";
-import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const SHORTCUT_KBD =
@@ -58,6 +63,65 @@ function ScoreMeter({ color, score }: { color: string; score: number }) {
   );
 }
 
+function WhyThisRanksCard({ fibre }: { fibre: Fibre }) {
+  return (
+    <div className="text-left">
+      <div className="flex items-center gap-2 text-xs text-primary">
+        <Info className="h-3.5 w-3.5" />
+        Why this ranks here
+      </div>
+      {fibre.why ? (
+        <p className="mt-2 text-sm leading-relaxed text-foreground/90">
+          {fibre.why}
+        </p>
+      ) : (
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+          One message, no interpretation needed — it reads for itself below.
+        </p>
+      )}
+      {fibre.signals.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {fibre.signals.map((signal) => (
+            <span
+              className="flex items-center gap-1.5 rounded-md bg-background/40 px-2 py-0.5 text-2xs text-muted-foreground"
+              key={`${signal.weight}-${signal.label}`}
+            >
+              <span className="tabular-nums text-primary">{signal.weight}</span>
+              {signal.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PriorityWhyHint({ fibre }: { fibre: Fibre }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label="Why this ranks here"
+          className="rounded-full p-0.5 text-muted-foreground hover:text-foreground"
+          data-testid="fibre-why-trigger"
+          type="button"
+        >
+          <Info className="h-3.5 w-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent
+        align="end"
+        className="max-w-sm overflow-visible rounded-lg bg-popover px-4 py-3.5 text-popover-foreground shadow-md ring-1 ring-border/60"
+        data-testid="fibre-why-card"
+        side="bottom"
+        sideOffset={8}
+      >
+        <WhyThisRanksCard fibre={fibre} />
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function FibreDetailPane({
   currentPubkey,
   fibre,
@@ -69,7 +133,6 @@ export function FibreDetailPane({
   onReopen,
   profiles,
 }: FibreDetailPaneProps) {
-  const [artifactsOpen, setArtifactsOpen] = React.useState(true);
   const [delegateOpen, setDelegateOpen] = React.useState(false);
   const agentsQuery = useManagedAgentsQuery({ enabled: delegateOpen });
   const agents = agentsQuery.data ?? [];
@@ -78,7 +141,6 @@ export function FibreDetailPane({
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset on fibre identity, not object identity
   React.useEffect(() => {
     setDelegateOpen(false);
-    setArtifactsOpen(true);
   }, [fibre?.id]);
 
   React.useEffect(() => {
@@ -94,10 +156,7 @@ export function FibreDetailPane({
         return;
       }
       const key = event.key.toLowerCase();
-      if (key === "a") {
-        event.preventDefault();
-        setArtifactsOpen((open) => !open);
-      } else if (key === "d") {
+      if (key === "d") {
         if (fibre?.status === "done") return;
         event.preventDefault();
         setDelegateOpen((open) => !open);
@@ -205,7 +264,12 @@ export function FibreDetailPane({
           Fibre in <span className="text-foreground">{source}</span>
         </div>
         <div className="ml-auto flex items-center gap-3 text-muted-foreground">
-          <span className="text-xs">Priority</span>
+          <TooltipProvider delayDuration={200}>
+            <span className="flex items-center gap-1.5 text-xs">
+              Priority
+              <PriorityWhyHint fibre={fibre} />
+            </span>
+          </TooltipProvider>
           <span
             className="text-sm font-medium tabular-nums"
             style={{ color: kind.color }}
@@ -238,62 +302,15 @@ export function FibreDetailPane({
             </p>
           ) : null}
 
-          {fibre.why ? (
-            <div className="mt-5 rounded-lg bg-muted/50 px-4 py-3.5 ring-1 ring-border/60">
-              <div className="flex items-center gap-2 text-xs text-primary">
-                <Info className="h-3.5 w-3.5" />
-                Why this ranks here
-              </div>
-              <p className="mt-2 text-sm leading-relaxed text-foreground/90">
-                {fibre.why}
+          <section className="mt-8" data-testid="fibre-artifacts">
+            <header className="mb-3">
+              <h2 className="text-sm font-medium text-foreground">
+                Source artifacts
+              </h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                {fibreArtifactCountLabel(fibre.artifacts.length)} · {source}
               </p>
-              {fibre.signals.length > 0 ? (
-                <div className="mt-3 flex flex-wrap gap-1.5">
-                  {fibre.signals.map((signal) => (
-                    <span
-                      className="flex items-center gap-1.5 rounded-md bg-background/40 px-2 py-0.5 text-2xs text-muted-foreground"
-                      key={`${signal.weight}-${signal.label}`}
-                    >
-                      <span className="tabular-nums text-primary">
-                        {signal.weight}
-                      </span>
-                      {signal.label}
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <p className="mt-4 text-xs text-muted-foreground">
-              One message, no interpretation needed — it reads for itself below.
-            </p>
-          )}
-        </div>
-      </div>
-
-      <div className="flex min-h-0 max-h-[min(36rem,58%)] shrink-0 flex-col overflow-hidden border-t border-border/60 bg-muted/20">
-        <button
-          className="flex h-11 shrink-0 items-center gap-2.5 px-5 text-left"
-          onClick={() => setArtifactsOpen((open) => !open)}
-          type="button"
-        >
-          <ChevronDown
-            className={cn(
-              "h-3.5 w-3.5 text-muted-foreground transition-transform",
-              artifactsOpen ? undefined : "-rotate-90",
-            )}
-          />
-          <span className="text-sm text-foreground">Source artifacts</span>
-          <span className="text-xs text-muted-foreground">
-            {fibreArtifactCountLabel(fibre.artifacts.length)} · {source}
-          </span>
-          <span className="ml-auto text-xs text-muted-foreground">A</span>
-        </button>
-        {artifactsOpen ? (
-          <div
-            className="min-h-0 overflow-y-auto px-3.5 pb-2"
-            data-testid="fibre-artifacts"
-          >
+            </header>
             {fibre.artifacts.map((artifact) => {
               const authorLabel = resolveFibrePersonLabel(
                 {
@@ -307,7 +324,7 @@ export function FibreDetailPane({
                 : undefined;
               return (
                 <div
-                  className="grid grid-cols-[2.125rem_minmax(0,1fr)] gap-x-3 rounded-lg px-2 py-2"
+                  className="grid grid-cols-[2.125rem_minmax(0,1fr)] gap-x-3 rounded-2xl px-2 py-2 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
                   key={artifact.eventId}
                 >
                   <UserAvatar
@@ -364,8 +381,8 @@ export function FibreDetailPane({
                 </div>
               );
             })}
-          </div>
-        ) : null}
+          </section>
+        </div>
       </div>
 
       <div className="relative flex shrink-0 items-center gap-2 border-t border-border/60 px-5 py-3">
