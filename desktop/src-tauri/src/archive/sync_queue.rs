@@ -120,6 +120,43 @@ pub(super) enum EnqueueResult {
     Duplicate,
 }
 
+#[derive(Debug)]
+pub(super) enum EnqueueError {
+    Rejected(String),
+    Capacity {
+        candidate: DurableCandidate,
+        message: String,
+    },
+    Storage {
+        candidate: DurableCandidate,
+        message: String,
+    },
+}
+
+impl std::fmt::Display for EnqueueError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message)
+            | Self::Capacity { message, .. }
+            | Self::Storage { message, .. } => formatter.write_str(message),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum QueuePersistError {
+    Capacity(String),
+    Storage(String),
+}
+
+impl std::fmt::Display for QueuePersistError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capacity(message) | Self::Storage(message) => formatter.write_str(message),
+        }
+    }
+}
+
 impl DurableQueue {
     pub(super) fn open(path: PathBuf) -> Result<Self, String> {
         let parent = path
@@ -219,7 +256,7 @@ impl DurableQueue {
             acked_keys,
         };
         if changed {
-            queue.persist()?;
+            queue.persist().map_err(|error| error.to_string())?;
         }
         Ok(queue)
     }
@@ -232,8 +269,15 @@ impl DurableQueue {
         self.entries.is_empty()
     }
 
-    pub(super) fn enqueue(&mut self, candidate: DurableCandidate) -> Result<EnqueueResult, String> {
-        candidate.validate()?;
+    pub(super) fn has_entry_capacity(&self) -> bool {
+        self.entries.len() < MAX_DURABLE_QUEUE_ENTRIES
+    }
+
+    pub(super) fn enqueue(
+        &mut self,
+        candidate: DurableCandidate,
+    ) -> Result<EnqueueResult, EnqueueError> {
+        candidate.validate().map_err(EnqueueError::Rejected)?;
         let key = candidate.dedupe_key();
         if self.acked_keys.iter().any(|existing| existing == &key)
             || self
@@ -244,17 +288,26 @@ impl DurableQueue {
             return Ok(EnqueueResult::Duplicate);
         }
         if self.entries.len() >= MAX_DURABLE_QUEUE_ENTRIES {
-            return Err(format!(
-                "archive sync durable queue limit reached ({MAX_DURABLE_QUEUE_ENTRIES} entries); event was not accepted"
-            ));
+            return Err(EnqueueError::Capacity {
+                candidate,
+                message: format!(
+                    "archive sync durable queue limit reached ({MAX_DURABLE_QUEUE_ENTRIES} entries); event was not accepted"
+                ),
+            });
         }
 
         self.entries.push(candidate);
         if let Err(error) = self.persist() {
-            self.entries.pop();
-            return Err(format!(
-                "archive sync durable queue write failed; event was not accepted: {error}"
-            ));
+            let candidate = self
+                .entries
+                .pop()
+                .expect("enqueue candidate must remain at the queue tail");
+            let message =
+                format!("archive sync durable queue write failed; event was not accepted: {error}");
+            return Err(match error {
+                QueuePersistError::Capacity(_) => EnqueueError::Capacity { candidate, message },
+                QueuePersistError::Storage(_) => EnqueueError::Storage { candidate, message },
+            });
         }
         Ok(EnqueueResult::Accepted)
     }
@@ -288,13 +341,14 @@ impl DurableQueue {
         if next_acked.len() > MAX_ACKED_DEDUPE_KEYS {
             next_acked.drain(..next_acked.len() - MAX_ACKED_DEDUPE_KEYS);
         }
-        persist_queue_file(&self.path, &next_entries, &next_acked)?;
+        persist_queue_file(&self.path, &next_entries, &next_acked)
+            .map_err(|error| error.to_string())?;
         self.entries = std::mem::take(&mut next_entries);
         self.acked_keys = next_acked;
         Ok(())
     }
 
-    fn persist(&self) -> Result<(), String> {
+    fn persist(&self) -> Result<(), QueuePersistError> {
         persist_queue_file(&self.path, &self.entries, &self.acked_keys)
     }
 
@@ -302,26 +356,54 @@ impl DurableQueue {
     pub(super) fn fill_to_capacity_for_test(&mut self, candidate: DurableCandidate) {
         self.entries = vec![candidate; MAX_DURABLE_QUEUE_ENTRIES];
     }
+
+    #[cfg(test)]
+    pub(super) fn fill_until_candidate_exceeds_byte_capacity_for_test(
+        &mut self,
+        filler: DurableCandidate,
+        incoming: &DurableCandidate,
+    ) {
+        loop {
+            let mut projected = self.entries.clone();
+            projected.push(incoming.clone());
+            let projected_len = serde_json::to_vec(&DurableQueueFile {
+                version: DURABLE_QUEUE_VERSION,
+                entries: projected,
+                acked_keys: self.acked_keys.clone(),
+            })
+            .unwrap()
+            .len();
+            if projected_len > MAX_DURABLE_QUEUE_BYTES {
+                break;
+            }
+            self.entries.push(filler.clone());
+            assert!(self.entries.len() < MAX_DURABLE_QUEUE_ENTRIES);
+        }
+        self.persist().unwrap();
+    }
 }
 
 fn persist_queue_file(
     path: &Path,
     entries: &[DurableCandidate],
     acked_keys: &[String],
-) -> Result<(), String> {
+) -> Result<(), QueuePersistError> {
     let payload = serde_json::to_vec(&DurableQueueFile {
         version: DURABLE_QUEUE_VERSION,
         entries: entries.to_vec(),
         acked_keys: acked_keys.to_vec(),
     })
-    .map_err(|error| format!("serialize durable archive queue: {error}"))?;
+    .map_err(|error| {
+        QueuePersistError::Storage(format!("serialize durable archive queue: {error}"))
+    })?;
     if payload.len() > MAX_DURABLE_QUEUE_BYTES {
-        return Err(format!(
+        return Err(QueuePersistError::Capacity(format!(
             "durable archive queue would be {} bytes; maximum is {MAX_DURABLE_QUEUE_BYTES}",
             payload.len()
-        ));
+        )));
     }
     crate::managed_agents::storage::atomic_write_json_restricted(path, &payload)
+        .map_err(QueuePersistError::Storage)
 }
 
 fn ensure_owner_only_dir(path: &Path) -> Result<(), String> {

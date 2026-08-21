@@ -45,7 +45,7 @@ use crate::native_relay_client::{MatchedEvent, NativeRelayClient, RelaySession, 
 mod sync_queue;
 use sync_queue::{
     durable_queue_path, retry_delay, AcknowledgedHead, DurableCandidate, DurableQueue,
-    EnqueueResult, FlushOutcome, ARCHIVE_ATTEMPT_TIMEOUT, ARCHIVE_RETRY_ATTEMPTS,
+    EnqueueError, EnqueueResult, FlushOutcome, ARCHIVE_ATTEMPT_TIMEOUT, ARCHIVE_RETRY_ATTEMPTS,
     ARCHIVE_RETRY_MAX_DELAY,
 };
 
@@ -186,6 +186,7 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
     // batching deadline from the first accepted event.
     let mut flush_deadline = (!queue.is_empty()).then(Instant::now);
     let mut backing_off = false;
+    let mut pending_candidate = None;
 
     reconcile(io, &mut scopes).await;
 
@@ -200,6 +201,48 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
                 reconcile(io, &mut scopes).await;
             }
             _ = tokio::time::sleep_until(deadline), if flush_deadline.is_some() => {
+                if let Some(candidate) = pending_candidate.take() {
+                    let was_empty = queue.is_empty();
+                    match queue.enqueue(candidate) {
+                        Ok(EnqueueResult::Accepted) => {
+                            flush_deadline = Some(if was_empty && queue.len() < FLUSH_BATCH_SIZE {
+                                Instant::now() + FLUSH_DEADLINE
+                            } else {
+                                Instant::now()
+                            });
+                            backing_off = false;
+                            continue;
+                        }
+                        Ok(EnqueueResult::Duplicate) => {
+                            flush_deadline = (!queue.is_empty()).then(Instant::now);
+                            backing_off = false;
+                            continue;
+                        }
+                        Err(EnqueueError::Rejected(error)) => {
+                            eprintln!("buzz-desktop: archive sync: rejected invalid queued event: {error}");
+                            flush_deadline = (!queue.is_empty()).then(Instant::now);
+                            backing_off = false;
+                            continue;
+                        }
+                        Err(EnqueueError::Capacity { candidate, message }) => {
+                            if queue.is_empty() {
+                                eprintln!("buzz-desktop: archive sync: rejected event larger than the durable queue: {message}");
+                                flush_deadline = None;
+                                backing_off = false;
+                                continue;
+                            }
+                            eprintln!("buzz-desktop: archive sync: retaining event while durable capacity drains: {message}");
+                            pending_candidate = Some(candidate);
+                        }
+                        Err(EnqueueError::Storage { candidate, message }) => {
+                            eprintln!("buzz-desktop: archive sync: retaining event while durable storage recovers: {message}");
+                            pending_candidate = Some(candidate);
+                            flush_deadline = Some(Instant::now() + ARCHIVE_RETRY_MAX_DELAY);
+                            backing_off = true;
+                            continue;
+                        }
+                    }
+                }
                 match flush_head_with_retries(
                     io,
                     &mut queue,
@@ -211,7 +254,8 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
                         backing_off = false;
                     }
                     FlushOutcome::Committed => {
-                        flush_deadline = (!queue.is_empty()).then(Instant::now);
+                        flush_deadline = (pending_candidate.is_some() || !queue.is_empty())
+                            .then(Instant::now);
                         backing_off = false;
                     }
                     FlushOutcome::Retained => {
@@ -221,7 +265,11 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
                     FlushOutcome::Cancelled => break,
                 }
             }
-            received = events.recv() => {
+            // The count cap stops consumption before receive. The exact byte
+            // cap is known only after serialization; that event is retained in
+            // `pending_candidate` and applies the same backpressure until a
+            // committed head creates durable capacity.
+            received = events.recv(), if pending_candidate.is_none() && queue.has_entry_capacity() => {
                 let Some(event) = received else { break };
                 // A subscription we already closed can still have events in
                 // flight; without its scope we cannot assert a match, and the
@@ -232,10 +280,23 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
                 match queue.enqueue(candidate) {
                     Ok(EnqueueResult::Duplicate) => continue,
                     Ok(EnqueueResult::Accepted) => {}
-                    Err(error) => {
-                        // The event has not been accepted: stop the relay task
-                        // rather than pretending an in-memory tail is durable.
-                        return Err(error);
+                    Err(EnqueueError::Rejected(error)) => {
+                        eprintln!("buzz-desktop: archive sync: rejected invalid relay event: {error}");
+                        continue;
+                    }
+                    Err(EnqueueError::Capacity { candidate, message }) => {
+                        eprintln!("buzz-desktop: archive sync: applying durable-capacity backpressure: {message}");
+                        pending_candidate = Some(candidate);
+                        flush_deadline = Some(Instant::now());
+                        backing_off = true;
+                        continue;
+                    }
+                    Err(EnqueueError::Storage { candidate, message }) => {
+                        eprintln!("buzz-desktop: archive sync: applying durable-storage backpressure: {message}");
+                        pending_candidate = Some(candidate);
+                        flush_deadline = Some(Instant::now() + ARCHIVE_RETRY_MAX_DELAY);
+                        backing_off = true;
+                        continue;
                     }
                 }
                 if was_empty {
@@ -252,11 +313,37 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
     // Every accepted event is already durable. Teardown makes one bounded
     // retry cycle per head and then returns; failures remain on disk for the
     // next Tauri process instead of hanging shutdown or discarding the tail.
-    while !queue.is_empty() {
-        match flush_head_with_retries(io, &mut queue, &mut acknowledged_head, None).await {
-            FlushOutcome::Committed => {}
-            FlushOutcome::Empty => break,
-            FlushOutcome::Retained | FlushOutcome::Cancelled => break,
+    loop {
+        if !queue.is_empty() {
+            match flush_head_with_retries(io, &mut queue, &mut acknowledged_head, None).await {
+                FlushOutcome::Committed => continue,
+                FlushOutcome::Empty => {}
+                FlushOutcome::Retained | FlushOutcome::Cancelled => {
+                    if pending_candidate.is_some() {
+                        return Err(
+                            "archive sync stopped with one received event retained only in memory"
+                                .into(),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        let Some(candidate) = pending_candidate.take() else {
+            break;
+        };
+        match queue.enqueue(candidate) {
+            Ok(EnqueueResult::Accepted) => {}
+            Ok(EnqueueResult::Duplicate) => break,
+            Err(EnqueueError::Rejected(error)) => {
+                eprintln!("buzz-desktop: archive sync: rejected invalid pending event during teardown: {error}");
+                break;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "archive sync could not durably accept the pending event during teardown: {error}"
+                ));
+            }
         }
     }
     Ok(())

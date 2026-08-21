@@ -823,7 +823,11 @@ impl RunCtx<'_> {
             }
             if call.name == builtin::ACTIVITY_LEDGER_TODAY_TOOL {
                 emit_in_progress(self.wire, self.session_id, call).await;
-                let mut result = builtin::call_activity_ledger_today(&call.arguments).await;
+                let mut result = builtin::call_activity_ledger_today(
+                    &call.arguments,
+                    self.cfg.max_tool_result_text_bytes,
+                )
+                .await;
                 result.provider_id = call.provider_id.clone();
                 emit_completed(self.wire, self.session_id, call, &result).await;
                 results[idx] = Some(result);

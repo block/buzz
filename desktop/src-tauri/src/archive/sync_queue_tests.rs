@@ -6,6 +6,7 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind};
 use std::{
     path::Path,
     sync::{Arc, Mutex as StdMutex},
+    time::Duration,
 };
 
 struct QueueIo {
@@ -30,7 +31,16 @@ impl QueueIo {
 
 impl ArchiveSyncIo for QueueIo {
     fn list_subscriptions(&self) -> BoxFuture<'_, Result<Vec<SaveSubscription>, String>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async {
+            Ok(vec![SaveSubscription {
+                identity_pubkey: "owner".into(),
+                relay_url: "wss://relay.test".into(),
+                scope_type: "channel_h".into(),
+                scope_value: "channel-a".into(),
+                kinds: "[9]".into(),
+                created_at: 0,
+            }])
+        })
     }
 
     fn set_subscriptions(&self, _subscriptions: Vec<Subscription>) -> BoxFuture<'_, ()> {
@@ -200,9 +210,82 @@ fn queue_bound_rejects_new_event_without_mutating_pending_head() {
     let candidate = signed_candidate("capacity");
     let mut queue = DurableQueue::open(path).unwrap();
     queue.fill_to_capacity_for_test(candidate);
-    let error = queue.enqueue(signed_candidate("one-too-many")).unwrap_err();
+    let error = queue
+        .enqueue(signed_candidate("one-too-many"))
+        .unwrap_err()
+        .to_string();
     assert!(error.contains("limit reached"));
     assert_eq!(queue.len(), MAX_DURABLE_QUEUE_ENTRIES);
+}
+
+#[test]
+fn byte_capacity_returns_the_candidate_for_retry_after_head_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.json");
+    let filler = signed_candidate(&"f".repeat(512 * 1024));
+    let incoming = signed_candidate(&"i".repeat(512 * 1024));
+    let incoming_id = incoming.event_id.clone();
+    let mut queue = DurableQueue::open(path).unwrap();
+    queue.fill_until_candidate_exceeds_byte_capacity_for_test(filler, &incoming);
+
+    assert!(queue.len() < MAX_DURABLE_QUEUE_ENTRIES);
+    let retained = match queue.enqueue(incoming).unwrap_err() {
+        EnqueueError::Capacity { candidate, .. } => candidate,
+        other => panic!("expected byte-capacity backpressure, got {other}"),
+    };
+    assert_eq!(retained.event_id, incoming_id);
+
+    queue.acknowledge_head(queue.head_len()).unwrap();
+    assert_eq!(queue.enqueue(retained).unwrap(), EnqueueResult::Accepted);
+}
+
+#[tokio::test]
+async fn full_queue_backpressures_and_resumes_without_stopping_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.json");
+    let mut queue = DurableQueue::open(path).unwrap();
+    queue.fill_to_capacity_for_test(signed_candidate("capacity-head"));
+
+    let event = EventBuilder::new(Kind::Custom(9), "arrived-while-full")
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let event_id = event.id.to_hex();
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(MatchedEvent {
+        subscription_id: subscription_id(&ScopeType::ChannelH, "channel-a", &[9]),
+        event: Box::new(event),
+    })
+    .await
+    .unwrap();
+    drop(tx);
+
+    let io = Arc::new(QueueIo::new(ARCHIVE_RETRY_ATTEMPTS));
+    let task_io = Arc::clone(&io);
+    let handle = tokio::spawn(async move {
+        run_sync(
+            task_io.as_ref(),
+            Arc::new(Notify::new()),
+            rx,
+            CancellationToken::new(),
+            queue,
+        )
+        .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("full-queue recovery timed out")
+        .expect("sync task panicked")
+        .expect("sync listener stopped at capacity");
+    assert!(
+        io.delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|id| id == &event_id),
+        "event waiting behind the full queue was not archived"
+    );
 }
 
 #[tokio::test]

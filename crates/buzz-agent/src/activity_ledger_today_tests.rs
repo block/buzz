@@ -204,6 +204,16 @@ fn activity_ledger_today_limit_keeps_newest_matching_journals() {
 }
 
 #[test]
+fn activity_ledger_today_result_obeys_the_model_text_budget() {
+    let result = success_result("x".repeat(4_096), 512);
+    let ToolResultContent::Text(text) = &result.content[0] else {
+        panic!("Today result must stay text-only");
+    };
+    assert!(text.len() <= 512);
+    assert!(text.contains("bytes elided from tool result"));
+}
+
+#[test]
 fn activity_ledger_today_rejects_relative_path() {
     let error = read_activity_ledger_today(
         "relative.json",

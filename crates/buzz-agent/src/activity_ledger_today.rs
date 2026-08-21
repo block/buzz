@@ -3,6 +3,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::Digest;
 
+use crate::mcp::truncate_middle;
 use crate::types::{ToolDef, ToolResult, ToolResultContent};
 
 pub const ACTIVITY_LEDGER_TODAY_TOOL: &str = "get_activity_ledger_today";
@@ -61,7 +62,7 @@ pub fn activity_ledger_today_def() -> ToolDef {
     }
 }
 
-pub async fn call_activity_ledger_today(arguments: &Value) -> ToolResult {
+pub async fn call_activity_ledger_today(arguments: &Value, max_text_bytes: usize) -> ToolResult {
     let Some(path) = env_non_empty(ACTIVITY_LEDGER_TODAY_PATH_ENV) else {
         return error_result(&format!(
             "{ACTIVITY_LEDGER_TODAY_TOOL}: missing {ACTIVITY_LEDGER_TODAY_PATH_ENV}"
@@ -94,12 +95,19 @@ pub async fn call_activity_ledger_today(arguments: &Value) -> ToolResult {
     .await
     .unwrap_or_else(|e| Err(format!("{ACTIVITY_LEDGER_TODAY_TOOL}: task failed: {e}")))
     {
-        Ok(output) => ToolResult {
-            provider_id: String::new(),
-            content: vec![ToolResultContent::Text(output)],
-            is_error: false,
-        },
+        Ok(output) => success_result(output, max_text_bytes),
         Err(msg) => error_result(&msg),
+    }
+}
+
+fn success_result(output: String, max_text_bytes: usize) -> ToolResult {
+    ToolResult {
+        provider_id: String::new(),
+        content: vec![ToolResultContent::Text(truncate_middle(
+            &output,
+            max_text_bytes,
+        ))],
+        is_error: false,
     }
 }
 

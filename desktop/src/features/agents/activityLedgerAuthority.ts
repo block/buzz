@@ -131,6 +131,13 @@ export function applyValidatedJournalAuthority(
     .at(-1);
   if (!latestVerification) return result;
 
+  // A receipt can verify work observed before it was issued, but it cannot
+  // erase later terminal evidence. Reapplying authority after a failed or
+  // stale-incomplete transition must preserve the journal's fail-closed proof.
+  if (result.status === "failed" || result.status === "incomplete") {
+    return result;
+  }
+
   const timestamp = new Date(
     latestVerification.createdAt * 1_000,
   ).toISOString();

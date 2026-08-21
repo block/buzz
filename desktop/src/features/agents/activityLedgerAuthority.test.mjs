@@ -93,6 +93,27 @@ test("owner-signed verification only promotes evidence bound to the journal", ()
   assert.notEqual(crossJournal.proofState, "VERIFIED");
 });
 
+test("later failure and incomplete states outrank an older verification", () => {
+  const journal = observedJournal();
+
+  for (const [status, proofState] of [
+    ["failed", "FAILED"],
+    ["incomplete", "UNKNOWN"],
+  ]) {
+    const terminalJournal = { ...journal, status, proofState };
+    const updated = applyValidatedJournalAuthority(terminalJournal, [
+      artifact(),
+    ]);
+
+    assert.equal(updated.status, status);
+    assert.equal(updated.proofState, proofState);
+    assert.equal(
+      updated.events.some((event) => event.title === "Owner verification"),
+      false,
+    );
+  }
+});
+
 test("verification writes use the journal correlation, not a tool-call correlation", () => {
   const journal = observedJournal();
   const receiptSourceId = "e".repeat(64);
