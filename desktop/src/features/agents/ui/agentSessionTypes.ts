@@ -24,6 +24,20 @@ export type ObserverEvent = {
   payload: unknown;
 };
 
+/**
+ * Stable identity for one decrypted observer event.
+ *
+ * A single signed relay frame may carry a batch of inner events, so the outer
+ * event id alone is not unique. The inner timestamp and sequence number keep
+ * batch siblings distinct while still deduplicating the same archived/live
+ * observation. Legacy unsigned events retain the historical fallback.
+ */
+export function observerEventIdentity(event: ObserverEvent): string {
+  return event.sourceEventId
+    ? `source:${event.sourceEventId}:${event.timestamp.length}:${event.timestamp}:${event.seq}`
+    : `legacy:${event.seq}:${event.timestamp}`;
+}
+
 export type ConnectionState =
   | "idle"
   | "connecting"

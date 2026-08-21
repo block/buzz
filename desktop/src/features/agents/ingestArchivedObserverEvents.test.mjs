@@ -1192,6 +1192,45 @@ describe("raw-event-level merge: stateful aggregates across live/archive boundar
     );
   });
 
+  it("test_batch_inner_events_share_signed_provenance_without_collapsing", async () => {
+    _testRegisterKnownAgents(SUB_ID, [AGENT_PUBKEY]);
+    const CHANNEL = "chan-batch-provenance";
+    const raw = makeRawEvent({ id: "f".repeat(64), created_at: 4242 });
+    const first = makeObserverEvent({
+      seq: 41,
+      timestamp: "2026-01-01T00:41:00.000Z",
+      channelId: CHANNEL,
+    });
+    const second = makeObserverEvent({
+      seq: 42,
+      timestamp: "2026-01-01T00:41:01.000Z",
+      channelId: CHANNEL,
+    });
+    const envelope = makeObserverEvent({
+      seq: 42,
+      timestamp: second.timestamp,
+      kind: "batch",
+      channelId: CHANNEL,
+      payload: { events: [first, second] },
+    });
+
+    await ingestArchivedObserverEvents([raw, raw], makeDecrypt(envelope));
+
+    const archived = _testGetArchivedChannelEvents(AGENT_PUBKEY, CHANNEL);
+    assert.deepEqual(
+      archived.map((event) => event.seq),
+      [41, 42],
+      "one signed batch must retain every distinct inner event exactly once",
+    );
+    for (const event of archived) {
+      assert.equal(event.sourceEventId, raw.id);
+      assert.equal(event.sourcePubkey, raw.pubkey);
+      assert.equal(event.sourceCreatedAt, raw.created_at);
+      assert.equal(event.sourceSignature, raw.sig);
+      assert.equal(event.origin, "historical_backfill");
+    }
+  });
+
   it("test_malformed_batch_envelope_degrades_to_itself", async () => {
     // A kind:"batch" envelope with no events array (harness bug shape) must
     // degrade to the envelope itself rather than being silently dropped, so a

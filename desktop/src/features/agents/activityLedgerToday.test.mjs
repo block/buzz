@@ -89,6 +89,60 @@ test("Today reconstruction skips decrypt failures without admitting bad proof", 
   assert.equal(surface.counts.journals, 0);
 });
 
+test("Today reconstruction expands every inner event from one signed batch", async () => {
+  const timestamp = "2026-08-21T14:00:00.000Z";
+  const batch = relayEvent({
+    id: "batch-frame",
+    decoded: {
+      seq: 99,
+      timestamp,
+      kind: "batch",
+      agentIndex: 0,
+      channelId: "channel-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      payload: {
+        events: [
+          {
+            seq: 1,
+            timestamp,
+            kind: "turn_started",
+            agentIndex: 0,
+            channelId: "channel-1",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            payload: { triggeringEventIds: ["message-1"] },
+          },
+          {
+            seq: 2,
+            timestamp,
+            kind: "turn_completed",
+            agentIndex: 0,
+            channelId: "channel-1",
+            sessionId: "session-1",
+            turnId: "turn-1",
+            payload: {},
+          },
+        ],
+      },
+    },
+  });
+
+  const surface = await buildTodayActivityFromArchivedEvents({
+    day: "2026-08-21",
+    agents: [{ pubkey: "agent-a", name: "Honey" }],
+    events: [batch],
+    decrypt: async (event) => event.decoded,
+  });
+
+  assert.equal(surface.counts.journals, 1);
+  assert.equal(surface.journals[0].events.length, 2);
+  assert.deepEqual(
+    surface.journals[0].events.map((event) => event.provenance.sourceEventId),
+    ["batch-frame", "batch-frame"],
+  );
+});
+
 test("day range is half-open and rejects impossible dates", () => {
   const range = activityLedgerDayRange("2026-08-21");
   assert.equal(range.endCreatedAt - range.startCreatedAt, 24 * 60 * 60);

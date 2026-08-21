@@ -16,9 +16,17 @@
 //! `useArchiveSync` gated on `observerReconciled`, and it survives the move as
 //! an explicit `start_archive_sync` command issued after the same gate.
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
-use nostr::JsonUtil;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
@@ -33,6 +41,14 @@ use super::{
 use crate::app_state::AppState;
 use crate::native_relay_client::{MatchedEvent, NativeRelayClient, RelaySession, Subscription};
 
+#[path = "sync_queue.rs"]
+mod sync_queue;
+use sync_queue::{
+    durable_queue_path, retry_delay, AcknowledgedHead, DurableCandidate, DurableQueue,
+    EnqueueResult, FlushOutcome, ARCHIVE_ATTEMPT_TIMEOUT, ARCHIVE_RETRY_ATTEMPTS,
+    ARCHIVE_RETRY_MAX_DELAY,
+};
+
 /// Flush once this many events are buffered. Parity with the renderer manager.
 const FLUSH_BATCH_SIZE: usize = 25;
 /// Maximum time an event waits in the buffer before being flushed.
@@ -43,6 +59,10 @@ const FLUSH_BATCH_SIZE: usize = 25;
 /// already pending, so a steady trickle still flushed every 2s rather than
 /// never. The behavior is preserved; the name is corrected.
 const FLUSH_DEADLINE: Duration = Duration::from_millis(2_000);
+#[cfg(not(test))]
+const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(12);
+#[cfg(test)]
+const SHUTDOWN_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Emitted after a batch persists new agent-metric rows, so the renderer can
 /// invalidate its usage queries. Replaces the in-process `notifyAgentMetrics
@@ -144,36 +164,6 @@ fn subscription_id(scope_type: &ScopeType, scope_value: &str, kinds: &[u64]) -> 
     format!("archive:{}:{scope_value}:{kinds}", scope_type.as_str())
 }
 
-// ── Batching ─────────────────────────────────────────────────────────────────
-
-/// Buffered candidates plus the deadline of the oldest one.
-#[derive(Default)]
-struct PendingBatch {
-    candidates: Vec<ArchiveCandidate>,
-    /// Set when the buffer goes from empty to non-empty, cleared on take. The
-    /// deadline belongs to the oldest buffered event, so a steady trickle of
-    /// arrivals cannot postpone its flush indefinitely.
-    deadline: Option<Instant>,
-}
-
-impl PendingBatch {
-    fn push(&mut self, candidate: ArchiveCandidate) {
-        if self.candidates.is_empty() {
-            self.deadline = Some(Instant::now() + FLUSH_DEADLINE);
-        }
-        self.candidates.push(candidate);
-    }
-
-    fn is_full(&self) -> bool {
-        self.candidates.len() >= FLUSH_BATCH_SIZE
-    }
-
-    fn take(&mut self) -> Vec<ArchiveCandidate> {
-        self.deadline = None;
-        std::mem::take(&mut self.candidates)
-    }
-}
-
 // ── Sync loop ────────────────────────────────────────────────────────────────
 
 /// Drives one archive sync session until `cancel` fires.
@@ -187,26 +177,49 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
     reload: Arc<Notify>,
     mut events: mpsc::Receiver<MatchedEvent>,
     cancel: CancellationToken,
-) {
+    mut queue: DurableQueue,
+) -> Result<(), String> {
     let mut scopes: HashMap<String, MatchedScope> = HashMap::new();
-    let mut pending = PendingBatch::default();
+    let mut acknowledged_head = None;
+    // Restored work predates every live event this task can receive and is
+    // therefore eligible immediately. A fresh queue retains the existing 2s
+    // batching deadline from the first accepted event.
+    let mut flush_deadline = (!queue.is_empty()).then(Instant::now);
+    let mut backing_off = false;
 
     reconcile(io, &mut scopes).await;
 
     loop {
         // `Instant::far_future()` is not public; a long sleep stands in for
         // "no deadline" so the select arm can be unconditional.
-        let deadline = pending
-            .deadline
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
+        let deadline = flush_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
 
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = reload.notified() => {
                 reconcile(io, &mut scopes).await;
             }
-            _ = tokio::time::sleep_until(deadline), if pending.deadline.is_some() => {
-                flush(io, pending.take()).await;
+            _ = tokio::time::sleep_until(deadline), if flush_deadline.is_some() => {
+                match flush_head_with_retries(
+                    io,
+                    &mut queue,
+                    &mut acknowledged_head,
+                    Some(&cancel),
+                ).await {
+                    FlushOutcome::Empty => {
+                        flush_deadline = None;
+                        backing_off = false;
+                    }
+                    FlushOutcome::Committed => {
+                        flush_deadline = (!queue.is_empty()).then(Instant::now);
+                        backing_off = false;
+                    }
+                    FlushOutcome::Retained => {
+                        flush_deadline = Some(Instant::now() + ARCHIVE_RETRY_MAX_DELAY);
+                        backing_off = true;
+                    }
+                    FlushOutcome::Cancelled => break,
+                }
             }
             received = events.recv() => {
                 let Some(event) = received else { break };
@@ -214,23 +227,39 @@ async fn run_sync<I: ArchiveSyncIo + ?Sized>(
                 // flight; without its scope we cannot assert a match, and the
                 // backend re-verifies scope claims anyway, so drop it.
                 let Some(scope) = scopes.get(&event.subscription_id) else { continue };
-                pending.push(ArchiveCandidate {
-                    raw_event_json: event.event.as_json(),
-                    matched_scope: MatchedScope {
-                        scope_type: scope.scope_type.clone(),
-                        scope_value: scope.scope_value.clone(),
-                    },
-                });
-                if pending.is_full() {
-                    flush(io, pending.take()).await;
+                let was_empty = queue.is_empty();
+                let candidate = DurableCandidate::from_event(&event.event, scope);
+                match queue.enqueue(candidate) {
+                    Ok(EnqueueResult::Duplicate) => continue,
+                    Ok(EnqueueResult::Accepted) => {}
+                    Err(error) => {
+                        // The event has not been accepted: stop the relay task
+                        // rather than pretending an in-memory tail is durable.
+                        return Err(error);
+                    }
+                }
+                if was_empty {
+                    flush_deadline = Some(Instant::now() + FLUSH_DEADLINE);
+                    backing_off = false;
+                }
+                if queue.len() >= FLUSH_BATCH_SIZE && !backing_off {
+                    flush_deadline = Some(Instant::now());
                 }
             }
         }
     }
 
-    // Buffered events are already off the relay; dropping them on shutdown
-    // would lose them permanently for the ephemeral scope.
-    flush(io, pending.take()).await;
+    // Every accepted event is already durable. Teardown makes one bounded
+    // retry cycle per head and then returns; failures remain on disk for the
+    // next Tauri process instead of hanging shutdown or discarding the tail.
+    while !queue.is_empty() {
+        match flush_head_with_retries(io, &mut queue, &mut acknowledged_head, None).await {
+            FlushOutcome::Committed => {}
+            FlushOutcome::Empty => break,
+            FlushOutcome::Retained | FlushOutcome::Cancelled => break,
+        }
+    }
+    Ok(())
 }
 
 /// Reloads the saved subscriptions and applies them to the session.
@@ -250,21 +279,99 @@ async fn reconcile<I: ArchiveSyncIo + ?Sized>(io: &I, scopes: &mut HashMap<Strin
     *scopes = next_scopes;
 }
 
-/// Awaited rather than spawned: back-pressure through the session's bounded
-/// event channel is what keeps a catch-up storm from queueing unbounded
-/// archive work. The renderer's fire-and-forget was a property of living in
-/// an event loop it could not block, not a behavior worth porting.
-async fn flush<I: ArchiveSyncIo + ?Sized>(io: &I, candidates: Vec<ArchiveCandidate>) {
-    if candidates.is_empty() {
-        return;
+/// Deliver exactly the durable head. Archive calls and acknowledgment writes
+/// are both single-flight. Once the backend acknowledges, `acknowledged_head`
+/// prevents an acknowledgment-write retry from re-delivering the batch in the
+/// same process. A process crash in that narrow interval can replay once; the
+/// archive database's signed event-id + scope key makes that idempotent.
+async fn flush_head_with_retries<I: ArchiveSyncIo + ?Sized>(
+    io: &I,
+    queue: &mut DurableQueue,
+    acknowledged_head: &mut Option<AcknowledgedHead>,
+    cancel: Option<&CancellationToken>,
+) -> FlushOutcome {
+    if queue.is_empty() {
+        *acknowledged_head = None;
+        return FlushOutcome::Empty;
     }
-    match io.archive(candidates).await {
-        // The backend is authoritative: a duplicate-only batch or one with no
-        // kind-44200 events must not invalidate usage queries.
-        Ok(result) if result.persisted_agent_metrics > 0 => io.notify_agent_metrics_changed(),
-        Ok(_) => {}
-        Err(error) => eprintln!("buzz-desktop: archive sync: archive_events failed: {error}"),
+
+    if acknowledged_head.is_none() {
+        let mut archived = None;
+        for attempt in 0..ARCHIVE_RETRY_ATTEMPTS {
+            let archive = tokio::time::timeout(ARCHIVE_ATTEMPT_TIMEOUT, io.archive(queue.head()));
+            let result = if let Some(cancel) = cancel {
+                tokio::select! {
+                    _ = cancel.cancelled() => return FlushOutcome::Cancelled,
+                    result = archive => result,
+                }
+            } else {
+                archive.await
+            };
+            match result {
+                Ok(Ok(result)) => {
+                    archived = Some(AcknowledgedHead {
+                        count: queue.head_len(),
+                        persisted_agent_metrics: result.persisted_agent_metrics,
+                    });
+                    break;
+                }
+                Ok(Err(error)) => eprintln!(
+                    "buzz-desktop: archive sync: archive_events attempt {} failed: {error}",
+                    attempt + 1
+                ),
+                Err(_) => eprintln!(
+                    "buzz-desktop: archive sync: archive_events attempt {} timed out",
+                    attempt + 1
+                ),
+            }
+            if attempt + 1 < ARCHIVE_RETRY_ATTEMPTS {
+                let sleep = tokio::time::sleep(retry_delay(attempt));
+                if let Some(cancel) = cancel {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return FlushOutcome::Cancelled,
+                        _ = sleep => {}
+                    }
+                } else {
+                    sleep.await;
+                }
+            }
+        }
+        let Some(archived) = archived else {
+            return FlushOutcome::Retained;
+        };
+        *acknowledged_head = Some(archived);
     }
+
+    // Archive acknowledgment already happened. Retry only the atomic durable
+    // removal; do not call archive again while this process remembers the ack.
+    for attempt in 0..ARCHIVE_RETRY_ATTEMPTS {
+        let acknowledged = acknowledged_head.expect("acknowledged head is set");
+        match queue.acknowledge_head(acknowledged.count) {
+            Ok(()) => {
+                if acknowledged.persisted_agent_metrics > 0 {
+                    io.notify_agent_metrics_changed();
+                }
+                *acknowledged_head = None;
+                return FlushOutcome::Committed;
+            }
+            Err(error) => eprintln!(
+                "buzz-desktop: archive sync: durable acknowledgment attempt {} failed: {error}",
+                attempt + 1
+            ),
+        }
+        if attempt + 1 < ARCHIVE_RETRY_ATTEMPTS {
+            let sleep = tokio::time::sleep(retry_delay(attempt));
+            if let Some(cancel) = cancel {
+                tokio::select! {
+                    _ = cancel.cancelled() => return FlushOutcome::Cancelled,
+                    _ = sleep => {}
+                }
+            } else {
+                sleep.await;
+            }
+        }
+    }
+    FlushOutcome::Retained
 }
 
 // ── Production wiring ────────────────────────────────────────────────────────
@@ -353,6 +460,33 @@ struct RunningSync {
     scope: (String, String),
     cancel: CancellationToken,
     reload: Arc<Notify>,
+    completion: Arc<SyncCompletion>,
+}
+
+#[derive(Default)]
+struct SyncCompletion {
+    finished: AtomicBool,
+    notify: Notify,
+}
+
+impl SyncCompletion {
+    fn finish(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        loop {
+            if self.finished.load(Ordering::Acquire) {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.finished.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 /// Proof that the holder is the current archive-sync owner, and the lock that
@@ -472,6 +606,7 @@ impl ArchiveSyncState {
         scope: (String, String),
         cancel: CancellationToken,
         reload: Arc<Notify>,
+        completion: Arc<SyncCompletion>,
     ) -> Option<ArchiveOwnership<'_>> {
         let mut latest = self.latest.lock().await;
         if mark <= *latest {
@@ -495,6 +630,7 @@ impl ArchiveSyncState {
             scope,
             cancel,
             reload,
+            completion,
         });
         Some(ArchiveOwnership {
             _latest: latest,
@@ -516,15 +652,42 @@ impl ArchiveSyncState {
     /// newer start install its task, and then cancel that task on resume —
     /// stale cleanup stranding the newest owner. Both halves take `latest` then
     /// `running`, so the two can never interleave and the order is deadlock-free.
-    async fn end(&self, mark: (u64, u64)) {
+    async fn end(&self, mark: (u64, u64)) -> Result<(), String> {
         let mut latest = self.latest.lock().await;
         if mark < *latest {
-            return;
+            return Ok(());
         }
         *latest = mark;
 
-        if let Some(running) = self.running.lock().await.take() {
+        let running = self.running.lock().await.take();
+        if let Some(running) = running {
             running.cancel.cancel();
+            if tokio::time::timeout(SHUTDOWN_WAIT_TIMEOUT, running.completion.wait())
+                .await
+                .is_err()
+            {
+                // Keep the cancelled task visible so a later start cannot
+                // assume teardown completed and race the same durable queue.
+                *self.running.lock().await = Some(running);
+                return Err(format!(
+                    "archive sync teardown did not finish within {}ms; durable queue retained",
+                    SHUTDOWN_WAIT_TIMEOUT.as_millis()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear a task that finished after a bounded stop timed out and reinserted
+    /// it. Pointer identity prevents an old task's late completion from
+    /// clearing a newer task installed for the same scope.
+    async fn clear_completed(&self, completion: &Arc<SyncCompletion>) {
+        let mut running = self.running.lock().await;
+        if running.as_ref().is_some_and(|current| {
+            Arc::ptr_eq(&current.completion, completion)
+                && current.completion.finished.load(Ordering::Acquire)
+        }) {
+            running.take();
         }
     }
 }
@@ -562,16 +725,34 @@ pub async fn start_archive_sync(
     let keys = state.signing_keys()?;
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
     let scope = (keys.public_key().to_hex(), relay_url.clone());
+    let queue_path = durable_queue_path(&app, &scope.0, &scope.1)?;
 
     // Only cheap handles before `begin`: a start that lost its mark, or a
     // same-scope remount, must not open a relay socket just to drop it again.
     let cancel = CancellationToken::new();
     let reload = Arc::new(Notify::new());
+    let completion = Arc::new(SyncCompletion::default());
     let Some(ownership) = sync_state
-        .begin((epoch, lease), scope, cancel.clone(), Arc::clone(&reload))
+        .begin(
+            (epoch, lease),
+            scope.clone(),
+            cancel.clone(),
+            Arc::clone(&reload),
+            Arc::clone(&completion),
+        )
         .await
     else {
         return Ok(());
+    };
+
+    let queue = match DurableQueue::open(queue_path) {
+        Ok(queue) => queue,
+        Err(error) => {
+            completion.finish();
+            drop(ownership);
+            sync_state.end((epoch, lease)).await?;
+            return Err(error);
+        }
     };
 
     // No NIP-OA auth tag: this is the owner's own session, authenticated as
@@ -589,8 +770,13 @@ pub async fn start_archive_sync(
         session: Arc::clone(&session),
     };
     tauri::async_runtime::spawn(async move {
-        run_sync(&io, reload, events, cancel).await;
+        if let Err(error) = run_sync(&io, reload, events, cancel, queue).await {
+            eprintln!("buzz-desktop: archive sync stopped fail-closed: {error}");
+        }
         session.set_subscriptions(Vec::new()).await;
+        completion.finish();
+        let sync_state: State<'_, ArchiveSyncState> = io.app.state();
+        sync_state.clear_completed(&completion).await;
     });
     Ok(())
 }
@@ -606,9 +792,12 @@ pub async fn stop_archive_sync(
     epoch: u64,
     lease: u64,
 ) -> Result<(), String> {
-    sync_state.end((epoch, lease)).await;
-    Ok(())
+    sync_state.end((epoch, lease)).await
 }
+
+#[cfg(test)]
+#[path = "sync_queue_tests.rs"]
+mod sync_queue_tests;
 
 #[cfg(test)]
 #[path = "sync_tests.rs"]

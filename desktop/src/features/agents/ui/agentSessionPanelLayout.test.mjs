@@ -120,6 +120,14 @@ test("observerEventScrollId returns distinct ids for same seq across a restart",
   assert.notEqual(observerEventScrollId(before), observerEventScrollId(after));
 });
 
+test("observerEventScrollId distinguishes siblings from one signed batch", () => {
+  const timestamp = "2026-07-13T21:00:00.000Z";
+  const sourceEventId = "a".repeat(64);
+  const first = { seq: 1, timestamp, sourceEventId };
+  const second = { seq: 2, timestamp, sourceEventId };
+  assert.notEqual(observerEventScrollId(first), observerEventScrollId(second));
+});
+
 test("mergeObserverEventWindows preserves signed frames with colliding seq and timestamp", () => {
   const timestamp = "2026-07-13T21:00:00.000Z";
   const live = { seq: 1, timestamp, sourceEventId: "a".repeat(64) };
@@ -128,12 +136,24 @@ test("mergeObserverEventWindows preserves signed frames with colliding seq and t
   assert.equal(merged.length, 2);
 });
 
-test("mergeObserverEventWindows deduplicates the same signed frame", () => {
+test("mergeObserverEventWindows deduplicates the same signed inner event", () => {
   const timestamp = "2026-07-13T21:00:00.000Z";
   const sourceEventId = "a".repeat(64);
   const live = { seq: 1, timestamp, sourceEventId };
-  const archived = { seq: 9, timestamp, sourceEventId };
+  const archived = { ...live };
   const merged = mergeObserverEventWindows([live], [archived]);
   assert.equal(merged.length, 1);
   assert.equal(merged[0], live);
+});
+
+test("mergeObserverEventWindows preserves signed batch siblings", () => {
+  const timestamp = "2026-07-13T21:00:00.000Z";
+  const sourceEventId = "a".repeat(64);
+  const live = { seq: 1, timestamp, sourceEventId };
+  const archived = { seq: 2, timestamp, sourceEventId };
+  const merged = mergeObserverEventWindows([live], [archived]);
+  assert.deepEqual(
+    merged.map((event) => event.seq),
+    [1, 2],
+  );
 });

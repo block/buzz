@@ -1,5 +1,5 @@
 use super::*;
-use crate::archive::store::{open_archive_db, SCHEMA};
+use crate::archive::store::{self, open_archive_db, SCHEMA};
 use rusqlite::Connection;
 
 fn in_memory() -> Connection {
@@ -24,6 +24,58 @@ fn verification_input() -> JournalVerificationInput {
         receipt_ref: "receipt://archive/tool-call-1".into(),
         source_event_ids: vec!["a".repeat(64), "b".repeat(64)],
     }
+}
+
+fn observer_event(owner: &Keys, agent: &Keys, journal_id: &str, correlation_id: &str) -> Event {
+    let payload = serde_json::json!({
+        "seq": 1,
+        "timestamp": "2026-08-21T14:00:00.000Z",
+        "kind": "turn_started",
+        "agentIndex": 0,
+        "channelId": "channel-1",
+        "sessionId": "session-1",
+        "turnId": journal_id,
+        "payload": { "triggeringEventIds": [correlation_id] }
+    });
+    let ciphertext =
+        buzz_core_pkg::observer::encrypt_observer_payload(agent, &owner.public_key(), &payload)
+            .unwrap();
+    EventBuilder::new(Kind::Custom(24200), ciphertext)
+        .tags([
+            Tag::parse(["p", &owner.public_key().to_hex()]).unwrap(),
+            Tag::parse(["agent", &agent.public_key().to_hex()]).unwrap(),
+            Tag::parse(["frame", "telemetry"]).unwrap(),
+        ])
+        .sign_with_keys(agent)
+        .unwrap()
+}
+
+fn archive_observer(conn: &Connection, owner_pubkey: &str, relay_url: &str, event: &Event) {
+    store::upsert_archived_event(
+        conn,
+        owner_pubkey,
+        relay_url,
+        &event.id.to_hex(),
+        24200,
+        &event.pubkey.to_hex(),
+        event.created_at.as_secs() as i64,
+        &event.as_json(),
+        1,
+    )
+    .unwrap();
+}
+
+fn scope_observer(conn: &Connection, owner_pubkey: &str, relay_url: &str, event: &Event) {
+    store::upsert_event_scope(
+        conn,
+        owner_pubkey,
+        relay_url,
+        &event.id.to_hex(),
+        "owner_p",
+        owner_pubkey,
+        1,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -182,9 +234,8 @@ fn verification_sources_must_exist_and_remain_valid_in_owner_archive() {
     let owner = Keys::generate();
     let agent = Keys::generate();
     let owner_pk = owner.public_key().to_hex();
-    let event = EventBuilder::new(Kind::Custom(24200), "signed observer")
-        .sign_with_keys(&agent)
-        .unwrap();
+    let relay_url = "wss://r";
+    let event = observer_event(&owner, &agent, "agent:channel:turn-1", "tool-call-1");
     let event_id = event.id.to_hex();
     let input = JournalVerificationInput {
         source_event_ids: vec![event_id.clone()],
@@ -193,24 +244,23 @@ fn verification_sources_must_exist_and_remain_valid_in_owner_archive() {
     let raw = build_verification_event(&owner, &input, 1).unwrap();
     let artifact = upsert_signed_artifact(&conn, &owner_pk, &raw, 10).unwrap();
     assert!(
-        validate_archived_verification_sources(&conn, &owner_pk, &artifact)
+        validate_archived_verification_sources(&conn, &owner, &artifact)
             .unwrap_err()
             .contains("is not archived")
     );
 
-    conn.execute(
-        "INSERT INTO archived_events
-         (identity_pubkey, relay_url, id, kind, pubkey, created_at, raw_json, archived_at)
-         VALUES (?1, 'wss://r', ?2, 24200, ?3, 1, ?4, 1)",
-        params![
-            owner_pk,
-            event_id,
-            agent.public_key().to_hex(),
-            event.as_json()
-        ],
+    archive_observer(&conn, &owner_pk, relay_url, &event);
+    scope_observer(&conn, &owner_pk, relay_url, &event);
+    assert!(
+        validate_archived_verification_sources(&conn, &owner, &artifact)
+            .unwrap_err()
+            .contains("no owner_p subscription")
+    );
+    store::upsert_save_subscription(
+        &conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]", 1,
     )
     .unwrap();
-    validate_archived_verification_sources(&conn, &owner_pk, &artifact).unwrap();
+    validate_archived_verification_sources(&conn, &owner, &artifact).unwrap();
 
     conn.execute(
         "UPDATE archived_events SET raw_json = '{}' WHERE identity_pubkey = ?1 AND id = ?2",
@@ -218,9 +268,75 @@ fn verification_sources_must_exist_and_remain_valid_in_owner_archive() {
     )
     .unwrap();
     assert!(
-        validate_archived_verification_sources(&conn, &owner_pk, &artifact)
+        validate_archived_verification_sources(&conn, &owner, &artifact)
             .unwrap_err()
             .contains("failed validation")
+    );
+}
+
+#[test]
+fn verification_rejects_tagless_or_wrongly_bound_observer_sources() {
+    let conn = in_memory();
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let owner_pk = owner.public_key().to_hex();
+    let relay_url = "wss://r";
+    store::upsert_save_subscription(
+        &conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]", 1,
+    )
+    .unwrap();
+
+    let authorized = observer_event(&owner, &agent, "agent:channel:turn-1", "tool-call-1");
+    archive_observer(&conn, &owner_pk, relay_url, &authorized);
+    scope_observer(&conn, &owner_pk, relay_url, &authorized);
+
+    let mut wrong_journal = verification_input();
+    wrong_journal.journal_id = "different-turn".into();
+    wrong_journal.source_event_ids = vec![authorized.id.to_hex()];
+    let raw = build_verification_event(&owner, &wrong_journal, 1).unwrap();
+    let artifact = validate_signed_artifact(&raw, &owner_pk).unwrap();
+    assert!(
+        validate_archived_verification_sources(&conn, &owner, &artifact)
+            .unwrap_err()
+            .contains("does not bind the journal")
+    );
+
+    let mut wrong_correlation = verification_input();
+    wrong_correlation.correlation_id = "different-correlation".into();
+    wrong_correlation.source_event_ids = vec![authorized.id.to_hex()];
+    let raw = build_verification_event(&owner, &wrong_correlation, 1).unwrap();
+    let artifact = validate_signed_artifact(&raw, &owner_pk).unwrap();
+    assert!(
+        validate_archived_verification_sources(&conn, &owner, &artifact)
+            .unwrap_err()
+            .contains("do not bind correlation")
+    );
+
+    let ciphertext = buzz_core_pkg::observer::encrypt_observer_payload(
+        &agent,
+        &owner.public_key(),
+        &serde_json::json!({
+            "seq": 2,
+            "timestamp": "2026-08-21T14:00:01.000Z",
+            "kind": "turn_started",
+            "turnId": "agent:channel:turn-1",
+            "payload": { "triggeringEventIds": ["tool-call-1"] }
+        }),
+    )
+    .unwrap();
+    let tagless = EventBuilder::new(Kind::Custom(24200), ciphertext)
+        .sign_with_keys(&agent)
+        .unwrap();
+    archive_observer(&conn, &owner_pk, relay_url, &tagless);
+    scope_observer(&conn, &owner_pk, relay_url, &tagless);
+    let mut input = verification_input();
+    input.source_event_ids = vec![tagless.id.to_hex()];
+    let raw = build_verification_event(&owner, &input, 1).unwrap();
+    let artifact = validate_signed_artifact(&raw, &owner_pk).unwrap();
+    assert!(
+        validate_archived_verification_sources(&conn, &owner, &artifact)
+            .unwrap_err()
+            .contains("observer authorization failed")
     );
 }
 

@@ -11,13 +11,10 @@ import {
   writeOwnerTodaySnapshot,
   type JournalAuthorityArtifact,
 } from "@/shared/api/tauriArchive";
-import type { RelayEvent } from "@/shared/api/types";
-import { truncatePubkey } from "@/shared/lib/pubkey";
 import {
   activityLedgerDayRange,
   applyAuthorityToTodayActivity,
   buildTodayActivityFromArchivedEvents,
-  type ActivityLedgerAgentIdentity,
 } from "./activityLedgerToday";
 
 const SNAPSHOT_REFRESH_MS = 60_000;
@@ -29,32 +26,6 @@ function localDay(now: Date): string {
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const date = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${date}`;
-}
-
-function observerAgentPubkey(event: RelayEvent): string | null {
-  return (
-    event.tags.find(
-      (tag) => tag[0] === "agent" && typeof tag[1] === "string",
-    )?.[1] ?? null
-  );
-}
-
-function todayAgentIdentities(
-  managed: readonly ActivityLedgerAgentIdentity[],
-  events: readonly RelayEvent[],
-): ActivityLedgerAgentIdentity[] {
-  const identities = new Map(
-    managed.map((agent) => [agent.pubkey, agent] as const),
-  );
-  for (const event of events) {
-    const pubkey = observerAgentPubkey(event);
-    if (!pubkey || event.pubkey !== pubkey || identities.has(pubkey)) continue;
-    identities.set(pubkey, {
-      pubkey,
-      name: `Agent ${truncatePubkey(pubkey)}`,
-    });
-  }
-  return [...identities.values()];
 }
 
 async function loadCompleteAuthorityWindow(input: {
@@ -110,10 +81,9 @@ export function useActivityLedgerTodaySnapshot(): void {
           ...range,
           pageSize: 500,
         });
-        const agents = todayAgentIdentities(managedIdentities, archived);
         const observedSurface = await buildTodayActivityFromArchivedEvents({
           day,
-          agents,
+          agents: managedIdentities,
           events: archived,
         });
         const authority = await loadCompleteAuthorityWindow({

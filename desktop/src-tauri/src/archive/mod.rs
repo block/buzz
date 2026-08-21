@@ -888,7 +888,7 @@ pub fn upsert_journal_verification(
     )?;
     let raw = journal_authority::build_verification_event(&keys, &input, revision)?;
     let artifact = journal_authority::validate_signed_artifact(&raw, &identity_pk)?;
-    journal_authority::validate_archived_verification_sources(&conn, &identity_pk, &artifact)?;
+    journal_authority::validate_archived_verification_sources(&conn, &keys, &artifact)?;
     journal_authority::upsert_signed_artifact(&conn, &identity_pk, &raw, now_secs())
 }
 
@@ -899,12 +899,13 @@ pub fn get_journal_authority_artifacts(
     state: State<'_, AppState>,
     journal_id: String,
 ) -> Result<Vec<JournalAuthorityArtifact>, String> {
-    let identity_pk = identity_pubkey(&state)?;
+    let keys = state.signing_keys()?;
+    let identity_pk = keys.public_key().to_hex();
     let conn = open_db()?;
     let artifacts =
         journal_authority::get_journal_authority_artifacts(&conn, &identity_pk, journal_id.trim())?;
     for artifact in &artifacts {
-        journal_authority::validate_archived_verification_sources(&conn, &identity_pk, artifact)?;
+        journal_authority::validate_archived_verification_sources(&conn, &keys, artifact)?;
     }
     Ok(artifacts)
 }
@@ -918,7 +919,8 @@ pub fn query_journal_authority_artifacts(
     end_created_at: i64,
     limit: Option<i64>,
 ) -> Result<Vec<JournalAuthorityArtifact>, String> {
-    let identity_pk = identity_pubkey(&state)?;
+    let keys = state.signing_keys()?;
+    let identity_pk = keys.public_key().to_hex();
     let conn = open_db()?;
     let artifacts = journal_authority::query_journal_authority_artifacts(
         &conn,
@@ -928,7 +930,7 @@ pub fn query_journal_authority_artifacts(
         limit.unwrap_or(200),
     )?;
     for artifact in &artifacts {
-        journal_authority::validate_archived_verification_sources(&conn, &identity_pk, artifact)?;
+        journal_authority::validate_archived_verification_sources(&conn, &keys, artifact)?;
     }
     Ok(artifacts)
 }
@@ -941,9 +943,16 @@ pub fn write_owner_today_snapshot(
     state: State<'_, AppState>,
     snapshot_json: String,
 ) -> Result<TodaySnapshotReceipt, String> {
-    let identity_pk = identity_pubkey(&state)?;
+    let keys = state.signing_keys()?;
+    let identity_pk = keys.public_key().to_hex();
     let nest = nest_dir().ok_or("cannot resolve nest directory for Today snapshot")?;
-    today_snapshot::write_owner_today_snapshot(&nest, &identity_pk, &snapshot_json, now_secs())
+    today_snapshot::write_owner_today_snapshot(
+        &nest,
+        &keys,
+        &identity_pk,
+        &snapshot_json,
+        now_secs(),
+    )
 }
 
 /// Read and revalidate the current owner's unexpired Today snapshot.

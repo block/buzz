@@ -14,10 +14,11 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
-import type {
-  ConnectionState,
-  ObserverEvent,
-  TranscriptItem,
+import {
+  observerEventIdentity,
+  type ConnectionState,
+  type ObserverEvent,
+  type TranscriptItem,
 } from "./ui/agentSessionTypes";
 import {
   type TranscriptState,
@@ -221,12 +222,6 @@ function setConnectionState(
 
 function observerTag(event: RelayEvent, tagName: string) {
   return event.tags.find((tag) => tag[0] === tagName)?.[1] ?? null;
-}
-
-function observerEventIdentity(event: ObserverEvent): string {
-  return event.sourceEventId
-    ? `source:${event.sourceEventId}:${event.timestamp.length}:${event.timestamp}:${event.seq}`
-    : `legacy:${event.seq}:${event.timestamp}`;
 }
 
 function withRelayProvenance(

@@ -115,6 +115,24 @@ test("signed provenance keeps same seq and timestamp with different ids distinct
   assert.equal(events.length, 2);
 });
 
+test("signed batch siblings keep the same outer id without collapsing", () => {
+  const sourceEventId = "3".repeat(64);
+  const events = normalizeActivityEvents([
+    observerEvent({ seq: 1, sourceEventId }),
+    observerEvent({
+      seq: 2,
+      kind: "turn_completed",
+      sourceEventId,
+    }),
+  ]);
+  assert.equal(events.length, 2);
+  assert.equal(new Set(events.map((event) => event.id)).size, 2);
+  assert.deepEqual(
+    events.map((event) => event.provenance.sourceEventId),
+    [sourceEventId, sourceEventId],
+  );
+});
+
 test("completed tool output is RECEIPTED but never implicitly VERIFIED", () => {
   const events = normalizeActivityEvents([
     sessionUpdate(2, "tool_call_update", {

@@ -1,4 +1,7 @@
-import type { ObserverEvent } from "./ui/agentSessionTypes";
+import {
+  observerEventIdentity,
+  type ObserverEvent,
+} from "./ui/agentSessionTypes";
 
 export type ActivityProofState =
   | "OBSERVED"
@@ -255,11 +258,7 @@ function buildId(
   category: ActivityCategory,
   suffix: string | null = null,
 ) {
-  return [
-    category,
-    event.sourceEventId ?? `${event.seq}:${event.timestamp}:${event.kind}`,
-    suffix,
-  ]
+  return [category, observerEventIdentity(event), suffix]
     .filter(Boolean)
     .join(":");
 }
@@ -292,9 +291,7 @@ function dedupeObserverEvents(events: readonly ObserverEvent[]) {
   const seen = new Set<string>();
   const deduped: ObserverEvent[] = [];
   for (const event of [...events].sort(compareObserverEvents)) {
-    const key = event.sourceEventId
-      ? `source:${event.sourceEventId}`
-      : `legacy:${event.seq}:${event.timestamp}`;
+    const key = observerEventIdentity(event);
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(event);

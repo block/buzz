@@ -619,7 +619,7 @@ export const OWNER_TODAY_SNAPSHOT_SCHEMA =
 export const OWNER_TODAY_SNAPSHOT_CAPABILITY =
   "buzz.activity-ledger.today.read/v1" as const;
 
-export type OwnerTodaySnapshot = {
+export type OwnerTodaySnapshotInput = {
   schema: typeof OWNER_TODAY_SNAPSHOT_SCHEMA;
   ownerPubkey: string;
   generatedAt: number;
@@ -627,6 +627,12 @@ export type OwnerTodaySnapshot = {
   capability: typeof OWNER_TODAY_SNAPSHOT_CAPABILITY;
   surface: Record<string, unknown>;
   rawEvents: unknown[];
+};
+
+export type OwnerTodaySnapshot = OwnerTodaySnapshotInput & {
+  snapshotSha256: string;
+  eventId: string;
+  signature: string;
 };
 
 export type TodaySnapshotReceipt = {
@@ -640,7 +646,7 @@ export type TodaySnapshotReceipt = {
 
 /** Atomically write the current owner's canonical Today projection as 0600. */
 export async function writeOwnerTodaySnapshot(
-  snapshot: OwnerTodaySnapshot,
+  snapshot: OwnerTodaySnapshotInput,
 ): Promise<TodaySnapshotReceipt> {
   return invokeTauri<TodaySnapshotReceipt>("write_owner_today_snapshot", {
     snapshotJson: JSON.stringify(snapshot),

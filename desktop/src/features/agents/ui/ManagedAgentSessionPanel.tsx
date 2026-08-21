@@ -275,6 +275,15 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     ],
     [journal.events],
   );
+  const receiptedCorrelationId = React.useMemo(
+    () =>
+      journal.events.find(
+        (event) =>
+          event.proofState === "RECEIPTED" &&
+          typeof event.provenance.sourceEventId === "string",
+      )?.correlationId ?? journal.correlationId,
+    [journal.correlationId, journal.events],
+  );
 
   const saveSummary = async () => {
     if (!summary.trim() || saving) return;
@@ -306,7 +315,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     try {
       await upsertJournalVerification({
         journalId: journal.id,
-        correlationId: journal.correlationId,
+        correlationId: receiptedCorrelationId,
         receiptRef: receiptRef.trim(),
         sourceEventIds: receiptedSourceIds,
       });

@@ -583,22 +583,39 @@ pub fn query_journal_authority_artifacts(
 /// tampered observer evidence.
 pub fn validate_archived_verification_sources(
     conn: &Connection,
-    identity_pubkey: &str,
+    owner_keys: &Keys,
     artifact: &JournalAuthorityArtifact,
 ) -> Result<(), String> {
     if artifact.artifact_type != JournalAuthorityArtifactType::Verification {
         return Ok(());
     }
+    let identity_pubkey = owner_keys.public_key().to_hex();
+    if artifact.owner_pubkey != identity_pubkey {
+        return Err("verification artifact owner does not match the active identity".into());
+    }
+    let mut correlation_bound = artifact.correlation_id == artifact.journal_id;
     for source_event_id in &artifact.source_event_ids {
         let mut stmt = conn
             .prepare(
-                "SELECT kind, raw_json FROM archived_events
-                 WHERE identity_pubkey = ?1 AND id = ?2",
+                "SELECT ae.relay_url, ae.kind, ae.raw_json
+                   FROM archived_events ae
+                   INNER JOIN archived_event_scopes aes
+                     ON aes.identity_pubkey = ae.identity_pubkey
+                    AND aes.relay_url = ae.relay_url
+                    AND aes.id = ae.id
+                  WHERE ae.identity_pubkey = ?1
+                    AND ae.id = ?2
+                    AND aes.scope_type = 'owner_p'
+                    AND aes.scope_value = ?1",
             )
             .map_err(|error| format!("prepare verification source read: {error}"))?;
         let rows = stmt
             .query_map(params![identity_pubkey, source_event_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .map_err(|error| format!("read verification source event: {error}"))?
             .collect::<Result<Vec<_>, _>>()
@@ -610,19 +627,92 @@ pub fn validate_archived_verification_sources(
         }
         let mut validation_errors = Vec::new();
         let mut valid = false;
-        for (kind, raw_json) in rows {
+        for (relay_url, kind, raw_json) in rows {
             if kind != 24200 {
                 validation_errors.push("not an observer event".to_string());
                 continue;
             }
-            match Event::from_json(&raw_json) {
+            let event = match Event::from_json(&raw_json) {
                 Ok(event) if event.id.to_hex() == *source_event_id && event.verify().is_ok() => {
-                    valid = true;
-                    break;
+                    event
                 }
-                Ok(_) => validation_errors.push("signed ID or signature mismatch".to_string()),
-                Err(error) => validation_errors.push(format!("parse failed: {error}")),
+                Ok(_) => {
+                    validation_errors.push("signed ID or signature mismatch".to_string());
+                    continue;
+                }
+                Err(error) => {
+                    validation_errors.push(format!("parse failed: {error}"));
+                    continue;
+                }
+            };
+            if let Err(error) = super::validate_ephemeral_frame(
+                &event,
+                &identity_pubkey,
+                &identity_pubkey,
+                conn,
+                &identity_pubkey,
+                &relay_url,
+            ) {
+                validation_errors.push(format!("observer authorization failed: {error}"));
+                continue;
             }
+            let decoded = match buzz_core_pkg::observer::decrypt_observer_payload::<serde_json::Value>(
+                owner_keys, &event,
+            ) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    validation_errors.push(format!("observer decrypt failed: {error}"));
+                    continue;
+                }
+            };
+            let leaves: Vec<&serde_json::Value> =
+                if decoded.get("kind").and_then(serde_json::Value::as_str) == Some("batch") {
+                    decoded
+                        .get("payload")
+                        .and_then(|payload| payload.get("events"))
+                        .and_then(serde_json::Value::as_array)
+                        .map(|events| events.iter().collect())
+                        .unwrap_or_default()
+                } else {
+                    vec![&decoded]
+                };
+            let matching_leaves = leaves
+                .into_iter()
+                .filter(|leaf| {
+                    ["journalKey", "turnId", "sessionId", "channelId"]
+                        .into_iter()
+                        .filter_map(|field| leaf.get(field).and_then(serde_json::Value::as_str))
+                        .any(|value| value == artifact.journal_id)
+                })
+                .collect::<Vec<_>>();
+            if matching_leaves.is_empty() {
+                validation_errors.push("observer payload does not bind the journal".to_string());
+                continue;
+            }
+            correlation_bound |= matching_leaves.iter().any(|leaf| {
+                let payload = leaf.get("payload");
+                let triggering_matches = payload
+                    .and_then(|value| value.get("triggeringEventIds"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|ids| {
+                        ids.iter()
+                            .any(|id| id.as_str() == Some(artifact.correlation_id.as_str()))
+                    });
+                let update = payload
+                    .and_then(|value| value.get("params"))
+                    .and_then(|value| value.get("update"));
+                let update_matches = ["toolCallId", "messageId"]
+                    .into_iter()
+                    .filter_map(|field| {
+                        update
+                            .and_then(|value| value.get(field))
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .any(|value| value == artifact.correlation_id);
+                triggering_matches || update_matches
+            });
+            valid = true;
+            break;
         }
         if !valid {
             return Err(format!(
@@ -630,6 +720,12 @@ pub fn validate_archived_verification_sources(
                 validation_errors.join("; ")
             ));
         }
+    }
+    if !correlation_bound {
+        return Err(format!(
+            "verification sources do not bind correlation {:?}",
+            artifact.correlation_id
+        ));
     }
     Ok(())
 }

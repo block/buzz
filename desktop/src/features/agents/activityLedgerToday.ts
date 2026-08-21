@@ -37,6 +37,15 @@ function isObserverEvent(value: unknown): value is ObserverEvent {
   );
 }
 
+function unwrapObserverEvents(value: unknown): ObserverEvent[] {
+  if (!isObserverEvent(value)) return [];
+  if (value.kind !== "batch") return [value];
+  if (!value.payload || typeof value.payload !== "object") return [];
+  const events = (value.payload as { events?: unknown }).events;
+  if (!Array.isArray(events)) return [];
+  return events.filter(isObserverEvent);
+}
+
 /** Return the local-time half-open Unix range used by the owner Today view. */
 export function activityLedgerDayRange(day: string): {
   startCreatedAt: number;
@@ -94,18 +103,20 @@ export async function buildTodayActivityFromArchivedEvents(input: {
 
       try {
         const decoded = await decrypt(relayEvent);
-        if (!isObserverEvent(decoded)) return;
-        const enriched: ObserverEvent = {
-          ...decoded,
-          sourceEventId: relayEvent.id,
-          sourcePubkey: relayEvent.pubkey,
-          sourceKind: relayEvent.kind,
-          sourceCreatedAt: relayEvent.created_at,
-          sourceSignature: relayEvent.sig,
-          origin: "historical_backfill",
-        };
+        const decodedEvents = unwrapObserverEvents(decoded);
+        if (decodedEvents.length === 0) return;
         const bucket = observerEvents.get(agentPubkey) ?? [];
-        bucket.push(enriched);
+        for (const decodedEvent of decodedEvents) {
+          bucket.push({
+            ...decodedEvent,
+            sourceEventId: relayEvent.id,
+            sourcePubkey: relayEvent.pubkey,
+            sourceKind: relayEvent.kind,
+            sourceCreatedAt: relayEvent.created_at,
+            sourceSignature: relayEvent.sig,
+            origin: "historical_backfill",
+          });
+        }
         observerEvents.set(agentPubkey, bucket);
       } catch {
         // Archive reconciliation is fail-closed: one bad ciphertext cannot

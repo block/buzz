@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+mod activity_ledger_today;
 mod agent;
 pub mod auth;
 mod builtin;
