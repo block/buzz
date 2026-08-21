@@ -82,7 +82,13 @@ export function mergeOutgoingTagsWithReferenceMentions(
 }
 
 export function getErrorMessage(error: unknown, fallback: string) {
-  return error instanceof Error && error.message ? error.message : fallback;
+  if (error instanceof Error) {
+    return error.message.trim().length > 0 ? error.message : fallback;
+  }
+  if (typeof error === "string") {
+    return error.trim().length > 0 ? error : fallback;
+  }
+  return fallback;
 }
 
 export function uniqueNormalizedPubkeys(pubkeys: Iterable<string>) {
