@@ -33,9 +33,9 @@
 //! `welcomeTeammateHasExpectedAccess` in
 //! `desktop/src/features/onboarding/welcomeGuide.ts`). Read every use of
 //! "owner-only" in this module as `owner ∪ verified same-owner agents`. The
-//! setting's own copy says so: the line under Only me reads "Only you and your
-//! agents can send instructions." (`RespondToField.tsx`). The dropdown label
-//! stays "Only me", which is the audience the user picks.
+//! setting's own copy says so: the label reads "Me and my agents only", and the
+//! line under it reads "Only you and your agents can send instructions."
+//! (`RespondToField.tsx`).
 
 use super::{validate_respond_to_allowlist, ManagedAgentRecord, RespondTo};
 

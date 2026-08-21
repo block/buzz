@@ -25,7 +25,7 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  * Inbound author gate UI for create/edit agent dialogs.
  *
  * Dropdown:
- *   - Only me        (default; maps to `buzz-acp --respond-to=owner-only`)
+ *   - Me and my agents only (default; maps to `buzz-acp --respond-to=owner-only`)
  *   - Anyone         (`--respond-to=anyone` — fully open agent)
  *   - Selected people (`--respond-to=allowlist`, plus the selected pubkeys as
  *                     `--respond-to-allowlist`)
@@ -36,14 +36,12 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  * Anyone and Selected people both share the host's access with someone other
  * than the owner, so both render the persistent warning; only the audience
  * phrase differs. It leads with the audience so it reads as a warning rather
- * than an explanation, and stays one sentence — Only me already owns the line
- * below the control.
+ * than an explanation, and stays one sentence — Me and my agents only already
+ * has a line below the control.
  *
- * The line below Only me says "Only you and your agents", because the harness
- * gate admits the owner and every verified same-owner agent, not the owner
- * alone (see `managed_agents/access_policy.rs`). The dropdown label stays
- * "Only me": it is the audience the user picks, and it has meant this since
- * before agents could instruct each other.
+ * The label and line below it name both the owner and their agents because the
+ * harness gate admits the owner and every verified same-owner agent, not the
+ * owner alone (see `managed_agents/access_policy.rs`).
  *
  * Which machine and stakes it names follow the optional `runLocation` prop, and
  * an unknown location falls back to the local wording rather than hedging with
@@ -73,7 +71,7 @@ function formatSearchUserSecondary(user: UserSearchResult) {
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
-  { label: "Only me (default)", value: "owner-only" },
+  { label: "Me and my agents only (default)", value: "owner-only" },
   { label: "Anyone", value: "anyone" },
   { label: "Selected people", value: "allowlist" },
 ];
@@ -212,7 +210,7 @@ export function CreateAgentRespondToField({
           id="agent-respond-to"
           onValueChange={(value) => onModeChange(value as RespondToMode)}
           options={RESPOND_TO_OPTIONS}
-          placeholder="Only me (default)"
+          placeholder="Me and my agents only (default)"
           value={mode}
         />
       ) : (

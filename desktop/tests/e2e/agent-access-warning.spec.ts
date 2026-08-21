@@ -123,7 +123,8 @@ test("open agent access explains the available access before save", async ({
     .getByRole("dialog", { name: "Manage agent access" })
     .screenshot({ path: `${SHOTS}/selected-people-warning.png` });
 
-  // Only me shares nothing, so the warning goes away entirely.
+  // Me and my agents only keeps access inside the owner's trust boundary, so
+  // the warning goes away entirely.
   await accessSelect.selectOption("owner-only");
   await expect(warning).toHaveCount(0);
 });
@@ -307,7 +308,7 @@ test("persona-backed edit warns before saving open access", async ({
   const dialog = page.getByTestId("edit-agent-dialog");
   await expect(dialog).toBeVisible();
   await expect(page.locator("#agent-respond-to")).toHaveText(
-    "Only me (default)",
+    "Me and my agents only (default)",
   );
   await choosePersonaAccess(page, "Anyone");
   await expect(dialog.getByTestId("agent-access-warning")).toContainText(

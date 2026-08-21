@@ -113,7 +113,7 @@ function formatRespondToLabel(agent: ManagedAgent) {
     case "allowlist":
       return `Selected people (${agent.respondToAllowlist.length})`;
     default:
-      return "Only me";
+      return "Me and my agents only";
   }
 }
 
