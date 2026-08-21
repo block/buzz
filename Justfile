@@ -698,6 +698,11 @@ mobile-build-android:
     ./scripts/mobile-worktree-overrides.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
 
+# Compile an unsigned iOS debug build (worktree-aware debug identity)
+mobile-build-ios:
+    ./scripts/mobile-worktree-overrides.sh
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build ios --debug --no-codesign --no-pub
+
 # Run the mobile app on iOS simulator (worktree-aware debug identity)
 mobile-dev:
     #!/usr/bin/env bash
