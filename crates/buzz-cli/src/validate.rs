@@ -178,6 +178,49 @@ pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
     }
 }
 
+/// Read message content, bounding non-interactive stdin so an inherited open
+/// pipe cannot leave an agent send blocked forever.
+///
+/// A terminal remains interactive and may wait for a human to finish input.
+/// Pipes must deliver their complete payload (including EOF) promptly.
+pub fn read_message_or_stdin(value: &str) -> Result<String, CliError> {
+    if value != "-" {
+        return Ok(value.to_string());
+    }
+
+    use std::io::{IsTerminal, Read};
+
+    if std::io::stdin().is_terminal() {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| CliError::Other(format!("failed to read stdin: {e}")))?;
+        return Ok(buf);
+    }
+
+    const PIPE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let result = std::io::stdin()
+            .read_to_string(&mut buf)
+            .map(|_| buf)
+            .map_err(|e| CliError::Other(format!("failed to read stdin: {e}")));
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(PIPE_READ_TIMEOUT) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CliError::Usage(
+            "stdin did not reach EOF within 2 seconds; pipe content explicitly or redirect a file"
+                .into(),
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CliError::Other(
+            "failed to read stdin: reader stopped unexpectedly".into(),
+        )),
+    }
+}
+
 /// Read content from a file path, or stdin if the value is "-".
 ///
 /// Unlike [`read_or_stdin`], `value` is never treated as literal content —
@@ -474,6 +517,12 @@ mod tests {
     #[test]
     fn read_or_stdin_passthrough_empty_string() {
         assert_eq!(super::read_or_stdin("").unwrap(), "");
+    }
+
+    #[test]
+    fn read_message_or_stdin_passthrough_returns_value() {
+        let raw = "literal `backticks` and $vars\nwith newline";
+        assert_eq!(super::read_message_or_stdin(raw).unwrap(), raw);
     }
 
     // --- read_file_or_stdin ---
