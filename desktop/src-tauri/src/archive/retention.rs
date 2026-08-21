@@ -81,6 +81,7 @@ pub(super) const SCOPE_AGE_INDEX_NAME: &str = "idx_archived_event_scopes_age";
 /// `archive_size_stats`. All figures come from cheap PRAGMAs and file metadata
 /// — no payload scans.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArchiveSizeStats {
     /// On-disk size of the main DB file, in bytes (from filesystem metadata).
     pub main_file_bytes: i64,
