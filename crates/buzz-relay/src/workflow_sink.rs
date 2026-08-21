@@ -254,12 +254,14 @@ impl ActionSink for RelayActionSink {
 
             // 3. Build kind:9 Nostr event
             //    - Signed by relay keypair (event.pubkey = relay pubkey)
-            //    - `p` tag attributes the message to the workflow owner
+            //    - `actor` and first `p` tag attribute the message to the workflow owner
             //    - `h` tag scopes to the channel (NIP-29, canonical UUID)
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
             let mut tags = vec![
+                Tag::parse(["actor", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
                 Tag::parse(["h", &channel_id_canonical])
@@ -766,6 +768,17 @@ mod integration_tests {
             .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
             .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
             .collect();
+
+        let actor_tag_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("actor"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+
+        assert_eq!(actor_tag_targets, vec![author_hex.as_str()]);
+        assert_eq!(p_tag_targets.first().copied(), Some(author_hex.as_str()));
 
         assert!(
             p_tag_targets.contains(&author_hex.as_str()),

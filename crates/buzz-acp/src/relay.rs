@@ -277,6 +277,26 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Fetch and validate the relay signing identity published in its NIP-11
+    /// information document.
+    pub async fn relay_self_pubkey(&self) -> Result<nostr::PublicKey, RelayError> {
+        let url = format!("{}/", self.base_url.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(&url)
+            .header(reqwest::header::ACCEPT, "application/nostr+json")
+            .send()
+            .await
+            .map_err(|e| RelayError::Http(format!("failed to fetch relay info: {e}")))?
+            .error_for_status()
+            .map_err(|e| RelayError::Http(format!("relay info request failed: {e}")))?;
+        let document: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| RelayError::Http(format!("invalid relay info document: {e}")))?;
+        parse_relay_self_pubkey(&document)
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -452,6 +472,20 @@ impl RestClient {
         }
         serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
     }
+}
+
+fn parse_relay_self_pubkey(document: &serde_json::Value) -> Result<nostr::PublicKey, RelayError> {
+    let self_hex = document
+        .get("self")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| RelayError::Http("relay info document missing 'self' field".into()))?;
+    if self_hex.len() != 64 || !self_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(RelayError::Http(format!(
+            "relay 'self' field is not a valid 64-hex pubkey: {self_hex}"
+        )));
+    }
+    nostr::PublicKey::from_hex(self_hex)
+        .map_err(|e| RelayError::Http(format!("invalid relay 'self' pubkey: {e}")))
 }
 
 /// Events the harness cares about.
@@ -4025,6 +4059,20 @@ async fn wait_for_any_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_self_pubkey_parses_valid_and_uppercase_hex() {
+        let expected = nostr::Keys::generate().public_key();
+        let upper = expected.to_hex().to_ascii_uppercase();
+        let parsed = parse_relay_self_pubkey(&serde_json::json!({"self": upper})).unwrap();
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn relay_self_pubkey_rejects_missing_or_invalid_self() {
+        assert!(parse_relay_self_pubkey(&serde_json::json!({})).is_err());
+        assert!(parse_relay_self_pubkey(&serde_json::json!({"self": "not-a-pubkey"})).is_err());
+    }
 
     #[test]
     fn relay_ws_to_http_plain() {
