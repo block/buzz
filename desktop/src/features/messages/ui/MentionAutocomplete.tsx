@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Bot, ChevronRight, Pin, Users } from "lucide-react";
+import { AtSign, Bot, ChevronRight, Users } from "lucide-react";
 import { motion } from "motion/react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
@@ -382,7 +382,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     <TooltipTrigger asChild>
                       <span className="absolute right-3 top-1/2 inline-flex -translate-y-1/2">
                         <Toggle
-                          aria-label={`Always address ${suggestion.displayName}`}
+                          aria-label={`${isAlwaysAddressed ? "Stop automatically mentioning" : "Automatically mention"} ${suggestion.displayName}`}
                           className="h-6 w-6 p-0 data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
                           data-always-address-pubkey={suggestion.pubkey?.toLowerCase()}
                           data-testid={`mention-always-address-${suggestion.pubkey}`}
@@ -398,10 +398,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           size="xs"
                           type="button"
                         >
-                          <Pin
-                            aria-hidden="true"
-                            fill={isAlwaysAddressed ? "currentColor" : "none"}
-                          />
+                          <AtSign aria-hidden="true" className="h-3.5 w-3.5" />
                         </Toggle>
                       </span>
                     </TooltipTrigger>
@@ -409,7 +406,11 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                       className="flex items-center gap-2"
                       side="top"
                     >
-                      <span>Always address</span>
+                      <span>
+                        {isAlwaysAddressed
+                          ? "Stop automatically mentioning"
+                          : "Automatically mention"}
+                      </span>
                       {alwaysAddressShortcut ? (
                         <kbd className="flex items-center gap-0.5 rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0 font-mono text-sm text-primary-foreground/70">
                           {(alwaysAddressShortcut.includes("+")

@@ -35,7 +35,7 @@ afterEach(async () => {
 
 after(() => dom.window.close());
 
-test("agent rows offer an Always address pin", async () => {
+test("agent rows offer automatic mention controls", async () => {
   const React = await import("react");
   const { fireEvent, render } = await import("@testing-library/react");
   const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
@@ -73,11 +73,10 @@ test("agent rows offer an Always address pin", async () => {
   assert.deepEqual(selected, [suggestion]);
 
   const action = view.getByRole("button", {
-    name: "Always address Agent Ada",
+    name: "Automatically mention Agent Ada",
   });
   assert.equal(action.getAttribute("aria-pressed"), "false");
   assert.equal(action.getAttribute("data-state"), "off");
-  assert.equal(action.querySelector("svg")?.getAttribute("fill"), "none");
   fireEvent.click(action);
   assert.deepEqual(toggled, [suggestion]);
   assert.deepEqual(selected, [suggestion]);
@@ -89,14 +88,10 @@ test("agent rows offer an Always address pin", async () => {
     }),
   );
   const selectedAction = view.getByRole("button", {
-    name: "Always address Agent Ada",
+    name: "Stop automatically mentioning Agent Ada",
   });
   assert.equal(selectedAction.getAttribute("aria-pressed"), "true");
   assert.equal(selectedAction.getAttribute("data-state"), "on");
-  assert.equal(
-    selectedAction.querySelector("svg")?.getAttribute("fill"),
-    "currentColor",
-  );
   fireEvent.click(selectedAction);
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });

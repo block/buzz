@@ -28,6 +28,7 @@ import { useMentions } from "@/features/messages/lib/useMentions";
 import {
   getPersistentAgentAudienceSnapshot,
   getPersistentAgentAudienceScope,
+  removePersistentAgentAudienceMember,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
 import {
@@ -302,12 +303,7 @@ function MessageComposerImpl({
   const keepMentionedAgentsPinned = useKeepMentionedAgentsPinned();
   const addressPulse = useAddressMentionPulse();
   const addressPrototype = useComposerAddressPrototype();
-  const audienceScopeRef = React.useRef(audienceScope);
-  const removeAddressedAgentRef = React.useRef<(pubkey: string) => void>(
-    persistentAudience.removePubkey,
-  );
   const openMentionOptionsRef = React.useRef<() => void>(() => {});
-  audienceScopeRef.current = audienceScope;
   const addInlineAgentMentionsToAudience = React.useCallback(
     (pubkeys: readonly string[]) => {
       if (!audienceScope || !keepMentionedAgentsPinned) return;
@@ -326,10 +322,9 @@ function MessageComposerImpl({
       }
       if (newlyPinnedPubkeys.length === 0) return;
 
-      const undoAutoPin = () => {
-        if (audienceScopeRef.current !== audienceScope) return;
+      const undoAutomaticMentions = () => {
         for (const pubkey of newlyPinnedPubkeys) {
-          removeAddressedAgentRef.current(pubkey);
+          removePersistentAgentAudienceMember(audienceScope, pubkey);
         }
       };
       const showAutoPinToast = (title: string, message: string) => {
@@ -345,7 +340,7 @@ function MessageComposerImpl({
                 <button
                   className="cursor-pointer bg-transparent p-0 font-medium text-foreground underline decoration-foreground/40 underline-offset-2 hover:decoration-foreground"
                   onClick={() => {
-                    undoAutoPin();
+                    undoAutomaticMentions();
                     dismissToast();
                   }}
                   type="button"
@@ -361,7 +356,7 @@ function MessageComposerImpl({
                   }}
                   type="button"
                 >
-                  Open in settings
+                  Change this behavior
                 </button>
               </div>
             </div>
@@ -374,15 +369,17 @@ function MessageComposerImpl({
           .getMentionDisplayName(newlyPinnedPubkeys[0])
           ?.trim();
         showAutoPinToast(
-          displayName ? `${displayName} is now pinned` : "Agent is now pinned",
-          "Future messages will include this agent.",
+          displayName
+            ? `${displayName} will be mentioned automatically`
+            : "Agent will be mentioned automatically",
+          "Future messages in this channel will include this agent.",
         );
         return;
       }
 
       showAutoPinToast(
-        `${newlyPinnedPubkeys.length} agents are now pinned`,
-        "Future messages will include these agents.",
+        `${newlyPinnedPubkeys.length} agents will be mentioned automatically`,
+        "Future messages in this channel will include these agents.",
       );
     },
     [
@@ -512,7 +509,6 @@ function MessageComposerImpl({
     profiles,
     richText,
   });
-  removeAddressedAgentRef.current = removeAddressedAgent;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();

@@ -155,12 +155,14 @@ export function useAgentAddressLockPicker({
 
       if (lockedAgentPubkeys.has(pubkey)) {
         removeAddressedAgent(pubkey);
-        setAnnouncement(`Stopped always addressing ${suggestion.displayName}`);
+        setAnnouncement(
+          `Stopped automatically mentioning ${suggestion.displayName}`,
+        );
       } else {
         unpinnedAgentPubkeysRef.current.delete(pubkey);
         audience.addPubkey(pubkey);
         onPulseAddressLock(pubkey);
-        setAnnouncement(`Always addressing ${suggestion.displayName}`);
+        setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
       }
 
       if (mentions.isMentionOpen) {
@@ -213,7 +215,7 @@ export function useAgentAddressLockPicker({
         consumeAddressSuggestion(suggestion, { removeInlineMentions: false });
         if (!lockedAgentPubkeys.has(pubkey)) {
           audience.addPubkey(pubkey);
-          setAnnouncement(`Always addressing ${suggestion.displayName}`);
+          setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
         }
         onPulseAddressLock(pubkey);
         return;

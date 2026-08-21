@@ -49,6 +49,7 @@ test("mention-button prototype expands the mention control with addressed agents
     "./ComposerAddressControls.tsx"
   );
   let opened = 0;
+  const removed = [];
   const renderButton = (agents) =>
     React.createElement(
       TooltipProvider,
@@ -60,6 +61,7 @@ test("mention-button prototype expands the mention control with addressed agents
         onOpen: () => {
           opened += 1;
         },
+        onRemove: (pubkey) => removed.push(pubkey),
         showAgents: true,
       }),
     );
@@ -70,23 +72,28 @@ test("mention-button prototype expands the mention control with addressed agents
   const avatar = view.getByTestId("composer-address-lock-agent-pubkey");
   assert.ok(avatar);
   assert.match(
-    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    view.getByRole("button", { name: "Manage automatic agent mentions" })
+      .parentElement?.className ?? "",
     /(?:^|\s)pl-2(?:\s|$)/,
   );
   assert.match(
-    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    view.getByRole("button", { name: "Manage automatic agent mentions" })
+      .parentElement?.className ?? "",
     /(?:^|\s)pr-1(?:\s|$)/,
   );
   assert.match(
-    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    view.getByRole("button", { name: "Manage automatic agent mentions" })
+      .parentElement?.className ?? "",
     /(?:^|\s)bg-primary\/15(?:\s|$)/,
   );
   assert.match(
-    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    view.getByRole("button", { name: "Manage automatic agent mentions" })
+      .parentElement?.className ?? "",
     /(?:^|\s)text-primary(?:\s|$)/,
   );
   assert.doesNotMatch(
-    view.getByRole("button", { name: "Manage mentioned agents" }).className,
+    view.getByRole("button", { name: "Manage automatic agent mentions" })
+      .parentElement?.className ?? "",
     /(?:^|\s)bg-accent\/70(?:\s|$)/,
   );
   assert.doesNotMatch(
@@ -103,12 +110,17 @@ test("mention-button prototype expands the mention control with addressed agents
       /scale\(0.8\)/,
     );
   }
-  assert.equal(
-    view.queryByRole("button", { name: "Stop always mentioning Agent Ada" }),
-    null,
+  const remove = view.getByRole("button", {
+    name: "Stop automatically mentioning Agent Ada",
+  });
+  assert.match(
+    remove.querySelector("span.absolute")?.className ?? "",
+    /group-hover\/address:opacity-100/,
   );
+  fireEvent.click(remove);
+  assert.deepEqual(removed, ["agent-pubkey"]);
   fireEvent.click(
-    view.getByRole("button", { name: "Manage mentioned agents" }),
+    view.getByRole("button", { name: "Manage automatic agent mentions" }),
   );
   assert.equal(opened, 1);
 });
@@ -146,7 +158,7 @@ test("send-button prototype exposes each addressed avatar as a remove control", 
     );
   }
   const remove = view.getByRole("button", {
-    name: "Stop always mentioning Agent Ada",
+    name: "Stop automatically mentioning Agent Ada",
   });
   assert.match(
     remove.querySelector("span.absolute")?.className ?? "",

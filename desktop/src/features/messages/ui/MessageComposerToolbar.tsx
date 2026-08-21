@@ -181,6 +181,7 @@ export const MessageComposerToolbar = React.memo(
                   disabled={composerDisabled}
                   onCaptureSelection={onCaptureSelection}
                   onOpen={onOpenMentionPicker}
+                  onRemove={onRemoveAddressedAgent}
                   pulseVersionByPubkey={pulseVersionByPubkey}
                   shakeVersionByPubkey={shakeVersionByPubkey}
                   showAgents={addressPrototype === "mention-button"}
