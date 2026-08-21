@@ -57,6 +57,17 @@ async function addMessageStep(
   await dialog.getByLabel("Message text").fill("Workflow notification");
 }
 
+async function createEnabled(
+  page: import("@playwright/test").Page,
+  dialog: import("@playwright/test").Locator,
+) {
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Enable this workflow now?",
+  });
+  await confirmation.getByRole("button", { name: "Enable and create" }).click();
+}
+
 async function reopenWorkflow(
   page: import("@playwright/test").Page,
   name: string,
@@ -68,6 +79,60 @@ async function reopenWorkflow(
   await page.getByRole("menuitem", { name: "Edit" }).click();
   return page.getByRole("dialog", { name: "Edit workflow" });
 }
+
+test("confirms activation after create and preserves a safe disabled path", async ({
+  page,
+}) => {
+  const name = `activation_confirmation_${Date.now()}`;
+  const dialog = await openCreateWorkflow(page, name);
+  await addMessageStep(page, dialog);
+
+  await expect(
+    dialog.getByRole("switch", { name: "Enable workflow" }),
+  ).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Create" }).click();
+  const confirmation = page.getByRole("alertdialog", {
+    name: "Enable this workflow now?",
+  });
+  await expect(confirmation).toBeVisible();
+  await expect(
+    confirmation.getByRole("button", { name: "Back" }),
+  ).toBeFocused();
+
+  await confirmation.getByRole("button", { name: "Back" }).click();
+  await expect(confirmation).toBeHidden();
+  await expect(dialog).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (call) => call.command === "create_workflow",
+          ).length,
+      ),
+    )
+    .toBe(0);
+
+  await dialog.getByRole("button", { name: "Create" }).click();
+  await confirmation.getByRole("button", { name: "Create disabled" }).click();
+  await expect(dialog).toBeHidden();
+
+  const yaml = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((candidate) => candidate.command === "create_workflow");
+    return (call?.payload as { yamlDefinition?: string } | undefined)
+      ?.yamlDefinition;
+  });
+  expect(parseYaml(yaml ?? "").enabled).toBe(false);
+  const card = page
+    .locator('[data-testid^="workflow-card-"]')
+    .filter({ hasText: name })
+    .first();
+  await expect(
+    card.getByRole("switch", { name: "Enable workflow" }),
+  ).not.toBeChecked();
+});
 
 test("inserts template variables with keyboard control and restores the caret", async ({
   page,
@@ -174,7 +239,7 @@ test("round-trips schedule presets and saves a custom UTC cron", async ({
   ).toHaveValue("2-4");
 
   await addMessageStep(page, dialog);
-  await dialog.getByRole("button", { name: "Create" }).click();
+  await createEnabled(page, dialog);
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
   await expect(
@@ -236,7 +301,7 @@ test("round-trips and reopens structured message-text conditions", async ({
   await dialog.getByRole("tab", { name: "Basic" }).click();
 
   await addMessageStep(page, dialog);
-  await dialog.getByRole("button", { name: "Create" }).click();
+  await createEnabled(page, dialog);
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
   await expect(
@@ -272,32 +337,31 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   });
   await expect(stepNode).toContainText("Send Message");
   await expect(stepNode).toContainText("“Workflow notification” in #agents");
-  await dialog.getByRole("button", { name: "Create" }).click();
+  await createEnabled(page, dialog);
 
   const card = page
     .locator('[data-testid^="workflow-card-"]')
-    .filter({ hasText: name });
-  const triggerSummary = card.getByTestId("workflow-card-trigger-summary");
+    .filter({ hasText: name })
+    .first();
   const semanticLabel = card.getByTestId("workflow-card-semantic-label");
   const workflowName = card.getByTestId("workflow-card-name");
   const channelName = card.getByTestId("workflow-card-channel");
-  await expect(triggerSummary).toHaveText("Message contains “deploy”");
+  await expect(card.getByTestId("workflow-card-trigger-summary")).toHaveCount(
+    0,
+  );
   await expect(semanticLabel).toHaveText(
     "When a message contains “deploy”, send “Workflow notification”",
   );
   await expect(workflowName).toHaveText(name);
   await expect(channelName).toHaveText("#agents");
-  const triggerBox = await triggerSummary.boundingBox();
   const semanticBox = await semanticLabel.boundingBox();
   const nameBox = await workflowName.boundingBox();
   const channelBox = await channelName.boundingBox();
-  expect(triggerBox).not.toBeNull();
   expect(semanticBox).not.toBeNull();
   expect(nameBox).not.toBeNull();
   expect(channelBox).not.toBeNull();
-  expect(triggerBox?.y).toBeLessThan(semanticBox?.y ?? 0);
   expect(semanticBox?.y).toBeLessThan(nameBox?.y ?? 0);
-  expect(nameBox?.y).toBeLessThan(channelBox?.y ?? 0);
+  expect(channelBox?.y).toBeLessThan(nameBox?.y ?? 0);
 });
 
 test("round-trips manual author and reaction message IDs through save and reopen", async ({
@@ -334,7 +398,7 @@ test("round-trips manual author and reaction message IDs through save and reopen
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
   await addMessageStep(page, dialog);
-  await dialog.getByRole("button", { name: "Create" }).click();
+  await createEnabled(page, dialog);
 
   const reopened = await reopenWorkflow(page, name);
   await openTriggerInspector(reopened);
@@ -402,7 +466,9 @@ test("keeps advanced and malformed definitions lossless", async ({ page }) => {
     dialog.getByText(/advanced expression is active/i),
   ).toBeVisible();
 
-  await dialog.getByRole("switch", { name: "Enable workflow" }).click();
+  await expect(
+    dialog.getByRole("switch", { name: "Enable workflow" }),
+  ).toHaveCount(0);
   await dialog.getByRole("tab", { name: "YAML" }).click();
   expect(parseYaml(await yamlEditor.inputValue()).trigger.filter).toBe(
     advanced,

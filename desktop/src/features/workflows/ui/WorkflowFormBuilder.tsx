@@ -1,11 +1,15 @@
 import {
   ArrowDown,
+  CalendarClock,
   Check,
   ChevronDown,
+  GitPullRequest,
+  MessageSquare,
   Plus,
+  SmilePlus,
   Trash2,
+  Webhook,
   X,
-  Zap,
 } from "lucide-react";
 import { FocusScope } from "@radix-ui/react-focus-scope";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -605,6 +609,13 @@ export const WorkflowFormBuilder = React.forwardRef<
   const visibleTriggerDescription = triggerEmoji
     ? "Reaction added"
     : triggerDescription;
+  const TriggerIcon = {
+    diff_posted: GitPullRequest,
+    message_posted: MessageSquare,
+    reaction_added: SmilePlus,
+    schedule: CalendarClock,
+    webhook: Webhook,
+  }[formState.trigger.on];
 
   return (
     <>
@@ -656,7 +667,7 @@ export const WorkflowFormBuilder = React.forwardRef<
                             value={triggerEmoji}
                           />
                         ) : (
-                          <Zap className="h-4 w-4" />
+                          <TriggerIcon className="h-4 w-4" />
                         )
                       }
                       label={`Trigger: ${triggerDescription}`}

@@ -74,9 +74,6 @@ async function createWorkflow(
     );
     await dialog.getByRole("tab", { name: "Form" }).click();
   }
-  if (options?.enabled === false) {
-    await dialog.getByRole("switch", { name: "Enable" }).click();
-  }
   if (options?.trigger) {
     await dialog
       .getByRole("button", { name: "Trigger: Message Posted" })
@@ -116,6 +113,15 @@ async function createWorkflow(
   }
 
   await dialog.getByRole("button", { name: "Create" }).click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "Enable this workflow now?",
+  });
+  await activationConfirmation
+    .getByRole("button", {
+      name:
+        options?.enabled === false ? "Create disabled" : "Enable and create",
+    })
+    .click();
 
   await expect(
     page.getByRole("heading", { name: "Create Workflow" }),
@@ -322,7 +328,9 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
   await expect(card).toContainText("disabled");
 });
 
-test("enables and disables a workflow from its card menu", async ({ page }) => {
+test("enables and disables a workflow from its card status toggle", async ({
+  page,
+}) => {
   const workflowName = `toggle_workflow_${Date.now()}`;
 
   await navigateToWorkflows(page);
@@ -333,26 +341,27 @@ test("enables and disables a workflow from its card menu", async ({ page }) => {
       .locator('[data-testid^="workflow-card-"]')
       .filter({ hasText: workflowName })
       .first();
-  const workflowActions = () =>
-    workflowCard().getByRole("button", { name: "Workflow actions" });
 
-  const enableItem = page.getByRole("menuitemcheckbox", { name: "Enable" });
+  const disable = workflowCard().getByRole("switch", {
+    name: "Disable workflow",
+  });
+  await expect(disable).toBeChecked();
+  await disable.click();
+  const enable = workflowCard().getByRole("switch", {
+    name: "Enable workflow",
+  });
+  await expect(enable).not.toBeChecked();
+  await enable.click();
+  await expect(
+    workflowCard().getByRole("switch", { name: "Disable workflow" }),
+  ).toBeChecked();
 
-  await workflowActions().click();
-  await expect(enableItem).toHaveAttribute("aria-checked", "true");
-  await expect(enableItem.locator("button")).toHaveCount(0);
+  await workflowCard()
+    .getByRole("button", { name: "Workflow actions" })
+    .click();
   await expect(
-    enableItem.getByTestId("workflow-enabled-switch-visual"),
-  ).toHaveAttribute("aria-hidden", "true");
-  await enableItem.click();
-  await expect(
-    workflowCard().getByText("disabled", { exact: true }),
-  ).toBeVisible();
-
-  await enableItem.click();
-  await expect(
-    workflowCard().getByText("active", { exact: true }),
-  ).toBeVisible();
+    page.getByRole("menuitemcheckbox", { name: "Enable" }),
+  ).toHaveCount(0);
 });
 
 test("rejects a stale card toggle without overwriting a newer edit", async ({
@@ -395,8 +404,7 @@ test("rejects a stale card toggle without overwriting a newer edit", async ({
     });
   }, workflowName);
 
-  await workflowCard.getByRole("button", { name: "Workflow actions" }).click();
-  await page.getByRole("menuitemcheckbox", { name: "Enable" }).click();
+  await workflowCard.getByRole("switch", { name: "Disable workflow" }).click();
 
   await expect(
     page
@@ -436,14 +444,15 @@ test("reports a rejected workflow status change", async ({ page }) => {
     .locator('[data-testid^="workflow-card-"]')
     .filter({ hasText: workflowName })
     .first();
-  await workflowCard.getByRole("button", { name: "Workflow actions" }).click();
-  await page.getByRole("menuitemcheckbox", { name: "Enable" }).click();
+  await workflowCard.getByRole("switch", { name: "Disable workflow" }).click();
 
   const errorToast = page
     .locator("[data-sonner-toast][data-removed='false']")
     .filter({ hasText: "Couldn’t change workflow status" });
   await expect(errorToast).toContainText("relay refused the update");
-  await expect(workflowCard.getByText("active", { exact: true })).toBeVisible();
+  await expect(
+    workflowCard.getByRole("switch", { name: "Disable workflow" }),
+  ).toBeChecked();
 });
 
 test("shows the webhook secret dialog after saving a webhook workflow", async ({

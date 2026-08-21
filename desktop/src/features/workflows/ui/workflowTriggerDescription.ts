@@ -74,6 +74,7 @@ export function workflowTriggerDescription(
     authorLabel?: string;
     messageLabel?: string;
     messageLoading?: boolean;
+    omitUnresolvedReferences?: boolean;
   } = {},
 ): string {
   const baseLabel =
@@ -116,7 +117,12 @@ export function workflowTriggerDescription(
           ? `Any reaction except ${emojiCondition.value} added`
           : `${emojiCondition.value} reaction added`;
     }
-    if (authorCondition) {
+    if (
+      authorCondition &&
+      (!options.omitUnresolvedReferences ||
+        options.authorLabel ||
+        options.authorLoading)
+    ) {
       const author = authorReference(
         authorCondition,
         options.authorLabel,
@@ -134,7 +140,12 @@ export function workflowTriggerDescription(
           ? `${subject}${attribution}${description.slice(subject.length)}`
           : `${description}${attribution}`;
     }
-    if (messageCondition) {
+    if (
+      messageCondition &&
+      (!options.omitUnresolvedReferences ||
+        options.messageLabel ||
+        options.messageLoading)
+    ) {
       const message = messageReference(
         messageCondition,
         options.messageLabel,
@@ -149,6 +160,13 @@ export function workflowTriggerDescription(
   }
 
   if (condition.field === "trigger_author") {
+    if (
+      options.omitUnresolvedReferences &&
+      !options.authorLabel &&
+      !options.authorLoading
+    ) {
+      return baseLabel;
+    }
     const author = authorReference(
       condition,
       options.authorLabel,
@@ -170,6 +188,13 @@ export function workflowTriggerDescription(
   }
 
   if (condition.field === "trigger_message_id") {
+    if (
+      options.omitUnresolvedReferences &&
+      !options.messageLabel &&
+      !options.messageLoading
+    ) {
+      return baseLabel;
+    }
     const message = messageReference(
       condition,
       options.messageLabel,

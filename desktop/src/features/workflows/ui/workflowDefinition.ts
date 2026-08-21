@@ -58,8 +58,17 @@ export function getWorkflowPrimaryAction(
 export function getWorkflowPrimaryActionEmoji(
   definition: Record<string, unknown>,
 ): string | null {
-  const step = getWorkflowSteps(definition)[0];
-  return step?.action === "add_reaction" ? nonEmptyString(step.emoji) : null;
+  return getWorkflowActionTiles(definition)[0]?.emoji ?? null;
+}
+
+export function getWorkflowActionTiles(
+  definition: Record<string, unknown>,
+): Array<{ action: string; emoji: string | null; key: string }> {
+  return getWorkflowSteps(definition).map((step, index) => ({
+    action: nonEmptyString(step.action) ?? "",
+    emoji: step.action === "add_reaction" ? nonEmptyString(step.emoji) : null,
+    key: nonEmptyString(step.id) ?? `step-${index}`,
+  }));
 }
 
 export function getWorkflowTriggerEmoji(
@@ -355,6 +364,12 @@ function getActionCardClause(
   }
 }
 
+export function getWorkflowStepCount(
+  definition: Record<string, unknown>,
+): number {
+  return getWorkflowSteps(definition).length;
+}
+
 /** Build a short plain-language label from the workflow's trigger and steps. */
 export function getWorkflowCardLabel(
   definition: Record<string, unknown>,
@@ -369,7 +384,9 @@ export function getWorkflowCardLabel(
     getPresentedTriggerCardClause(options.triggerDescription) ??
     getPresentedTriggerCardClause(
       triggerConfig?.filter && !options.triggerReaction
-        ? workflowTriggerDescription(triggerConfig)
+        ? workflowTriggerDescription(triggerConfig, {
+            omitUnresolvedReferences: true,
+          })
         : undefined,
     ) ??
     getTriggerCardClause(definition, options.triggerReaction);
@@ -426,7 +443,10 @@ export function getWorkflowTriggerSummary(
   definition: Record<string, unknown>,
 ): string | null {
   const trigger = getWorkflowTriggerConfig(definition);
-  if (trigger) return workflowTriggerDescription(trigger);
+  if (trigger)
+    return workflowTriggerDescription(trigger, {
+      omitUnresolvedReferences: true,
+    });
 
   const rawTrigger = asRecord(definition.trigger);
   const triggerType = nonEmptyString(rawTrigger?.on);

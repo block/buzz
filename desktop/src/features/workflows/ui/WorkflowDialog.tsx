@@ -262,6 +262,11 @@ export function WorkflowDialog({
   } | null>(null);
   const [discardConfirmationOpen, setDiscardConfirmationOpen] =
     React.useState(false);
+  const [activationConfirmationOpen, setActivationConfirmationOpen] =
+    React.useState(false);
+  const [pendingCreateYaml, setPendingCreateYaml] = React.useState<
+    string | null
+  >(null);
   const [secretConfirmationOpen, setSecretConfirmationOpen] =
     React.useState(false);
   const [generatingName, setGeneratingName] = React.useState(false);
@@ -299,6 +304,8 @@ export function WorkflowDialog({
     let active = true;
     setSavedWebhookInfo(null);
     setDiscardConfirmationOpen(false);
+    setActivationConfirmationOpen(false);
+    setPendingCreateYaml(null);
     resetCreate();
     resetUpdate();
 
@@ -338,6 +345,8 @@ export function WorkflowDialog({
     resetCreate();
     resetUpdate();
     setDiscardConfirmationOpen(false);
+    setActivationConfirmationOpen(false);
+    setPendingCreateYaml(null);
     onOpenChange(false);
   }, [onOpenChange, resetCreate, resetUpdate]);
 
@@ -402,14 +411,12 @@ export function WorkflowDialog({
     [closeDialog, isDirty, onOpenChange, savedWebhookInfo],
   );
 
-  async function handleSubmit() {
-    if (!selectedChannelId || !yamlDefinition.trim()) return;
-
+  async function saveWorkflow(yaml: string) {
     try {
-      const saved = await mutation.mutateAsync(yamlDefinition);
+      const saved = await mutation.mutateAsync(yaml);
       initialValuesRef.current = {
         channelId: selectedChannelId,
-        yaml: yamlDefinition,
+        yaml,
       };
       if (saved.webhookSecret) {
         allowNavigationRef.current = false;
@@ -439,6 +446,30 @@ export function WorkflowDialog({
     } catch {
       // React Query stores the error; keep the dialog open and dirty.
     }
+  }
+
+  function handleSubmit() {
+    if (!selectedChannelId || !yamlDefinition.trim()) return;
+    if (mode !== "create") {
+      void saveWorkflow(yamlDefinition);
+      return;
+    }
+
+    const disabledYaml = yamlWithWorkflowEnabled(yamlDefinition, false);
+    if (disabledYaml === null) return;
+    setPendingCreateYaml(disabledYaml);
+    setActivationConfirmationOpen(true);
+  }
+
+  function handleCreateActivation(enabled: boolean) {
+    if (pendingCreateYaml === null) return;
+    const yaml = enabled
+      ? yamlWithWorkflowEnabled(pendingCreateYaml, true)
+      : pendingCreateYaml;
+    if (yaml === null) return;
+    setActivationConfirmationOpen(false);
+    setPendingCreateYaml(null);
+    void saveWorkflow(yaml);
   }
 
   const handleEditorModeChange = React.useCallback(
@@ -543,7 +574,7 @@ export function WorkflowDialog({
                 />
                 <div
                   className={
-                    mode !== "edit" &&
+                    mode === "duplicate" &&
                     editorMode === "form" &&
                     !workflowNameEditing
                       ? "flex items-center"
@@ -758,6 +789,46 @@ export function WorkflowDialog({
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog
+        onOpenChange={(nextOpen) => {
+          setActivationConfirmationOpen(nextOpen);
+          if (!nextOpen) setPendingCreateYaml(null);
+        }}
+        open={activationConfirmationOpen}
+      >
+        <AlertDialogContent data-testid="workflow-activation-confirmation">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable this workflow now?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Enabled workflows can run as soon as they’re created. You can
+              create it disabled and enable it later after reviewing the setup.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button type="button" variant="ghost">
+                Back
+              </Button>
+            </AlertDialogCancel>
+            <Button
+              onClick={() => handleCreateActivation(false)}
+              type="button"
+              variant="outline"
+            >
+              Create disabled
+            </Button>
+            <AlertDialogAction asChild>
+              <Button
+                onClick={() => handleCreateActivation(true)}
+                type="button"
+              >
+                Enable and create
+              </Button>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         onOpenChange={(nextOpen) => {

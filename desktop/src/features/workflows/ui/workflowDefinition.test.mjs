@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getWorkflowActionTiles,
   getWorkflowCardLabel,
   getWorkflowDisplayStatus,
   getWorkflowPrimaryAction,
   getWorkflowPrimaryActionEmoji,
+  getWorkflowStepCount,
   getWorkflowTriggerEmoji,
   getWorkflowTriggerSummary,
   getWorkflowTriggerType,
@@ -130,7 +132,7 @@ test("builds a plain-language workflow card label", () => {
       },
       steps: [{ action: "add_reaction", emoji: "👍" }],
     }),
-    `When a reaction is added to ${"b".repeat(8)}…${"b".repeat(4)}, add a 👍 reaction`,
+    "When a reaction is added, add a 👍 reaction",
   );
 
   assert.equal(
@@ -162,15 +164,28 @@ test("builds a concise semantic trigger label for workflow cards", () => {
   );
   assert.equal(
     getWorkflowTriggerSummary({
-      trigger: { on: "reaction_added", emoji: "🔥" },
+      trigger: {
+        on: "reaction_added",
+        filter: `trigger_emoji == "🔥" && trigger_author == "${"a".repeat(64)}" && trigger_message_id == "${"b".repeat(64)}"`,
+      },
     }),
-    "Reaction added",
+    "🔥 reaction added",
   );
   assert.equal(
     getWorkflowTriggerSummary({
       trigger: { on: "schedule", interval: "15m" },
     }),
     "Schedule",
+  );
+});
+
+test("counts configured steps for card stack presentation", () => {
+  assert.equal(getWorkflowStepCount({}), 0);
+  assert.equal(
+    getWorkflowStepCount({
+      steps: [{ action: "send_message" }, { action: "add_reaction" }],
+    }),
+    2,
   );
 });
 
@@ -220,6 +235,20 @@ test("returns configured reaction emoji for rich card rendering", () => {
       steps: [{ action: "send_message", emoji: ":blob-wave:" }],
     }),
     null,
+  );
+  assert.deepEqual(
+    getWorkflowActionTiles({
+      steps: [
+        { action: "add_reaction", emoji: "🐥" },
+        { action: "send_message", text: "hello" },
+        { action: "delay", duration: "5m" },
+      ],
+    }),
+    [
+      { action: "add_reaction", emoji: "🐥", key: "step-0" },
+      { action: "send_message", emoji: null, key: "step-1" },
+      { action: "delay", emoji: null, key: "step-2" },
+    ],
   );
 });
 
