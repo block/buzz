@@ -28,6 +28,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use super::models::SttFamily;
 use super::stt::SttPipeline;
 use super::tts::TtsPipeline;
 
@@ -152,7 +153,8 @@ fn baseline_stt_fake_llm_tts_first_audio() {
     );
 
     let t = Instant::now();
-    let (stt, mut text_rx) = SttPipeline::new(stt_dir, None, None).expect("stt pipeline");
+    let (stt, mut text_rx) =
+        SttPipeline::new(stt_dir, SttFamily::NemoCtc, None, None).expect("stt pipeline");
     // Recognizer loads inside the worker thread; give it time, then verify
     // liveness via a first throwaway feed below.
     std::thread::sleep(Duration::from_secs(2));
