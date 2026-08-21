@@ -182,11 +182,33 @@ test("stale auto-pin Undo cannot remove a newer explicit choice", async () => {
   store.removePersistentAgentAudienceMember(scope, agentA);
   store.addPersistentAgentAudienceMember(scope, agentA);
   const removed = store.removePersistentAgentAudienceMembersIfUnchanged({
-    expectedRevision: appliedRevision,
+    expectedRevision: appliedRevision.revision,
     pubkeys: [agentA],
     scope,
   });
 
   assert.equal(removed, false);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+});
+
+test("promotion reports only newly added agents for transactional Undo", async () => {
+  const store = await loadStore(11);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, [agentA]);
+  const promotion = store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentA, agentB],
+    scope,
+  });
+
+  assert.deepEqual(promotion.promotedPubkeys, [agentB]);
+  assert.equal(
+    store.removePersistentAgentAudienceMembersIfUnchanged({
+      expectedRevision: promotion.revision,
+      pubkeys: promotion.promotedPubkeys,
+      scope,
+    }),
+    true,
+  );
   assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
 });

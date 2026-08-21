@@ -34,31 +34,32 @@ export function useAutoPinMentionedAgents({
       const normalizedPubkeys = [
         ...new Set(pubkeys.map(normalizePubkey)),
       ].filter(Boolean);
-      const appliedRevision = promotePersistentAgentAudienceIfUnchanged({
+      const promotion = promotePersistentAgentAudienceIfUnchanged({
         expectedRevision,
         pubkeys: normalizedPubkeys,
         scope: audienceScope,
       });
-      if (appliedRevision === null) return;
-      for (const pubkey of normalizedPubkeys) onPulse(pubkey);
+      if (promotion === null) return;
+      const { promotedPubkeys, revision } = promotion;
+      for (const pubkey of promotedPubkeys) onPulse(pubkey);
 
       const displayName =
-        normalizedPubkeys.length === 1
-          ? getDisplayName(normalizedPubkeys[0])?.trim()
+        promotedPubkeys.length === 1
+          ? getDisplayName(promotedPubkeys[0])?.trim()
           : null;
       const title = displayName
         ? `${displayName} will be mentioned automatically`
-        : normalizedPubkeys.length === 1
+        : promotedPubkeys.length === 1
           ? "Agent will be mentioned automatically"
-          : `${normalizedPubkeys.length} agents will be mentioned automatically`;
+          : `${promotedPubkeys.length} agents will be mentioned automatically`;
       toast.success(title, {
         action: {
           label: "Undo",
           onClick: () => {
             if (
               removePersistentAgentAudienceMembersIfUnchanged({
-                expectedRevision: appliedRevision,
-                pubkeys: normalizedPubkeys,
+                expectedRevision: revision,
+                pubkeys: promotedPubkeys,
                 scope: audienceScope,
               })
             ) {

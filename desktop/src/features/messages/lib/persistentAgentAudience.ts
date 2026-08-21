@@ -103,15 +103,21 @@ export function promotePersistentAgentAudienceIfUnchanged({
   expectedRevision: number;
   pubkeys: Iterable<string>;
   scope: string;
-}): number | null {
+}): { promotedPubkeys: string[]; revision: number } | null {
   if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
     return null;
-  const promoted = normalizePubkeys(pubkeys).filter(
+  const promotedPubkeys = normalizePubkeys(pubkeys).filter(
     (pubkey) => !(audiences[scope] ?? []).includes(pubkey),
   );
-  if (promoted.length === 0) return null;
-  setPersistentAgentAudience(scope, [...(audiences[scope] ?? []), ...promoted]);
-  return getPersistentAgentAudienceRevision(scope);
+  if (promotedPubkeys.length === 0) return null;
+  setPersistentAgentAudience(scope, [
+    ...(audiences[scope] ?? []),
+    ...promotedPubkeys,
+  ]);
+  return {
+    promotedPubkeys,
+    revision: getPersistentAgentAudienceRevision(scope),
+  };
 }
 
 export function removePersistentAgentAudienceMembersIfUnchanged({
