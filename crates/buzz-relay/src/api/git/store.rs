@@ -29,6 +29,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use s3::creds::Credentials;
 use s3::error::S3Error;
+use s3::serde_types::ObjectIdentifier;
 use s3::{Bucket, Region};
 use sha2::{Digest, Sha256};
 
@@ -91,6 +92,16 @@ pub enum StoreError {
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
     Backend(#[from] S3Error),
+    /// A multi-object delete request succeeded, but the backend rejected this key.
+    #[error("object delete failed for {key}: {code}: {message}")]
+    DeleteFailed {
+        /// Object key the backend rejected.
+        key: String,
+        /// Backend-specific error code.
+        code: String,
+        /// Backend-specific error detail.
+        message: String,
+    },
     /// Invalid storage configuration detected at client construction.
     #[error("git store config error: {0}")]
     Config(String),
@@ -172,6 +183,23 @@ pub struct GitStore {
 }
 
 impl GitStore {
+    /// Delete through S3's multi-object endpoint, which is compatible with
+    /// both MinIO and R2. R2 rejects rust-s3's single-object DELETE signature.
+    async fn delete_object(&self, key: &str) -> Result<(), StoreError> {
+        let result = self
+            .bucket
+            .delete_objects(vec![ObjectIdentifier::new(key)])
+            .await?;
+        if let Some(error) = result.errors.first() {
+            return Err(StoreError::DeleteFailed {
+                key: error.key.clone(),
+                code: error.code.clone(),
+                message: error.message.clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Build a client against an S3-compatible endpoint (e.g. MinIO).
     ///
     /// `addressing_style` is shared with media storage so both paths sign and
@@ -620,7 +648,7 @@ impl GitStore {
         // -- Phase 2: if_match_race -----------------------------------------------
         // Seed the pointer with a known value, then race N IfMatch updates.
         let seed = b"probe-pointer-seed".to_vec();
-        let _ = self.bucket.delete_object(&pointer_key).await; // ignore 404
+        let _ = self.delete_object(&pointer_key).await; // ignore 404
         let seed_outcome = self
             .put_pointer(&pointer_key, &seed, Precond::IfNoneMatchStar)
             .await?;
@@ -730,7 +758,7 @@ impl GitStore {
             let body = format!("probe-inm-race-{nonce}-{round}").into_bytes();
             let key = Self::content_key("probe/inm-race", &body);
             // Clean slate.
-            let _ = self.bucket.delete_object(&key).await;
+            let _ = self.delete_object(&key).await;
             let arc_self: Arc<&Self> = Arc::new(self);
             let mut tasks = Vec::with_capacity(cfg.race_width);
             for _ in 0..cfg.race_width {
@@ -873,7 +901,7 @@ impl GitStore {
 
         // Cleanup pointer (immutable probe writes accumulate by design; the
         // bucket's retention policy handles them, not the probe).
-        let _ = self.bucket.delete_object(&pointer_key).await;
+        let _ = self.delete_object(&pointer_key).await;
 
         Ok(ProbeReport {
             race_width: cfg.race_width,
@@ -1089,7 +1117,11 @@ mod probe {
             .put_object_with_content_type_and_headers(&key, b"second", "text/plain", Some(hdrs))
             .await;
         assert!(matches!(r2, Err(S3Error::HttpFailWithBody(412, _))));
-        let _ = st.bucket.delete_object(&key).await;
+        st.delete_object(&key).await.expect("delete object");
+        assert!(matches!(
+            st.bucket.head_object(&key).await,
+            Err(S3Error::HttpFailWithBody(404, _))
+        ));
     }
 
     #[tokio::test]
@@ -1167,8 +1199,8 @@ mod probe {
         assert_eq!(etag_now, e2, "get_pointer etag matches PUT-response etag");
 
         // Cleanup.
-        let _ = st.bucket.delete_object(&pkey).await;
-        let _ = st.bucket.delete_object(&key).await;
+        let _ = st.delete_object(&pkey).await;
+        let _ = st.delete_object(&key).await;
     }
 
     /// End-to-end conformance probe against MinIO. This is the same code path
@@ -1209,6 +1241,6 @@ mod probe {
         let etag = headers.get("etag").or_else(|| headers.get("ETag")).cloned();
         assert!(etag.is_some(), "GET response must carry ETag header");
         eprintln!("ETag from GET: {etag:?}");
-        let _ = st.bucket.delete_object(&key).await;
+        let _ = st.delete_object(&key).await;
     }
 }
