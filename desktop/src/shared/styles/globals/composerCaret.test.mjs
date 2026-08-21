@@ -10,14 +10,9 @@ const composerCss = readFileSync(
 const mentionChipRule = composerCss.match(
   /\.rich-text-composer \.tiptap \.mention-chip\s*\{([\s\S]*?)\n\}/,
 )?.[1];
-const iconBeforeRule = composerCss.match(
-  /\.rich-text-composer \.tiptap \.inline-chip-with-icon::before\s*\{([\s\S]*?)\n\}/,
-)?.[1];
 
 test("composer mention chips stay inline so the caret can sit after the trailing space", () => {
   assert.ok(mentionChipRule, "missing composer mention-chip override");
   assert.match(mentionChipRule, /display:\s*inline;/);
   assert.doesNotMatch(mentionChipRule, /display:\s*inline-flex/);
-  assert.ok(iconBeforeRule, "missing composer chip-icon override");
-  assert.match(iconBeforeRule, /display:\s*none;/);
 });

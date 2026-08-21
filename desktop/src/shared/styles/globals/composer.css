@@ -256,19 +256,12 @@
    Body copy is text-sm; inline code labels sit one step down (text-xs).
    All chip variants share one box height so mono labels stay balanced.
 
-   Rendered-message chips use inline-flex plus absolutely positioned
-   ::before icons. Those same decorations in the composer pull the caret
-   into the chip and swallow the trailing space after an @mention, so
-   typing "hello" after inserting @quinn becomes "@quinnhello". Keep
-   composer decorations as inline text so the caret stays after the
-   space. */
+   Rendered-message chips use inline-flex. The same decoration in the
+   composer pulls the caret into the chip and swallows the trailing
+   space after an @mention, so typing "hello" after @quinn becomes
+   "@quinnhello". Keep composer chips inline; leave ::before icons in
+   place. */
 .rich-text-composer .tiptap .mention-chip {
   display: inline;
-  position: static;
   min-height: 0;
-  padding-left: var(--inline-chip-padding-inline);
-}
-
-.rich-text-composer .tiptap .inline-chip-with-icon::before {
-  display: none;
 }

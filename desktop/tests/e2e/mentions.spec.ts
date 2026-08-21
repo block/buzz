@@ -746,7 +746,7 @@ test("selecting a person mention inserts @Name into input", async ({
   await expect(mentionChip).toBeVisible();
   await expect(mentionChip).toHaveText("bob");
   await expect(mentionChip).not.toHaveClass(/agent-mention-highlight/);
-  await expect(mentionChip).toHaveCSS("display", "inline-flex");
+  await expect(mentionChip).toHaveCSS("display", "inline");
   await expect(
     input.locator(".mention-prefix-hidden", { hasText: "@" }),
   ).toHaveCount(1);
@@ -820,7 +820,7 @@ test("selecting a managed agent mention inserts @Name into input", async ({
   });
   await expect(agentMentionChip).toBeVisible();
   await expect(agentMentionChip).toHaveText("alice");
-  await expect(agentMentionChip).toHaveCSS("display", "inline-flex");
+  await expect(agentMentionChip).toHaveCSS("display", "inline");
   await expect(agentMentionChip).toHaveCSS("border-top-width", "0px");
 });
 
