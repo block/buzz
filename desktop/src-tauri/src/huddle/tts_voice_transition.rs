@@ -100,9 +100,6 @@ impl TtsTextSender {
         text: String,
     ) -> Result<(), String> {
         let floor_epoch = self.human_floor.epoch();
-        if !self.human_floor.permits(floor_epoch) {
-            return Err("human holds the huddle floor".to_string());
-        }
         self.text_tx
             .send(QueuedText {
                 generation: self.generation,

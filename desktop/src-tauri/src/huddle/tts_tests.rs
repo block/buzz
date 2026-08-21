@@ -12,6 +12,57 @@ use std::sync::{Arc, Mutex};
 #[path = "tts_tests/token_split.rs"]
 mod token_split;
 
+// ── Human-floor queue authorization ───────────────────────────────────────
+
+fn queued_text(route_id: u64, floor_epoch: u64) -> QueuedText {
+    QueuedText {
+        generation: 1,
+        floor_epoch,
+        route_id,
+        speaker_pubkey: None,
+        speaker_generation: 0,
+        voice_reference: None,
+        text: "queued while a human is speaking".to_string(),
+    }
+}
+
+#[test]
+fn worker_queue_defers_text_while_floor_is_held_then_releases_it() {
+    let human_floor = HumanFloor::new();
+    assert!(human_floor.enter_local(true, false));
+    let floor_epoch = human_floor.epoch();
+    let mut deferred = VecDeque::new();
+
+    assert!(matches!(
+        authorize_or_defer_queued_text(&human_floor, &mut deferred, queued_text(41, floor_epoch),),
+        Err(HumanFloorAuthorization::Blocked)
+    ));
+    assert_eq!(deferred.len(), 1, "held-floor text must stay queued");
+
+    human_floor.leave_local();
+    let queued = deferred.pop_front().expect("deferred text");
+    let released = authorize_or_defer_queued_text(&human_floor, &mut deferred, queued)
+        .expect("the same queue item is eligible after floor release");
+
+    assert_eq!(released.route_id, 41);
+    assert!(deferred.is_empty());
+}
+
+#[test]
+fn worker_queue_drops_text_from_before_human_onset() {
+    let human_floor = HumanFloor::new();
+    let stale_epoch = human_floor.epoch();
+    assert!(human_floor.enter_local(true, false));
+    human_floor.leave_local();
+    let mut deferred = VecDeque::new();
+
+    assert!(matches!(
+        authorize_or_defer_queued_text(&human_floor, &mut deferred, queued_text(42, stale_epoch),),
+        Err(HumanFloorAuthorization::Stale)
+    ));
+    assert!(deferred.is_empty(), "pre-barge-in text must not replay");
+}
+
 // ── Remote interrupt tracker ──────────────────────────────────────────────
 //
 // Models the per-peer frame counting logic in the recv task of

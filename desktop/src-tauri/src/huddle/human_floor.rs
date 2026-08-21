@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::tts_playback::PlaybackCoordinator;
+use super::tts_playback::{HumanFloorAuthorization, PlaybackCoordinator};
 
 #[derive(Clone)]
 pub(crate) struct HumanFloor {
@@ -41,8 +41,13 @@ impl HumanFloor {
         self.playback.human_floor_epoch()
     }
 
+    pub(super) fn authorization(&self, epoch: u64) -> HumanFloorAuthorization {
+        self.playback.human_floor_authorization(epoch)
+    }
+
+    #[cfg(test)]
     pub(crate) fn permits(&self, epoch: u64) -> bool {
-        self.playback.human_floor_permits(epoch)
+        self.authorization(epoch) == HumanFloorAuthorization::Permitted
     }
 
     pub(crate) fn enter_local(&self, route_isolated: bool, sustained_coupled_speech: bool) -> bool {

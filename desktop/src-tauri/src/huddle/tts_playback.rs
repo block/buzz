@@ -64,6 +64,13 @@ impl OutputLease {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HumanFloorAuthorization {
+    Permitted,
+    Blocked,
+    Stale,
+}
+
 #[derive(Default)]
 struct HumanFloorState {
     epoch: u64,
@@ -125,6 +132,7 @@ impl PlaybackCoordinator {
     /// concurrent cancellation either replaces the queue before this append is
     /// authorized, or observes the committed state after it — never lands its
     /// own release between the two and gets overwritten.
+    #[cfg(test)]
     pub(super) fn append_if<S>(
         &self,
         source: S,
@@ -248,11 +256,54 @@ impl PlaybackCoordinator {
         self.lock().human_floor.epoch
     }
 
+    pub(super) fn human_floor_authorization(&self, epoch: u64) -> HumanFloorAuthorization {
+        Self::human_floor_authorization_locked(&self.lock(), epoch)
+    }
+
+    fn human_floor_authorization_locked(
+        state: &PlaybackState,
+        epoch: u64,
+    ) -> HumanFloorAuthorization {
+        if state.human_floor.local || !state.human_floor.remote.is_empty() {
+            HumanFloorAuthorization::Blocked
+        } else if state.human_floor.epoch != epoch {
+            HumanFloorAuthorization::Stale
+        } else {
+            HumanFloorAuthorization::Permitted
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn human_floor_permits(&self, epoch: u64) -> bool {
-        let state = self.lock();
-        !state.human_floor.local
-            && state.human_floor.remote.is_empty()
-            && state.human_floor.epoch == epoch
+        self.human_floor_authorization(epoch) == HumanFloorAuthorization::Permitted
+    }
+
+    pub(super) fn append_if_human_floor_permits<S>(
+        &self,
+        source: S,
+        epoch: u64,
+        authorize: impl FnOnce(bool) -> bool,
+        commit: impl FnOnce(),
+    ) -> HumanFloorAuthorization
+    where
+        S: Source<Item = f32> + Send + 'static,
+    {
+        let mut state = self.lock();
+        let floor_authorization = Self::human_floor_authorization_locked(&state, epoch);
+        if floor_authorization != HumanFloorAuthorization::Permitted {
+            return floor_authorization;
+        }
+        if !authorize(state.player.as_ref().is_none_or(Player::empty)) {
+            return HumanFloorAuthorization::Stale;
+        }
+        let Some(player) = state.player.as_ref() else {
+            return HumanFloorAuthorization::Stale;
+        };
+        player.append(source);
+        state.first_append = false;
+        state.output_lease = OutputLease::Active;
+        commit();
+        HumanFloorAuthorization::Permitted
     }
 
     pub(super) fn enter_local_human_floor(
@@ -360,6 +411,62 @@ mod tests {
             ),
             |_| true,
             || {},
+        );
+    }
+
+    fn one_second_source() -> SamplesBuffer {
+        SamplesBuffer::new(
+            NonZero::new(1).expect("nonzero channels"),
+            NonZero::new(24_000).expect("nonzero rate"),
+            vec![0.25; 24_000],
+        )
+    }
+
+    #[test]
+    fn floor_authorized_append_does_not_reenter_the_coordinator_lock() {
+        let (playback, _unpulled_source) = coordinator();
+        let epoch = playback.human_floor_epoch();
+        let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let authorization =
+                playback.append_if_human_floor_permits(one_second_source(), epoch, |_| true, || {});
+            completed_tx
+                .send(authorization)
+                .expect("completion receiver");
+        });
+
+        assert_eq!(
+            completed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("floor-authorized append must not deadlock"),
+            HumanFloorAuthorization::Permitted
+        );
+        worker.join().expect("append worker");
+    }
+
+    #[test]
+    fn text_queued_during_a_held_floor_is_permitted_after_release() {
+        let (playback, _unpulled_source) = coordinator();
+        assert!(playback.enter_local_human_floor(true, false));
+        let queued_epoch = playback.human_floor_epoch();
+
+        assert_eq!(
+            playback.human_floor_authorization(queued_epoch),
+            HumanFloorAuthorization::Blocked
+        );
+        playback.leave_local_human_floor();
+        assert_eq!(
+            playback.human_floor_authorization(queued_epoch),
+            HumanFloorAuthorization::Permitted
+        );
+        assert_eq!(
+            playback.append_if_human_floor_permits(
+                one_second_source(),
+                queued_epoch,
+                |_| true,
+                || {},
+            ),
+            HumanFloorAuthorization::Permitted
         );
     }
 

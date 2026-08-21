@@ -279,6 +279,27 @@ impl Drop for TtsPipeline {
 
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
+fn authorize_or_defer_queued_text(
+    human_floor: &HumanFloor,
+    deferred_text: &mut VecDeque<QueuedText>,
+    queued_text: QueuedText,
+) -> Result<QueuedText, HumanFloorAuthorization> {
+    match human_floor.authorization(queued_text.floor_epoch) {
+        HumanFloorAuthorization::Blocked => {
+            deferred_text.push_front(queued_text);
+            Err(HumanFloorAuthorization::Blocked)
+        }
+        HumanFloorAuthorization::Stale => {
+            eprintln!(
+                "buzz-desktop: tts stage=queue status=dropped reason=barge_in route_id={}",
+                queued_text.route_id
+            );
+            Err(HumanFloorAuthorization::Stale)
+        }
+        HumanFloorAuthorization::Permitted => Ok(queued_text),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tts_worker(
     model_dir: PathBuf,
@@ -459,11 +480,11 @@ fn tts_worker(
         let activity = speaker_pubkey.map(|pubkey| {
             build_tts_speaker_activity_frames(&prepared.buffer, pubkey, SAMPLE_RATE as usize)
         });
-        let accepted = playback.append_if(
+        let floor_authorization = playback.append_if_human_floor_permits(
             SamplesBuffer::new(channels, rate, prepared.buffer),
+            floor_epoch,
             |player_empty| {
-                if !human_floor.permits(floor_epoch)
-                    || cancel.load(Ordering::Acquire)
+                if cancel.load(Ordering::Acquire)
                     || voice_cancel.load(Ordering::Acquire)
                     || shutdown.load(Ordering::Acquire)
                 {
@@ -514,7 +535,7 @@ fn tts_worker(
             // `true` landing after the fact.
             || tts_active.store(true, Ordering::Release),
         );
-        if !accepted {
+        if floor_authorization != HumanFloorAuthorization::Permitted {
             return false;
         }
         eprintln!(
@@ -641,7 +662,19 @@ fn tts_worker(
             thread::sleep(RECV_TIMEOUT);
             continue;
         }
-        let requested_voice = queued_text.voice_reference.unwrap_or_else(|| {
+        let mut queued_text =
+            match authorize_or_defer_queued_text(&human_floor, &mut deferred_text, queued_text) {
+                Ok(queued_text) => queued_text,
+                Err(HumanFloorAuthorization::Blocked) => {
+                    thread::sleep(RECV_TIMEOUT);
+                    continue;
+                }
+                Err(HumanFloorAuthorization::Stale) => continue,
+                Err(HumanFloorAuthorization::Permitted) => {
+                    unreachable!("permitted text is returned")
+                }
+            };
+        let requested_voice = queued_text.voice_reference.take().unwrap_or_else(|| {
             selected_voice
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -652,10 +685,6 @@ fn tts_worker(
         let speaker_generation = queued_text.speaker_generation;
         let floor_epoch = queued_text.floor_epoch;
         let route_id = queued_text.route_id;
-        if !human_floor.permits(floor_epoch) {
-            eprintln!("buzz-desktop: tts stage=queue status=dropped reason=human_floor route_id={route_id}");
-            continue;
-        }
         eprintln!("buzz-desktop: tts stage=synthesis status=started route_id={route_id}");
 
         // If playback already drained while we were waiting for this item,

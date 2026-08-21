@@ -7,9 +7,6 @@ impl TtsPipeline {
     /// `TEXT_QUEUE_DEPTH`) — caller may log and discard.
     pub fn speak(&self, text: String) -> Result<(), String> {
         let floor_epoch = self.human_floor.epoch();
-        if !self.human_floor.permits(floor_epoch) {
-            return Err("human holds the huddle floor".to_string());
-        }
         self.text_tx
             .try_send(QueuedText {
                 generation: self.voice_generation.load(Ordering::Acquire),
