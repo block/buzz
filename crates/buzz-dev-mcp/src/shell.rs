@@ -210,13 +210,13 @@ pub async fn run(
     // primitive (Unix process group / Windows Job Object). Built from the live
     // child so the Windows job can take the process handle, which only exists
     // after spawn. Held for the whole run; its Drop is the last-resort reaper.
-    let mut kill_group = KillGroup::new(&child, pid);
+    let kill_group = KillGroup::new(&child, pid);
     // Bind the reserved slots to this command's lifetime handle: on Unix the
     // process group, which `set_process_group` made equal to the child's own
-    // pid, and on Windows the pid. Held for the rest of `run`, so the entries
-    // disappear when the command is done and the directories go back to being
-    // reclaimable.
-    let _registered = match pid.filter(|_| kill_group.armed()) {
+    // pid — the same assumption `KillGroup` kills by — and on Windows the pid.
+    // Held for the rest of `run`, so the entries disappear when the command is
+    // done and the directories go back to being reclaimable.
+    let registered = match pid.filter(|_| kill_group.armed()) {
         Some(handle) => Some(pending.confirm(handle)),
         None => {
             // Nothing left ties this command's lifetime to ours, and nothing
@@ -231,6 +231,13 @@ pub async fn run(
             None
         }
     };
+    // One tuple rather than two bindings, because the drop order matters and
+    // is otherwise invisible: tuple fields drop left to right, so the kill
+    // guard fires before the entry naming that process group is removed. Two
+    // separate bindings drop in reverse declaration order, which would take
+    // the directory's last protection away while the group it names is still
+    // up.
+    let (mut kill_group, _registered) = (kill_group, registered);
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
