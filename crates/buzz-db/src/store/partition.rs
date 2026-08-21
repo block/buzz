@@ -77,7 +77,8 @@ pub struct PartitionChildAudit {
     /// Parent trigger names absent from this child or a routable descendant leaf.
     /// Nested-leaf entries are qualified as `{leaf}:{trigger}`.
     pub missing_triggers: Vec<String>,
-    /// Child trigger names absent from the parent.
+    /// Child-only row trigger names absent from the parent.
+    /// Nested-leaf entries are qualified as `{leaf}:{trigger}`.
     pub extra_triggers: Vec<String>,
 }
 
@@ -513,9 +514,6 @@ async fn audit_table_on(
     let descendant_triggers = trigger_metadata_for_descendants(connection, table).await?;
     let mut child_audits = Vec::with_capacity(children.len());
     for child in children {
-        let triggers = descendant_triggers
-            .get(&child.name)
-            .map(|relation| &relation.triggers);
         let mut missing_triggers = Vec::new();
         let routable_leaves: Vec<_> = descendant_triggers
             .values()
@@ -527,7 +525,7 @@ async fn audit_table_on(
                             && relation.relation_kind != "p"))
             })
             .collect();
-        for leaf in routable_leaves {
+        for leaf in &routable_leaves {
             for (name, parent_oid) in &parent_triggers {
                 let present =
                     trigger_lineage_reaches_parent(leaf, name, *parent_oid, &descendant_triggers)
@@ -545,15 +543,20 @@ async fn audit_table_on(
             }
         }
         missing_triggers.sort();
-        let mut extra_triggers: Vec<_> = triggers
-            .map(|triggers| {
-                triggers
-                    .keys()
-                    .filter(|name| !parent_triggers.contains_key(*name))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut extra_triggers = Vec::new();
+        for leaf in routable_leaves {
+            for name in leaf
+                .triggers
+                .keys()
+                .filter(|name| !parent_triggers.contains_key(*name))
+            {
+                if leaf.depth == 0 {
+                    extra_triggers.push(name.clone());
+                } else {
+                    extra_triggers.push(format!("{}:{name}", leaf.name));
+                }
+            }
+        }
         extra_triggers.sort();
         child_audits.push(PartitionChildAudit {
             name: child.name,
@@ -1614,6 +1617,60 @@ mod tests {
             assert!(events.children.iter().any(|child| {
                 child.name == "events_nested"
                     && child.missing_triggers == ["events_nested_first:partition_probe"]
+            }));
+            drop_schema(&admin, &schema).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn child_only_nested_leaf_trigger_degrades_parity() {
+            let (pool, admin, schema) = scratch_pool().await;
+            seed_parents(&pool).await;
+            create_nested_child(
+                &pool,
+                "events",
+                "events_nested",
+                "created_at",
+                "'2026-09-01'",
+                "'2026-10-01'",
+            )
+            .await;
+            create_child(
+                &pool,
+                "events_nested",
+                "events_nested_first",
+                "'2026-09-01'",
+                "'2026-09-15'",
+            )
+            .await;
+            create_child(
+                &pool,
+                "events_nested",
+                "events_nested_second",
+                "'2026-09-15'",
+                "'2026-10-01'",
+            )
+            .await;
+            sqlx::query(
+                "CREATE TRIGGER child_only_probe BEFORE INSERT ON events_nested_first \
+                 FOR EACH ROW EXECUTE FUNCTION partition_test_trigger()",
+            )
+            .execute(&pool)
+            .await
+            .expect("create nested child-only trigger");
+
+            let audit = audit_partition_catalog_at(&pool, 0, fixed_now())
+                .await
+                .expect("audit");
+            let events = audit
+                .tables
+                .iter()
+                .find(|table| table.table == "events")
+                .expect("events audit");
+            assert_eq!(events.extra_trigger_count(), 1);
+            assert!(events.children.iter().any(|child| {
+                child.name == "events_nested"
+                    && child.extra_triggers == ["events_nested_first:child_only_probe"]
             }));
             drop_schema(&admin, &schema).await;
         }
