@@ -935,7 +935,6 @@ pub fn spawn_agent_child(
     })
 }
 
-
 /// Spawn (or adopt) the runtime pair for `record` on the caller's bound
 /// workspace relay. `workspace_relay` can only be produced by
 /// `bind_expected_relay_scope`, so this spawn consumes — by construction — the

@@ -28,7 +28,9 @@ pub(super) const LOG_FILTER: &str =
 fn is_global_level(directive: &str) -> bool {
     const NAMES: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
     let directive = directive.trim();
-    NAMES.iter().any(|name| directive.eq_ignore_ascii_case(name))
+    NAMES
+        .iter()
+        .any(|name| directive.eq_ignore_ascii_case(name))
         || matches!(directive, "0" | "1" | "2" | "3" | "4" | "5")
 }
 
