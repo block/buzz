@@ -12,6 +12,11 @@ test("agents page is backed by accessible relay agents, not local demos", () => 
   assert.match(source, /useRelayAgentsQuery\(\)/);
   assert.match(source, /availableRelayAgents\(/);
   assert.match(source, /<RelayAgentsSection/);
+  assert.match(source, /data-testid="buzz-user-public-key"/);
+  assert.match(source, /data-testid="buzz-user-npub"/);
+  assert.match(source, /safeNpub\(userPubkey\)/);
+  assert.match(source, /Your private key is never shown/);
+  assert.doesNotMatch(source, /nsec|privateKey|secretKey/);
   assert.doesNotMatch(source, /Fizz|Honey|Pollen|Welcome Team/);
   assert.doesNotMatch(source, /list_managed_agents/);
 });
