@@ -16,6 +16,10 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
+import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
+import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/members_sheet.dart';
 import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
@@ -23,6 +27,7 @@ import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/features/channels/emoji_picker.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
+import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/message_action_backdrop_state.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
@@ -46,6 +51,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/widgets/lucide_star_icon.dart';
 import 'package:buzz/shared/widgets/masked_avatar_badge.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -229,6 +235,8 @@ Widget _buildTestable({
       ),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       channelsProvider.overrideWith(() => fakeChannelsNotifier),
+      channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
+      channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
       channelDetailsProvider(_channelId).overrideWith(
         (ref) async => ChannelDetails.fromChannel(resolvedChannel),
       ),
@@ -1062,7 +1070,7 @@ void main() {
       final starSemantics = tester.getSemantics(
         find.byKey(const ValueKey('channel-details-star-action')),
       );
-      expect(starSemantics.label, 'Star channel');
+      expect(starSemantics.label, 'Star');
       expect(starSemantics.flagsCollection.isButton, isTrue);
       expect(
         starSemantics.flagsCollection.isEnabled.toString(),
@@ -1087,6 +1095,56 @@ void main() {
         isFalse,
       );
     });
+
+    testWidgets(
+      'star and mute actions update their visible state immediately',
+      (tester) async {
+        await tester.pumpWidget(_buildTestable(messages: const []));
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byKey(const ValueKey('channel-header-settings-trigger')),
+        );
+        await tester.pumpAndSettle();
+
+        final starAction = find.byKey(
+          const ValueKey('channel-details-star-action'),
+        );
+        final muteAction = find.byKey(
+          const ValueKey('channel-details-mute-action'),
+        );
+        expect(find.text('Star'), findsOneWidget);
+        var star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        expect(star.filled, isFalse);
+        expect(find.text('Mute'), findsOneWidget);
+        expect(find.byIcon(LucideIcons.bellOff), findsOneWidget);
+
+        await tester.tap(starAction);
+        await tester.pump();
+
+        expect(find.text('Unstar'), findsOneWidget);
+        star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        expect(star.filled, isTrue);
+        expect(star.color, AppTheme.light().colorScheme.primary);
+
+        await tester.tap(muteAction);
+        await tester.pump();
+
+        expect(find.text('Unmute'), findsOneWidget);
+        final activeBell = tester.widget<Icon>(find.byIcon(LucideIcons.bell));
+        expect(activeBell.color, AppTheme.light().colorScheme.primary);
+
+        await tester.tap(starAction);
+        await tester.tap(muteAction);
+        await tester.pump();
+
+        expect(find.text('Star'), findsOneWidget);
+        expect(find.text('Mute'), findsOneWidget);
+        star = tester.widget<LucideStarIcon>(find.byType(LucideStarIcon));
+        expect(star.filled, isFalse);
+        expect(find.byIcon(LucideIcons.bellOff), findsOneWidget);
+      },
+    );
 
     testWidgets('action tiles grow together for large text on a narrow page', (
       tester,
@@ -1118,8 +1176,8 @@ void main() {
       final editAction = find.byKey(
         const ValueKey('channel-details-edit-action'),
       );
-      expect(find.text('Star channel'), findsOneWidget);
-      expect(find.text('Mute channel'), findsOneWidget);
+      expect(find.text('Star'), findsOneWidget);
+      expect(find.text('Mute'), findsOneWidget);
       expect(find.text('Edit'), findsOneWidget);
       expect(tester.getSize(starAction).height, greaterThan(84));
       expect(
@@ -1651,7 +1709,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Mute channel'), findsOneWidget);
+      expect(find.text('Mute'), findsOneWidget);
       expect(find.text('Leave channel'), findsNothing);
       expect(find.text('Topic'), findsNothing);
       expect(find.text('Purpose'), findsNothing);
@@ -3467,6 +3525,70 @@ void main() {
     });
 
     testWidgets(
+      'a same-second local send follows its inserted row when the tail ID stays unchanged',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 600);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final initialMessages = [
+          for (var i = 0; i < 39; i++)
+            _textMsg(
+              id: 'msg$i',
+              pubkey: 'alice',
+              content: 'Message $i',
+              createdAt: 1000 + i,
+            ),
+          _textMsg(
+            id: 'z-final',
+            pubkey: 'alice',
+            content: List.filled(20, 'Tall final message').join('\n'),
+            createdAt: 2000,
+          ),
+        ];
+        final messagesNotifier = _FakeMessagesNotifier(initialMessages);
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            messagesNotifier: messagesNotifier,
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final messageList = find.byKey(const ValueKey('channel-message-list'));
+        await tester.drag(messageList, const Offset(0, 300));
+        await tester.pumpAndSettle();
+        expect(findRichText('My same-second send'), findsNothing);
+
+        final localSend = _textMsg(
+          id: 'a-local',
+          pubkey: 'self',
+          content: 'My same-second send',
+          createdAt: 2000,
+        );
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ChannelDetailPage)),
+        );
+        container
+            .read(localMessageSendAnimationProvider(_channelId).notifier)
+            .mark(localSend.id);
+        messagesNotifier.setMessages([...initialMessages, localSend]);
+        await tester.pumpAndSettle();
+
+        expect(findRichText('My same-second send'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
       'Latest reveals the channel tail while the Android keyboard stays open',
       (tester) async {
         final previousPlatform = debugDefaultTargetPlatformOverride;
@@ -5197,6 +5319,79 @@ void main() {
   });
 
   group('App bar', () {
+    testWidgets('aligns the Channel Details iOS back control with channels', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ChannelDetailPage(channel: _testChannel),
+                  ),
+                ),
+                child: const Text('Open channel'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open channel'));
+      await tester.pumpAndSettle();
+
+      final channelBack = find.byKey(const ValueKey('channel-ios-glass-back'));
+      final channelNativeView = tester.widget<UiKitView>(
+        find.descendant(of: channelBack, matching: find.byType(UiKitView)),
+      );
+      final channelParams =
+          channelNativeView.creationParams as Map<String, Object>;
+      final channelButtonCenter =
+          tester.getTopLeft(channelBack).dx +
+          (channelParams['buttonCenterX']! as double);
+
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      final detailsBack = find.byKey(
+        const ValueKey('channel-details-ios-glass-back'),
+      );
+      final detailsNativeView = tester.widget<UiKitView>(
+        find.descendant(of: detailsBack, matching: find.byType(UiKitView)),
+      );
+      final detailsParams =
+          detailsNativeView.creationParams as Map<String, Object>;
+      final detailsButtonCenter =
+          tester.getTopLeft(detailsBack).dx +
+          (detailsParams['buttonCenterX']! as double);
+      debugDefaultTargetPlatformOverride = null;
+
+      expect(detailsBack, findsOneWidget);
+      expect(
+        detailsParams['buttonCenterX'],
+        iosGlassChannelHeaderButtonCenterX,
+      );
+      expect(
+        detailsParams['hitTargetWidth'],
+        iosGlassChannelHeaderLeadingWidth,
+      );
+      expect(detailsButtonCenter, moreOrLessEquals(channelButtonCenter));
+      expect(
+        tester.getRect(detailsBack).width,
+        iosGlassChannelHeaderLeadingWidth,
+      );
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('matches the channel header placement on iOS', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -5566,8 +5761,8 @@ void main() {
       expect(find.text('General discussion'), findsOneWidget);
       expect(find.text('5 members'), findsOneWidget);
       expect(find.text('Preferences'), findsNothing);
-      expect(find.text('Star channel'), findsOneWidget);
-      expect(find.text('Mute channel'), findsOneWidget);
+      expect(find.text('Star'), findsOneWidget);
+      expect(find.text('Mute'), findsOneWidget);
       expect(find.text('Edit'), findsOneWidget);
       expect(find.text('Actions'), findsNothing);
       expect(find.byTooltip('Back'), findsOneWidget);
@@ -9746,6 +9941,54 @@ class _FakeProfileNotifier extends ProfileNotifier {
   @override
   Future<UserProfile?> build() async =>
       const UserProfile(pubkey: 'self', displayName: 'Self');
+}
+
+class _FakeChannelStarsNotifier extends ChannelStarsNotifier {
+  @override
+  ChannelStarsState build() => const ChannelStarsState(isReady: true);
+
+  @override
+  void starChannel(String channelId) => _setStarred(channelId, true);
+
+  @override
+  void unstarChannel(String channelId) => _setStarred(channelId, false);
+
+  void _setStarred(String channelId, bool starred) {
+    state = ChannelStarsState(
+      isReady: true,
+      store: ChannelStarStore(
+        channels: {
+          ...state.store.channels,
+          channelId: ChannelStarEntry(starred: starred, updatedAt: 1),
+        },
+      ),
+      version: state.version + 1,
+    );
+  }
+}
+
+class _FakeChannelMutesNotifier extends ChannelMutesNotifier {
+  @override
+  ChannelMutesState build() => const ChannelMutesState(isReady: true);
+
+  @override
+  void muteChannel(String channelId) => _setMuted(channelId, true);
+
+  @override
+  void unmuteChannel(String channelId) => _setMuted(channelId, false);
+
+  void _setMuted(String channelId, bool muted) {
+    state = ChannelMutesState(
+      isReady: true,
+      store: ChannelMuteStore(
+        channels: {
+          ...state.store.channels,
+          channelId: ChannelMuteEntry(muted: muted, updatedAt: 1),
+        },
+      ),
+      version: state.version + 1,
+    );
+  }
 }
 
 class _FakeUserCacheNotifier extends UserCacheNotifier {
