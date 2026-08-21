@@ -354,6 +354,9 @@ export const MentionHighlightExtension = Extension.create({
                 }
               }
               setDomCaretAtPos(view, view.state.selection.from);
+              // Consume after the intended remap so a following ArrowLeft
+              // is not bounced back past the trailing space.
+              settlement.cancel();
             },
             destroy() {
               settlement.cancel();
