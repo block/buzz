@@ -13,6 +13,7 @@ from harbor_buzz_orchestra.container_runtime import (
     REMOTE_BIN,
     REMOTE_EVIDENCE,
     REMOTE_LOGS,
+    SCRIPTED_TURN_SETTLE_POLLS,
     THINKING_EFFORT,
     BuzzContainerRuntime,
     EndpointLaunchConfig,
@@ -549,26 +550,29 @@ async def test_solo_turn_end_completes_without_done_message(tmp_path, monkeypatc
     assert await rt._wait_for_done(environment, orch, trial, [], solo=solo) is None
 
 
-async def test_scripted_events_wait_for_second_agent_message(tmp_path, monkeypatch):
+async def test_scripted_events_wait_for_delayed_follow_up_turn(tmp_path, monkeypatch):
     from harbor_buzz_orchestra.container_runtime import _Agent
 
     rt = runtime(tmp_path, poll_seconds=0)
     orch = credential("orch-1", "orchestrator", "orch-model")
     trial = trial_handle((orch,))
     solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    alpha = {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}
+    beta = {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "BETA"}
     message_rounds = iter(
-        [
-            [{"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}],
-            [{"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"}],
-            [
-                {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"},
-                {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "BETA"},
-            ],
-        ]
+        [[alpha]] * SCRIPTED_TURN_SETTLE_POLLS
+        + [[alpha, beta]] * SCRIPTED_TURN_SETTLE_POLLS
     )
-    turn_rounds = iter([(1, 1), (2, 1), (2, 2)])
+    turn_rounds = iter(
+        [(1, 1)] * (SCRIPTED_TURN_SETTLE_POLLS - 1)
+        + [(2, 1)]
+        + [(2, 2)] * SCRIPTED_TURN_SETTLE_POLLS
+    )
+    polls = 0
 
     async def buzz_json(*args, **kwargs):
+        nonlocal polls
+        polls += 1
         return next(message_rounds)
 
     async def turn_counts(*args, **kwargs):
@@ -583,10 +587,49 @@ async def test_scripted_events_wait_for_second_agent_message(tmp_path, monkeypat
         trial,
         [],
         solo=solo,
-        minimum_agent_messages=2,
+        wait_for_scripted_turns=True,
     )
 
     assert result["id"] == "beta"
+    assert polls == SCRIPTED_TURN_SETTLE_POLLS * 2
+
+
+async def test_scripted_events_do_not_stop_an_active_turn(tmp_path, monkeypatch):
+    from harbor_buzz_orchestra.container_runtime import _Agent
+
+    rt = runtime(tmp_path, poll_seconds=0)
+    orch = credential("orch-1", "orchestrator", "orch-model")
+    trial = trial_handle((orch,))
+    solo = _Agent(orch, 7, "stdout.log", "stderr.log")
+    messages = [
+        {"id": "alpha", "pubkey": orch.nostr_pubkey, "content": "ALPHA"},
+        {"id": "beta", "pubkey": orch.nostr_pubkey, "content": "DONE: BETA"},
+    ]
+    turn_rounds = iter([(2, 1)] + [(2, 2)] * SCRIPTED_TURN_SETTLE_POLLS)
+    polls = 0
+
+    async def buzz_json(*args, **kwargs):
+        nonlocal polls
+        polls += 1
+        return messages
+
+    async def turn_counts(*args, **kwargs):
+        return next(turn_rounds)
+
+    monkeypatch.setattr(rt, "_buzz_json", buzz_json)
+    monkeypatch.setattr(rt, "_turn_counts", turn_counts)
+
+    result = await rt._wait_for_done(
+        Environment(),
+        orch,
+        trial,
+        [],
+        solo=solo,
+        wait_for_scripted_turns=True,
+    )
+
+    assert result["id"] == "beta"
+    assert polls == SCRIPTED_TURN_SETTLE_POLLS + 1
 
 
 async def test_collect_evidence_uploads_verifier_artifact(tmp_path, monkeypatch):

@@ -49,7 +49,7 @@ FORWARDER = f"{REMOTE_BIN}/relay-forwarder"
 FORWARDER_LOG = f"{REMOTE_LOGS}/relay-forwarder.log"
 # How many done-poll iterations between in-container liveness probes.
 LIVENESS_EVERY = 10
-SCRIPTED_EVENT_IDLE_POLLS = 5
+SCRIPTED_TURN_SETTLE_POLLS = 5
 TRANSCRIPT_LIMIT = 1000
 TURN_ENDED_MARKERS = (
     "turn complete for",
@@ -206,9 +206,7 @@ class BuzzContainerRuntime:
                     trial,
                     agents + infra,
                     solo=agents[0] if len(agents) == 1 else None,
-                    minimum_agent_messages=fixture_for(
-                        trial.task_name
-                    ).minimum_agent_messages,
+                    wait_for_scripted_turns=bool(scripted_events),
                 ),
                 timeout=manifest.trial_budget.timeout_seconds,
             )
@@ -506,16 +504,17 @@ class BuzzContainerRuntime:
         trial: TrialHandle,
         agents: list[_Agent],
         solo: _Agent | None = None,
-        minimum_agent_messages: int = 0,
+        wait_for_scripted_turns: bool = False,
     ) -> dict[str, Any] | None:
-        """Observe until a team posts DONE or a solo agent finishes its one turn.
+        """Observe until a team posts DONE or a solo agent finishes its work.
 
         Observation only: the harness never speaks as any agent. If the team
         stalls, the trial times out and the stall is the measured result. A solo
-        agent cannot be woken by a teammate, so its logged turn end is final.
+        task without scripted events finishes at its first logged turn end.
         """
         polls = 0
-        idle_terminal_polls = 0
+        settled_polls = 0
+        previous_scripted_state: tuple[int, int, tuple[str, ...]] | None = None
         while True:
             if polls % LIVENESS_EVERY == 0:
                 await self._raise_for_dead_agents(environment, agents)
@@ -531,9 +530,11 @@ class BuzzContainerRuntime:
                 "100",
             )
             for message in messages:
-                if message.get("pubkey") == orchestrator.nostr_pubkey and str(
-                    message.get("content", "")
-                ).startswith("DONE:"):
+                if (
+                    message.get("pubkey") == orchestrator.nostr_pubkey
+                    and str(message.get("content", "")).startswith("DONE:")
+                    and (solo is None or not wait_for_scripted_turns)
+                ):
                     return message
             if solo is not None:
                 starts, ends = await self._turn_counts(environment, solo)
@@ -542,14 +543,27 @@ class BuzzContainerRuntime:
                     for message in messages
                     if message.get("pubkey") == orchestrator.nostr_pubkey
                 ]
-                if ends > 0 and len(authored) >= minimum_agent_messages:
+                if not wait_for_scripted_turns and ends > 0:
                     return authored[-1] if authored else None
-                if starts > 0 and starts == ends:
-                    idle_terminal_polls += 1
-                    if idle_terminal_polls >= SCRIPTED_EVENT_IDLE_POLLS:
+
+                scripted_state = (
+                    starts,
+                    ends,
+                    tuple(sorted(str(message.get("id", "")) for message in authored)),
+                )
+                if wait_for_scripted_turns and starts > 0 and starts == ends:
+                    # A queued scripted event can start a new turn just after one ends.
+                    # Stop only after the idle state stays unchanged for several polls.
+                    settled_polls = (
+                        settled_polls + 1
+                        if scripted_state == previous_scripted_state
+                        else 1
+                    )
+                    if settled_polls >= SCRIPTED_TURN_SETTLE_POLLS:
                         return authored[-1] if authored else None
                 else:
-                    idle_terminal_polls = 0
+                    settled_polls = 0
+                previous_scripted_state = scripted_state
             await asyncio.sleep(self.poll_seconds)
 
     @staticmethod
