@@ -27,6 +27,7 @@ jobs:
       desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
+      native-review: ${{ steps.filter.outputs.native-review }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -72,6 +73,10 @@ jobs:
               - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
               - '.github/workflows/mobile-release-candidate.yml'
+              - '.github/workflows/ci.yml'
+            native-review:
+              - 'tools/native-review/**'
+              - 'mobile/**'
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
@@ -899,6 +904,35 @@ jobs:
         run: cd mobile && flutter test
       - name: Build Android debug APK
         run: just mobile-build-android
+
+  native-review-tests:
+    name: Native Review Tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.native-review == 'true'
+    permissions:
+      contents: read
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Prime Flutter SDK
+        run: flutter --version
+      - name: Install mobile dependencies
+        run: cd mobile && flutter pub get
+      - name: Verify CocoaPods lockfile is canonical
+        run: |
+          sudo gem install cocoapods -v 1.17.0 --no-document
+          cd mobile/ios
+          pod install --deployment
+          cmp Podfile.lock Pods/Manifest.lock
+      - name: Test native review harness
+        run: |
+          python3 -m unittest discover -s tools/native-review/tests -p 'test_*.py'
+          swift test --package-path tools/native-review/swift
 
   security:
     name: Security
