@@ -959,3 +959,38 @@ export function _testGetArchivedChannelEvents(
     archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ?? []
   );
 }
+
+/**
+ * Profiling-harness accessor (temporary branch): cheap size census of the
+ * module-level accumulator maps. Reads `.length`/`.size` only — no allocation,
+ * no copy — so it is safe to sample every couple of minutes. Feeds the
+ * `census` profiling record that adjudicates whether accumulator growth
+ * correlates with felt lag.
+ */
+export function getObserverStoreCensus(): {
+  observerEvents: number;
+  observerAgents: number;
+  observerMaxPerAgent: number;
+  archiveEvents: number;
+  transcripts: number;
+} {
+  let observerEvents = 0;
+  let observerMaxPerAgent = 0;
+  for (const events of eventsByAgent.values()) {
+    observerEvents += events.length;
+    if (events.length > observerMaxPerAgent) {
+      observerMaxPerAgent = events.length;
+    }
+  }
+  let archiveEvents = 0;
+  for (const events of archiveEventsByChannel.values()) {
+    archiveEvents += events.length;
+  }
+  return {
+    observerEvents,
+    observerAgents: eventsByAgent.size,
+    observerMaxPerAgent,
+    archiveEvents,
+    transcripts: transcriptByAgent.size,
+  };
+}

@@ -2,12 +2,41 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { resolveTauriCore } from "./src/shared/profiling/viteTauriCoreProxy";
 
 const host = process.env.TAURI_DEV_HOST;
+
+// Temporary profiling harness (never merges): route every Tauri core `invoke`
+// through a proxy that wraps it. A resolver (not a bare alias) is required
+// because Tauri's own submodules (`event`, `app`, `window`, `webview`, …) reach
+// core via the relative import `./core.js`, which an alias cannot see; the hook
+// redirects both the bare specifier and that relative form to the proxy, while
+// the proxy's `@tauri-core-impl` import escapes to the real module.
+const tauriCoreProxyId = path.resolve(
+  __dirname,
+  "./src/shared/profiling/tauriCoreProxy.ts",
+);
+const tauriRealCoreId = path.resolve(
+  __dirname,
+  "./node_modules/@tauri-apps/api/core.js",
+);
+const tauriCoreProfilingProxy = {
+  name: "tauri-core-profiling-proxy",
+  enforce: "pre" as const,
+  resolveId(source: string, importer: string | undefined) {
+    return resolveTauriCore(
+      source,
+      importer,
+      tauriCoreProxyId,
+      tauriRealCoreId,
+    );
+  },
+};
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [
+    tauriCoreProfilingProxy,
     tanstackRouter({
       target: "react",
       routesDirectory: "./src/app/routes",
