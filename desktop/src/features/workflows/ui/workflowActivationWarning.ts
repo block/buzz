@@ -34,27 +34,49 @@ function frequentIntervalDescription(interval: string): string | null {
   return `It is scheduled to run every ${formatDurationSecondsVerbose(seconds)}. Review the schedule before turning it on.`;
 }
 
-function frequentCronDescription(cron: string): string | null {
+function normalizedCronFields(cron: string): string[] | null {
   const fields = cron.trim().split(/\s+/);
-  if (fields.length !== 5) return null;
-  const [minute, hour] = fields;
-  if (hour !== "*") return null;
+  if (fields.length === 5) return ["0", ...fields, "*"];
+  if (fields.length === 6) return [...fields, "*"];
+  return fields.length === 7 ? fields : null;
+}
 
+function repeatedFieldCount(field: string, maximum: number): number | null {
+  if (field === "*") return maximum + 1;
+  const step = /^\*\/(\d+)$/.exec(field);
+  if (step) {
+    const size = Number(step[1]);
+    return size >= 1 && size <= maximum + 1
+      ? Math.ceil((maximum + 1) / size)
+      : null;
+  }
+  if (field.includes(",") || field.includes("-")) return 2;
+  return /^\d+$/.test(field) ? 1 : null;
+}
+
+function frequentCronDescription(cron: string): string | null {
+  const fields = normalizedCronFields(cron);
+  if (!fields) return null;
+  const [second, minute, hour] = fields;
+  const secondRuns = repeatedFieldCount(second, 59);
+  const minuteRuns = repeatedFieldCount(minute, 59);
+  if (secondRuns === null || minuteRuns === null || hour !== "*") return null;
+
+  if (secondRuns > 1) {
+    return "It is scheduled to run multiple times a minute. Review the schedule before turning it on.";
+  }
   if (minute === "*") {
     return "It is scheduled to run every minute. Review the schedule before turning it on.";
   }
   const steppedMinute = /^\*\/(\d+)$/.exec(minute);
   if (steppedMinute) {
     const minutes = Number(steppedMinute[1]);
-    if (minutes >= 1 && minutes <= 60) {
-      return `It is scheduled to run every ${minutes} minute${minutes === 1 ? "" : "s"}. Review the schedule before turning it on.`;
-    }
-    return null;
+    return `It is scheduled to run every ${minutes} minute${minutes === 1 ? "" : "s"}. Review the schedule before turning it on.`;
   }
-  if (/^\d+$/.test(minute)) {
+  if (minuteRuns === 1) {
     return "It is scheduled to run every hour. Review the schedule before turning it on.";
   }
-  if (minute.includes(",") || minute.includes("-")) {
+  if (minuteRuns > 1) {
     return "It is scheduled to run multiple times an hour. Review the schedule before turning it on.";
   }
   return null;

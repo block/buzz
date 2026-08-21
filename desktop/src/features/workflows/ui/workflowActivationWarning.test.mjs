@@ -43,11 +43,19 @@ test("warns for hourly-or-faster interval schedules with concrete copy", () => {
 });
 
 test("warns for clear hourly-or-faster cron schedules", () => {
+  for (const cron of ["*/5 * * * *", "0 */5 * * * *", "0 */5 * * * * *"]) {
+    assert.equal(
+      getWorkflowActivationWarning(
+        workflowYaml(`  on: schedule\n  cron: "${cron}"`),
+      )?.description,
+      "It is scheduled to run every 5 minutes. Review the schedule before turning it on.",
+    );
+  }
   assert.equal(
     getWorkflowActivationWarning(
-      workflowYaml('  on: schedule\n  cron: "*/5 * * * *"'),
+      workflowYaml('  on: schedule\n  cron: "*/10 * * * * *"'),
     )?.description,
-    "It is scheduled to run every 5 minutes. Review the schedule before turning it on.",
+    "It is scheduled to run multiple times a minute. Review the schedule before turning it on.",
   );
   assert.equal(
     getWorkflowActivationWarning(
