@@ -211,7 +211,7 @@ export function WorkflowCard({
   return (
     <div
       className={cn(
-        "group relative min-h-60 w-full overflow-hidden rounded-2xl bg-muted/50 p-5 text-left text-foreground shadow-xs transition-colors hover:bg-muted/65",
+        "group relative flex min-h-60 w-full flex-col overflow-hidden rounded-2xl bg-muted/50 p-5 text-left text-foreground shadow-xs transition-colors hover:bg-muted/65",
       )}
       data-testid={`workflow-card-${workflow.id}`}
     >
@@ -223,7 +223,7 @@ export function WorkflowCard({
         <span className="sr-only">View {workflow.name}</span>
       </button>
 
-      <div className="pointer-events-none relative z-10 flex h-full min-h-48 flex-col">
+      <div className="pointer-events-none relative z-10 flex min-h-48 flex-1 flex-col">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2" aria-hidden="true">
             <span

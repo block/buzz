@@ -316,6 +316,34 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   page,
 }) => {
   const name = `semantic_summaries_${Date.now()}`;
+  await page.addInitScript((workflowName) => {
+    const positions: number[] = [];
+    Object.defineProperty(window, "__WORKFLOW_METADATA_POSITIONS__", {
+      configurable: true,
+      value: positions,
+    });
+
+    const findTarget = () => {
+      const target = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '[data-testid="workflow-card-name"]',
+        ),
+      ).find((element) => element.textContent === workflowName);
+      if (!target) {
+        requestAnimationFrame(findTarget);
+        return;
+      }
+
+      let remainingFrames = 12;
+      const sample = () => {
+        positions.push(target.getBoundingClientRect().y);
+        remainingFrames -= 1;
+        if (remainingFrames > 0) requestAnimationFrame(sample);
+      };
+      sample();
+    };
+    requestAnimationFrame(findTarget);
+  }, name);
   const dialog = await openCreateWorkflow(page, name);
 
   await dialog.getByLabel("Message text").fill("deploy");
@@ -362,6 +390,29 @@ test("renders deterministic trigger, step, and workflow-card summaries", async (
   expect(channelBox).not.toBeNull();
   expect(semanticBox?.y).toBeLessThan(nameBox?.y ?? 0);
   expect(channelBox?.y).toBeLessThan(nameBox?.y ?? 0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __WORKFLOW_METADATA_POSITIONS__?: number[];
+            }
+          ).__WORKFLOW_METADATA_POSITIONS__?.length ?? 0,
+      ),
+    )
+    .toBe(12);
+  const metadataPositions = await page.evaluate(
+    () =>
+      (
+        window as typeof window & {
+          __WORKFLOW_METADATA_POSITIONS__?: number[];
+        }
+      ).__WORKFLOW_METADATA_POSITIONS__ ?? [],
+  );
+  expect(
+    Math.max(...metadataPositions) - Math.min(...metadataPositions),
+  ).toBeLessThan(0.5);
 });
 
 test("round-trips manual author and reaction message IDs through save and reopen", async ({
