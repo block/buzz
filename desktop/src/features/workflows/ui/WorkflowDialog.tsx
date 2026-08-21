@@ -117,7 +117,7 @@ function WorkflowNameEditor({
   generating: boolean;
   name: string;
   onCommit: (name: string) => boolean;
-  onEditingChange: (editing: boolean) => void;
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(name);
@@ -134,7 +134,7 @@ function WorkflowNameEditor({
   const changeEditing = React.useCallback(
     (nextEditing: boolean) => {
       setEditing(nextEditing);
-      onEditingChange(nextEditing);
+      onEditingChange?.(nextEditing);
     },
     [onEditingChange],
   );
@@ -247,13 +247,10 @@ export function WorkflowDialog({
   const [editorParseError, setEditorParseError] = React.useState<string | null>(
     null,
   );
-  const [workflowNameEditing, setWorkflowNameEditing] = React.useState(false);
   const [historyOpen, setHistoryOpen] = React.useState(false);
   const [channelAutoOpenPending, setChannelAutoOpenPending] = React.useState(
     mode === "create" && !channelId,
   );
-  const [nameLeadingElement, setNameLeadingElement] =
-    React.useState<HTMLDivElement | null>(null);
   const [savedWebhookInfo, setSavedWebhookInfo] = React.useState<{
     relayHttpUrl: string | null;
     relayUrlError: string | null;
@@ -267,6 +264,7 @@ export function WorkflowDialog({
   const [pendingCreateYaml, setPendingCreateYaml] = React.useState<
     string | null
   >(null);
+  const [formValid, setFormValid] = React.useState(true);
   const [secretConfirmationOpen, setSecretConfirmationOpen] =
     React.useState(false);
   const [generatingName, setGeneratingName] = React.useState(false);
@@ -306,6 +304,7 @@ export function WorkflowDialog({
     setDiscardConfirmationOpen(false);
     setActivationConfirmationOpen(false);
     setPendingCreateYaml(null);
+    setFormValid(true);
     resetCreate();
     resetUpdate();
 
@@ -449,8 +448,8 @@ export function WorkflowDialog({
   }
 
   function handleSubmit() {
-    if (!selectedChannelId || !yamlDefinition.trim()) return;
-    if (mode !== "create") {
+    if (!selectedChannelId || !yamlDefinition.trim() || !formValid) return;
+    if (mode === "edit") {
       void saveWorkflow(yamlDefinition);
       return;
     }
@@ -570,17 +569,6 @@ export function WorkflowDialog({
                   generating={generatingName}
                   name={workflowName}
                   onCommit={handleWorkflowNameCommit}
-                  onEditingChange={setWorkflowNameEditing}
-                />
-                <div
-                  className={
-                    mode === "duplicate" &&
-                    editorMode === "form" &&
-                    !workflowNameEditing
-                      ? "flex items-center"
-                      : "hidden"
-                  }
-                  ref={setNameLeadingElement}
                 />
               </div>
             </div>
@@ -665,13 +653,14 @@ export function WorkflowDialog({
               channels={channels}
               disabled={mutation.isPending}
               mode={editorMode}
-              nameLeadingContainer={mode === "edit" ? null : nameLeadingElement}
+              nameLeadingContainer={null}
               onChange={(yaml) => {
                 mutation.reset();
                 yamlDefinitionRef.current = yaml;
                 setYamlDefinition(yaml);
               }}
               onSelectedNodeChange={onEditorPaneChange}
+              onValidityChange={setFormValid}
               parseError={editorParseError}
               ref={formBuilderRef}
               scopeField={
@@ -775,6 +764,7 @@ export function WorkflowDialog({
                   disabled={
                     !selectedChannelId ||
                     !yamlDefinition.trim() ||
+                    !formValid ||
                     mutation.isPending
                   }
                   onClick={handleSubmit}

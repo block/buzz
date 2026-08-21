@@ -372,12 +372,30 @@ test("round-trips manual author and reaction message IDs through save and reopen
   const messageId = "b".repeat(64);
   const dialog = await openCreateWorkflow(page, name);
   await selectTrigger(page, dialog, "Reaction Added");
+  await addMessageStep(page, dialog);
+  await dialog.getByRole("button", { name: /^Trigger:/ }).click();
+  await openTriggerInspector(dialog);
 
   await dialog.getByRole("button", { name: "Author pubkey" }).click();
   await dialog.getByLabel("Author pubkey").fill("not-hex");
   await expect(
     dialog.getByText("Enter a 64-character hex pubkey."),
   ).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (call) => call.command === "create_workflow",
+          ).length,
+      ),
+    )
+    .toBe(0);
+  await dialog.getByLabel("Author pubkey").fill(author);
+  await expect(dialog.getByRole("button", { name: "Create" })).toBeEnabled();
+  await dialog.getByLabel("Author pubkey").fill("still-not-hex");
+  await expect(dialog.getByRole("button", { name: "Create" })).toBeDisabled();
   await dialog.getByLabel("Author pubkey").fill(author);
   await dialog
     .getByRole("group", { name: "Match" })
@@ -397,7 +415,6 @@ test("round-trips manual author and reaction message IDs through save and reopen
 
   await dialog.getByRole("tab", { name: "Form" }).click();
   await openTriggerInspector(dialog);
-  await addMessageStep(page, dialog);
   await createEnabled(page, dialog);
 
   const reopened = await reopenWorkflow(page, name);

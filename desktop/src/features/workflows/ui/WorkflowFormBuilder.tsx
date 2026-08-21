@@ -35,6 +35,7 @@ import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
 import {
   parseConditionExpressions,
+  conditionValueError,
   type ParsedConditionExpression,
 } from "./workflowConditionExpression";
 import type { WorkflowEditorPane } from "./workflowEditorPane";
@@ -125,6 +126,7 @@ type WorkflowFormBuilderProps = {
   mode: WorkflowEditorMode;
   onChange: (yaml: string) => void;
   onSelectedNodeChange: (pane: WorkflowEditorPane) => void;
+  onValidityChange?: (valid: boolean) => void;
   parseError: string | null;
   scopeField?: React.ReactNode;
   selectedNode: WorkflowEditorPane;
@@ -359,6 +361,7 @@ export const WorkflowFormBuilder = React.forwardRef<
     mode,
     onChange,
     onSelectedNodeChange,
+    onValidityChange,
     parseError,
     scopeField,
     selectedNode: selectedRouteNode,
@@ -377,6 +380,15 @@ export const WorkflowFormBuilder = React.forwardRef<
   const [triggerConditionDrafts, setTriggerConditionDrafts] = React.useState<
     ParsedConditionExpression[] | null
   >(null);
+  const conditionDraftsValid =
+    triggerConditionDrafts === null ||
+    triggerConditionDrafts.every(
+      (condition) => !conditionValueError(condition.field, condition.value),
+    );
+
+  React.useEffect(() => {
+    onValidityChange?.(conditionDraftsValid);
+  }, [conditionDraftsValid, onValidityChange]);
   const selectedNode =
     selectedRouteNode?.type === "trigger" ||
     (selectedRouteNode?.type === "step" &&

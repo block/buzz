@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { parse as parseYaml } from "yaml";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -537,7 +538,36 @@ test("duplicates a workflow", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
   await selectWorkflowChannel(page, dialog);
   await dialog.getByRole("button", { name: "Create copy" }).click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "Enable this workflow now?",
+  });
+  await expect(activationConfirmation).toBeVisible();
+  await activationConfirmation.getByRole("button", { name: "Back" }).click();
+  await expect(dialog).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (call) => call.command === "create_workflow",
+          ).length,
+      ),
+    )
+    .toBe(1);
+  await dialog.getByRole("button", { name: "Create copy" }).click();
+  await activationConfirmation
+    .getByRole("button", { name: "Create disabled" })
+    .click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
+
+  const copiedYaml = await page.evaluate(() => {
+    const calls = (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (call) => call.command === "create_workflow",
+    );
+    return (calls.at(-1)?.payload as { yamlDefinition?: string } | undefined)
+      ?.yamlDefinition;
+  });
+  expect(parseYaml(copiedYaml ?? "").enabled).toBe(false);
 
   // Both the original and copy should exist
   await expect(page.getByTestId("workflows-view")).toContainText(originalName);
