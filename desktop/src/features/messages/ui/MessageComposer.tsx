@@ -60,10 +60,14 @@ import { submitMessageEdit } from "./submitMessageEdit";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import {
+  useManagedAgentsQuery,
+  useRelayAgentsQuery,
+} from "@/features/agents/hooks";
 import { useActiveAgentTurnsByChannel } from "@/features/agents/activeAgentTurnsStore";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { resolveInterruptibleAgents } from "@/features/messages/lib/resolveInterruptibleAgents";
 import { toast } from "sonner";
 function MessageComposerImpl({
   audienceContext = null,
@@ -127,6 +131,7 @@ function MessageComposerImpl({
   const drafts = useDrafts();
   const identityQuery = useIdentityQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
+  const relayAgentsQuery = useRelayAgentsQuery();
   const activeAgentTurns = useActiveAgentTurnsByChannel();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
@@ -168,18 +173,18 @@ function MessageComposerImpl({
       (turn) => turn.channelId === channelId,
     );
     if (!activeChannel) return [];
-    const managedAgentsByPubkey = new Map(
-      (managedAgentsQuery.data ?? [])
-        .filter(
-          (agent) => agent.status === "running" || agent.status === "deployed",
-        )
-        .map((agent) => [normalizePubkey(agent.pubkey), agent]),
+    return resolveInterruptibleAgents(
+      activeChannel.agentPubkeys,
+      managedAgentsQuery.data ?? [],
+      relayAgentsQuery.data ?? [],
     );
-    return activeChannel.agentPubkeys.flatMap((pubkey) => {
-      const agent = managedAgentsByPubkey.get(normalizePubkey(pubkey));
-      return agent ? [{ name: agent.name, pubkey: agent.pubkey }] : [];
-    });
-  }, [activeAgentTurns, channelId, editTarget, managedAgentsQuery.data]);
+  }, [
+    activeAgentTurns,
+    channelId,
+    editTarget,
+    managedAgentsQuery.data,
+    relayAgentsQuery.data,
+  ]);
   const [stoppingAgentPubkeys, setStoppingAgentPubkeys] = React.useState<
     string[]
   >([]);

@@ -620,6 +620,12 @@ fn batch_envelope(events: &[observer::ObserverEvent]) -> observer::ObserverEvent
         session_id: last.session_id.clone(),
         turn_id: last.turn_id.clone(),
         started_at: last.started_at.clone(),
+        viewer_pubkeys: events
+            .iter()
+            .flat_map(|event| event.viewer_pubkeys.iter().cloned())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect(),
         payload: serde_json::json!({
             "events": serde_json::to_value(events).unwrap_or_default(),
         }),
@@ -1057,60 +1063,97 @@ async fn publish_relay_observer_event(
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
-    let encrypted = match encrypt_observer_payload(keys, owner_pubkey, &event) {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            tracing::warn!("failed to encrypt relay observer event: {error}");
-            return;
+    let mut recipients = vec![(owner_pubkey_hex.to_string(), *owner_pubkey)];
+    let mut seen = HashSet::from([owner_pubkey_hex.to_ascii_lowercase()]);
+    for viewer in &event.viewer_pubkeys {
+        let normalized = viewer.to_ascii_lowercase();
+        if !seen.insert(normalized.clone()) {
+            continue;
         }
-    };
-    let builder = match buzz_sdk::build_agent_observer_frame(
-        owner_pubkey_hex,
-        agent_pubkey_hex,
-        OBSERVER_FRAME_TELEMETRY,
-        &encrypted,
-    ) {
-        Ok(builder) => builder,
-        Err(error) => {
-            tracing::warn!("failed to build relay observer event: {error}");
-            return;
+        match PublicKey::from_hex(&normalized) {
+            Ok(pubkey) => recipients.push((normalized, pubkey)),
+            Err(error) => tracing::warn!(viewer, %error, "invalid observer viewer pubkey"),
         }
-    };
-    let signed = match builder.sign_with_keys(keys) {
-        Ok(event) => event,
-        Err(error) => {
-            tracing::warn!("failed to sign relay observer event: {error}");
-            return;
+    }
+
+    for (recipient_hex, recipient) in recipients {
+        let encrypted = match encrypt_observer_payload(keys, &recipient, &event) {
+            Ok(encrypted) => encrypted,
+            Err(error) => {
+                tracing::warn!(recipient = %recipient_hex, "failed to encrypt relay observer event: {error}");
+                continue;
+            }
+        };
+        let builder = match buzz_sdk::build_agent_observer_frame(
+            &recipient_hex,
+            agent_pubkey_hex,
+            OBSERVER_FRAME_TELEMETRY,
+            &encrypted,
+        ) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::warn!(recipient = %recipient_hex, "failed to build relay observer event: {error}");
+                continue;
+            }
+        };
+        let signed = match builder.sign_with_keys(keys) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!(recipient = %recipient_hex, "failed to sign relay observer event: {error}");
+                continue;
+            }
+        };
+        if let Err(error) = publisher.publish_event(signed).await {
+            tracing::warn!(recipient = %recipient_hex, "relay observer event dropped: {error}");
         }
-    };
-    if let Err(error) = publisher.publish_event(signed).await {
-        tracing::warn!("relay observer event dropped: {error}");
     }
 }
 
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
 const OBSERVER_CONTROL_FRESHNESS_SECS: i64 = 300;
 
-fn handle_relay_observer_control_event(
+struct ObserverControlAuthorization<'a> {
+    owner_pubkey_hex: &'a str,
+    respond_to: &'a RespondTo,
+    respond_to_allowlist: &'a HashSet<String>,
+    owner_cache: &'a OwnerCache,
+    rest_client: &'a relay::RestClient,
+}
+
+async fn observer_control_author_allowed(
+    command_type: &str,
+    sender: &str,
+    is_dm: bool,
+    authorization: &ObserverControlAuthorization<'_>,
+) -> bool {
+    match command_type {
+        "cancel_turn" => {
+            author_allowed(
+                authorization.respond_to,
+                authorization.respond_to_allowlist,
+                sender,
+                is_dm,
+                authorization.owner_cache,
+                authorization.rest_client,
+            )
+            .await
+        }
+        "switch_model" => sender == authorization.owner_pubkey_hex,
+        _ => false,
+    }
+}
+
+async fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
     event: nostr::Event,
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
-    owner_pubkey_hex: &str,
+    authorization: &ObserverControlAuthorization<'_>,
+    channel_info: &pool::ChannelInfoResolver,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
         tracing::warn!(error = %e, "observer control frame failed signature verification");
-        return;
-    }
-
-    // Defense-in-depth: verify the sender is the resolved owner.
-    if event.pubkey.to_hex() != owner_pubkey_hex {
-        tracing::warn!(
-            sender = %event.pubkey,
-            expected = %owner_pubkey_hex,
-            "observer control frame from non-owner — dropping"
-        );
         return;
     }
 
@@ -1137,9 +1180,34 @@ fn handle_relay_observer_control_event(
     let command_type = payload.get("type").and_then(|value| value.as_str());
     match command_type {
         Some("cancel_turn") => {
+            let Some(channel_id) = payload
+                .get("channelId")
+                .and_then(|value| value.as_str())
+                .and_then(|value| value.parse::<Uuid>().ok())
+            else {
+                tracing::warn!("observer cancel_turn control frame missing valid channelId");
+                return;
+            };
+            let sender = event.pubkey.to_hex();
+            let is_dm = is_dm_channel(channel_id, channel_info).await;
+            if !observer_control_author_allowed("cancel_turn", &sender, is_dm, authorization).await
+            {
+                tracing::warn!(sender, %channel_id, "observer cancel frame from disallowed author");
+                return;
+            }
             handle_cancel_turn_control(&payload, pool, observer);
         }
         Some("switch_model") => {
+            let sender = event.pubkey.to_hex();
+            if !observer_control_author_allowed("switch_model", &sender, true, authorization).await
+            {
+                tracing::warn!(
+                    sender = %event.pubkey,
+                    expected = %authorization.owner_pubkey_hex,
+                    "observer model control frame from non-owner — dropping"
+                );
+                return;
+            }
             handle_switch_model_control(&payload, pool, observer);
         }
         _ => {
@@ -1174,6 +1242,7 @@ fn handle_cancel_turn_control(
                 session_id: None,
                 turn_id: None,
                 started_at: None,
+                viewer_pubkeys: Vec::new(),
             },
             serde_json::json!({
                 "type": "cancel_turn",
@@ -1251,6 +1320,7 @@ fn handle_switch_model_control(
                 session_id: None,
                 turn_id: None,
                 started_at: None,
+                viewer_pubkeys: Vec::new(),
             },
             serde_json::json!({
                 "type": "switch_model",
@@ -2480,7 +2550,21 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                let authorization = ObserverControlAuthorization {
+                                    owner_pubkey_hex: owner_hex,
+                                    respond_to: &config.respond_to,
+                                    respond_to_allowlist: &config.respond_to_allowlist,
+                                    owner_cache: &owner_cache,
+                                    rest_client: &ctx.rest_client,
+                                };
+                                handle_relay_observer_control_event(
+                                    &config.keys,
+                                    event,
+                                    &mut pool,
+                                    observer.as_ref(),
+                                    &authorization,
+                                    &ctx.channel_info,
+                                ).await;
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -5200,6 +5284,56 @@ mod author_gate_tests {
         cache
     }
 
+    fn control_authorization<'a>(
+        owner_cache: &'a OwnerCache,
+        respond_to: &'a RespondTo,
+        respond_to_allowlist: &'a HashSet<String>,
+        rest_client: &'a relay::RestClient,
+    ) -> ObserverControlAuthorization<'a> {
+        ObserverControlAuthorization {
+            owner_pubkey_hex: OWNER,
+            respond_to,
+            respond_to_allowlist,
+            owner_cache,
+            rest_client,
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cancel_uses_instruction_author_policy() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::new();
+        let rest_client = dummy_rest_client();
+        let respond_to = RespondTo::Anyone;
+        let authorization = control_authorization(&cache, &respond_to, &allowlist, &rest_client);
+        assert!(
+            observer_control_author_allowed("cancel_turn", STRANGER, false, &authorization,).await,
+            "respond-to=anyone should let another channel user stop the turn"
+        );
+        let respond_to = RespondTo::OwnerOnly;
+        let authorization = control_authorization(&cache, &respond_to, &allowlist, &rest_client);
+        assert!(
+            !observer_control_author_allowed("cancel_turn", STRANGER, false, &authorization,).await,
+            "owner-only must still reject an unrelated user's stop command"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_switch_remains_owner_only_when_instructions_allow_anyone() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::new();
+        let rest_client = dummy_rest_client();
+        let respond_to = RespondTo::Anyone;
+        let authorization = control_authorization(&cache, &respond_to, &allowlist, &rest_client);
+        assert!(
+            !observer_control_author_allowed("switch_model", STRANGER, false, &authorization,)
+                .await
+        );
+        assert!(
+            observer_control_author_allowed("switch_model", OWNER, false, &authorization,).await
+        );
+    }
+
     #[tokio::test]
     async fn test_allowlist_accepts_sibling_not_in_allowlist() {
         let cache = cache_with_sibling();
@@ -5577,6 +5711,52 @@ mod observer_snapshot_race_tests {
         );
     }
 
+    #[tokio::test]
+    async fn relay_observer_event_is_encrypted_for_owner_and_turn_author() {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let author_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+        let mut frame = observer::ObserverEvent {
+            seq: 1,
+            timestamp: "2026-08-21T00:00:00Z".to_string(),
+            kind: "turn_started".to_string(),
+            agent_index: Some(0),
+            channel_id: Some(Uuid::new_v4().to_string()),
+            session_id: None,
+            turn_id: Some("turn-1".to_string()),
+            started_at: None,
+            viewer_pubkeys: vec![author_keys.public_key().to_hex()],
+            payload: serde_json::json!({}),
+        };
+
+        publish_relay_observer_event(
+            &publisher,
+            &agent_keys,
+            &agent_keys.public_key().to_hex(),
+            &owner_keys.public_key().to_hex(),
+            &owner_keys.public_key(),
+            frame.clone(),
+        )
+        .await;
+
+        let first = published_rx.recv().await.expect("owner frame");
+        let second = published_rx.recv().await.expect("author frame");
+        let events = [first, second];
+        assert!(events.iter().any(|event| {
+            decrypt_observer_payload::<serde_json::Value>(&owner_keys, event).is_ok()
+        }));
+        assert!(events.iter().any(|event| {
+            decrypt_observer_payload::<serde_json::Value>(&author_keys, event).is_ok()
+        }));
+
+        frame.viewer_pubkeys = vec![owner_keys.public_key().to_hex()];
+        assert_eq!(
+            batch_envelope(&[frame]).viewer_pubkeys,
+            vec![owner_keys.public_key().to_hex()],
+        );
+    }
+
     /// An event emitted between `subscribe()` and `snapshot()` lands in BOTH
     /// the snapshot and the live receiver; the seq high-water dedupe must
     /// deliver it exactly once — and never lose events on either side of it.
@@ -5651,6 +5831,7 @@ mod observer_publish_queue_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            viewer_pubkeys: Vec::new(),
             payload: serde_json::json!({ "seq": seq }),
         }
     }
@@ -6519,6 +6700,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            viewer_pubkeys: Vec::new(),
             payload: serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -6547,6 +6729,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            viewer_pubkeys: Vec::new(),
             payload: serde_json::json!({ "type": "turn_started" }),
         }
     }
@@ -8335,6 +8518,7 @@ mod observer_payload_trim_tests {
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            viewer_pubkeys: Vec::new(),
             payload,
         }
     }

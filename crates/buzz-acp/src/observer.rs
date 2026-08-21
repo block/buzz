@@ -1,8 +1,9 @@
 //! In-process observer bus for ACP session activity.
 //!
 //! This is intentionally process-local infrastructure: it lets the harness
-//! collect raw ACP JSON-RPC activity and publish owner-scoped encrypted relay
-//! frames without exposing a local HTTP port.
+//! collect raw ACP JSON-RPC activity and publish recipient-scoped encrypted
+//! relay frames without exposing a local HTTP port. Every frame goes to the
+//! owner; channel turns additionally go to the accepted request authors.
 
 use std::{
     collections::VecDeque,
@@ -28,6 +29,9 @@ pub struct ObserverContext {
     pub turn_id: Option<String>,
     /// RFC3339 timestamp at which the current turn began, when known.
     pub started_at: Option<String>,
+    /// Additional users allowed to observe this turn. The owner is always
+    /// included separately by the relay publisher.
+    pub viewer_pubkeys: Vec<String>,
 }
 
 /// Handle used by the harness to publish local observer events.
@@ -74,6 +78,9 @@ pub struct ObserverEvent {
     /// RFC3339 timestamp at which the current turn began, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    /// Additional recipients for this turn's encrypted relay telemetry.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub viewer_pubkeys: Vec<String>,
     /// Raw or semantic event payload.
     pub payload: serde_json::Value,
 }
@@ -117,6 +124,7 @@ impl ObserverHandle {
             session_id: context.session_id.clone(),
             turn_id: context.turn_id.clone(),
             started_at: context.started_at.clone(),
+            viewer_pubkeys: context.viewer_pubkeys.clone(),
             payload,
         };
 
@@ -147,6 +155,7 @@ pub fn context_for(
         session_id,
         turn_id,
         started_at: None,
+        viewer_pubkeys: Vec::new(),
     }
 }
 
@@ -162,5 +171,12 @@ pub fn context_for_turn(
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),
+        viewer_pubkeys: Vec::new(),
     }
+}
+
+/// Attach additional encrypted relay recipients to an observer context.
+pub fn with_viewers(mut context: ObserverContext, viewer_pubkeys: Vec<String>) -> ObserverContext {
+    context.viewer_pubkeys = viewer_pubkeys;
+    context
 }

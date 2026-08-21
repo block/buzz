@@ -2022,12 +2022,27 @@ pub async fn run_prompt_task(
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
+    let observer_viewers: Vec<String> = batch
+        .as_ref()
+        .map(|batch| {
+            batch
+                .events
+                .iter()
+                .map(|event| event.event.pubkey.to_hex())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
     let turn_started_at = chrono::Utc::now().to_rfc3339();
-    agent.acp.set_observer_context(observer::context_for_turn(
-        observer_channel_id,
-        None,
-        turn_id.clone(),
-        turn_started_at.clone(),
+    agent.acp.set_observer_context(observer::with_viewers(
+        observer::context_for_turn(
+            observer_channel_id,
+            None,
+            turn_id.clone(),
+            turn_started_at.clone(),
+        ),
+        observer_viewers.clone(),
     ));
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
@@ -2053,6 +2068,7 @@ pub async fn run_prompt_task(
         agent.acp.observer_agent_index(),
         observer_channel_id,
         turn_id.clone(),
+        observer_viewers.clone(),
     );
 
     // Start liveness with `turn_started`, not the final session/prompt call:
@@ -2071,11 +2087,14 @@ pub async fn run_prompt_task(
     let liveness = run_turn_liveness(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
-        observer::context_for_turn(
-            observer_channel_id,
-            None,
-            turn_id.clone(),
-            turn_started_at.clone(),
+        observer::with_viewers(
+            observer::context_for_turn(
+                observer_channel_id,
+                None,
+                turn_id.clone(),
+                turn_started_at.clone(),
+            ),
+            observer_viewers.clone(),
         ),
         ctx.turn_liveness_interval,
         Arc::clone(&liveness_state),
@@ -2446,11 +2465,14 @@ pub async fn run_prompt_task(
             }
         }
     };
-    agent.acp.set_observer_context(observer::context_for_turn(
-        observer_channel_id,
-        Some(session_id.clone()),
-        turn_id.clone(),
-        turn_started_at,
+    agent.acp.set_observer_context(observer::with_viewers(
+        observer::context_for_turn(
+            observer_channel_id,
+            Some(session_id.clone()),
+            turn_id.clone(),
+            turn_started_at,
+        ),
+        observer_viewers,
     ));
     // Backfill liveness's shared session ID so ticks after this point carry
     // it too, matching every other observer frame for this turn.
@@ -4656,6 +4678,7 @@ struct TurnCompletionGuard {
     agent_index: Option<usize>,
     channel_id: Option<uuid::Uuid>,
     turn_id: String,
+    viewer_pubkeys: Vec<String>,
 }
 
 impl TurnCompletionGuard {
@@ -4664,12 +4687,14 @@ impl TurnCompletionGuard {
         agent_index: Option<usize>,
         channel_id: Option<uuid::Uuid>,
         turn_id: String,
+        viewer_pubkeys: Vec<String>,
     ) -> Self {
         Self {
             observer,
             agent_index,
             channel_id,
             turn_id,
+            viewer_pubkeys,
         }
     }
 }
@@ -4677,7 +4702,10 @@ impl TurnCompletionGuard {
 impl Drop for TurnCompletionGuard {
     fn drop(&mut self) {
         if let Some(observer) = self.observer.take() {
-            let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
+            let context = observer::with_viewers(
+                observer::context_for(self.channel_id, None, Some(self.turn_id.clone())),
+                self.viewer_pubkeys.clone(),
+            );
             observer.emit(
                 "turn_completed",
                 self.agent_index,
