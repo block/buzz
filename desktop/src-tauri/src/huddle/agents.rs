@@ -34,14 +34,21 @@ use super::{pipeline::start_auto_enabled_transcription, HuddlePhase};
 ///
 /// Keep this deliberately short: the invariant that matters is that a directly
 /// addressed user receives an immediate spoken response before any other work.
-pub fn voice_mode_guidelines(parent_channel_id: &str) -> String {
+///
+/// `huddle_channel_id` MUST be the ephemeral huddle channel: it is the only
+/// channel whose messages are transcribed to speech. Naming the parent here
+/// sends every spoken reply to the parent channel instead, where `buzz messages
+/// send` still returns `accepted: true` and the huddle stays silent. Both ids
+/// are rendered so an agent can tell them apart rather than trusting one
+/// opaque uuid.
+pub fn voice_mode_guidelines(huddle_channel_id: &str, parent_channel_id: &str) -> String {
     format!(
         "\
-You are in a live voice huddle attached to channel {parent_channel_id}.
-Only messages sent with `buzz messages send` to this huddle channel are spoken aloud, in the order sent; everything else you produce is silent.
-When a user addresses you, your FIRST tool call must send a brief spoken reply to this channel, before any file read, search, or other tool call. The usual rule against bare acknowledgments does not apply here; the pickup is the feedback that you heard them.
+You are in a live voice huddle in channel {huddle_channel_id}, started from channel {parent_channel_id}.
+Only messages sent with `buzz messages send` to the huddle channel {huddle_channel_id} are spoken aloud, in the order sent; everything else you produce is silent.
+When a user addresses you, your FIRST tool call must send a brief spoken reply to {huddle_channel_id}, before any file read, search, or other tool call. The usual rule against bare acknowledgments does not apply here; the pickup is the feedback that you heard them.
 Then work, sending each useful sentence as its own message the moment it is ready—a few sentences per answer, not a monologue.
-Speak plainly without markdown; post code or long detail to the attached channel instead.
+Speak plainly without markdown; post code or long detail to the parent channel {parent_channel_id} instead.
 If you are not addressed, stay silent."
     )
 }
@@ -301,13 +308,39 @@ mod tests {
 
     #[test]
     fn voice_mode_guidelines_pin_spoken_reply_as_first_tool_call() {
-        let guidelines = voice_mode_guidelines("parent-channel");
+        let guidelines = voice_mode_guidelines("huddle-channel", "parent-channel");
         assert_eq!(guidelines.lines().count(), 6);
         assert!(guidelines.contains("Only messages sent with `buzz messages send`"));
         assert!(guidelines.contains("your FIRST tool call must send a brief spoken reply"));
         assert!(guidelines.contains("before any file read, search, or other tool call"));
         assert!(guidelines.contains("rule against bare acknowledgments does not apply here"));
+        assert!(guidelines.contains("huddle-channel"));
         assert!(guidelines.contains("parent-channel"));
+    }
+
+    /// Regression: the spoken-output rules must name the ephemeral huddle
+    /// channel. Pointing them at the parent silently routes every spoken reply
+    /// to a text channel while `buzz messages send` still reports success.
+    #[test]
+    fn voice_mode_guidelines_route_spoken_output_to_the_huddle_channel() {
+        let guidelines = voice_mode_guidelines("huddle-channel", "parent-channel");
+
+        let spoken_rules: Vec<&str> = guidelines
+            .lines()
+            .filter(|line| {
+                line.contains("are spoken aloud")
+                    || line.contains("your FIRST tool call must send a brief spoken reply")
+            })
+            .collect();
+        assert_eq!(spoken_rules.len(), 2, "expected both spoken-output rules");
+
+        for rule in spoken_rules {
+            assert!(
+                rule.contains("huddle-channel"),
+                "not routed to huddle: {rule}"
+            );
+            assert!(!rule.contains("parent-channel"), "routed to parent: {rule}");
+        }
     }
 
     #[test]
