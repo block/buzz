@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { beginRelayOriginFetch } from "../lib/mediaUrl.ts";
 import { resolveFileCard, resolveSnapshotCard } from "./markdownFileCard.ts";
+
+// rewriteRelayUrl only proxies URLs whose origin it trusts (community host
+// aliases). Publish the relay origin these fixtures use so thumb rewriting
+// below exercises the same trusted-origin path production hits after
+// startup, instead of the fail-closed passthrough.
+beginRelayOriginFetch()("https://relay.example");
 
 // A generic-file URL (non-media extension) does not match the relay-media
 // proxy regex, so `rewriteRelayUrl` passes it through unchanged — assertions

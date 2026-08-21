@@ -167,18 +167,15 @@ pub fn list_managed_agent_runtimes(
             Ok(None) => None,
         })
         .collect();
-    let records_changed = !exited_keys.is_empty();
+    let (records_changed, _) =
+        super::sync_managed_agent_processes(&app, &mut records, &mut runtimes);
     let mut statuses = Vec::new();
     for key in exited_keys {
-        runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(&app, &key);
         state.clear_agent_session_cache(&key);
         if let Some(record) = records
             .iter_mut()
             .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
         {
-            record.updated_at = crate::util::now_iso();
-            record.last_stopped_at = Some(record.updated_at.clone());
             let status = status_for_with(
                 &app,
                 record,
@@ -236,7 +233,7 @@ pub fn start_managed_agent_runtime(
     start_managed_agent_runtime_pair_lazy(pubkey, relay_url, app)
 }
 
-fn start_pair(
+pub(crate) fn start_pair(
     pubkey: String,
     relay_url: String,
     lazy: bool,
@@ -384,6 +381,64 @@ pub fn restart_managed_agent_runtime(
 ) -> Result<ManagedAgentRuntimeStatus, String> {
     stop_managed_agent_runtime(pubkey.clone(), relay_url.clone(), app.clone())?;
     start_pair(pubkey, relay_url, true, None, app)
+}
+
+/// Move every live runtime pair filed under `old_relay_url` to
+/// `new_relay_url`. The caller must only invoke this for an address edit of
+/// the same workspace, never for ordinary workspace navigation.
+///
+/// Stop and start remain separate pair-scoped transitions so the old runtime
+/// key is removed before the replacement is minted. That keeps logs, receipts,
+/// stop scoping, and session caches aligned with the relay identity actually
+/// used by the child process.
+pub fn restart_managed_agent_pairs_for_relay_transition(
+    old_relay_url: String,
+    new_relay_url: String,
+    app: AppHandle,
+) -> Vec<String> {
+    let normalized_old = match ManagedAgentRuntimeKey::new("probe", &old_relay_url) {
+        Ok(key) => key.relay_url,
+        Err(error) => return vec![error],
+    };
+    let normalized_new = match ManagedAgentRuntimeKey::new("probe", &new_relay_url) {
+        Ok(key) => key.relay_url,
+        Err(error) => return vec![error],
+    };
+    if normalized_old == normalized_new {
+        return Vec::new();
+    }
+
+    let pubkeys: Vec<String> = {
+        let state = app.state::<AppState>();
+        let Ok(runtimes) = state.managed_agent_processes.lock() else {
+            return vec!["managed-agent runtime lock is poisoned".to_string()];
+        };
+        runtimes
+            .keys()
+            .filter(|key| key.relay_url == normalized_old)
+            .map(|key| key.pubkey.clone())
+            .collect()
+    };
+
+    let mut errors = Vec::new();
+    for pubkey in pubkeys {
+        if let Err(error) =
+            stop_managed_agent_runtime(pubkey.clone(), normalized_old.clone(), app.clone())
+        {
+            errors.push(format!("{pubkey}: failed to stop old relay pair: {error}"));
+            continue;
+        }
+        if let Err(error) = start_pair(
+            pubkey.clone(),
+            normalized_new.clone(),
+            true,
+            None,
+            app.clone(),
+        ) {
+            errors.push(format!("{pubkey}: failed to start new relay pair: {error}"));
+        }
+    }
+    errors
 }
 
 /// Probe whether this agent can operate on `requested_relay_url`.

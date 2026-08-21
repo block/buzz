@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
+use buzz_core::tenant::normalize_host;
 use serde_json::json;
 use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -205,11 +206,18 @@ fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tr
 }
 
 fn make_http_span(request: &Request<Body>) -> tracing::Span {
+    let request_host = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(normalize_host)
+        .unwrap_or_default();
     tracing::info_span!(
         target: "buzz_relay",
         "http.request",
         otel.kind = "server",
         http.request.method = %request.method(),
+        server.address = %request_host,
     )
 }
 

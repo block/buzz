@@ -3,10 +3,10 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        current_instance_id, delete_agent_key, load_managed_agents, load_personas, load_teams,
-        save_managed_agents, save_personas, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_persona_activation_change,
-        validate_persona_deletion, AgentDefinition, ManagedAgentRecord,
+        delete_agent_key, load_managed_agents, load_personas, load_teams, save_managed_agents,
+        save_personas, stop_managed_agent_process, sync_managed_agent_processes,
+        try_regenerate_nest, validate_persona_activation_change, validate_persona_deletion,
+        AgentDefinition, ManagedAgentRecord,
     },
     util::now_iso,
 };
@@ -152,11 +152,8 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     .managed_agent_processes
                     .lock()
                     .map_err(|error| error.to_string())?;
-                let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
-                    &mut agents,
-                    &mut runtimes,
-                    &current_instance_id(&app),
-                );
+                let (sync_changed, exited_pubkeys) =
+                    sync_managed_agent_processes(&app, &mut agents, &mut runtimes);
                 if sync_changed {
                     save_managed_agents(&app, &agents)?;
                 }

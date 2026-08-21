@@ -22,11 +22,12 @@
 
 mod deletions;
 
+use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
-use buzz_core::tenant::{relay_url_authority, TenantContext};
+use buzz_core::tenant::{normalize_host, relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
@@ -42,6 +43,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage alternate hostnames for the configured relay community.
+    Community {
+        #[command(subcommand)]
+        command: CommunityCommand,
+    },
     /// Add a pubkey to the relay membership list.
     ///
     /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
@@ -108,6 +114,30 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum CommunityCommand {
+    /// Add a public alternate hostname to the configured relay community.
+    ///
+    /// Every registered alias is published in the relay's unauthenticated
+    /// NIP-11 document and is readable by anyone who can reach the relay.
+    AddHost {
+        /// Hostname or URL to add.
+        #[arg(long)]
+        host: String,
+
+        /// Skip confirmation when publishing an internal-looking host.
+        /// Required for non-interactive use with such hosts.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Remove an alternate hostname from the configured relay community.
+    RemoveHost {
+        /// Hostname or URL to remove.
+        #[arg(long)]
+        host: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ProductFeedbackCommand {
     /// List feedback across every community as JSON.
     List {
@@ -154,6 +184,7 @@ async fn run(cli: Cli) -> Result<i32> {
             println!("Database migrations complete.");
             Ok(0)
         }
+        Command::Community { command } => cmd_community(command).await,
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::ListMembers => cmd_list_members().await,
@@ -166,6 +197,104 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+async fn cmd_community(command: CommunityCommand) -> Result<i32> {
+    let raw_host = match &command {
+        CommunityCommand::AddHost { host, .. } | CommunityCommand::RemoveHost { host } => host,
+    };
+    let host = if raw_host.contains("://") {
+        relay_url_authority(raw_host)
+    } else {
+        normalize_host(raw_host)
+    };
+    if host.is_empty() || host.contains('/') {
+        anyhow::bail!("invalid host '{raw_host}'");
+    }
+
+    if let CommunityCommand::AddHost { yes, .. } = &command {
+        if internal_host_kind(&host).is_some() && !confirm_public_alias(&host, *yes)? {
+            return Ok(1);
+        }
+    }
+
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+
+    match command {
+        CommunityCommand::AddHost { .. } => {
+            if db.add_community_host(tenant.community(), &host).await? {
+                println!("added community host: {host}");
+            } else {
+                println!("community host already exists: {host} (no change)");
+            }
+        }
+        CommunityCommand::RemoveHost { .. } => {
+            if db.remove_community_host(tenant.community(), &host).await? {
+                println!("removed community host: {host}");
+            } else {
+                println!("community host not found: {host} (no change)");
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn internal_host_kind(authority: &str) -> Option<&'static str> {
+    let url = url::Url::parse(&format!("http://{authority}")).ok()?;
+    match url.host()? {
+        url::Host::Ipv4(address) if address.is_loopback() => Some("loopback"),
+        url::Host::Ipv4(address) if address.is_private() => Some("private-range"),
+        url::Host::Ipv4(address) if address.is_link_local() => Some("link-local"),
+        url::Host::Ipv6(address) if address.is_loopback() => Some("loopback"),
+        url::Host::Ipv6(address) if address.is_unicast_link_local() => Some("link-local"),
+        url::Host::Ipv6(address) if is_unique_local(address) => Some("private-range"),
+        url::Host::Domain(domain)
+            if domain.eq_ignore_ascii_case("localhost")
+                || domain.to_ascii_lowercase().ends_with(".localhost") =>
+        {
+            Some("loopback")
+        }
+        url::Host::Domain(domain)
+            if domain.eq_ignore_ascii_case("local")
+                || domain.to_ascii_lowercase().ends_with(".local") =>
+        {
+            Some(".local")
+        }
+        _ => None,
+    }
+}
+
+fn is_unique_local(address: std::net::Ipv6Addr) -> bool {
+    address.octets()[0] & 0xfe == 0xfc
+}
+
+fn confirm_public_alias(host: &str, assume_yes: bool) -> Result<bool> {
+    if assume_yes {
+        return Ok(true);
+    }
+
+    let kind = internal_host_kind(host).unwrap_or("internal-looking");
+    eprintln!(
+        "WARNING: '{host}' is a {kind} host. Every registered community alias is published \n\
+         in the relay's unauthenticated NIP-11 document and is readable by anyone who can \n\
+         reach the relay."
+    );
+
+    if !io::stdin().is_terminal() {
+        eprintln!("Refusing non-interactive registration without --yes.");
+        return Ok(false);
+    }
+
+    eprint!("Publish this alias? [y/N] ");
+    io::stderr().flush()?;
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    Ok(is_affirmative(&response))
+}
+
+fn is_affirmative(response: &str) -> bool {
+    matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
@@ -627,4 +756,72 @@ async fn reconcile_channels(
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_host_detection_covers_disclosure_classes() {
+        for (host, expected) in [
+            ("127.0.0.1:3000", "loopback"),
+            ("10.1.2.3:3000", "private-range"),
+            ("172.16.0.1:3000", "private-range"),
+            ("172.31.255.254:3000", "private-range"),
+            ("192.168.1.2:3000", "private-range"),
+            ("169.254.1.2:3000", "link-local"),
+            ("[::1]:3000", "loopback"),
+            ("[fe80::1]:3000", "link-local"),
+            ("[fd12:3456::1]:3000", "private-range"),
+            ("localhost:3000", "loopback"),
+            ("relay.localhost:3000", "loopback"),
+            ("relay.local:3000", ".local"),
+        ] {
+            assert_eq!(internal_host_kind(host), Some(expected), "host: {host}");
+        }
+    }
+
+    #[test]
+    fn public_hosts_do_not_require_disclosure_confirmation() {
+        for host in [
+            "relay.example.com:3000",
+            "8.8.8.8:3000",
+            "172.15.255.255:3000",
+            "172.32.0.1:3000",
+            "[2001:db8::1]:3000",
+        ] {
+            assert_eq!(internal_host_kind(host), None, "host: {host}");
+        }
+    }
+
+    #[test]
+    fn confirmation_accepts_only_explicit_yes() {
+        for response in ["y", "Y", "yes", " YES \n"] {
+            assert!(is_affirmative(response), "response: {response:?}");
+        }
+        for response in ["", "n", "no", "true", "1"] {
+            assert!(!is_affirmative(response), "response: {response:?}");
+        }
+    }
+
+    #[test]
+    fn yes_flag_is_available_for_non_interactive_use() {
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "community",
+            "add-host",
+            "--host",
+            "127.0.0.1:3000",
+            "--yes",
+        ])
+        .expect("parse add-host --yes");
+
+        assert!(matches!(
+            cli.command,
+            Command::Community {
+                command: CommunityCommand::AddHost { yes: true, .. }
+            }
+        ));
+    }
 }

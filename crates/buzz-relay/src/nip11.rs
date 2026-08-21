@@ -55,6 +55,10 @@ pub struct RelayInfo {
     /// Relay's own signing pubkey (NIP-11 `self` field, NIP-43).
     #[serde(rename = "self", skip_serializing_if = "Option::is_none")]
     pub relay_self: Option<String>,
+    /// Exact host authorities registered for this community (canonical + aliases).
+    /// Omitted when the request host is not mapped or the lookup fails.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community_hosts: Option<Vec<String>>,
 }
 
 /// Protocol and resource limits advertised in the NIP-11 document.
@@ -169,6 +173,7 @@ impl RelayInfo {
             limitation: Some(relay_limitation(max_message_length)),
             pairing_relay_url: pairing_relay_url.map(str::to_string),
             relay_self: relay_self.map(|s| s.to_string()),
+            community_hosts: None,
         }
     }
 }
@@ -247,6 +252,9 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
     );
+    if let Ok(tenant) = crate::tenant::bind_community(&state.db, raw_host).await {
+        info.community_hosts = state.db.community_hosts(tenant.community()).await.ok();
+    }
     let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
         crate::tenant::bind_community(&state.db, raw_host)
             .await

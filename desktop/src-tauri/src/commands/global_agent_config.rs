@@ -16,11 +16,11 @@ use tauri::AppHandle;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-        load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
-        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
-        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
-        AgentReadiness, BackendKind, GlobalAgentConfig,
+        agent_readiness, find_managed_agent_mut, known_acp_runtime, load_global_agent_config,
+        load_managed_agents, load_personas, record_agent_command, resolve_effective_agent_env,
+        save_global_agent_config, save_managed_agents, stop_managed_agent_process,
+        sync_managed_agent_processes, validate_global_config, AgentReadiness, BackendKind,
+        GlobalAgentConfig,
     },
 };
 
@@ -274,11 +274,8 @@ async fn restart_local_agent_on_config_change(
             .map_err(|e| format!("failed to acquire runtimes lock: {e}"))?;
 
         // Sync process state so PID liveness reflects current reality.
-        let (sync_changed, _) = sync_managed_agent_processes(
-            &mut records,
-            &mut runtimes,
-            &current_instance_id(&app_for_stop),
-        );
+        let (sync_changed, _) =
+            sync_managed_agent_processes(&app_for_stop, &mut records, &mut runtimes);
         if sync_changed {
             save_managed_agents(&app_for_stop, &records)?;
         }

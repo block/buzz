@@ -97,6 +97,32 @@ pub fn get_relay_http_url(state: State<'_, AppState>) -> String {
     relay_api_base_url_with_override(&state)
 }
 
+/// Fetch the exact canonical/alias host set advertised by the active relay.
+#[tauri::command]
+pub async fn get_relay_community_hosts(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let relay_url = relay_api_base_url_with_override(&state);
+    let response = state
+        .media_fetch_client
+        .get(relay_url)
+        .header(reqwest::header::ACCEPT, "application/nostr+json")
+        .send()
+        .await
+        .map_err(|error| format!("relay info request failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("relay info returned HTTP {}", response.status()));
+    }
+    let info: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("relay info was malformed: {error}"))?;
+    serde_json::from_value(
+        info.get("community_hosts")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+    )
+    .map_err(|error| format!("relay info community_hosts was malformed: {error}"))
+}
+
 #[tauri::command]
 pub fn get_media_proxy_port(state: State<'_, AppState>) -> u16 {
     state
