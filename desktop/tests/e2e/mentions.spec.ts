@@ -471,6 +471,42 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     "From another Buzz setup",
   );
   await expect(remoteSidebarMarker).toHaveText("Other setup");
+  const remoteSidebarRow = page.getByTestId(`sidebar-member-${relayPubkey}`);
+  const localSidebarMarker = page.getByTestId(
+    `sidebar-member-agent-provenance-${managedPubkey}`,
+  );
+  const markerRemainsVisible = () =>
+    remoteSidebarMarker.evaluate((marker) => {
+      let element: Element | null = marker;
+      while (element) {
+        const style = window.getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden") {
+          return false;
+        }
+        if (Number(style.opacity) === 0) return false;
+        element = element.parentElement;
+      }
+      return true;
+    });
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+  const sidebarMarkerBox = await remoteSidebarMarker.boundingBox();
+  const sidebarBox = await page.getByTestId("members-sidebar").boundingBox();
+  expect(sidebarMarkerBox).not.toBeNull();
+  expect(sidebarBox).not.toBeNull();
+  expect(
+    (sidebarMarkerBox?.x ?? 0) + (sidebarMarkerBox?.width ?? 0),
+  ).toBeLessThanOrEqual((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0) + 1);
+
+  await remoteSidebarRow.hover();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+
+  await page.getByTestId(`sidebar-member-open-profile-${relayPubkey}`).focus();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
 });
 
 test("relay-only shared agents emit an outbound mention tag when selected", async ({

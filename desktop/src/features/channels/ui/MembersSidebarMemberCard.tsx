@@ -180,26 +180,28 @@ export function MembersSidebarMemberCard({
       </div>
       <div className="min-w-0 flex-1">
         {memberIsBot ? (
-          <div className="relative min-w-0">
-            <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/member:opacity-0 group-focus-within/member:opacity-0">
-              <span className="truncate text-sm font-medium tracking-tight">
-                {memberLabel}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                <Bot aria-hidden="true" className="h-4 w-4" />
-                {roleLabel}
-                {showOtherSetupMarker ? (
-                  <OtherSetupAgentMarker
-                    testId={`sidebar-member-agent-provenance-${member.pubkey}`}
-                  />
-                ) : null}
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/member:opacity-0 group-focus-within/member:opacity-0">
+                <span className="truncate text-sm font-medium tracking-tight">
+                  {memberLabel}
+                </span>
+                <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                  <Bot aria-hidden="true" className="h-4 w-4" />
+                  {roleLabel}
+                </span>
+              </div>
+              <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
+                <span className="truncate font-mono text-sm text-muted-foreground">
+                  {truncatePubkey(member.pubkey)}
+                </span>
               </span>
             </div>
-            <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
-              <span className="truncate font-mono text-sm text-muted-foreground">
-                {truncatePubkey(member.pubkey)}
-              </span>
-            </span>
+            {showOtherSetupMarker ? (
+              <OtherSetupAgentMarker
+                testId={`sidebar-member-agent-provenance-${member.pubkey}`}
+              />
+            ) : null}
           </div>
         ) : (
           <div className="flex min-w-0 items-center gap-2">

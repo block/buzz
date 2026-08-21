@@ -71,6 +71,7 @@ const MEMBER_ADD_RESULT_LIMIT = 50;
 const MEMBER_SEARCH_MIN_QUERY_LENGTH = 2;
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
+
 function formatAddCandidateName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
@@ -193,6 +194,13 @@ export function MembersSidebar({
     managedAgentsQuery,
     relayAgentsQuery,
   } = useClassifiedMembers(rawMembers, currentPubkey);
+  const agentDirectoriesReady =
+    managedAgentsQuery.data !== undefined &&
+    managedAgentsQuery.error === null &&
+    !managedAgentsQuery.isFetching &&
+    relayAgentsQuery.data !== undefined &&
+    relayAgentsQuery.error === null &&
+    !relayAgentsQuery.isFetching;
   const activeMembers = React.useMemo(
     () =>
       [...people, ...bots].sort((left, right) =>
@@ -459,7 +467,8 @@ export function MembersSidebar({
     onUntimeout,
   } = useMembersSidebarModeration(open);
 
-  const isArchived = channel?.archivedAt != null;
+  const isArchived =
+    channel?.archivedAt !== null && channel?.archivedAt !== undefined;
   const managedAgentByPubkey = React.useMemo(
     () =>
       new Map(
@@ -613,6 +622,7 @@ export function MembersSidebar({
     const showOtherSetupMarker =
       memberIsBot &&
       isOtherSetupAgent({
+        agentDirectoriesReady,
         currentPubkey,
         managedAgents: managedAgentsQuery.data ?? [],
         profileOwnerPubkey: memberProfile?.ownerPubkey,

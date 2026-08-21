@@ -526,6 +526,7 @@ export function useMentions(
       .slice(0, MENTION_SUGGESTION_LIMIT)
       .map(({ candidate, label }) =>
         mapMentionCandidateToSuggestion({
+          agentProvenanceReady: agentDirectoriesReady,
           candidate,
           label,
           channelType: options?.channelType,
@@ -536,6 +537,7 @@ export function useMentions(
       );
   }, [
     activePersonaIds,
+    agentDirectoriesReady,
     currentPubkey,
     mentionCandidatesWithTeams,
     mentionQuery,
@@ -913,6 +915,7 @@ export function useMentions(
             searchableNamesLowerRef,
             candidates: mentionCandidatesWithTeams,
             activePersonaIds,
+            agentProvenanceReady: agentDirectoriesReady,
             channelType: options?.channelType,
             currentPubkey,
             ownerProfiles: ownerProfilesQuery.data?.profiles,
@@ -942,6 +945,7 @@ export function useMentions(
     },
     [
       activePersonaIds,
+      agentDirectoriesReady,
       cancelMentionAutocomplete,
       currentPubkey,
       isMentionOpen,
