@@ -297,6 +297,24 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return () => _unsubscribe(subId);
   }
 
+  /// Subscribe without waiting for EOSE. Use this for app-lifetime invalidation
+  /// feeds whose consumers do not need a ready barrier before rendering.
+  void Function() subscribeImmediately(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) {
+    if (_disposed) throw StateError('Relay session is disposed');
+    final subId = _nextSubId('l');
+    _liveSubscriptions[subId] = _LiveSubscription(
+      filter: filter,
+      onEvent: onEvent,
+      onClosed: onClosed,
+    );
+    _sendReq(subId, filter);
+    return () => _unsubscribe(subId);
+  }
+
   /// Publish an event and wait for the relay's OK confirmation.
   Future<NostrEvent> publish(
     NostrEvent event, {

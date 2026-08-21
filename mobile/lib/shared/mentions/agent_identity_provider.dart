@@ -56,12 +56,67 @@ Map<String, dynamic>? _tryDecodeJsonMap(String content) {
   }
 }
 
+/// Subscribes to replaceable agent-profile events and bumps whenever the
+/// directory changes so already-connected clients refetch immediately.
+class _AgentDirectorySubscription extends Notifier<int> {
+  void Function()? _unsubscribe;
+  int _subscriptionVersion = 0;
+
+  @override
+  int build() {
+    final sessionState = ref.watch(relaySessionProvider);
+    final subscriptionVersion = ++_subscriptionVersion;
+    _clearSubscription();
+    ref.onDispose(() {
+      _subscriptionVersion++;
+      _clearSubscription();
+    });
+
+    if (sessionState.status != SessionStatus.connected) return 0;
+    Future.microtask(() => _subscribe(subscriptionVersion));
+    return 0;
+  }
+
+  void _subscribe(int subscriptionVersion) {
+    if (!_isCurrent(subscriptionVersion)) return;
+    final session = ref.read(relaySessionProvider.notifier);
+    try {
+      _unsubscribe = session.subscribeImmediately(
+        NostrFilters.agentProfiles().copyWithSince(
+          DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5,
+        ),
+        (_) {
+          if (_isCurrent(subscriptionVersion)) state++;
+        },
+      );
+    } catch (error) {
+      if (_isCurrent(subscriptionVersion)) {
+        debugPrint('[AgentDirectorySubscription] failed: $error');
+      }
+    }
+  }
+
+  bool _isCurrent(int subscriptionVersion) =>
+      subscriptionVersion == _subscriptionVersion;
+
+  void _clearSubscription() {
+    _unsubscribe?.call();
+    _unsubscribe = null;
+  }
+}
+
+final agentDirectoryUpdateProvider =
+    NotifierProvider<_AgentDirectorySubscription, int>(
+      _AgentDirectorySubscription.new,
+    );
+
 /// Relay agent directory from kind:10100 agent-profile events.
 ///
-/// Watches the session and only fetches after the WebSocket connects.
+/// Watches the session and refetches whenever a live profile update arrives.
 final agentDirectoryProvider = FutureProvider<List<AgentDirectoryEntry>>((
   ref,
 ) async {
+  ref.watch(agentDirectoryUpdateProvider);
   final sessionState = ref.watch(relaySessionProvider);
   if (sessionState.status != SessionStatus.connected) return const [];
   final session = ref.read(relaySessionProvider.notifier);
