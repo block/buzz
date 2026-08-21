@@ -661,3 +661,35 @@ fn owner_only_access_deploy_payload_clamps_stale_access() {
         "owner-only-access deploy payload retained a stale allowlist"
     );
 }
+
+#[test]
+fn snapshot_still_current_when_name_unchanged() {
+    let record = bare_agent_record(None, None, None);
+    assert!(snapshot_still_current(
+        std::slice::from_ref(&record),
+        &record.pubkey,
+        &record.name,
+    ));
+}
+
+#[test]
+fn snapshot_stale_when_name_changed_since_snapshot() {
+    let record = bare_agent_record(None, None, None);
+    // Simulates a rename committing between the reconcile snapshot being
+    // taken and the reconcile task actually running.
+    assert!(!snapshot_still_current(
+        std::slice::from_ref(&record),
+        &record.pubkey,
+        "a-name-from-before-the-rename",
+    ));
+}
+
+#[test]
+fn snapshot_stale_when_agent_no_longer_exists() {
+    let record = bare_agent_record(None, None, None);
+    assert!(!snapshot_still_current(
+        std::slice::from_ref(&record),
+        "some-other-pubkey-not-in-records",
+        &record.name,
+    ));
+}

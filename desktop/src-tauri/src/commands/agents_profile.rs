@@ -150,6 +150,26 @@ pub(crate) async fn reconcile_agent_profile(
         return Ok(());
     }
 
+    // Guard against racing a newer edit. `data` was snapshotted before this
+    // fire-and-forget task's async spawn/preflight resolved, so a rename
+    // (`update_managed_agent`) can commit and publish the correct profile
+    // while this task is still in flight. Without this check, the stale
+    // snapshot would look "correct" to `profile_needs_sync` above and
+    // silently republish the pre-rename name over the user's fix. Re-reading
+    // the live record right before the write shrinks that window to the
+    // final publish call; `update_managed_agent`'s own rollback guard
+    // (`AgentUpdateRollback`) protects the other direction of the same race.
+    {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(app)?;
+        if !snapshot_still_current(&records, &data.pubkey, &data.name) {
+            return Ok(());
+        }
+    }
+
     sync_managed_agent_profile(
         state,
         &relay_url,
@@ -159,6 +179,20 @@ pub(crate) async fn reconcile_agent_profile(
         data.auth_tag.as_deref(),
     )
     .await
+}
+
+/// Whether a snapshotted reconcile name still matches the live record for
+/// that pubkey. `false` means the record was edited after the snapshot was
+/// taken (or the agent is gone) and the stale snapshot must not be published.
+pub(super) fn snapshot_still_current(
+    records: &[crate::managed_agents::ManagedAgentRecord],
+    pubkey: &str,
+    expected_name: &str,
+) -> bool {
+    records
+        .iter()
+        .find(|r| r.pubkey == pubkey)
+        .is_some_and(|r| r.name == expected_name)
 }
 
 /// Decide whether a published profile is missing or stale relative to the
