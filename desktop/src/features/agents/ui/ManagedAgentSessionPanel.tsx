@@ -1,8 +1,10 @@
 import * as React from "react";
 import {
+  CheckCircle2,
   CircleAlert,
   CircleDot,
   Clock3,
+  Pencil,
   TerminalSquare,
   XCircle,
 } from "lucide-react";
@@ -13,13 +15,23 @@ import {
   normalizeActivityEvents,
   type MissionJournal,
 } from "@/features/agents/activityLedger";
+import { applyValidatedJournalAuthority } from "@/features/agents/activityLedgerAuthority";
+import {
+  getJournalAuthorityArtifacts,
+  upsertJournalVerification,
+  upsertOwnerJournalOverride,
+  type JournalAuthorityArtifact,
+} from "@/shared/api/tauriArchive";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Spinner } from "@/shared/ui/spinner";
+import { Textarea } from "@/shared/ui/textarea";
 import {
   AgentSessionTranscriptList,
   type AgentSessionTranscriptEmptyState,
@@ -206,19 +218,201 @@ function journalStatusLabel(status: MissionJournal["status"]): string {
 }
 
 function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
+  const [artifacts, setArtifacts] = React.useState<JournalAuthorityArtifact[]>(
+    [],
+  );
+  const [mode, setMode] = React.useState<"summary" | "verify" | null>(null);
+  const [summary, setSummary] = React.useState(journal.summary);
+  const [receiptRef, setReceiptRef] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const reloadAuthority = React.useCallback(async () => {
+    const current = await getJournalAuthorityArtifacts(journal.id);
+    setArtifacts(current);
+  }, [journal.id]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setArtifacts([]);
+    setMode(null);
+    setSummary(journal.summary);
+    setReceiptRef("");
+    setError(null);
+    getJournalAuthorityArtifacts(journal.id)
+      .then((current) => {
+        if (!cancelled) setArtifacts(current);
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setError(
+            loadError instanceof Error
+              ? loadError.message
+              : "Owner journal proof could not be loaded.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [journal.id, journal.summary]);
+
+  const authorizedJournal = React.useMemo(
+    () => applyValidatedJournalAuthority(journal, artifacts),
+    [artifacts, journal],
+  );
+  const receiptedSourceIds = React.useMemo(
+    () => [
+      ...new Set(
+        journal.events
+          .filter((event) => event.proofState === "RECEIPTED")
+          .map((event) => event.provenance.sourceEventId)
+          .filter(
+            (id): id is string =>
+              typeof id === "string" && /^[0-9a-f]{64}$/i.test(id),
+          ),
+      ),
+    ],
+    [journal.events],
+  );
+
+  const saveSummary = async () => {
+    if (!summary.trim() || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await upsertOwnerJournalOverride({
+        journalId: journal.id,
+        correlationId: journal.correlationId,
+        summary: summary.trim(),
+      });
+      await reloadAuthority();
+      setMode(null);
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "The owner summary was not saved.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveVerification = async () => {
+    if (!receiptRef.trim() || receiptedSourceIds.length === 0 || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await upsertJournalVerification({
+        journalId: journal.id,
+        correlationId: journal.correlationId,
+        receiptRef: receiptRef.trim(),
+        sourceEventIds: receiptedSourceIds,
+      });
+      await reloadAuthority();
+      setMode(null);
+      setReceiptRef("");
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "The verification was not saved.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="mt-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Mission journal
         </span>
-        <Badge variant="secondary">{journalStatusLabel(journal.status)}</Badge>
-        <Badge variant="outline">{journal.proofState}</Badge>
-        {journal.claimedCompletionWithoutEvidence ? (
+        <Badge variant="secondary">
+          {journalStatusLabel(authorizedJournal.status)}
+        </Badge>
+        <Badge variant="outline">{authorizedJournal.proofState}</Badge>
+        {authorizedJournal.claimedCompletionWithoutEvidence ? (
           <Badge variant="destructive">Evidence gap</Badge>
         ) : null}
       </div>
-      <p className="mt-2 text-sm text-foreground">{journal.summary}</p>
+      <p className="mt-2 text-sm text-foreground">
+        {authorizedJournal.summary}
+      </p>
+      {authorizedJournal.summarySource === "owner" ? (
+        <p className="mt-1 text-xs text-muted-foreground">Owner edited</p>
+      ) : null}
+
+      {mode === "summary" ? (
+        <div className="mt-3 space-y-2">
+          <Textarea
+            aria-label="Owner journal summary"
+            value={summary}
+            onChange={(event) => setSummary(event.target.value)}
+          />
+          <div className="flex gap-2">
+            <Button
+              size="xs"
+              disabled={saving || !summary.trim()}
+              onClick={saveSummary}
+            >
+              Save owner summary
+            </Button>
+            <Button size="xs" variant="ghost" onClick={() => setMode(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {mode === "verify" ? (
+        <div className="mt-3 space-y-2">
+          <Input
+            aria-label="Verification receipt reference"
+            placeholder="Receipt or independent check reference"
+            value={receiptRef}
+            onChange={(event) => setReceiptRef(event.target.value)}
+          />
+          {receiptedSourceIds.length === 0 ? (
+            <p className="text-xs text-destructive">
+              This journal has no receipted tool evidence to verify.
+            </p>
+          ) : null}
+          <div className="flex gap-2">
+            <Button
+              size="xs"
+              disabled={
+                saving || !receiptRef.trim() || receiptedSourceIds.length === 0
+              }
+              onClick={saveVerification}
+            >
+              Record owner verification
+            </Button>
+            <Button size="xs" variant="ghost" onClick={() => setMode(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {mode == null ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          <Button size="xs" variant="ghost" onClick={() => setMode("summary")}>
+            <Pencil /> Edit summary
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={authorizedJournal.proofState === "VERIFIED"}
+            onClick={() => setMode("verify")}
+          >
+            <CheckCircle2 /> Verify receipt
+          </Button>
+        </div>
+      ) : null}
+      {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
     </div>
   );
 }

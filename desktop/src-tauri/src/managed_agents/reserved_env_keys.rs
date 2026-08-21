@@ -56,6 +56,11 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Stable agent identity used for git attribution and private-conversation
     // provenance must come from the managed-agent record, not user overrides.
     "BUZZ_ACP_DISPLAY_NAME",
+    // Owner Activity Ledger read capability. Desktop derives these from the
+    // active owner and private nest path for Honey; saved persona config may
+    // not redirect the reader to another file or weaken the contract marker.
+    "BUZZ_ACTIVITY_LEDGER_TODAY_PATH",
+    "BUZZ_ACTIVITY_LEDGER_TODAY_CAPABILITY",
     // Remote lifetime/presence policy: user env must not disable the
     // desktop/provider-owned bounds while the saved record still promises them.
     "BUZZ_ACP_EXIT_AFTER_INACTIVITY",

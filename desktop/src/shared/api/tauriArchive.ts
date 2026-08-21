@@ -545,6 +545,114 @@ export async function readAllArchivedObserverEventsForRange(opts: {
   }
 }
 
+export type JournalAuthorityArtifactType = "owner_override" | "verification";
+
+/** An artifact returned only after backend signature and evidence validation. */
+export type JournalAuthorityArtifact = {
+  ownerPubkey: string;
+  eventId: string;
+  signature: string;
+  createdAt: number;
+  artifactType: JournalAuthorityArtifactType;
+  journalId: string;
+  correlationId: string;
+  revision: number;
+  summary: string | null;
+  note: string | null;
+  receiptRef: string | null;
+  sourceEventIds: string[];
+};
+
+export async function upsertOwnerJournalOverride(input: {
+  journalId: string;
+  correlationId: string;
+  summary: string;
+  note?: string | null;
+}): Promise<JournalAuthorityArtifact> {
+  return invokeTauri<JournalAuthorityArtifact>(
+    "upsert_owner_journal_override",
+    { input },
+  );
+}
+
+/**
+ * Create an owner-signed verification artifact. The backend rejects missing,
+ * cross-owner, non-observer, or signature-invalid source event IDs.
+ */
+export async function upsertJournalVerification(input: {
+  journalId: string;
+  correlationId: string;
+  receiptRef: string;
+  sourceEventIds: string[];
+}): Promise<JournalAuthorityArtifact> {
+  return invokeTauri<JournalAuthorityArtifact>("upsert_journal_verification", {
+    input,
+  });
+}
+
+export async function getJournalAuthorityArtifacts(
+  journalId: string,
+): Promise<JournalAuthorityArtifact[]> {
+  return invokeTauri<JournalAuthorityArtifact[]>(
+    "get_journal_authority_artifacts",
+    { journalId },
+  );
+}
+
+export async function queryJournalAuthorityArtifacts(opts: {
+  startCreatedAt: number;
+  endCreatedAt: number;
+  limit?: number;
+}): Promise<JournalAuthorityArtifact[]> {
+  return invokeTauri<JournalAuthorityArtifact[]>(
+    "query_journal_authority_artifacts",
+    {
+      startCreatedAt: opts.startCreatedAt,
+      endCreatedAt: opts.endCreatedAt,
+      limit: opts.limit ?? null,
+    },
+  );
+}
+
+export const OWNER_TODAY_SNAPSHOT_SCHEMA =
+  "buzz.activity-ledger.today/v1" as const;
+export const OWNER_TODAY_SNAPSHOT_CAPABILITY =
+  "buzz.activity-ledger.today.read/v1" as const;
+
+export type OwnerTodaySnapshot = {
+  schema: typeof OWNER_TODAY_SNAPSHOT_SCHEMA;
+  ownerPubkey: string;
+  generatedAt: number;
+  expiresAt: number;
+  capability: typeof OWNER_TODAY_SNAPSHOT_CAPABILITY;
+  surface: Record<string, unknown>;
+  rawEvents: unknown[];
+};
+
+export type TodaySnapshotReceipt = {
+  path: string;
+  ownerPubkey: string;
+  generatedAt: number;
+  expiresAt: number;
+  byteLength: number;
+  sha256: string;
+};
+
+/** Atomically write the current owner's canonical Today projection as 0600. */
+export async function writeOwnerTodaySnapshot(
+  snapshot: OwnerTodaySnapshot,
+): Promise<TodaySnapshotReceipt> {
+  return invokeTauri<TodaySnapshotReceipt>("write_owner_today_snapshot", {
+    snapshotJson: JSON.stringify(snapshot),
+  });
+}
+
+/** Read the current owner's snapshot after backend owner/expiry validation. */
+export async function readOwnerTodaySnapshot(): Promise<OwnerTodaySnapshot> {
+  const raw = await invokeTauri<string>("read_owner_today_snapshot");
+  return JSON.parse(raw) as OwnerTodaySnapshot;
+}
+
 /**
  * Index one or more archived observer frames by channelId.
  *

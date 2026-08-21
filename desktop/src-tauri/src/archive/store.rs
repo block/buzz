@@ -138,6 +138,28 @@ CREATE INDEX IF NOT EXISTS idx_agent_metric_reported
 -- reported_at, so their window membership is judged by event_created_at).
 CREATE INDEX IF NOT EXISTS idx_agent_metric_created
     ON agent_metric_index (identity_pubkey, relay_url, event_created_at, parse_status);
+
+-- Owner-authorized Activity Ledger artifacts. Each row contains the complete
+-- signed Nostr event and is re-verified on every read. `revision` prevents an
+-- older but otherwise valid owner event from replaying over newer journal
+-- authority state.
+CREATE TABLE IF NOT EXISTS journal_authority_artifacts (
+    identity_pubkey TEXT NOT NULL,
+    journal_id      TEXT NOT NULL,
+    artifact_type   TEXT NOT NULL,
+    event_id        TEXT NOT NULL,
+    created_at      INTEGER NOT NULL,
+    revision        INTEGER NOT NULL,
+    raw_json        TEXT NOT NULL,
+    stored_at       INTEGER NOT NULL,
+    PRIMARY KEY (identity_pubkey, journal_id, artifact_type),
+    UNIQUE (identity_pubkey, event_id),
+    CHECK (artifact_type IN ('owner_override', 'verification')),
+    CHECK (revision > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_journal_authority_created
+    ON journal_authority_artifacts
+       (identity_pubkey, created_at DESC, event_id DESC);
 ";
 
 // ── Open / init ─────────────────────────────────────────────────────────────

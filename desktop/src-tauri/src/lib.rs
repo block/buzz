@@ -846,6 +846,12 @@ pub fn run() {
             archive::sync::announce_archive_sync_epoch,
             archive::sync::start_archive_sync,
             archive::sync::stop_archive_sync,
+            archive::upsert_owner_journal_override,
+            archive::upsert_journal_verification,
+            archive::get_journal_authority_artifacts,
+            archive::query_journal_authority_artifacts,
+            archive::write_owner_today_snapshot,
+            archive::read_owner_today_snapshot,
             is_auto_update_supported,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]

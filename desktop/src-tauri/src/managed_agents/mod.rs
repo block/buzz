@@ -1,4 +1,5 @@
 pub(crate) mod access_policy;
+mod activity_ledger_env;
 mod agent_env;
 pub(crate) mod agent_events;
 pub(crate) mod agent_snapshot;

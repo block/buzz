@@ -47,11 +47,11 @@ webbrowser = "1"
 dirs = "6"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "signal", "process"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
-nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "signal", "process"] }
 axum = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }

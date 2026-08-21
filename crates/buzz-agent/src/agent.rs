@@ -382,6 +382,9 @@ impl RunCtx<'_> {
             if !self.skills.is_empty() {
                 tools.push(builtin::load_skill_def());
             }
+            if builtin::activity_ledger_today_enabled() {
+                tools.push(builtin::activity_ledger_today_def());
+            }
             round = round.saturating_add(1);
             let response_result = tokio::select! {
                 biased;
@@ -813,6 +816,14 @@ impl RunCtx<'_> {
             if call.name == builtin::LOAD_SKILL_TOOL {
                 emit_in_progress(self.wire, self.session_id, call).await;
                 let mut result = builtin::call_load_skill(&call.arguments, self.skills).await;
+                result.provider_id = call.provider_id.clone();
+                emit_completed(self.wire, self.session_id, call, &result).await;
+                results[idx] = Some(result);
+                continue;
+            }
+            if call.name == builtin::ACTIVITY_LEDGER_TODAY_TOOL {
+                emit_in_progress(self.wire, self.session_id, call).await;
+                let mut result = builtin::call_activity_ledger_today(&call.arguments).await;
                 result.provider_id = call.provider_id.clone();
                 emit_completed(self.wire, self.session_id, call, &result).await;
                 results[idx] = Some(result);

@@ -572,3 +572,109 @@ async fn load_skill_tool_returns_body() {
     );
     h.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activity_ledger_today_tool_returns_filtered_snapshot() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let snapshot_path = cwd.join("activity-ledger-today.json");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let snapshot = json!({
+        "schema": "buzz.activity-ledger.today/v1",
+        "ownerPubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "generatedAt": now_secs.saturating_sub(60),
+        "expiresAt": now_secs + 300,
+        "capability": "buzz.activity-ledger.today.read/v1",
+        "surface": {
+            "day": "2026-08-21",
+            "journals": [
+                {
+                    "id": "journal-a",
+                    "channelId": "chan-a",
+                    "agentPubkey": "agent-a",
+                    "agentName": "Honey",
+                    "status": "completed",
+                    "proofState": "RECEIPTED",
+                    "endedAt": "2026-08-21T14:00:00.000Z",
+                    "claimedCompletionWithoutEvidence": false,
+                    "events": [{ "id": "event-a", "detail": "receipted activity" }]
+                }
+            ]
+        }
+    });
+    std::fs::write(&snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&snapshot_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let tool_call = json!({
+        "id": "cc-ledger", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": "tc-ledger", "type": "function",
+                    "function": {
+                        "name": "get_activity_ledger_today",
+                        "arguments": "{\"agentPubkey\":\"agent-a\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let end_turn = openai_text("done");
+
+    let llm = spawn_capturing_llm(vec![tool_call, end_turn]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            (
+                "BUZZ_ACTIVITY_LEDGER_TODAY_PATH",
+                snapshot_path.to_str().unwrap(),
+            ),
+            (
+                "BUZZ_ACTIVITY_LEDGER_TODAY_CAPABILITY",
+                "buzz.activity-ledger.today.read/v1",
+            ),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, cwd.to_str().unwrap()).await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"What did Honey do today?"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+
+    let reqs = llm.captured.lock().await;
+    assert!(
+        reqs.len() >= 2,
+        "expected at least 2 LLM requests, got {}",
+        reqs.len()
+    );
+    let round1 = serde_json::to_string(&reqs[0]).unwrap();
+    assert!(
+        round1.contains("get_activity_ledger_today"),
+        "tool was not advertised in round 1: {round1}"
+    );
+    let round2 = serde_json::to_string(&reqs[1]).unwrap();
+    assert!(
+        round2.contains("journal-a"),
+        "tool result missing filtered journal: {round2}"
+    );
+    assert!(
+        !round2.contains("\"events\""),
+        "events should be stripped by default: {round2}"
+    );
+    h.shutdown().await;
+}

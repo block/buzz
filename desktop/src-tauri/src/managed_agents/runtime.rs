@@ -400,7 +400,6 @@ pub(crate) fn configure_runtime_cli(
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
-///
 /// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
 /// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
 pub fn spawn_agent_child(
@@ -764,6 +763,7 @@ pub fn spawn_agent_child(
         command.env_remove("BUZZ_AUTH_TAG");
     }
 
+    super::activity_ledger_env::configure(&mut command, record, owner_hex);
     // Inbound author gate: who is this agent allowed to respond to?
     // Validation is strict here — a malformed allowlist on disk fails before
     // we spawn anything (the harness would also reject it, but we'd rather
