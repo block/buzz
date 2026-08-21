@@ -110,6 +110,21 @@ test("includes aliases from mention reference tags", () => {
   });
 });
 
+test("a selected reference wins over an earlier same-name notification identity", () => {
+  const tags = [
+    ["p", OTHER_PUBKEY],
+    ["mention", PUBKEY],
+  ];
+  const profiles = {
+    [PUBKEY]: profile({ displayName: "Debug" }),
+    [OTHER_PUBKEY]: profile({ displayName: "Debug" }),
+  };
+
+  assert.deepEqual(resolveMentionPubkeysByName(tags, profiles), {
+    debug: PUBKEY,
+  });
+});
+
 test("every rendered name resolves to a pubkey (outputs stay in sync)", () => {
   const tags = [
     ["p", PUBKEY],

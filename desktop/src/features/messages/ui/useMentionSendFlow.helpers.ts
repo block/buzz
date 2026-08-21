@@ -49,7 +49,15 @@ export function mergeOutgoingTagsWithReferenceMentions(
   outgoingTags: string[][] | undefined,
   pubkeys: Iterable<string>,
 ) {
-  const normalizedPubkeys = uniqueNormalizedPubkeys(pubkeys);
+  const existingReferencePubkeys = new Set(
+    (outgoingTags ?? [])
+      .filter((tag) => tag[0] === MENTION_REFERENCE_TAG)
+      .map((tag) => normalizePubkey(tag[1] ?? ""))
+      .filter(Boolean),
+  );
+  const normalizedPubkeys = uniqueNormalizedPubkeys(pubkeys).filter(
+    (pubkey) => !existingReferencePubkeys.has(pubkey),
+  );
   if (normalizedPubkeys.length === 0) {
     return outgoingTags;
   }

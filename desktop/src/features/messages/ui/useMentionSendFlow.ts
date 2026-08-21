@@ -552,9 +552,9 @@ export function useMentionSendFlow({
               ),
             ]),
           );
-          const finalOutgoingTags = mergeOutgoingTags(
-            mediaTags,
-            outgoingTags ?? [],
+          const finalOutgoingTags = mergeOutgoingTagsWithReferenceMentions(
+            mergeOutgoingTags(mediaTags, outgoingTags ?? []),
+            draft.savedMentionRefs.map(({ pubkey }) => pubkey),
           );
           if (signal?.aborted) return;
           const revalidatedMentionPubkeys =
