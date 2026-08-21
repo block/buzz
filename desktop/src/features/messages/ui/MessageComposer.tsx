@@ -924,6 +924,7 @@ function MessageComposerImpl({
                   : undefined
               }
               onFetchMore={mentions.fetchMoreSuggestions}
+              onDismiss={mentions.cancelMentionAutocomplete}
               onSelect={selectMentionSuggestion}
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}

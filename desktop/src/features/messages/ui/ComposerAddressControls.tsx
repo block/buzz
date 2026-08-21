@@ -153,6 +153,7 @@ export function ComposerMentionButton({
               ? "bg-primary/15 pl-2 pr-1 text-primary hover:bg-primary/25 hover:text-primary/90"
               : "text-foreground hover:bg-accent hover:text-accent-foreground",
           )}
+          data-mention-picker-trigger=""
           data-testid="message-insert-mention"
           disabled={disabled}
           onClick={onOpen}

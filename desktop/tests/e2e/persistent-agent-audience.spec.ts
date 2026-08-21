@@ -274,6 +274,31 @@ test("the mention button opens settings and can undo an address", async ({
   const menu = composer.getByTestId("mention-autocomplete");
   await expect(menu).toBeVisible();
   await expect(input).toHaveText("draft text");
+  await page.getByTestId("mention-options-trigger").click();
+  await expect(
+    page.getByTestId("mention-keep-agents-pinned-toggle"),
+  ).toBeVisible();
+  const layerBox = await composer
+    .getByTestId("mention-autocomplete-layer")
+    .boundingBox();
+  const optionsBox = await page
+    .getByTestId("mention-options-trigger")
+    .boundingBox();
+  expect(layerBox).not.toBeNull();
+  expect(optionsBox).not.toBeNull();
+  if (!layerBox || !optionsBox) throw new Error("Mention tray is not laid out");
+  await page.mouse.click(layerBox.x + 4, optionsBox.y + optionsBox.height / 2);
+  await expect(menu).toHaveCount(0);
+  await expect(input).toHaveText("draft text");
+  await ingress.click();
+  await expect(menu).toBeVisible();
+  await expect(page.getByTestId("mention-options-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(
+    page.getByTestId("mention-keep-agents-pinned-toggle"),
+  ).toHaveCount(0);
   await ingress.click();
   await expect(menu).toHaveCount(0);
   await ingress.click();

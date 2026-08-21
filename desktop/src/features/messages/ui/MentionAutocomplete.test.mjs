@@ -141,13 +141,97 @@ test("options expand in place without replacing the people list", async () => {
   fireEvent.click(toggle);
   assert.deepEqual(changes, [false]);
 
-  fireEvent.click(options);
-  assert.equal(options.getAttribute("aria-expanded"), "false");
+  view.rerender(
+    React.createElement(MentionAutocomplete, {
+      suggestions: [],
+      selectedIndex: 0,
+      onSelect: () => {},
+      keepMentionedAgentsPinned: false,
+      onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
+    }),
+  );
+  assert.equal(view.queryByRole("button", { name: "Options" }), null);
+
+  view.rerender(
+    React.createElement(MentionAutocomplete, {
+      suggestions: [suggestion],
+      selectedIndex: 0,
+      onSelect: () => {},
+      keepMentionedAgentsPinned: false,
+      onKeepMentionedAgentsPinnedChange: (value) => changes.push(value),
+    }),
+  );
+  assert.equal(
+    view.getByRole("button", { name: "Options" }).getAttribute("aria-expanded"),
+    "false",
+  );
   assert.equal(
     view.queryByRole("switch", { name: "Keep agents pinned" }),
     null,
   );
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
+});
+
+test("clicking outside dismisses the tray without intercepting its trigger", async () => {
+  const React = await import("react");
+  const { fireEvent, render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const suggestion = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  let dismissCount = 0;
+  const view = render(
+    React.createElement(
+      React.Fragment,
+      null,
+      React.createElement(
+        "form",
+        null,
+        React.createElement(
+          "button",
+          { "data-mention-picker-trigger": "", type: "button" },
+          "@",
+        ),
+        React.createElement(MentionAutocomplete, {
+          suggestions: [suggestion],
+          selectedIndex: 0,
+          onDismiss: () => {
+            dismissCount += 1;
+          },
+          onSelect: () => {},
+        }),
+      ),
+      React.createElement("button", { type: "button" }, "Outside"),
+      React.createElement(
+        "form",
+        null,
+        React.createElement(
+          "button",
+          { "data-mention-picker-trigger": "", type: "button" },
+          "Other @",
+        ),
+      ),
+    ),
+  );
+
+  fireEvent.pointerDown(
+    view.getByRole("button", { name: "Mention Agent Ada" }),
+  );
+  assert.equal(dismissCount, 0);
+
+  fireEvent.pointerDown(view.getByRole("button", { name: "@" }));
+  assert.equal(dismissCount, 0);
+
+  fireEvent.pointerDown(view.getByTestId("mention-autocomplete-layer"));
+  assert.equal(dismissCount, 1);
+
+  fireEvent.pointerDown(view.getByRole("button", { name: "Outside" }));
+  assert.equal(dismissCount, 2);
+
+  fireEvent.pointerDown(view.getByRole("button", { name: "Other @" }));
+  assert.equal(dismissCount, 3);
 });
 
 test("collision npubs sit inline with agent metadata", async () => {

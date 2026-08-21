@@ -42,6 +42,7 @@ type MentionAutocompleteProps = {
   onToggleAlwaysAddressAgent?: (suggestion: MentionSuggestion) => void;
   keepMentionedAgentsPinned?: boolean;
   onKeepMentionedAgentsPinnedChange?: (value: boolean) => void;
+  onDismiss?: () => void;
   position?: "above" | "below";
 };
 
@@ -64,8 +65,11 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   onToggleAlwaysAddressAgent,
   keepMentionedAgentsPinned = true,
   onKeepMentionedAgentsPinnedChange,
+  onDismiss,
   position = "above",
 }: MentionAutocompleteProps) {
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const optionsSurfaceRef = React.useRef<HTMLDivElement>(null);
   const listRef = React.useRef<HTMLDivElement>(null);
   const optionsId = React.useId();
   const keepPinnedSwitchId = React.useId();
@@ -78,6 +82,43 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     );
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
+
+  React.useEffect(() => {
+    if (suggestions.length === 0) {
+      setOptionsOpen(false);
+    }
+  }, [suggestions.length]);
+
+  React.useEffect(() => {
+    if (!onDismiss) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const root = rootRef.current;
+      const target = event.target;
+      if (!root || !(target instanceof Node)) return;
+      if (
+        listRef.current?.contains(target) ||
+        optionsSurfaceRef.current?.contains(target)
+      ) {
+        return;
+      }
+
+      const composer = root.closest("form");
+      const mentionTrigger =
+        target instanceof Element
+          ? target.closest("[data-mention-picker-trigger]")
+          : null;
+      if (composer && mentionTrigger && composer.contains(mentionTrigger)) {
+        return;
+      }
+
+      onDismiss();
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () =>
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [onDismiss]);
 
   const handleScroll = React.useCallback(() => {
     const list = listRef.current;
@@ -107,6 +148,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
         "absolute left-0 right-0 z-50 px-3 sm:px-4",
         position === "below" ? "top-full mt-1" : "bottom-full mb-1",
       )}
+      data-testid="mention-autocomplete-layer"
+      ref={rootRef}
     >
       <div className="w-full max-w-2xl">
         {onKeepMentionedAgentsPinnedChange ? (
@@ -117,6 +160,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 POPOVER_SURFACE_CLASS,
                 optionsOpen ? "w-72" : "w-[5.75rem]",
               )}
+              ref={optionsSurfaceRef}
               style={POPOVER_SHADOW_STYLE}
             >
               {optionsOpen ? (
