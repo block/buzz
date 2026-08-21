@@ -9,6 +9,7 @@ class _ThreadMessageList extends StatelessWidget {
   final ItemPositionsListener itemPositionsListener;
   final double bottomInset;
   final List<TimelineMessage> replies;
+  final Map<String, DateTime> localSendAnimations;
   final Widget Function(Widget child) trackActiveScrollPosition;
   final bool headIsDeleted;
   final TimelineMessage head;
@@ -33,6 +34,7 @@ class _ThreadMessageList extends StatelessWidget {
     required this.itemPositionsListener,
     required this.bottomInset,
     required this.replies,
+    required this.localSendAnimations,
     required this.trackActiveScrollPosition,
     required this.headIsDeleted,
     required this.head,
@@ -183,45 +185,55 @@ class _ThreadMessageList extends StatelessWidget {
                     : null;
 
                 return trackActiveScrollPosition(
-                  Padding(
-                    key: ValueKey('thread-message-group-${reply.id}'),
-                    // Tail spacing comes from the list's own bottom padding now
-                    // that the list runs top-down; the reversed list used to
-                    // need it here because item 0 sat against the composer.
-                    padding: EdgeInsets.zero,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (showDayDivider)
-                          DayDivider(
-                            label: formatDayHeading(reply.createdAt),
-                            dayTimestamp: reply.createdAt,
-                            stickyDayTimestamp: stickyDayTimestamp,
-                          ),
-                        _ThreadMessage(
-                          message: reply,
-                          channelNames: channelNames,
-                          channelId: channelId,
-                          currentPubkey: currentPubkey,
-                          showAuthor: showAuthor,
-                          isHighlighted: reply.id == highlightedMessageId,
-                          allMessages: allMessages,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                          composerFocusNode: composerFocusNode,
-                          restoreComposerFocus: restoreComposerFocus,
-                        ),
-                        if (nestedSummary != null)
-                          _NestedThreadSummaryRow(
-                            summary: nestedSummary,
-                            replyMessage: reply,
-                            allMessages: allMessages,
+                  LocalMessageSendTransition(
+                    key: ValueKey('thread-message-send-${reply.id}'),
+                    animate: isRecentLocalMessageSendAnimation(
+                      localSendAnimations,
+                      reply.id,
+                    ),
+                    startOffsetFactor: showAuthor
+                        ? localMessageSendTransitionAvatarStartOffset
+                        : localMessageSendTransitionStartOffset,
+                    child: Padding(
+                      key: ValueKey('thread-message-group-${reply.id}'),
+                      // Tail spacing comes from the list's own bottom padding now
+                      // that the list runs top-down; the reversed list used to
+                      // need it here because item 0 sat against the composer.
+                      padding: EdgeInsets.zero,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showDayDivider)
+                            DayDivider(
+                              label: formatDayHeading(reply.createdAt),
+                              dayTimestamp: reply.createdAt,
+                              stickyDayTimestamp: stickyDayTimestamp,
+                            ),
+                          _ThreadMessage(
+                            message: reply,
+                            channelNames: channelNames,
                             channelId: channelId,
                             currentPubkey: currentPubkey,
+                            showAuthor: showAuthor,
+                            isHighlighted: reply.id == highlightedMessageId,
+                            allMessages: allMessages,
                             isMember: isMember,
                             isArchived: isArchived,
+                            composerFocusNode: composerFocusNode,
+                            restoreComposerFocus: restoreComposerFocus,
                           ),
-                      ],
+                          if (nestedSummary != null)
+                            _NestedThreadSummaryRow(
+                              summary: nestedSummary,
+                              replyMessage: reply,
+                              allMessages: allMessages,
+                              channelId: channelId,
+                              currentPubkey: currentPubkey,
+                              isMember: isMember,
+                              isArchived: isArchived,
+                            ),
+                        ],
+                      ),
                     ),
                   ),
                 );

@@ -95,14 +95,21 @@ class PairingPage extends HookConsumerWidget {
         ? AppBar(
             foregroundColor: _onboardingInk,
             systemOverlayStyle: onboardingSystemOverlayStyle,
+            leadingWidth: Theme.of(context).platform == TargetPlatform.iOS
+                ? Grid.quarter + iosGlassChannelHeaderLeadingWidth
+                : null,
             leading: Theme.of(context).platform == TargetPlatform.iOS
-                ? IosGlassNavigationButton(
-                    key: const ValueKey('pairing-ios-glass-back'),
-                    icon: IosGlassNavigationIcon.back,
-                    semanticLabel: 'Back',
-                    onPressed: () => Navigator.of(context).maybePop(),
-                    width: 56,
-                    foregroundColor: _onboardingInk,
+                ? Padding(
+                    padding: const EdgeInsets.only(left: Grid.quarter),
+                    child: IosGlassNavigationButton(
+                      key: const ValueKey('pairing-ios-glass-back'),
+                      icon: IosGlassNavigationIcon.back,
+                      semanticLabel: 'Back',
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      width: iosGlassChannelHeaderLeadingWidth,
+                      buttonCenterX: iosGlassChannelHeaderButtonCenterX,
+                      foregroundColor: _onboardingInk,
+                    ),
                   )
                 : IconButton(
                     icon: const Icon(LucideIcons.arrowLeft),
