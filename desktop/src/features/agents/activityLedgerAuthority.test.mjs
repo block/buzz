@@ -12,6 +12,7 @@ import {
 } from "./activityLedgerAuthority.ts";
 
 const sourceId = "a".repeat(64);
+const terminalSourceId = "b".repeat(64);
 
 function observedJournal() {
   return buildMissionJournal(
@@ -36,7 +37,7 @@ function observedJournal() {
         seq: 2,
         timestamp: "2026-08-21T14:01:00.000Z",
         kind: "turn_completed",
-        sourceEventId: "b".repeat(64),
+        sourceEventId: terminalSourceId,
         sourcePubkey: "agent-a",
         sourceKind: 24200,
         sourceCreatedAt: 1_787_319_660,
@@ -66,7 +67,7 @@ function artifact(overrides = {}) {
     summary: null,
     note: null,
     receiptRef: "receipt:independent-check-1",
-    sourceEventIds: [sourceId],
+    sourceEventIds: [sourceId, terminalSourceId].sort(),
     ...overrides,
   };
 }
@@ -81,7 +82,9 @@ test("owner-signed verification only promotes evidence bound to the journal", ()
   assert.equal(verified.events.at(-1).title, "Owner verification");
   assert.deepEqual(verified.events.at(-1).provenance.triggeringEventIds, [
     sourceId,
+    terminalSourceId,
   ]);
+  assert.equal(verified.events.at(-1).provenance.seq, 3);
   assert.equal(
     verified.events.at(-1).provenance.sourceSignature,
     "owner-signature",
@@ -112,6 +115,108 @@ test("later failure and incomplete states outrank an older verification", () => 
       false,
     );
   }
+});
+
+test("later successful tool evidence invalidates an older verification", () => {
+  const journal = observedJournal();
+  const laterSourceId = "d".repeat(64);
+  const laterTool = {
+    ...journal.events[0],
+    id: "later-tool",
+    category: "tool",
+    title: "Tool completed",
+    status: "completed",
+    proofState: "RECEIPTED",
+    timestamp: "2026-08-21T14:03:00.000Z",
+    provenance: {
+      ...journal.events[0].provenance,
+      sourceEventId: laterSourceId,
+      sourceCreatedAt: 1_787_319_780,
+      seq: 3,
+      timestamp: "2026-08-21T14:03:00.000Z",
+    },
+  };
+  const current = {
+    ...journal,
+    endedAt: laterTool.timestamp,
+    eventCount: journal.eventCount + 1,
+    events: [...journal.events, laterTool],
+  };
+
+  assert.notEqual(
+    applyValidatedJournalAuthority(current, [artifact()]).proofState,
+    "VERIFIED",
+  );
+  assert.equal(
+    applyValidatedJournalAuthority(current, [
+      artifact({
+        sourceEventIds: [sourceId, terminalSourceId, laterSourceId].sort(),
+      }),
+    ]).proofState,
+    "VERIFIED",
+  );
+});
+
+test("later turn completion invalidates an older verification", () => {
+  const journal = observedJournal();
+  const laterSourceId = "e".repeat(64);
+  const laterTurn = {
+    ...journal.events.at(-1),
+    id: "later-turn",
+    timestamp: "2026-08-21T14:04:00.000Z",
+    provenance: {
+      ...journal.events.at(-1).provenance,
+      sourceEventId: laterSourceId,
+      sourceCreatedAt: 1_787_319_840,
+      seq: 4,
+      timestamp: "2026-08-21T14:04:00.000Z",
+    },
+  };
+  const current = {
+    ...journal,
+    endedAt: laterTurn.timestamp,
+    eventCount: journal.eventCount + 1,
+    events: [...journal.events, laterTurn],
+  };
+
+  assert.notEqual(
+    applyValidatedJournalAuthority(current, [artifact()]).proofState,
+    "VERIFIED",
+  );
+});
+
+test("reapplying authority ignores its synthetic owner verification event", () => {
+  const journal = observedJournal();
+  const verified = applyValidatedJournalAuthority(journal, [artifact()]);
+  const reapplied = applyValidatedJournalAuthority(verified, [artifact()]);
+
+  assert.equal(reapplied.proofState, "VERIFIED");
+  assert.equal(reapplied.events.at(-1).title, "Owner verification");
+});
+
+test("large journal verification computes its sequence without argument spread", () => {
+  const journal = observedJournal();
+  const template = journal.events.at(-1);
+  const events = [
+    journal.events[0],
+    ...Array.from({ length: 149_999 }, (_, index) => ({
+      ...template,
+      id: `large-${index}`,
+      provenance: {
+        ...template.provenance,
+        seq: index + 2,
+      },
+    })),
+  ];
+  const largeJournal = {
+    ...journal,
+    eventCount: events.length,
+    events,
+  };
+
+  const verified = applyValidatedJournalAuthority(largeJournal, [artifact()]);
+  assert.equal(verified.proofState, "VERIFIED");
+  assert.equal(verified.events.at(-1).provenance.seq, 150_001);
 });
 
 test("verification writes use the journal correlation, not a tool-call correlation", () => {

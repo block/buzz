@@ -40,6 +40,36 @@ function validSourceEventId(value: string | null | undefined): value is string {
   return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
 }
 
+function isCurrentVerificationEvidence(
+  event: NormalizedActivityEvent,
+): boolean {
+  if (
+    event.provenance.sourceKind === 24201 ||
+    event.provenance.observerKind === "owner_verification"
+  ) {
+    return false;
+  }
+  return (
+    validSourceEventId(event.provenance.sourceEventId) &&
+    (event.category === "turn" ||
+      event.category === "tool" ||
+      event.category === "permission" ||
+      event.category === "status")
+  );
+}
+
+function currentVerificationSourceEventId(
+  journal: MissionJournal,
+): string | null {
+  for (let index = journal.events.length - 1; index >= 0; index -= 1) {
+    const event = journal.events[index];
+    if (event && isCurrentVerificationEvidence(event)) {
+      return event.provenance.sourceEventId;
+    }
+  }
+  return null;
+}
+
 /**
  * Bind verification to both the receipted work and the observer frame that
  * carries the journal-level correlation. Those can be separate signed relay
@@ -59,13 +89,18 @@ export function journalVerificationSources(
       event.toolCallId === correlationId ||
       event.messageId === correlationId,
   )?.provenance.sourceEventId;
+  const currentSourceEventId = currentVerificationSourceEventId(journal);
   const hasCorrelationEvidence =
     correlationId === journal.id || validSourceEventId(correlationSourceId);
 
   return {
     sourceEventIds: [
       ...new Set(
-        [correlationSourceId, ...receiptedSourceIds].filter(validSourceEventId),
+        [
+          correlationSourceId,
+          ...receiptedSourceIds,
+          currentSourceEventId,
+        ].filter(validSourceEventId),
       ),
     ].sort(),
     hasReceiptedEvidence: receiptedSourceIds.length > 0,
@@ -120,13 +155,16 @@ export function applyValidatedJournalAuthority(
       .map((event) => event.provenance.sourceEventId)
       .filter((id): id is string => Boolean(id)),
   );
+  const currentSourceEventId = currentVerificationSourceEventId(journal);
   const latestVerification = matching
     .filter(
       (artifact) =>
         artifact.artifactType === "verification" &&
         Boolean(artifact.receiptRef?.trim()) &&
         artifact.sourceEventIds.length > 0 &&
-        artifact.sourceEventIds.every((id) => sourceEventIds.has(id)),
+        artifact.sourceEventIds.every((id) => sourceEventIds.has(id)) &&
+        validSourceEventId(currentSourceEventId) &&
+        artifact.sourceEventIds.includes(currentSourceEventId),
     )
     .at(-1);
   if (!latestVerification) return result;
@@ -141,6 +179,10 @@ export function applyValidatedJournalAuthority(
   const timestamp = new Date(
     latestVerification.createdAt * 1_000,
   ).toISOString();
+  let maxSequence = 0;
+  for (const event of journal.events) {
+    maxSequence = Math.max(maxSequence, event.provenance.seq);
+  }
   const verificationEvent: NormalizedActivityEvent = {
     id: latestVerification.eventId,
     journalKey: journal.journalKey,
@@ -166,8 +208,7 @@ export function applyValidatedJournalAuthority(
       observerKind: "owner_verification",
       method: null,
       sessionUpdate: null,
-      seq:
-        Math.max(0, ...journal.events.map((event) => event.provenance.seq)) + 1,
+      seq: maxSequence + 1,
       timestamp,
       channelId: journal.channelId,
       sessionId: journal.sessionId,

@@ -189,7 +189,7 @@ test("Today authority overlay recomputes evidence-gap counts", async () => {
       summary: null,
       note: null,
       receiptRef: "receipt:owner-check",
-      sourceEventIds: [event.id],
+      sourceEventIds: [event.id, ended.id].sort(),
     },
   ]);
 

@@ -27,6 +27,10 @@ impl QueueIo {
     fn attempt_count(&self) -> usize {
         self.attempts.lock().unwrap().len()
     }
+
+    fn recover(&self) {
+        *self.failures_remaining.lock().unwrap() = 0;
+    }
 }
 
 impl ArchiveSyncIo for QueueIo {
@@ -272,6 +276,93 @@ async fn byte_capacity_inbox_survives_failed_teardown_and_restart() {
             .any(|id| id == &incoming_id),
         "durable byte-cap inbox was not replayed after restart"
     );
+    assert!(DurableQueue::open(path).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn inbox_write_failure_retries_without_consuming_another_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.json");
+    let scope = MatchedScope {
+        scope_type: ScopeType::ChannelH,
+        scope_value: "channel-a".into(),
+    };
+    let incoming_event = EventBuilder::new(Kind::Custom(9), "i".repeat(512 * 1024))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let incoming_id = incoming_event.id.to_hex();
+    let incoming_candidate = DurableCandidate::from_event(&incoming_event, &scope);
+    let filler = signed_candidate(&"f".repeat(512 * 1024));
+    let mut queue = DurableQueue::open(path.clone()).unwrap();
+    queue.fill_until_candidate_exceeds_byte_capacity_for_test(filler, &incoming_candidate);
+
+    let inbox_path = path.with_extension("inbox.json");
+    std::fs::create_dir(&inbox_path).unwrap();
+
+    let second_event = EventBuilder::new(Kind::Custom(9), "second")
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let second_id = second_event.id.to_hex();
+    let subscription_id = subscription_id(&ScopeType::ChannelH, "channel-a", &[9]);
+    let (tx, rx) = mpsc::channel(2);
+    tx.send(MatchedEvent {
+        subscription_id: subscription_id.clone(),
+        event: Box::new(incoming_event),
+    })
+    .await
+    .unwrap();
+    tx.send(MatchedEvent {
+        subscription_id,
+        event: Box::new(second_event),
+    })
+    .await
+    .unwrap();
+
+    let io = Arc::new(QueueIo::new(usize::MAX));
+    let task_io = Arc::clone(&io);
+    let handle = tokio::spawn(async move {
+        run_sync(
+            task_io.as_ref(),
+            Arc::new(Notify::new()),
+            rx,
+            CancellationToken::new(),
+            queue,
+        )
+        .await
+    });
+
+    for _ in 0..10_000 {
+        if tx.capacity() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        tx.capacity(),
+        1,
+        "the first event was not consumed into the live-retained retry slot"
+    );
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        tx.capacity(),
+        1,
+        "archive sync consumed a second event before the first became durable"
+    );
+    assert!(!handle.is_finished(), "inbox write failure stopped sync");
+
+    std::fs::remove_dir(&inbox_path).unwrap();
+    io.recover();
+    drop(tx);
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("inbox recovery timed out")
+        .expect("sync task panicked")
+        .expect("sync stopped instead of recovering inbox persistence");
+
+    let delivered = io.delivered.lock().unwrap();
+    assert!(delivered.iter().flatten().any(|id| id == &incoming_id));
+    assert!(delivered.iter().flatten().any(|id| id == &second_id));
+    drop(delivered);
     assert!(DurableQueue::open(path).unwrap().is_empty());
 }
 
