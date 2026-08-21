@@ -83,6 +83,31 @@ impl EmissionScope {
 
 const USAGE_METRICS_LOCK_KEY: i64 = 0x4255_5A5A_4D45_5452;
 
+/// Session advisory lock serializing the fleet-wide NIP-43 membership sweep.
+///
+/// The sweep is O(communities) — minutes at fleet scale — so only one replica
+/// may run it at a time; the rest skip their tick. Same detached-session
+/// leadership mechanism as the usage-metrics poller, different key.
+const NIP43_SWEEP_LOCK_KEY: i64 = 0x4255_5A5A_4E50_3433;
+
+/// Run `task` only after the listener-bound signal fires.
+///
+/// This is the structural guarantee that background work gated on it cannot
+/// precede `serve()` binding the listeners — a jitter delay alone is
+/// probabilistic (zero is a valid draw) and does not establish the ordering.
+/// If the sender is dropped without firing (startup failed before bind), the
+/// task never runs.
+async fn after_listener_bound<F, Fut>(bound: tokio::sync::oneshot::Receiver<()>, task: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if bound.await.is_err() {
+        return;
+    }
+    task().await;
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install the ring CryptoProvider for rustls. Required before any rustls
@@ -534,16 +559,38 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // NIP-43: reconcile the event-backed roster for every provisioned
-    // community before opening the listener. `relay_members` is canonical;
-    // this repairs pre-snapshot communities and any publication that failed
-    // after a membership transaction committed.
+    // NIP-43: reconcile the event-backed roster for the deployment's own
+    // community before opening the listener. The fleet-wide sweep across every
+    // provisioned community deliberately does NOT run here: it is
+    // O(communities) — minutes at fleet scale — and a startup probe that
+    // SIGKILLs the pod mid-sweep restarts it from community #1 forever
+    // (permanent crashloop). The fleet sweep runs post-bind (structurally:
+    // gated on the listener-bound signal fired inside `serve`), jittered, and
+    // leader-gated in the periodic task spawned below.
+    let (listener_bound_tx, listener_bound_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut listener_bound_rx = Some(listener_bound_rx);
     if config.require_relay_membership {
-        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(&state).await
-        {
-            Ok(count) => info!(count, "NIP-43 membership snapshots reconciled on startup"),
-            Err(error) => {
-                tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
+        // `deployment_community` is always Some here: startup fails fast above
+        // when membership is enforced and the community cannot be ensured.
+        if let Some(community) = deployment_community {
+            let host = buzz_relay::tenant::relay_url_authority(&config.relay_url);
+            let tenant = buzz_core::tenant::TenantContext::resolved(community, host);
+            let started_at = std::time::Instant::now();
+            info!(community = %community, "NIP-43 startup phase: reconciling deployment community snapshot");
+            match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshot(
+                &tenant, &state,
+            )
+            .await
+            {
+                Ok(repaired) => info!(
+                    community = %community,
+                    repaired,
+                    elapsed_ms = started_at.elapsed().as_millis() as u64,
+                    "NIP-43 startup phase: deployment community snapshot reconciled"
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "NIP-43 deployment community startup reconciliation failed")
+                }
             }
         }
 
@@ -553,27 +600,70 @@ async fn main() -> anyhow::Result<()> {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(60)
             .max(1);
-        tokio::spawn(async move {
+        let sweep_bound_rx = listener_bound_rx
+            .take()
+            .expect("listener_bound_rx is consumed exactly once, here");
+        tokio::spawn(after_listener_bound(sweep_bound_rx, move || async move {
+            // Jitter the first tick by a random fraction of the interval so a
+            // rolling deploy of N pods doesn't contend for the sweep lock (and
+            // hammer `communities`) simultaneously at boot. True per-process
+            // randomness — PID-derived seeds are unsafe when every pod is PID 1.
+            // Ordering vs bind is NOT the jitter's job: `after_listener_bound`
+            // already guarantees this task starts only after `serve()` binds.
+            let jitter_secs = rand::random::<u64>() % interval_secs;
+            tokio::time::sleep(std::time::Duration::from_secs(jitter_secs)).await;
+
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-            interval.tick().await;
+            // A fleet-scale sweep takes longer than the interval; skip ticks
+            // rather than scheduling a catch-up burst behind it.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                // Per-tick leadership: hold the sweep lock only while sweeping,
+                // so a replica that dies mid-sweep releases it with its session
+                // and any peer picks up on its next tick.
+                let leader = match reconcile_state
+                    .db
+                    .try_lock_usage_metrics(NIP43_SWEEP_LOCK_KEY)
+                    .await
+                {
+                    Ok(Some(guard)) => guard,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(%error, "NIP-43 sweep leadership check failed");
+                        continue;
+                    }
+                };
+                let started_at = std::time::Instant::now();
+                info!("NIP-43 membership sweep starting (leader)");
                 match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(
                     &reconcile_state,
                 )
                 .await
                 {
-                    Ok(count) if count > 0 => {
-                        info!(count, "NIP-43 membership snapshots repaired")
+                    Ok(count) => {
+                        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                        if count > 0 {
+                            info!(
+                                count,
+                                elapsed_ms, "NIP-43 membership sweep complete: snapshots repaired"
+                            )
+                        } else {
+                            info!(
+                                elapsed_ms,
+                                "NIP-43 membership sweep complete: nothing to repair"
+                            )
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => tracing::warn!(
                         %error,
-                        "periodic NIP-43 membership snapshot reconciliation failed"
+                        elapsed_ms = started_at.elapsed().as_millis() as u64,
+                        "NIP-43 membership sweep failed"
                     ),
                 }
+                drop(leader);
             }
-        });
+        }));
     }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
@@ -1098,7 +1188,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    serve(router, health_router, Arc::clone(&state)).await?;
+    serve(router, health_router, Arc::clone(&state), listener_bound_tx).await?;
     state.community_revalidator_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
@@ -1116,6 +1206,59 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod after_listener_bound_tests {
+    use super::after_listener_bound;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The invariant PR review demanded be structural: the gated task must not
+    /// start before the bound signal, even with zero delay anywhere. Uses
+    /// `tokio::task::yield_now` generously so any "task runs immediately on
+    /// spawn" regression is caught deterministically, not probabilistically.
+    #[tokio::test]
+    async fn task_does_not_run_until_listener_bound_signal() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_task = Arc::clone(&ran);
+        let handle = tokio::spawn(after_listener_bound(rx, move || async move {
+            ran_in_task.store(true, Ordering::SeqCst);
+        }));
+
+        // Give the spawned task every chance to (incorrectly) run early.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "sweep task ran before the listener-bound signal"
+        );
+
+        tx.send(()).expect("receiver alive");
+        handle.await.expect("gated task completes");
+        assert!(ran.load(Ordering::SeqCst), "task must run after the signal");
+    }
+
+    /// Startup that fails before bind drops the sender; the gated task must
+    /// never run in that case (no sweep against a relay that never served).
+    #[tokio::test]
+    async fn task_never_runs_if_sender_dropped_before_bind() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_task = Arc::clone(&ran);
+        let handle = tokio::spawn(after_listener_bound(rx, move || async move {
+            ran_in_task.store(true, Ordering::SeqCst);
+        }));
+
+        drop(tx);
+        handle.await.expect("gated task exits cleanly");
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "task must not run when startup fails before bind"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1249,6 +1392,7 @@ async fn serve(
     router: axum::Router,
     health_router: axum::Router,
     state: Arc<AppState>,
+    listener_bound_tx: tokio::sync::oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
@@ -1331,6 +1475,11 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind {}: {e}", config.bind_addr))?;
     info!(addr = %config.bind_addr, "buzz-relay TCP listening");
+    // Release background work gated on the listener being bound (NIP-43 fleet
+    // sweep). Fired only here — if startup fails before this point the sender
+    // drops and the gated tasks never run. A receiver dropped earlier (e.g.
+    // membership disabled) is fine; ignore the send result.
+    let _ = listener_bound_tx.send(());
 
     #[cfg(unix)]
     if let Some(ref uds_path) = config.uds_path {
