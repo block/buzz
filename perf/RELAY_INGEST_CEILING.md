@@ -3,19 +3,28 @@
 Measures where accepted-event throughput stops tracking the offered rate, and
 whether the audit write path is what stops it.
 
-It exists because the backend perf findings in
-`RESEARCH/BUZZ_BACKEND_PERF_FINDINGS.md` (round-trip counts read from the code)
-predict a hard ingest ceiling, and nothing in this repo could measure it. That
-doc's numbers are structural claims plus arithmetic; this harness is the part
-that can be wrong out loud.
+It exists because the audit write path costs a fixed number of sequential
+statements per accepted event, which predicts a hard ingest ceiling, and nothing
+in this repo could measure it: there are no criterion benches, and `perf/`
+otherwise covers only the Redis fan-out boundary. The structural claim is
+verifiable from the source cited below; this harness is the part that can be wrong
+out loud. (See `RESEARCH/BUZZ_BACKEND_PERF_FINDINGS.md` for the original survey
+and its local checkout line references.)
 
 ## What is under test
 
-`buzz-audit`'s `log` is six sequential round trips per entry (advisory lock,
-BEGIN, head read, INSERT, COMMIT, unlock — `crates/buzz-audit/src/service.rs`),
-and it sits on the OK path: `dispatch_persistent_event` awaits
-`audit_tx.send()` on a bounded channel before the rest of the dispatch is
-spawned. So sustained ingest cannot exceed one audit entry per six round trips.
+`buzz-audit`'s `log` is six sequential client/server exchanges per entry —
+advisory lock, BEGIN, head read, INSERT, COMMIT, unlock
+(`crates/buzz-audit/src/service.rs`) — plus a synchronous durability wait inside
+the COMMIT. It sits on the OK path: `dispatch_persistent_event` awaits
+`audit_tx.send()` on a bounded channel before the rest of the dispatch is spawned.
+So sustained ingest cannot exceed one audit entry per that fixed cost.
+
+The exchanges and the durability wait are separate costs, and conflating them is
+easy: disabling `synchronous_commit` removes the flush *wait* but not the COMMIT
+exchange, so a model of "five network round trips plus a commit" overcounts what
+that setting removes. Both are amortized by batching, which is why the direction
+of the proposed fix does not depend on the split.
 
 There are **two** ceilings and they coincide numerically:
 
@@ -33,10 +42,23 @@ after the worker is fixed. Do not quote a passing run as clearing the lock.
 
 ## Run it
 
+A full experiment is two half-runs, one per arm, judged together. Both arms bind
+the same port, so they cannot run at once.
+
 ```bash
-./scripts/start-perf-ingest-rig.sh --reset > /tmp/rig.json
-./perf/relay_ingest_ceiling.py --rig /tmp/rig.json --json /tmp/ceiling.json
+./scripts/start-perf-ingest-rig.sh --reset > /tmp/rig-on.json
+./perf/relay_ingest_ceiling.py --rig /tmp/rig-on.json --json /tmp/on.json
+
+./scripts/start-perf-ingest-rig.sh --audit off > /tmp/rig-off.json
+./perf/relay_ingest_ceiling.py --rig /tmp/rig-off.json --json /tmp/off.json
+
+./perf/relay_ingest_ceiling.py --combine /tmp/on.json /tmp/off.json
 ```
+
+Each half-run exits non-zero on its own — a single arm is a partial experiment by
+construction — and writes its `--json` first, so the workflow above still works.
+`--skip-relay` attaches to a relay someone else supervises, which is required in
+environments that reap detached processes.
 
 The rig is one relay process serving two communities, resolved by `Host`:
 `a.localhost:3030` and `b.localhost:3030` both resolve to 127.0.0.1, so the URL
@@ -54,46 +76,115 @@ python3 -m unittest discover -s perf -p 'test_*.py'
 
 ## What it asserts
 
+The contract is an **arm separation**, not a threshold. Each rate is run `--repeats`
+times in both arms, and the verdict asks whether the difference in accepted/offered
+between audit-off and audit-on excludes zero at any rate. No noise floor is needed
+for that.
+
+An earlier version derived its pass threshold from the spread of repeated runs
+(`1 - 3s`). That is retired, and the reason is worth keeping: in the unsaturated
+region accepted/offered is pinned at 1.0, so the spread is ~0 and the threshold
+absorbs nothing; in the saturated region the spread is the system's own throughput
+variability, which is the signal, not the noise. No placement of that control
+rescues the formula.
+
+Overlapping intervals are also not used as evidence of anything. "The arms'
+intervals overlap" would not establish that they are equal — absence of a
+significant difference is not evidence of absence — so the predicate is on the
+interval of the *difference*.
+
 Non-zero exit on any of these, with every failure reported rather than the first:
 
-1. **Admission quota rejections moved.** Then the limiter was measured, not the
-   relay. See the trap below.
-2. **`audit_log` did not grow with audit enabled.** The subject was never
-   exercised.
-3. **`audit_log` grew with audit disabled.** The attribution control did not take
-   effect, so it would have agreed with the hypothesis for the wrong reason.
-4. **No knee up to the highest offered rate.** The predicted ceiling did not
-   appear at these rates. This is a finding, not a harness defect, and it has to
-   be loud.
-5. **The knee did not move when audit was disabled.** Something other than the
-   audit path is the ceiling.
+1. **A cell was contaminated by admission control.** Either `reason="quota"` or
+   `reason="unavailable"` moved. The second matters as much as the first: a
+   rejected event takes the same NOTICE-without-OK path either way, and admission
+   itself costs Redis round trips against the same rig the sweep is loading — so
+   unavailability is load-correlated and can forge a knee that *persists* across
+   repeats at exactly the rate a reader would trust.
+2. **A cell saw relay rejections, generator transport errors, or audit-write or
+   audit-enqueue failures.** An enqueue failure specifically means the worker is
+   gone: a bounded `mpsc::Sender::send` awaits when full and errors only when the
+   receiver is dropped.
+3. **A cell was not in steady state** — `outstanding_delta` moved more than a small
+   fraction of the audit channel's depth. The criterion is stability, *not*
+   emptiness: a saturating cell settles with the channel full and backpressure
+   engaged, an unsaturated one settles near zero, and both are legitimate. A gate
+   written as "assert the queue is empty before the window" would make every
+   saturated cell — every cell that matters for a ceiling — unmeasurable while
+   looking like a working precondition.
+4. **The generator had less than 1.5x headroom over the offered rate**, so the cell
+   was partly measuring the generator rather than the relay.
+5. **The audit-off control did not run.** A single-arm dataset is a partial
+   experiment and reports `control.ran: false`; `--combine` judges the pair. The
+   verdict carries an explicit ran/skipped marker, because "no knee on the
+   audit-off arm" otherwise reads identically for "the control ran and the knee
+   was gone" and "the control never ran".
+6. **The two halves handed to `--combine` are not the same experiment.** Rates,
+   duration, repeats, community hosts, both limiter settings, the generator path,
+   and the source revision must all match.
+7. **No rate separated the arms**, so the audit path is not shown to limit ingest.
 
 `perf/test_relay_ingest_ceiling.py` pairs every passing case with a mutant that
-must fail — a lone dip that must not be called a knee, a control that did not
-take effect, a limiter-contaminated run. A contract that cannot go red is
-decoration.
+must fail — a lone dip that must not count as a knee, a control that did not run,
+an arm separation in the wrong direction, a cell that banked the whole channel, a
+`--combine` across mismatched durations. A contract that cannot go red is
+decoration. Nothing wires this suite into CI, a Justfile target, or a hook (the
+same is true of the pre-existing bus-scaling tests), so run it by hand:
 
-## How the knee is defined
+```bash
+python3 -m unittest discover -s perf -p 'test_*.py'
+```
 
-`achieved / offered` falls below `1 − 3s`, where `s` is the relative spread the
-**null control** measured on this machine: the lowest sweep rate run twice, back
-to back. The threshold is calibrated to the rig rather than asserted, so a noisy
-machine widens it instead of manufacturing a knee. A fixed constant like 95%
-would be a number nobody measured.
+## Two throughput series, and why neither replaces the other
 
-A knee must also persist at the next higher rate. Saturation is monotone; a
-single dip is noise. The highest rate may stand alone because it has no
-successor.
+- `accepted_per_s` — user-visible ingest. Arm separation is computed on this,
+  because it is the series both arms have.
+- `audit_completed_per_s` — audit-worker completions, from
+  `buzz_audit_log_seconds`. **N/A in the audit-off arm**: with
+  `BUZZ_AUDIT_ENABLED=false` there is no worker and no series, so substituting it
+  for accepted throughput would make the positive control read as total collapse
+  and invert the predicate.
 
-The report gives `ceiling_bracket_*` as `[last passing rate, knee]`. A sweep only
-ever brackets the ceiling between the last rate it met and the first it did not —
-quoting the knee alone reads a grid point as a measurement. A finer grid narrows
-the bracket.
+Accepted throughput needs the steady-state gate because the audit channel is a
+bounded `mpsc::channel(1000)`: a cell that starts with it empty accepts up to
+1000 events before backpressure. Measured on this rig, `accepted - completed` came
+to **exactly +1000** from a known-empty start and **exactly 0** from a full one.
+That credit is a *bias*, identical across repeats, so an interval over n runs
+converges tightly on a wrong number — precision and bias are different axes and n
+only buys the first. It is exactly 1000 only in deep saturation; a transition cell
+banks a partial amount depending on both offer and duration, and the knee lives in
+the transition region, so the bias is least tractable exactly where the bracket is
+decided.
 
-**Latency is corroboration, not part of the predicate.** p99 is reported next to
-every point and never gates the verdict: it is an extreme order statistic, while
-`achieved/offered` is a ratio of two aggregate rates, so a conjunctive gate would
-let the noisier signal hide a real knee.
+`audit_completed_per_s` is free of that credit, and it licenses a capacity claim
+only where `audit_busy_fraction` is near 1 and no error counter moved — below
+saturation a completion rate just tracks the offer. Two further bounds: the
+histogram is a per-pod aggregate, so it cannot be split per community in the
+two-community cells; and it measures the audit worker, which is the subject only
+while the audit path is the binding constraint. Once the worker is fixed, it and
+ingest throughput part ways.
+
+`audit_busy_fraction` is reported explicitly rather than left implicit. Completion
+rate and `1/mean(service)` are `C/T` and `C/S` over the same count, so their ratio
+is exactly `S/T` — they are one measurement reported two ways, and their agreeing
+tells you the worker was busy, not that two instruments corroborate each other.
+
+## The two-community arm, and what it can show
+
+Each rate is also run split evenly across two communities. The expected relation
+follows from which defect binds:
+
+- If the **per-pod worker** is the ceiling, the two-community aggregate knee sits
+  at roughly the same place as the one-community knee — the worker drains all
+  communities serially, so splitting the offer buys nothing.
+- If the **per-community lock** were the ceiling, two communities would reach
+  roughly double the combined rate.
+
+Round 1 observed the first shape. The cells are recorded but **not** judged: a
+CI-backed equivalence test on the difference between the arms, with a predeclared
+margin, is the designed follow-up. Overlapping marginal intervals would not
+establish that the two ceilings are equal, so nothing here asserts that they are.
+
 
 ## Two latencies, and why both
 
@@ -140,8 +231,8 @@ different diagnosis.
 ## What this harness can and cannot support
 
 **It characterizes the mechanism, not deployability at scale.** A raised-limit
-sweep is valid evidence for "the audit path caps a community at ~1/(6·RTT)". It
-is *not* evidence that a real community reaches that rate. At production defaults
+sweep is valid evidence that the audit path caps a community's ingest. It is
+*not* evidence that a real community reaches that rate. At production defaults
 one identity sustains far less, so reaching a few hundred events/s inside one
 community needs hundreds of concurrent identities — each carrying its own
 WebSocket and its own per-event admission round trip that this sweep never pays.
@@ -156,18 +247,23 @@ Two constraints on whoever builds it:
   and the only connection cap is a global semaphore. Convenient here, and not to
   be mistaken for a control that exists.
 
-`load_per_cpu` is recorded per run because the null control only absorbs load
-that is steady across two adjacent runs. A drifting background load is invisible
-to it and looks like a ceiling. Run sweeps on an otherwise idle machine.
+`load_per_cpu` is recorded per cell, but read it with its resolution in mind: it
+is a 1-minute average sampled inside a much shorter cell, so consecutive cells are
+autocorrelated and every cell in a sweep reads about the same. It can catch a
+sweep-long compile storm on a shared machine; it cannot exonerate one cell. Run
+sweeps on an otherwise idle machine.
 
 ## Not yet measured
 
-* **The knee-versus-RTT slope.** The claim is that the ceiling is six round
-  trips, so the knee should fall roughly linearly in RTT with slope ~1/6.
-  Testing that needs a fixed delay injected between relay and Postgres, swept
-  across at least three values; a single injected value agreeing with one
-  predicted number is a coincidence that cannot be distinguished from a correct
-  prediction. Local Postgres is a loopback socket, so absolute rates from this
+* **Sensitivity to round-trip latency.** Injected delay between relay and
+  Postgres should move the ceiling, and a sweep across at least three injected
+  values can measure how much — a single value agreeing with one predicted number
+  is a coincidence indistinguishable from a correct prediction. But predeclare
+  the expected shape as *six* added exchange delays plus a durability intercept,
+  not five: the COMMIT exchange is still a round trip. Attributing the resulting
+  slope needs per-statement timing, since the measured interval also contains pool
+  acquisition, SQL execution, hash chaining and WAL generation. No clean
+  round-trip decomposition is available from anything run so far. Local Postgres is a loopback socket, so absolute rates from this
   rig are not comparable to a same-VPC deployment — the harness prints measured
   latency beside every rate for that reason, and no absolute events/s figure from
   it should be quoted as a production number.

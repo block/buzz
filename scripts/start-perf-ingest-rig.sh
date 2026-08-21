@@ -110,8 +110,16 @@ AUDIT_ENABLED=true
 [[ "${AUDIT}" == off ]] && AUDIT_ENABLED=false
 
 start_relay() {
+  # Only signal a pid that is still our relay: pids are recycled, and a stale
+  # file from a relay that already exited would otherwise kill a stranger.
   if [[ -f "${PIDFILE}" ]]; then
-    kill "$(cat "${PIDFILE}")" 2>/dev/null || true
+    stale_pid="$(cat "${PIDFILE}")"
+    if [[ "${stale_pid}" =~ ^[0-9]+$ ]] \
+      && ps -p "${stale_pid}" -o command= 2>/dev/null | grep -q 'buzz-relay'; then
+      kill "${stale_pid}" 2>/dev/null || true
+    else
+      log "pidfile ${PIDFILE} is stale (pid ${stale_pid} is not our relay); removing it"
+    fi
     rm -f "${PIDFILE}"
   fi
   # The relay panics rather than reporting a conflict if the metrics port is taken,
@@ -157,10 +165,10 @@ start_relay() {
   echo $! > "${PIDFILE}"
 
   for _ in $(seq 1 60); do
-    if curl -s -o /dev/null "http://localhost:${RELAY_MAIN}/health"; then break; fi
+    if curl -fs -o /dev/null "http://localhost:${RELAY_MAIN}/health"; then break; fi
     sleep 1
   done
-  if ! curl -s -o /dev/null "http://localhost:${RELAY_MAIN}/health"; then
+  if ! curl -fs -o /dev/null "http://localhost:${RELAY_MAIN}/health"; then
     echo "[perf-rig] relay did not come up on :${RELAY_MAIN} — see ${RELAY_LOG}" >&2
     exit 1
   fi
@@ -173,7 +181,7 @@ if [[ "${SKIP_RELAY}" == yes ]]; then
   # check it, so the audit-row control in perf/relay_ingest_ceiling.py is what
   # catches a mismatch.
   log "Attaching to the relay already listening on :${RELAY_MAIN}..."
-  if ! curl -s -o /dev/null "http://localhost:${RELAY_MAIN}/health"; then
+  if ! curl -fs -o /dev/null "http://localhost:${RELAY_MAIN}/health"; then
     echo "[perf-rig] --skip-relay given but nothing is serving :${RELAY_MAIN}" >&2
     exit 1
   fi
@@ -198,13 +206,22 @@ log "Creating a channel in each community..."
 CHANNEL_A="$(create_channel "${HOST_A}" "perf-ingest-a")"
 CHANNEL_B="$(create_channel "${HOST_B}" "perf-ingest-b")"
 
-RELAY_PID="$(cat "${PIDFILE}" 2>/dev/null || echo 0)"
+# Under --skip-relay this process manages no relay, so reporting a pid would
+# hand the header's teardown instruction a number that is not ours to kill.
+if [[ "${SKIP_RELAY}" == yes ]]; then
+  RELAY_PID=null
+else
+  RELAY_PID="$(cat "${PIDFILE}")"
+fi
+SOURCE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 python3 -c '
 import json, sys
 (pid, log, gen, metrics, db, project, key, audit, ws_limit, msg_limit,
- host_a, chan_a, host_b, chan_b) = sys.argv[1:]
+ host_a, chan_a, host_b, chan_b, revision, repo_root) = sys.argv[1:]
 print(json.dumps({
-    "relay_pid": int(pid),
+    "relay_pid": None if pid == "null" else int(pid),
+    "source_revision": revision,
+    "repo_root": repo_root,
     "relay_log": log,
     "generator": gen,
     "metrics_url": metrics,
@@ -224,5 +241,6 @@ print(json.dumps({
   "postgres://buzz:buzz_dev@localhost:${PG_PORT}/buzz" \
   "${PROJECT}" "${BENCH_KEY}" "${AUDIT_ENABLED}" \
   "${WS_EVENTS_PER_SEC}" "${MESSAGES_PER_MIN}" \
-  "${HOST_A}" "${CHANNEL_A}" "${HOST_B}" "${CHANNEL_B}"
-log "Rig ready. Relay pid ${RELAY_PID}, log ${RELAY_LOG}"
+  "${HOST_A}" "${CHANNEL_A}" "${HOST_B}" "${CHANNEL_B}" \
+  "${SOURCE_REVISION}" "${REPO_ROOT}"
+log "Rig ready. Relay pid ${RELAY_PID}, log ${RELAY_LOG}, revision ${SOURCE_REVISION}"

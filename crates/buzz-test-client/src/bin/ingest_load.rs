@@ -1,10 +1,8 @@
 //! Multi-community paced ingest load generator.
 //!
 //! Drives several communities at independently settable rates against one relay
-//! process. That is what separates the two ingest ceilings under investigation:
-//! the audit worker is per-pod and aggregate across communities, while the audit
-//! advisory lock is per-community and cluster-wide. One community alone cannot
-//! tell them apart. See `perf/RELAY_INGEST_CEILING.md`.
+//! process, which is what lets the harness tell a per-pod ceiling from a
+//! per-community one. `perf/RELAY_INGEST_CEILING.md` owns that reasoning.
 //!
 //! Reports two latencies per target, because they diverge exactly when the relay
 //! saturates and the gap between them is the measurement:
@@ -21,7 +19,7 @@
 //! ratio of rates, and p50/p95/p99/max cover what a human reads.
 //!
 //! Usage:
-//!   ingest-load <duration_secs> <target> [<target> ...]
+//!   ingest_load <duration_secs> <target> [<target> ...]
 //!     target: url=<ws-url>,channel=<uuid>,rate=<events/s>[,conns=<n>]
 //!
 //! Env:
@@ -58,6 +56,10 @@ struct Target {
 }
 
 /// What one connection, or one whole target, observed.
+///
+/// `attempted` counts *settled* sends only. A send that fails in flight leaves
+/// no latency sample and is not counted here either — it shows up as
+/// `first_transport_error`, which the runner treats as invalidating the cell.
 #[derive(Debug, Default)]
 struct Outcome {
     attempted: u64,
@@ -197,13 +199,16 @@ fn summarize(target: &Target, window: &Window, out: &mut Outcome) -> Value {
     let achieved = out.accepted as f64 / window.elapsed_secs;
 
     // The ceiling this generator imposes on itself: each connection is
-    // closed-loop, so it cannot exceed one send per service latency. A reader
-    // comparing `achieved_per_s` against this can tell a relay ceiling from a
-    // generator ceiling; raise `conns` when they are close.
-    let conn_capacity = service["p50"]
-        .as_f64()
-        .filter(|p50| *p50 > 0.0)
-        .map(|p50| target.conns as f64 / (p50 / 1e3));
+    // closed-loop, so it cannot exceed one send per service time. Derived from
+    // the *mean*, not the median — closed-loop throughput depends on mean
+    // service demand, and a median understates it on a skewed distribution.
+    // A reader comparing `achieved_per_s` against this can tell a relay ceiling
+    // from a generator ceiling; raise `conns` when they are close.
+    let service_mean_ms = (!out.service_ms.is_empty())
+        .then(|| out.service_ms.iter().sum::<f64>() / out.service_ms.len() as f64);
+    let conn_capacity = service_mean_ms
+        .filter(|mean| *mean > 0.0)
+        .map(|mean| target.conns as f64 / (mean / 1e3));
 
     json!({
         "url": target.url,
@@ -219,6 +224,7 @@ fn summarize(target: &Target, window: &Window, out: &mut Outcome) -> Value {
         // a run that finishes a hair early cannot report better than 1.0.
         "achieved_over_offered": out.accepted as f64 / (target.rate * window.requested_secs),
         "conn_capacity_per_s": conn_capacity,
+        "service_mean_ms": service_mean_ms,
         "service_ms": service,
         "scheduled_ms": percentiles(&mut out.scheduled_ms),
         "first_rejection": out.first_rejection,
@@ -240,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
         .filter(|(_, targets)| !targets.is_empty())
         .ok_or_else(|| {
             anyhow!(
-                "usage: ingest-load <duration_secs> <target> [<target> ...]\n  \
+                "usage: ingest_load <duration_secs> <target> [<target> ...]\n  \
                  target: url=<ws-url>,channel=<uuid>,rate=<events/s>[,conns=<n>]"
             )
         })?;
