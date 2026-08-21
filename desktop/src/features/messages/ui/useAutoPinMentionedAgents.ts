@@ -2,15 +2,14 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  getPersistentAgentAudienceSnapshot,
-  removePersistentAgentAudienceMember,
+  promotePersistentAgentAudienceIfUnchanged,
+  removePersistentAgentAudienceMembersIfUnchanged,
 } from "@/features/messages/lib/persistentAgentAudience";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type Options = {
   audienceScope: string | null;
   enabled: boolean;
-  addPubkey: (pubkey: string) => void;
   getDisplayName: (pubkey: string) => string | null | undefined;
   onOpenOptions: () => void;
   onPulse: (pubkey: string) => void;
@@ -19,55 +18,56 @@ type Options = {
 export function useAutoPinMentionedAgents({
   audienceScope,
   enabled,
-  addPubkey,
   getDisplayName,
   onOpenOptions,
   onPulse,
 }: Options) {
   return React.useCallback(
-    (pubkeys: readonly string[]) => {
+    ({
+      expectedRevision,
+      pubkeys,
+    }: {
+      expectedRevision: number;
+      pubkeys: readonly string[];
+    }) => {
       if (!audienceScope || !enabled) return;
-      const pinnedPubkeys = new Set(
-        getPersistentAgentAudienceSnapshot().audiences[audienceScope] ?? [],
-      );
-      const newlyPinnedPubkeys: string[] = [];
-      for (const pubkey of pubkeys) {
-        const normalizedPubkey = normalizePubkey(pubkey);
-        if (!pinnedPubkeys.has(normalizedPubkey)) {
-          pinnedPubkeys.add(normalizedPubkey);
-          newlyPinnedPubkeys.push(normalizedPubkey);
-        }
-        addPubkey(normalizedPubkey);
-        onPulse(normalizedPubkey);
-      }
-      if (newlyPinnedPubkeys.length === 0) return;
+      const normalizedPubkeys = [
+        ...new Set(pubkeys.map(normalizePubkey)),
+      ].filter(Boolean);
+      const appliedRevision = promotePersistentAgentAudienceIfUnchanged({
+        expectedRevision,
+        pubkeys: normalizedPubkeys,
+        scope: audienceScope,
+      });
+      if (appliedRevision === null) return;
+      for (const pubkey of normalizedPubkeys) onPulse(pubkey);
 
-      const showToast = (title: string) => {
-        toast.success(title, {
-          action: {
-            label: "Undo",
-            onClick: () => {
-              for (const pubkey of newlyPinnedPubkeys) {
-                removePersistentAgentAudienceMember(audienceScope, pubkey);
-              }
+      const displayName =
+        normalizedPubkeys.length === 1
+          ? getDisplayName(normalizedPubkeys[0])?.trim()
+          : null;
+      const title = displayName
+        ? `${displayName} will be mentioned automatically`
+        : normalizedPubkeys.length === 1
+          ? "Agent will be mentioned automatically"
+          : `${normalizedPubkeys.length} agents will be mentioned automatically`;
+      toast.success(title, {
+        action: {
+          label: "Undo",
+          onClick: () => {
+            if (
+              removePersistentAgentAudienceMembersIfUnchanged({
+                expectedRevision: appliedRevision,
+                pubkeys: normalizedPubkeys,
+                scope: audienceScope,
+              })
+            ) {
               onOpenOptions();
-            },
+            }
           },
-        });
-      };
-      if (newlyPinnedPubkeys.length === 1) {
-        const displayName = getDisplayName(newlyPinnedPubkeys[0])?.trim();
-        showToast(
-          displayName
-            ? `${displayName} will be mentioned automatically`
-            : "Agent will be mentioned automatically",
-        );
-      } else {
-        showToast(
-          `${newlyPinnedPubkeys.length} agents will be mentioned automatically`,
-        );
-      }
+        },
+      });
     },
-    [addPubkey, audienceScope, enabled, getDisplayName, onOpenOptions, onPulse],
+    [audienceScope, enabled, getDisplayName, onOpenOptions, onPulse],
   );
 }

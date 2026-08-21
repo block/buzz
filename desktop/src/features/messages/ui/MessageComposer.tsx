@@ -29,6 +29,7 @@ import {
 } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
+  getPersistentAgentAudienceRevision,
   getPersistentAgentAudienceScope,
   usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
@@ -300,7 +301,6 @@ function MessageComposerImpl({
   const addInlineAgentMentionsToAudience = useAutoPinMentionedAgents({
     audienceScope,
     enabled: keepMentionedAgentsPinned,
-    addPubkey: persistentAudience.addPubkey,
     getDisplayName: mentions.getMentionDisplayName,
     onOpenOptions: () => openMentionOptionsRef.current(),
     onPulse: addressPulse.pulseOne,
@@ -357,10 +357,6 @@ function MessageComposerImpl({
       setSpoileredAttachmentUrls(
         findSpoileredImetaMediaUrls(editTarget.body, editableImeta),
       );
-      // restoration the trigger UI (e.g. the message-row context menu)
-      // fires on close. Without this, Radix-style focus-restoration races
-      // our call and leaves DOM focus on the message row — global keybinds
-      // like Delete then fire there instead of in the editor. `focusEnd`
       // also lands the caret at end of the loaded content.
       const rafId = requestAnimationFrame(() => richText.focusEnd());
       return () => cancelAnimationFrame(rafId);
@@ -574,6 +570,9 @@ function MessageComposerImpl({
         : prepareBackgroundLinkPreviews(getLiveLinkPreviewCandidates());
       await mentionSendFlow.sendMessageWithMentionFlow({
         addressedAgentPubkeys: persistentAudience.pubkeys,
+        audienceRevision: audienceScope
+          ? getPersistentAgentAudienceRevision(audienceScope)
+          : 0,
         capturedChannelId: channelId,
         capturedThreadContext,
         pendingImeta: currentPendingImeta,
@@ -616,6 +615,7 @@ function MessageComposerImpl({
     syncComposerContentFromEditor,
     onCaptureSendContext,
     onPreparingMentionSendChange,
+    audienceScope,
     persistentAudience.pubkeys,
     isEditSubmissionLocked,
     effectiveDraftKey,

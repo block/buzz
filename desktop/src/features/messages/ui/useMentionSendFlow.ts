@@ -61,7 +61,10 @@ type UseMentionSendFlowOptions = {
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onAddressedAgentsSendStarted?: (pubkeys: readonly string[]) => void;
   onAddressedAgentsSendFailed?: (pubkeys: readonly string[]) => void;
-  onInlineAgentMentionsSent?: (pubkeys: readonly string[]) => void;
+  onInlineAgentMentionsSent?: (promotion: {
+    expectedRevision: number;
+    pubkeys: readonly string[];
+  }) => void;
   onSendRef: React.MutableRefObject<
     (
       content: string,
@@ -586,11 +589,12 @@ export function useMentionSendFlow({
           const sentMentionPubkeys = new Set(
             revalidatedMentionPubkeys.map(normalizePubkey),
           );
-          onInlineAgentMentionsSent?.(
-            draft.inlineAgentMentionPubkeys.filter((pubkey) =>
+          onInlineAgentMentionsSent?.({
+            expectedRevision: draft.audienceRevision,
+            pubkeys: draft.inlineAgentMentionPubkeys.filter((pubkey) =>
               sentMentionPubkeys.has(normalizePubkey(pubkey)),
             ),
-          );
+          });
           if (draft.sentDraftKey) {
             drafts.markDraftSent(
               draft.sentDraftKey,
@@ -672,6 +676,7 @@ export function useMentionSendFlow({
   const sendMessageWithMentionFlow = React.useCallback(
     async ({
       addressedAgentPubkeys = [],
+      audienceRevision = 0,
       capturedChannelId,
       capturedThreadContext = null,
       pendingImeta,
@@ -780,6 +785,7 @@ export function useMentionSendFlow({
         const savedMentionRefs = mentions.getDraftMentionRefs(trimmed);
         const pendingDraft: PendingNonMemberMentionSend = {
           addressedAgentPubkeys: uniqueNormalizedPubkeys(addressedAgentPubkeys),
+          audienceRevision,
           inlineAgentMentionPubkeys: uniqueNormalizedPubkeys(
             savedMentionRefs
               .filter((ref) => ref.isAgent)

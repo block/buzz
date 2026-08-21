@@ -3,6 +3,9 @@ import * as React from "react";
 export const MAX_IN_MEMORY_AGENT_AUDIENCES = 200;
 
 const listeners = new Set<() => void>();
+const revisions = new Map<string, number>();
+let revisionClock = 0;
+let defaultRevision = 0;
 let audiences: Record<string, string[]> = {};
 let snapshot = buildSnapshot();
 
@@ -51,6 +54,9 @@ export function getPersistentAgentAudienceScope({
 }
 
 export function resetPersistentAgentAudienceStore(): void {
+  revisionClock += 1;
+  defaultRevision = revisionClock;
+  revisions.clear();
   audiences = {};
   emit();
 }
@@ -77,7 +83,54 @@ export function setPersistentAgentAudience(
   const nextAudiences = { ...audiences };
   delete nextAudiences[scope];
   audiences = boundAudiences({ ...nextAudiences, [scope]: normalized });
+  for (const revisedScope of revisions.keys()) {
+    if (!Object.hasOwn(audiences, revisedScope)) revisions.delete(revisedScope);
+  }
+  revisionClock += 1;
+  revisions.set(scope, revisionClock);
   emit();
+}
+
+export function getPersistentAgentAudienceRevision(scope: string): number {
+  return revisions.get(scope) ?? defaultRevision;
+}
+
+export function promotePersistentAgentAudienceIfUnchanged({
+  expectedRevision,
+  pubkeys,
+  scope,
+}: {
+  expectedRevision: number;
+  pubkeys: Iterable<string>;
+  scope: string;
+}): number | null {
+  if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
+    return null;
+  const promoted = normalizePubkeys(pubkeys).filter(
+    (pubkey) => !(audiences[scope] ?? []).includes(pubkey),
+  );
+  if (promoted.length === 0) return null;
+  setPersistentAgentAudience(scope, [...(audiences[scope] ?? []), ...promoted]);
+  return getPersistentAgentAudienceRevision(scope);
+}
+
+export function removePersistentAgentAudienceMembersIfUnchanged({
+  expectedRevision,
+  pubkeys,
+  scope,
+}: {
+  expectedRevision: number;
+  pubkeys: Iterable<string>;
+  scope: string;
+}): boolean {
+  if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
+    return false;
+  const removals = new Set(normalizePubkeys(pubkeys));
+  setPersistentAgentAudience(
+    scope,
+    (audiences[scope] ?? []).filter((pubkey) => !removals.has(pubkey)),
+  );
+  return true;
 }
 
 export function addPersistentAgentAudienceMember(

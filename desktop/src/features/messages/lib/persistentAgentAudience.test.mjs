@@ -149,3 +149,44 @@ test("channel and thread composers share the channel audience scope", async () =
   assert.equal(channelScope, `${ownerA}:channel-a:channel`);
   assert.equal(threadScope, channelScope);
 });
+
+test("delayed promotion cannot overwrite a newer audience choice", async () => {
+  const store = await loadStore(9);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, []);
+  const sendRevision = store.getPersistentAgentAudienceRevision(scope);
+
+  store.addPersistentAgentAudienceMember(scope, agentA);
+  store.removePersistentAgentAudienceMember(scope, agentA);
+  const result = store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: sendRevision,
+    pubkeys: [agentA],
+    scope,
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(currentAudiences(store), { [scope]: [] });
+});
+
+test("stale auto-pin Undo cannot remove a newer explicit choice", async () => {
+  const store = await loadStore(10);
+  const scope = `${ownerA}:channel-a:channel`;
+  store.setPersistentAgentAudience(scope, []);
+  const appliedRevision = store.promotePersistentAgentAudienceIfUnchanged({
+    expectedRevision: store.getPersistentAgentAudienceRevision(scope),
+    pubkeys: [agentA],
+    scope,
+  });
+  assert.notEqual(appliedRevision, null);
+
+  store.removePersistentAgentAudienceMember(scope, agentA);
+  store.addPersistentAgentAudienceMember(scope, agentA);
+  const removed = store.removePersistentAgentAudienceMembersIfUnchanged({
+    expectedRevision: appliedRevision,
+    pubkeys: [agentA],
+    scope,
+  });
+
+  assert.equal(removed, false);
+  assert.deepEqual(currentAudiences(store), { [scope]: [agentA] });
+});
