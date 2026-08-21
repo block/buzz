@@ -72,7 +72,15 @@ pub async fn get_feed(
     };
 
     // Mentions: messages that reference me via #p.
+    //
+    // `feed_types` routes this filter through the relay's feed path, whose
+    // mentions query windows **per conversation** (newest conversations first,
+    // a few newest events each) instead of a flat newest-N-events cut. The
+    // flat cut let one chatty thread/DM fill the whole window and starve
+    // every other conversation out of the Inbox. The kinds below still bound
+    // the generic-query fallback for older relays that ignore `feed_types`.
     let mut mention_filter = serde_json::json!({
+        "feed_types": ["mentions"],
         "kinds": [
             9,
             40002,

@@ -28,6 +28,28 @@
 /// before the query is issued so the SQL `LIMIT` clause always reflects this cap.
 pub const FEED_MAX_LIMIT: i64 = 100;
 
+/// Per-conversation cap inside the mentions window.
+///
+/// The mentions feed used to be a flat `ORDER BY created_at DESC LIMIT n`
+/// over every event p-tagging the user. Clients group those events into
+/// conversation rows *after* the cut, so one chatty thread or DM could occupy
+/// nearly the whole window and starve every other conversation out of the
+/// inbox (observed in production: a single DM held 39 of a 50-event
+/// window, collapsing the inbox to 3 rows). Capping each conversation
+/// at this many events guarantees a `limit`-row window spans at least
+/// `limit / FEED_CONVERSATION_EVENT_CAP` distinct conversations. The client
+/// only needs a representative event plus an unread signal per row — opening
+/// a row fetches the full thread separately.
+pub const FEED_CONVERSATION_EVENT_CAP: i64 = 3;
+
+/// Upper bound on candidate rows scanned before conversation windowing.
+///
+/// Bounds the work of the window function: the candidate CTE walks the
+/// indexed `event_mentions` ordering newest-first and stops here. Mentions
+/// older than the newest `FEED_WINDOW_SCAN_CAP` mention-events are outside
+/// the feed window (they remain reachable via thread/channel queries).
+const FEED_WINDOW_SCAN_CAP: i64 = 2000;
+
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, QueryBuilder};
@@ -82,6 +104,22 @@ fn collect_stored_events(rows: Vec<PgRow>) -> Result<Vec<StoredEvent>> {
     Ok(out)
 }
 
+/// Build the windowed mentions query.
+///
+/// The window is **per-conversation**, not flat: a naive
+/// `ORDER BY created_at DESC LIMIT n` lets one chatty thread or DM occupy
+/// nearly every slot, starving all other conversations out of the inbox
+/// before the client's conversation grouping ever sees them.
+///
+/// Shape: a candidate CTE walks the indexed `event_mentions` ordering
+/// newest-first (bounded by [`FEED_WINDOW_SCAN_CAP`]), each candidate is
+/// keyed by its conversation — `dm:<channel_id>` for DM channels, else the
+/// thread root from `thread_metadata` (falling back to the event's own id
+/// for top-level events) — mirroring the client's grouping key
+/// (`getInboxConversationId`). A `ROW_NUMBER()` window keeps the newest
+/// [`FEED_CONVERSATION_EVENT_CAP`] events per conversation, and whole
+/// conversations are emitted newest-activity-first so the final `LIMIT`
+/// truncates at a conversation boundary instead of mid-window.
 fn build_mentions_query(
     community: CommunityId,
     pubkey_bytes: &[u8],
@@ -93,7 +131,8 @@ fn build_mentions_query(
     let pubkey_hex = hex::encode(pubkey_bytes);
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
-        "SELECT {EVENT_COLS} FROM events e \
+        "WITH candidates AS ( \
+         SELECT {EVENT_COLS} FROM events e \
          INNER JOIN event_mentions m ON e.community_id = m.community_id AND e.id = m.event_id \
          WHERE e.community_id = "
     ));
@@ -112,8 +151,31 @@ fn build_mentions_query(
     if let Some(s) = since {
         qb.push(" AND m.event_created_at >= ").push_bind(s);
     }
-    qb.push(" ORDER BY m.event_created_at DESC LIMIT ")
-        .push_bind(limit);
+    qb.push(format!(
+        " ORDER BY m.event_created_at DESC LIMIT {FEED_WINDOW_SCAN_CAP} \
+         ), keyed AS ( \
+         SELECT c.*, \
+         CASE WHEN ch.channel_type = 'dm' THEN 'dm:' || c.channel_id::text \
+              ELSE encode(COALESCE(tm.root_event_id, c.id), 'hex') END AS conv_key \
+         FROM candidates c \
+         LEFT JOIN channels ch ON ch.community_id = "
+    ));
+    qb.push_bind(*community.as_uuid());
+    qb.push(" AND ch.id = c.channel_id LEFT JOIN thread_metadata tm ON tm.community_id = ");
+    qb.push_bind(*community.as_uuid());
+    qb.push(format!(
+        " AND tm.event_created_at = c.created_at AND tm.event_id = c.id \
+         ), ranked AS ( \
+         SELECT k.*, \
+         ROW_NUMBER() OVER (PARTITION BY k.conv_key ORDER BY k.created_at DESC, k.id DESC) AS conv_rank, \
+         MAX(k.created_at) OVER (PARTITION BY k.conv_key) AS conv_latest \
+         FROM keyed k \
+         ) \
+         SELECT {EVENT_COLS_UNALIASED} FROM ranked \
+         WHERE conv_rank <= {FEED_CONVERSATION_EVENT_CAP} \
+         ORDER BY conv_latest DESC, conv_key, created_at DESC LIMIT "
+    ));
+    qb.push_bind(limit);
     qb
 }
 
@@ -368,6 +430,63 @@ mod tests {
         crate::event::insert_event(pool, community, &event, channel_id)
             .await
             .expect("insert feed event");
+        crate::insert_mentions(pool, community, &event, channel_id)
+            .await
+            .expect("insert mentions");
+        event
+    }
+
+    /// Like [`store_feed_event`], but with a fixed `created_at` and — when the
+    /// tags carry a NIP-10 root marker — a `thread_metadata` row, mirroring the
+    /// relay ingest path so the windowed mentions query can resolve the
+    /// conversation key.
+    async fn store_feed_event_at(
+        pool: &PgPool,
+        community: CommunityId,
+        kind: u32,
+        content: &str,
+        channel_id: Option<Uuid>,
+        tags: Vec<Tag>,
+        created_at: i64,
+    ) -> nostr::Event {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(created_at as u64))
+            .sign_with_keys(&keys)
+            .expect("sign event");
+
+        let root_id: Option<Vec<u8>> = event.tags.iter().find_map(|tag| {
+            let t = tag.as_slice();
+            (t.len() >= 4 && t[0] == "e" && t[3] == "root")
+                .then(|| hex::decode(&t[1]).expect("hex root id"))
+        });
+        let event_created_at =
+            DateTime::from_timestamp(created_at, 0).expect("valid test timestamp");
+        let thread_meta = match (&root_id, channel_id) {
+            (Some(root), Some(channel)) => Some(crate::event::ThreadMetadataParams {
+                event_id: event.id.as_bytes(),
+                event_created_at,
+                channel_id: channel,
+                parent_event_id: Some(root.as_slice()),
+                parent_event_created_at: None,
+                root_event_id: Some(root.as_slice()),
+                root_event_created_at: None,
+                depth: 1,
+                broadcast: false,
+            }),
+            _ => None,
+        };
+
+        crate::event::insert_event_with_thread_metadata(
+            pool,
+            community,
+            &event,
+            channel_id,
+            thread_meta,
+        )
+        .await
+        .expect("insert feed event with thread metadata");
         crate::insert_mentions(pool, community, &event, channel_id)
             .await
             .expect("insert mentions");
@@ -841,6 +960,134 @@ mod tests {
                 && sql.contains(&KIND_GIT_ISSUE.to_string())
                 && sql.contains(&KIND_TEXT_NOTE.to_string()),
             "mentions feed must include Buzz Git roots and comments: {sql}"
+        );
+    }
+
+    #[test]
+    fn mentions_query_windows_per_conversation() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let pubkey = vec![0x42; 32];
+        let channel_id = Uuid::new_v4();
+        let mut qb = build_mentions_query(community, &pubkey, &[channel_id], None, 10);
+        let query = qb.build();
+        let sql_str = sqlx::Execute::sql(query);
+        let sql = sql_str.as_str();
+
+        assert!(
+            sql.contains("ROW_NUMBER() OVER (PARTITION BY k.conv_key"),
+            "mentions feed must rank events within each conversation: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("WHERE conv_rank <= {FEED_CONVERSATION_EVENT_CAP}")),
+            "mentions feed must cap events per conversation: {sql}"
+        );
+        assert!(
+            sql.contains("'dm:' || c.channel_id::text"),
+            "DM conversations must key by channel, not thread root: {sql}"
+        );
+        assert!(
+            sql.contains("COALESCE(tm.root_event_id, c.id)"),
+            "thread conversations must key by NIP-10 root with event-id fallback: {sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY conv_latest DESC"),
+            "conversations must surface newest-activity-first: {sql}"
+        );
+        assert!(
+            sql.contains(&format!("LIMIT {FEED_WINDOW_SCAN_CAP}")),
+            "candidate scan must stay bounded: {sql}"
+        );
+    }
+
+    /// The regression this windowing exists to prevent: one high-volume
+    /// conversation must not starve every other conversation out of the
+    /// mentions window.
+    ///
+    /// Seeds one thread with 40 replies mentioning the user plus 6 standalone
+    /// mention events (6 distinct conversations), then asks for a 20-event
+    /// window. The old flat `ORDER BY created_at DESC LIMIT 20` returned the
+    /// 20 newest events — all from the chatty thread — so the 6 older
+    /// conversations vanished. The windowed query must return every
+    /// conversation, with the chatty one capped.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn query_mentions_survives_chatty_conversation_starvation() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channel = insert_test_channel(&pool, community).await;
+        let mentioned_pubkey = "04".repeat(32);
+        let mentioned_bytes = hex::decode(&mentioned_pubkey).expect("hex pubkey");
+
+        let base = chrono::Utc::now().timestamp() - 10_000;
+
+        // 6 standalone conversations, oldest first.
+        let mut standalone_ids = Vec::new();
+        for n in 0..6 {
+            let event = store_feed_event_at(
+                &pool,
+                community,
+                KIND_STREAM_MESSAGE,
+                &format!("standalone {n}"),
+                Some(channel),
+                vec![Tag::parse(["p", mentioned_pubkey.as_str()]).unwrap()],
+                base + n * 10,
+            )
+            .await;
+            standalone_ids.push(event.id);
+        }
+
+        // One chatty thread: root + 40 newer replies, all mentioning the user.
+        let root = store_feed_event_at(
+            &pool,
+            community,
+            KIND_STREAM_MESSAGE,
+            "chatty root",
+            Some(channel),
+            vec![Tag::parse(["p", mentioned_pubkey.as_str()]).unwrap()],
+            base + 100,
+        )
+        .await;
+        let root_hex = root.id.to_hex();
+        for n in 0..40 {
+            store_feed_event_at(
+                &pool,
+                community,
+                KIND_STREAM_MESSAGE,
+                &format!("chatty reply {n}"),
+                Some(channel),
+                vec![
+                    Tag::parse(["p", mentioned_pubkey.as_str()]).unwrap(),
+                    Tag::parse(["e", root_hex.as_str(), "", "root"]).unwrap(),
+                ],
+                base + 200 + n,
+            )
+            .await;
+        }
+
+        let rows = query_mentions(&pool, community, &mentioned_bytes, &[channel], None, 20)
+            .await
+            .expect("query windowed mentions");
+
+        assert!(rows.len() <= 20, "limit must hold: got {} rows", rows.len());
+        for standalone in &standalone_ids {
+            assert!(
+                rows.iter().any(|row| row.event.id == *standalone),
+                "standalone conversation {standalone} must survive the chatty thread"
+            );
+        }
+        let chatty_rows = rows
+            .iter()
+            .filter(|row| {
+                row.event.id == root.id
+                    || row.event.tags.iter().any(|tag| {
+                        let t = tag.as_slice();
+                        t.len() >= 2 && t[0] == "e" && t[1] == root_hex
+                    })
+            })
+            .count();
+        assert!(
+            chatty_rows as i64 <= FEED_CONVERSATION_EVENT_CAP,
+            "chatty conversation must be capped at {FEED_CONVERSATION_EVENT_CAP}, got {chatty_rows}"
         );
     }
 
