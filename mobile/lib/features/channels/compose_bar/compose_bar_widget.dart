@@ -456,6 +456,7 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value > 0) {
         return;
       }
+      final submittedDraftRevision = draftRevision.value;
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
@@ -507,6 +508,7 @@ class ComposeBar extends HookConsumerWidget {
             controller: controller,
             mentionMap: mentionMap,
             draftRevision: draftRevision,
+            submittedDraftRevision: submittedDraftRevision,
             focusNode: focusNode,
             clearComposer: clearComposer,
             addMentionedNonMembers: addMentionedNonMembers,

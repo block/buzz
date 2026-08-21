@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 /// A Lucide-shaped star that can fill without changing its geometry.
 class LucideStarIcon extends StatelessWidget {
+  /// Creates a Lucide star using [color], optionally filled.
   const LucideStarIcon({
     super.key,
     required this.color,
@@ -11,8 +12,13 @@ class LucideStarIcon extends StatelessWidget {
     this.size = 22,
   });
 
+  /// Color of the star's stroke or fill.
   final Color color;
+
+  /// Whether to paint the star filled instead of outlined.
   final bool filled;
+
+  /// Width and height of the square icon canvas.
   final double size;
 
   @override

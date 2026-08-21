@@ -5,6 +5,7 @@ Future<void> _sendTextOnlyDraft({
   required _MarkdownEditingController controller,
   required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required ObjectRef<int> draftRevision,
+  required int submittedDraftRevision,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
   required Future<void> Function() addMentionedNonMembers,
@@ -13,28 +14,33 @@ Future<void> _sendTextOnlyDraft({
   required ComposeBarOnSend onSend,
   required ScaffoldMessengerState? messenger,
 }) async {
-  final draftText = controller.value;
-  final draftMentions = Map<String, MentionCandidate>.of(mentionMap.value);
+  TextEditingValue? clearedDraftText;
+  Map<String, MentionCandidate>? clearedDraftMentions;
   int? clearedDraftRevision;
 
   void restoreClearedDraft() {
     if (!context.mounted ||
+        clearedDraftText == null ||
+        clearedDraftMentions == null ||
         clearedDraftRevision == null ||
         draftRevision.value != clearedDraftRevision) {
       return;
     }
-    controller.value = draftText;
+    controller.value = clearedDraftText;
     mentionMap.value
       ..clear()
-      ..addAll(draftMentions);
+      ..addAll(clearedDraftMentions);
     focusNode.requestFocus();
   }
 
   try {
     await addMentionedNonMembers();
     // Clear before optimistic insertion so the outgoing row and draft never
-    // appear simultaneously during the send transition.
-    if (context.mounted) {
+    // appear simultaneously during the send transition. If the user edited
+    // while membership changes were pending, preserve that newer draft.
+    if (context.mounted && draftRevision.value == submittedDraftRevision) {
+      clearedDraftText = controller.value;
+      clearedDraftMentions = Map<String, MentionCandidate>.of(mentionMap.value);
       clearComposer();
       clearedDraftRevision = draftRevision.value;
     }

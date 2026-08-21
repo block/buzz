@@ -378,6 +378,10 @@ class _RecordingRelaySocket extends RelaySocket {
   final List<Map<String, dynamic>> events;
   final void Function(List<dynamic> message) handleMessage;
 
+  /// Invoked after an event is handed to the socket but before its relay
+  /// acknowledgement is delivered. Tests may defer that acknowledgement.
+  final Future<void> Function(Map<String, dynamic> event)? beforeAcknowledged;
+
   /// Invoked after an event has been recorded and acknowledged, before the
   /// caller's `await` resumes. Lets a test interleave state changes (such as
   /// a community switch) between two relay round trips.
@@ -386,6 +390,7 @@ class _RecordingRelaySocket extends RelaySocket {
   _RecordingRelaySocket(
     this.events,
     this.handleMessage, {
+    this.beforeAcknowledged,
     this.onEventAcknowledged,
   }) : super(
          wsUrl: 'ws://localhost',
@@ -403,8 +408,18 @@ class _RecordingRelaySocket extends RelaySocket {
     if (payload case ['EVENT', final Map<String, dynamic> event]) {
       events.add(event);
       final id = event['id'] as String;
-      super.debugHandleOkForTest(['OK', id, true, '']);
-      onEventAcknowledged?.call(event);
+      final pending = beforeAcknowledged?.call(event);
+      if (pending == null) {
+        super.debugHandleOkForTest(['OK', id, true, '']);
+        onEventAcknowledged?.call(event);
+      } else {
+        unawaited(
+          pending.then((_) {
+            super.debugHandleOkForTest(['OK', id, true, '']);
+            onEventAcknowledged?.call(event);
+          }),
+        );
+      }
     }
   }
 
@@ -3850,6 +3865,78 @@ void main() {
         ['p', agentPubkey],
         ['role', 'bot'],
       ]);
+    });
+
+    testWidgets('preserves edits made while a mentioned agent is being added', (
+      tester,
+    ) async {
+      final agentPubkey = 'c' * 64;
+      final signer = nostr.Keys.generate();
+      final publishedEvents = <Map<String, dynamic>>[];
+      final addMemberAcknowledgement = Completer<void>();
+      String? sentContent;
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(signer.nsec),
+          currentPubkey: signer.public,
+          relayAgents: [
+            AgentDirectoryEntry(
+              pubkey: agentPubkey,
+              displayName: 'Helper Bot',
+              respondTo: 'anyone',
+              channelIds: const ['shared-channel'],
+            ),
+          ],
+          channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {
+                sentContent = content;
+              },
+        ),
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      session.debugAttachSocketForTest(
+        _RecordingRelaySocket(
+          publishedEvents,
+          session.debugHandleSocketMessageForTest,
+          beforeAcknowledged: (event) async {
+            if (event['kind'] == 9000) await addMemberAcknowledgement.future;
+          },
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Helper Bot'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
+      await tester.pump();
+
+      expect(
+        publishedEvents.where((event) => event['kind'] == 9000),
+        hasLength(1),
+      );
+
+      await tester.enterText(find.byType(TextField), 'newer draft');
+      addMemberAcknowledgement.complete();
+      await tester.pumpAndSettle();
+
+      expect(sentContent, 'hello @Helper Bot');
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'newer draft',
+      );
     });
 
     testWidgets(
