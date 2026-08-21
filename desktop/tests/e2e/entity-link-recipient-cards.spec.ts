@@ -18,6 +18,8 @@ const ISSUE_ID = `f0${"1a2b".repeat(15)}ee`; // 64-hex event id
 const ISSUE_SUBJECT =
   "Smoke test: issue tracking on relay-tools with a deliberately long title";
 const EXTERNAL_HREF = "https://example.com/entity-chip-control";
+const RELAY_ORIGIN = "http://localhost:3000";
+const CLONE_HREF = `${RELAY_ORIGIN}/git/${ALICE_PUBKEY}/relay-tools.git`;
 
 test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   page,
@@ -73,7 +75,7 @@ test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   // Simulate an agent/CLI sender: plain kind-9 message with angle-bracket
   // buzz:// URLs in a Markdown list and NO link-preview snapshot tags.
   await page.evaluate(
-    ({ prId, issueId, alicePubkey, externalHref }) => {
+    ({ prId, issueId, alicePubkey, externalHref, cloneHref }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         pubkey: alicePubkey,
@@ -84,6 +86,7 @@ test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
           `- Issue: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
           `- Repository: <buzz://repo?owner=${alicePubkey}&d=relay-tools>`,
           `- Labeled issue: [triage this issue](buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools)`,
+          `- Labeled clone: [clone relay-tools](${cloneHref})`,
           `- Missing repo: <buzz://repo?owner=${alicePubkey}&d=missing-repo>`,
           `- External control: <${externalHref}>`,
         ].join("\n"),
@@ -109,6 +112,7 @@ test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
       issueId: ISSUE_ID,
       alicePubkey: ALICE_PUBKEY,
       externalHref: EXTERNAL_HREF,
+      cloneHref: CLONE_HREF,
     },
   );
 
@@ -213,6 +217,7 @@ test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   // Repository metadata remains available from its inline chip.
   const repoChip = row.getByRole("button", {
     name: "Open repository relay-tools",
+    exact: true,
   });
   await repoChip.hover();
   const repoTooltip = page.getByRole("tooltip");
@@ -222,6 +227,23 @@ test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   await expect(
     repoTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Repository");
+
+  const labeledClone = row
+    .getByRole("button", { name: "Open repository relay-tools" })
+    .filter({ hasText: "clone relay-tools" });
+  await expect(labeledClone).toBeVisible();
+  await expect(labeledClone).toHaveClass(/underline/);
+  await expect(labeledClone).not.toHaveClass(/wrapping-inline-chip/);
+  await expect(labeledClone).toHaveAttribute("title", CLONE_HREF);
+  await labeledClone.hover();
+  const cloneTooltip = page.getByRole("tooltip");
+  await expect(
+    cloneTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText("Operator tooling and admin CLI for relay deployments.");
+  await labeledClone.click();
+  await expect(page.locator("[data-project-detail-screen]")).toBeVisible();
+  await page.getByTestId("channel-general").click();
+
   const missingRepoChip = row.getByRole("button", {
     name: "Open repository missing-repo",
   });

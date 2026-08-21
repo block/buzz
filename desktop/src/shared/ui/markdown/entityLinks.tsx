@@ -229,7 +229,7 @@ export function EntityLinkAnchor({
   interactive?: boolean;
   asChip?: boolean;
 }): React.ReactElement | null {
-  const { data: projects } = useProjectsQuery();
+  const { data: projects } = useProjectsQuery(interactive);
   return renderEntityLinkAnchor({
     children,
     href,
