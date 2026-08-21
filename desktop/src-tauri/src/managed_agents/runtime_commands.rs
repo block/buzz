@@ -260,6 +260,9 @@ fn start_pair(
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
+    if record.disable_local_spawn {
+        return Err("local spawn disabled — runtime is externally managed".into());
+    }
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
