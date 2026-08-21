@@ -140,8 +140,8 @@ documents before any mutant is scored:
    pairs attributed to that profile here, exactly; a row with multiple owners
    contributes its pair to each.
 
-If a later core names an allowlisted symbol, only check 2's disjointness fails
-and the allowlist entry is deleted; check 1 then validates the promoted
+If a later core names an allowlisted symbol, check 2's disjointness fails
+until the allowlist entry is deleted, and check 1 validates the promoted
 symbol's class.
 
 **Anonymity comparison.** Every `authorization_denied` row is in the
