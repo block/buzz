@@ -50,6 +50,7 @@ import {
   yamlToFormState,
 } from "./workflowFormTypes";
 import {
+  readWorkflowDocumentFields,
   readWorkflowHeaderState,
   yamlWithWorkflowEnabled,
   yamlWithWorkflowName,
@@ -450,22 +451,22 @@ export function WorkflowDialog({
 
   function handleSubmit() {
     if (!selectedChannelId || !yamlDefinition.trim() || !formValid) return;
-    if (mode === "edit") {
-      void saveWorkflow(yamlDefinition);
+
+    const documentEnabled = readWorkflowDocumentFields(yamlDefinition).enabled;
+    const savedEnabled = workflowSnapshot
+      ? getWorkflowEnabled(workflowSnapshot.definition)
+      : null;
+    const enablesWorkflow =
+      documentEnabled !== false && (mode !== "edit" || savedEnabled === false);
+    if (enablesWorkflow && getWorkflowActivationWarning(yamlDefinition)) {
+      const disabledYaml = yamlWithWorkflowEnabled(yamlDefinition, false);
+      if (disabledYaml === null) return;
+      setPendingCreateYaml(disabledYaml);
+      setActivationConfirmationOpen(true);
       return;
     }
 
-    const enabledYaml = yamlWithWorkflowEnabled(yamlDefinition, true);
-    if (enabledYaml === null) return;
-    if (getWorkflowActivationWarning(enabledYaml) === null) {
-      void saveWorkflow(enabledYaml);
-      return;
-    }
-
-    const disabledYaml = yamlWithWorkflowEnabled(enabledYaml, false);
-    if (disabledYaml === null) return;
-    setPendingCreateYaml(disabledYaml);
-    setActivationConfirmationOpen(true);
+    void saveWorkflow(yamlDefinition);
   }
 
   function handleCreateActivation(enabled: boolean) {
