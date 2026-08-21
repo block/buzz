@@ -26,7 +26,7 @@
 # Teardown (the script verifies the pid is still this relay before signalling it;
 # do the same by hand, since pids are recycled):
 #   pid=$(cat /tmp/buzz-perf-ingest-rig.pid)
-#   ps -p "$pid" -o command= | grep -q buzz-relay && kill "$pid"
+#   ps -p "$pid" -o command= | grep -qF "$PWD/target/ci/buzz-relay" && kill "$pid"
 #   docker compose -p buzz-harness -f docker-compose.harness.yml down -v
 # =============================================================================
 set -euo pipefail
@@ -166,7 +166,7 @@ start_relay() {
     BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN="${MESSAGES_PER_MIN}" \
     RUST_LOG=info \
     python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
-    "./target/${CARGO_TARGET_PROFILE}/buzz-relay" > "${RELAY_LOG}" 2>&1 &
+    "${REPO_ROOT}/target/${CARGO_TARGET_PROFILE}/buzz-relay" > "${RELAY_LOG}" 2>&1 &
   echo $! > "${PIDFILE}"
 
   for _ in $(seq 1 60); do
@@ -222,17 +222,25 @@ SOURCE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 # Two dirty trees at the same commit are two different builds, so the identity
 # carries a digest of the working-tree diff rather than the commit alone.
 SOURCE_DIFF_DIGEST="$(git -C "${REPO_ROOT}" diff HEAD | shasum -a 256 | cut -d' ' -f1)"
+# The diff digest misses untracked inputs and is taken after the build, so it
+# cannot prove the running binaries came from it. Hash the binaries themselves:
+# that is the thing whose behaviour the dataset records.
+BINARY_DIGEST="$(shasum -a 256 \
+  "${REPO_ROOT}/target/${CARGO_TARGET_PROFILE}/buzz-relay" \
+  "${REPO_ROOT}/target/${CARGO_TARGET_PROFILE}/ingest_load" \
+  | shasum -a 256 | cut -d' ' -f1)"
 DATABASE_RESET=false
 [[ "${RESET}" == yes ]] && DATABASE_RESET=true
 python3 -c '
 import json, sys
 (pid, log, gen, metrics, db, project, key, audit, ws_limit, msg_limit,
  host_a, chan_a, host_b, chan_b, revision, repo_root, diff_digest,
- database_reset) = sys.argv[1:]
+ database_reset, binary_digest) = sys.argv[1:]
 print(json.dumps({
     "relay_pid": None if pid == "null" else int(pid),
     "source_revision": revision,
     "source_diff_digest": diff_digest,
+    "binary_digest": binary_digest,
     "database_reset": database_reset == "true",
     "repo_root": repo_root,
     "relay_log": log,
@@ -255,5 +263,6 @@ print(json.dumps({
   "${PROJECT}" "${BENCH_KEY}" "${AUDIT_ENABLED}" \
   "${WS_EVENTS_PER_SEC}" "${MESSAGES_PER_MIN}" \
   "${HOST_A}" "${CHANNEL_A}" "${HOST_B}" "${CHANNEL_B}" \
-  "${SOURCE_REVISION}" "${REPO_ROOT}" "${SOURCE_DIFF_DIGEST}" "${DATABASE_RESET}"
+  "${SOURCE_REVISION}" "${REPO_ROOT}" "${SOURCE_DIFF_DIGEST}" "${DATABASE_RESET}" \
+  "${BINARY_DIGEST}"
 log "Rig ready. Relay pid ${RELAY_PID}, log ${RELAY_LOG}, revision ${SOURCE_REVISION}"

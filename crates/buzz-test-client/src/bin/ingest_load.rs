@@ -72,6 +72,13 @@ struct Outcome {
     scheduled_ms: Vec<f64>,
     first_rejection: Option<String>,
     first_transport_error: Option<String>,
+    /// Time from when this connection was free to send until the send happened:
+    /// `sent_at - max(slot, previous settled_at)`. Signing and scheduler delay
+    /// land here, and relay backpressure does not, which is what makes it a
+    /// generator-vs-relay discriminator. The closed-loop rate metrics cannot be:
+    /// at saturation a connection's throughput *is* the relay's, so an apparent
+    /// generator shortfall is the treatment effect.
+    generator_lag_ms: Vec<f64>,
 }
 
 impl Outcome {
@@ -81,6 +88,7 @@ impl Outcome {
         self.rejected += other.rejected;
         self.service_ms.extend(other.service_ms);
         self.scheduled_ms.extend(other.scheduled_ms);
+        self.generator_lag_ms.extend(other.generator_lag_ms);
         self.first_rejection = self.first_rejection.take().or(other.first_rejection);
         self.first_transport_error = self
             .first_transport_error
@@ -143,17 +151,23 @@ async fn drive_connection(
     let mut out = Outcome::default();
     let mut slot = first_slot;
     let mut seq: u64 = 0;
+    let mut settled_at = first_slot;
 
     while slot < deadline && Instant::now() < deadline {
         tokio::time::sleep_until(slot).await;
+        // Ready to send once both the slot has arrived and the previous send has
+        // settled; anything after this instant is the generator's own delay.
+        let ready_at = slot.max(settled_at);
         seq += 1;
         let event = EventBuilder::new(kind, format!("{label} seq={seq} {PADDING}"))
             .tags([h_tag.clone()])
             .sign_with_keys(&keys)?;
 
         let sent_at = Instant::now();
+        out.generator_lag_ms
+            .push((sent_at - ready_at).as_secs_f64() * 1e3);
         let response = client.send_event(event).await;
-        let settled_at = Instant::now();
+        settled_at = Instant::now();
 
         let ok = match response {
             Ok(ok) => ok,
@@ -211,6 +225,8 @@ async fn scrape_counters(metrics_url: &str) -> anyhow::Result<Value> {
         ),
     ];
 
+    // Keep in step with `scrape()` in perf/relay_ingest_ceiling.py, which reads
+    // the same series names for the un-aligned fallback path.
     let parsed = metrics_url
         .parse::<url::Url>()
         .map_err(|e| anyhow!("metrics url {metrics_url:?}: {e}"))?;
@@ -233,12 +249,30 @@ async fn scrape_counters(metrics_url: &str) -> anyhow::Result<Value> {
     let mut body = Vec::new();
     tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut body).await?;
     let text = String::from_utf8_lossy(&body);
+    // A wrong path or a 404 would parse every counter to 0.0, and in the
+    // audit-off arm all-zeros reads as "the audit series stayed flat" — faking
+    // the positive control in exactly the misconfigured case it exists to catch.
+    let status_ok = text
+        .lines()
+        .next()
+        .is_some_and(|line| line.contains(" 200 ") || line.ends_with(" 200"));
+    if !status_ok {
+        let status = text.lines().next().unwrap_or("<empty response>");
+        bail!("metrics endpoint {metrics_url} did not return 200: {status}");
+    }
 
     let mut out = serde_json::Map::new();
     for (needle, name) in WANTED {
         let value = text
             .lines()
-            .find_map(|line| line.strip_prefix(needle)?.trim().parse::<f64>().ok())
+            .find_map(|line| {
+                let rest = line.strip_prefix(needle)?;
+                // Require a delimiter so `..._count` cannot match `..._count_x`.
+                if !rest.starts_with(' ') {
+                    return None;
+                }
+                rest.trim().parse::<f64>().ok()
+            })
             // Absent means never incremented, which is zero. Safe only because
             // the quota series has been positive-controlled on this rig.
             .unwrap_or(0.0);
@@ -288,6 +322,7 @@ fn summarize(target: &Target, window: &Window, out: &mut Outcome) -> Value {
         "achieved_over_offered": out.accepted as f64 / (target.rate * window.requested_secs),
         "conn_capacity_per_s": conn_capacity,
         "service_mean_ms": service_mean_ms,
+        "generator_lag_ms": percentiles(&mut out.generator_lag_ms),
         "service_ms": service,
         "scheduled_ms": percentiles(&mut out.scheduled_ms),
         "first_rejection": out.first_rejection,
@@ -412,6 +447,7 @@ async fn main() -> anyhow::Result<()> {
                     aggregate.accepted as f64 / (offered_total * window.requested_secs),
                 "service_ms": percentiles(&mut aggregate.service_ms),
                 "scheduled_ms": percentiles(&mut aggregate.scheduled_ms),
+                "generator_lag_ms": percentiles(&mut aggregate.generator_lag_ms),
             },
         })
     );

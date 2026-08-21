@@ -25,7 +25,12 @@ def cell(**overrides) -> dict:
         "unavailable_rejections_delta": 0,
         "audit_log_errors_delta": 0,
         "audit_send_errors_delta": 0,
-        "generator_headroom": 4.0,
+        "duration_secs": 20,
+        "counters_window_aligned": True,
+        "setup_overhead_fraction": 0.01,
+        "generator_headroom": 0.56,
+        "generator_lag_p99_ms": 0.3,
+        "attempted_over_offered": 0.56,
         "audit_completed_per_s": 450.0,
         "audit_service_mean_ms": 2.2,
         "audit_busy_fraction": 0.99,
@@ -109,11 +114,29 @@ class CellValidityTests(unittest.TestCase):
         self.assertTrue(harness.cell_problems(cell(rejected=3)))
         self.assertTrue(harness.cell_problems(cell(transport_errors=1)))
 
-    def test_thin_generator_headroom_invalidates(self) -> None:
-        problems = harness.cell_problems(cell(generator_headroom=1.1))
-        self.assertTrue(any("measuring the generator" in p for p in problems))
+    def test_a_starved_generator_disqualifies_its_cell(self) -> None:
+        # MUTANT for the replacement gate.
+        problems = harness.cell_problems(cell(generator_lag_p99_ms=45.0))
+        self.assertTrue(any("free to send" in p for p in problems), problems)
 
-    def test_ample_headroom_passes(self) -> None:
+    def test_a_healthy_generator_at_a_saturated_rate_passes(self) -> None:
+        # A saturated cell has a poor apparent capacity and a poor attempted
+        # fraction, and is still good evidence.
+        self.assertEqual(
+            harness.cell_problems(
+                cell(
+                    generator_lag_p99_ms=0.4,
+                    generator_headroom=0.56,
+                    attempted_over_offered=0.56,
+                )
+            ),
+            [],
+        )
+
+    def test_headroom_is_reported_not_gated(self) -> None:
+        # Issuability is established by the control arm holding its offer, not by
+        # a per-cell margin the saturated arm can never clear.
+        self.assertEqual(harness.cell_problems(cell(generator_headroom=1.1)), [])
         self.assertEqual(harness.cell_problems(cell(generator_headroom=2.0)), [])
 
 
@@ -410,11 +433,44 @@ class CausalValidityTests(unittest.TestCase):
         problems = harness.cell_problems(cell(setup_overhead_fraction=0.20))
         self.assertTrue(any("setup and teardown" in p for p in problems))
 
-    def test_a_generator_that_missed_its_slots_disqualifies_a_cell(self) -> None:
-        # Signing and scheduler delay are outside service_ms by design, so the
-        # on-wire headroom gate can pass while the generator never sent the offer.
-        problems = harness.cell_problems(cell(attempted_over_offered=0.80))
-        self.assertTrue(any("scheduled slots" in p for p in problems))
+    def test_closed_loop_shortfall_does_not_disqualify_a_saturated_cell(self) -> None:
+        # MUTANT for a gate that was added and then had to be removed: at a
+        # saturated rate a closed-loop sender can reach neither its scheduled
+        # slots nor a capacity margin, so gating on either rejected every cell
+        # that matters.
+        problems = harness.cell_problems(
+            cell(attempted_over_offered=0.57, generator_headroom=0.59)
+        )
+        self.assertEqual(problems, [])
+
+
+class GeneratorEnvironmentTests(unittest.TestCase):
+    RIG = {
+        "bench_private_key": "ab" * 32,
+        "metrics_url": "http://localhost:9202/metrics",
+    }
+
+    def test_the_metrics_url_reaches_the_generator(self) -> None:
+        # Its absence excludes the whole run, and nothing else in the suite can
+        # see that: these tests build cells directly and the model bypasses
+        # run_cell. See `generator_env`.
+        env = harness.generator_env(self.RIG)
+        self.assertEqual(env["BENCH_METRICS_URL"], self.RIG["metrics_url"])
+        self.assertEqual(env["BENCH_PRIVATE_KEY"], self.RIG["bench_private_key"])
+
+    def test_inherited_cli_credentials_are_scrubbed(self) -> None:
+        # A stale BUZZ_AUTH_TAG fails the dev relay's first write outright.
+        import os as _os
+
+        for name in ("BUZZ_AUTH_TAG", "BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY"):
+            _os.environ[name] = "stale"
+        try:
+            env = harness.generator_env(self.RIG)
+            for name in ("BUZZ_AUTH_TAG", "BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY"):
+                self.assertNotIn(name, env)
+        finally:
+            for name in ("BUZZ_AUTH_TAG", "BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY"):
+                _os.environ.pop(name, None)
 
 
 class WorkerRateRegimeTests(unittest.TestCase):
@@ -459,6 +515,7 @@ class CombineTests(unittest.TestCase):
             "generator": "./target/ci/ingest_load",
             "source_revision": "deadbeef",
             "source_diff_digest": "clean",
+            "binary_digest": "cafe",
             "database_reset": True,
         }
         base.update(identity)
@@ -531,6 +588,37 @@ class CombineTests(unittest.TestCase):
                 self.half(True), self.half(False, source_diff_digest="beef")
             )
 
+    def test_a_half_that_skipped_the_reset_is_rejected(self) -> None:
+        # MUTANT, probe-confirmed: two halves that both skipped the reset agree,
+        # and equality passed them. Equality is not truth.
+        with self.assertRaises(ValueError) as ctx:
+            harness.combine(
+                self.half(True, database_reset=False),
+                self.half(False, database_reset=False),
+            )
+        self.assertIn("database snapshot", str(ctx.exception))
+
+    def test_an_incomplete_cell_is_rejected(self) -> None:
+        # MUTANT: an absent validity field skips its gate, so a cell missing
+        # `counters_window_aligned` read as valid evidence.
+        broken = self.half(True)
+        del broken["cells"][0]["counters_window_aligned"]
+        with self.assertRaises(ValueError) as ctx:
+            harness.combine(broken, self.half(False))
+        self.assertIn("counters_window_aligned", str(ctx.exception))
+
+    def test_a_cell_without_a_duration_is_rejected(self) -> None:
+        broken = self.half(True)
+        del broken["cells"][0]["duration_secs"]
+        with self.assertRaises(ValueError):
+            harness.combine(broken, self.half(False))
+
+    def test_a_binary_digest_mismatch_is_rejected(self) -> None:
+        # Two builds at one commit are two experiments; the source digest is
+        # taken after the build and cannot prove what actually ran.
+        with self.assertRaises(ValueError):
+            harness.combine(self.half(True), self.half(False, binary_digest="beef"))
+
     def test_arms_reset_differently_are_rejected(self) -> None:
         # A fixed arm order against a database that grew in between confounds arm
         # with time and index size; restoring the same snapshot at both boundaries
@@ -602,6 +690,20 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(all(r == 470.0 for r in deltas))
         self.assertGreater(len(deltas), 1)
 
+    def test_the_model_derives_its_generator_metrics(self) -> None:
+        # Fixturing these is how two gates built on them stayed invisible: an
+        # absent key skips a gate, and a hard-coded healthy value passes it. The
+        # model must produce the saturated regime's real shape.
+        on = harness.model()["verdict"]
+        saturated = [
+            r for r in on["arm_separation"]["by_rate"] if r.get("separated_here")
+        ]
+        self.assertTrue(saturated)
+        # And the derived headroom at a saturated rate is below 1, which the old
+        # gate would have rejected.
+        cells = harness.model(ceiling_per_s=450.0, rates=[1600.0])
+        self.assertTrue(cells["verdict"]["saturation"]["any_rate_saturated"])
+
     def test_the_model_reproduces_sequential_channel_fill(self) -> None:
         # The green path has to be tested against the physics, not against a
         # dataset where every cell is conveniently steady. The first saturating
@@ -662,14 +764,15 @@ class FormattingTests(unittest.TestCase):
 class ConnectionSizingTests(unittest.TestCase):
     def test_connection_count_scales_with_offered_rate(self) -> None:
         self.assertEqual(harness.conns_for(20.0), harness.MIN_CONNS)
-        self.assertEqual(harness.conns_for(400.0), 16)
+        self.assertEqual(harness.conns_for(800.0), 32)
 
-    def test_sizing_leaves_the_offer_reachable(self) -> None:
-        # Each connection is closed-loop: one send per service time. At a
-        # pessimistic 20ms that is 50/s per connection, and the sizing has to
-        # leave the offer reachable or the sweep measures the generator.
-        for rate in harness.DEFAULT_RATES + [800.0, 1600.0]:
-            self.assertGreater(harness.conns_for(rate) * 50.0, rate)
+    def test_sizing_lets_an_unsaturated_cell_meet_its_offer(self) -> None:
+        # That is all the sizing has to buy. Above the ceiling the relay sets the
+        # pace and more connections only lengthen the queue, so the target is the
+        # unsaturated service time, not the saturated one.
+        unsaturated_service_s = 0.008
+        for rate in harness.DEFAULT_RATES:
+            self.assertGreater(harness.conns_for(rate) / unsaturated_service_s, rate)
 
 
 if __name__ == "__main__":

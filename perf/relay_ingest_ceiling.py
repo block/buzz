@@ -68,14 +68,16 @@ import time
 import urllib.request
 from typing import Callable
 
-# Connections per unit of offered rate. Each connection is closed-loop, so it
-# cannot exceed one send per mean service time; this keeps the generator's own
-# capacity clear of the offer. `generator_headroom` is the check that it worked.
+# Offered events per second per connection. Raising this does not raise what a
+# closed-loop generator can push through a saturated relay — measured on this rig,
+# going from 32 to 80 connections at 800/s left throughput flat and stretched
+# service time from 57ms to 187ms, because the extra sends just queued. Enough
+# connections that an *unsaturated* cell can meet its offer is all this needs to
+# buy; above the ceiling the relay sets the pace.
 RATE_PER_CONN = 25.0
 MIN_CONNS = 4
 
-# A cell is rejected unless the generator could have offered this multiple of the
-# requested rate. Below it, the sweep is partly measuring the generator.
+# Reported alongside every cell, never gated on — see `cell_problems`.
 GENERATOR_HEADROOM_MARGIN = 1.5
 
 # Depth of the relay's audit channel, and the share of it that `outstanding_delta`
@@ -97,10 +99,14 @@ CONTROL_EQUIVALENCE_MARGIN = 0.05
 # divided by mismatched windows can exceed 1.0 and overstate completions.
 MAX_SETUP_OVERHEAD_FRACTION = 0.05
 
-# Share of its scheduled slots the generator must actually have sent. Signing and
-# scheduler delay are outside `service_ms` by design, so a CPU-bound generator can
-# miss slots while the on-wire headroom gate still passes.
+# Reported, never gated on — see `cell_problems`.
 MIN_ATTEMPTED_FRACTION = 0.98
+
+# Bound on the one generator-vs-relay discriminator that survives saturation;
+# `Outcome::generator_lag_ms` in ingest_load.rs defines it. Only signing and
+# scheduler delay land in it, and signing is tens of microseconds, so a p99 in
+# milliseconds means the generator itself was starved.
+MAX_GENERATOR_LAG_P99_MS = 10.0
 
 # The grid has to straddle the drain rate, or the separation contract has nothing
 # to fire on and the run reports "the audit path is not shown to limit ingest" —
@@ -274,21 +280,25 @@ def cell_problems(cell: dict) -> list[str]:
             )
         )
 
-    attempted = cell.get("attempted_over_offered")
-    if attempted is not None and attempted < MIN_ATTEMPTED_FRACTION:
+    lag = cell.get("generator_lag_p99_ms")
+    if lag is not None and lag > MAX_GENERATOR_LAG_P99_MS:
         problems.append(
-            "{:g}/s: the generator sent only {:.1%} of its scheduled slots, so it "
-            "missed its own offer before the relay saw it".format(rate, attempted)
-        )
-
-    headroom = cell.get("generator_headroom")
-    if headroom is not None and headroom < GENERATOR_HEADROOM_MARGIN:
-        problems.append(
-            "{:g}/s: generator headroom {:.2f}x is under {}x, so the cell is "
-            "partly measuring the generator".format(
-                rate, headroom, GENERATOR_HEADROOM_MARGIN
+            "{:g}/s: the generator took {:.1f}ms at p99 between being free to "
+            "send and sending, over the {:.0f}ms bound, so it was starved and "
+            "this cell measures the generator".format(
+                rate, lag, MAX_GENERATOR_LAG_P99_MS
             )
         )
+
+    # `attempted_over_offered` and `generator_headroom` are reported, never
+    # gated. By Little's law, a closed-loop sender against a relay whose
+    # completion rate is fixed has service time L/rate, so `conns / service`
+    # equals the relay's own throughput at any connection count — see the
+    # measurement at `RATE_PER_CONN`. Gating on either would reject every
+    # saturated cell, which is every cell that matters. Issuability comes from
+    # the control arm instead: audit-off holding its offer at rate R shows the
+    # generator can issue R. Overdriving a saturated relay needs an open-loop
+    # generator, a different instrument.
     return problems
 
 
@@ -654,6 +664,25 @@ def scrape(metrics_url: str) -> dict:
     return out
 
 
+def generator_env(rig: dict) -> dict:
+    """Environment for the generator subprocess.
+
+    `BENCH_METRICS_URL` is not optional in practice: without it the generator
+    reports no window-edge counters, every cell fails the alignment gate, and the
+    whole run is excluded. Extracted so that wiring is testable without a rig —
+    the first version of it was missing and no unit test could see it, because the
+    tests construct cells directly and never build this environment.
+    """
+    env = dict(
+        os.environ,
+        BENCH_PRIVATE_KEY=rig["bench_private_key"],
+        BENCH_METRICS_URL=rig["metrics_url"],
+    )
+    for stale in ("BUZZ_AUTH_TAG", "BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY"):
+        env.pop(stale, None)
+    return env
+
+
 def run_generator(rig: dict, duration: int, offers: list) -> dict:
     specs = []
     for index, rate in offers:
@@ -663,9 +692,7 @@ def run_generator(rig: dict, duration: int, offers: list) -> dict:
                 target["url"], target["channel"], rate, conns_for(rate)
             )
         )
-    env = dict(os.environ, BENCH_PRIVATE_KEY=rig["bench_private_key"])
-    for stale in ("BUZZ_AUTH_TAG", "BUZZ_RELAY_URL", "BUZZ_PRIVATE_KEY"):
-        env.pop(stale, None)
+    env = generator_env(rig)
     try:
         # stderr is deliberately left on the inherited handle: capturing it would
         # bury the generator's error context inside the exception, and a bare
@@ -749,6 +776,7 @@ def run_cell(rig: dict, duration: int, offers: list, audit_on: bool) -> dict:
             after["audit_send_errors"] - before["audit_send_errors"]
         ),
         "generator_headroom": headroom,
+        "generator_lag_p99_ms": agg.get("generator_lag_ms", {}).get("p99"),
         "attempted_over_offered": (
             agg["attempted"] / (agg["offered_per_s"] * duration)
             if agg["offered_per_s"] else None
@@ -842,6 +870,9 @@ def experiment_identity(rig: dict, args: argparse.Namespace) -> dict:
         "source_revision": rig.get("source_revision"),
         # Two dirty trees at the same commit are two different builds.
         "source_diff_digest": rig.get("source_diff_digest"),
+        # What actually ran, as opposed to what the tree said: the diff digest is
+        # taken after the build and misses untracked inputs.
+        "binary_digest": rig.get("binary_digest"),
         # A fixed audit-on-then-audit-off order against a database that grew in
         # between confounds arm with time, cache and index size. Restoring the
         # same snapshot at both arm boundaries makes the arms comparable; the
@@ -910,7 +941,34 @@ def combine(first: dict, second: dict) -> dict:
             + ", ".join(mismatched)
         )
 
+    # An absent validity field skips its gate, so a cell missing them reads as
+    # valid. Require the schema at the boundary rather than trusting the producer.
+    required = (
+        "offered_per_s",
+        "audit_enabled",
+        "duration_secs",
+        "accepted_over_offered",
+        "rejected",
+        "transport_errors",
+        "quota_rejections_delta",
+        "unavailable_rejections_delta",
+        "audit_log_errors_delta",
+        "audit_send_errors_delta",
+        "counters_window_aligned",
+        "setup_overhead_fraction",
+        "generator_lag_p99_ms",
+        "attempted_over_offered",
+    )
     for report, arm in ((on_report, True), (off_report, False)):
+        for cell in report["cells"]:
+            missing = [key for key in required if key not in cell]
+            if missing:
+                raise ValueError(
+                    "a {}/s cell is missing {}; an absent validity field skips "
+                    "its gate, so an incomplete cell would read as valid".format(
+                        cell.get("offered_per_s", "?"), ", ".join(missing)
+                    )
+                )
         identity = report["identity"]
         expected = sorted(float(r) for r in identity["rates"])
         seen: dict = {}
@@ -920,7 +978,7 @@ def combine(first: dict, second: dict) -> dict:
                     "a cell labelled audit_enabled={} appears in the audit_enabled={} "
                     "report".format(cell["audit_enabled"], arm)
                 )
-            if cell.get("duration_secs") not in (None, identity["duration_secs"]):
+            if cell["duration_secs"] != identity["duration_secs"]:
                 raise ValueError(
                     "a {:g}/s cell ran for {}s but the identity declares {}s".format(
                         cell["offered_per_s"],
@@ -940,6 +998,18 @@ def combine(first: dict, second: dict) -> dict:
                 "the declared {} repeats are not present at every rate: {}".format(
                     identity["repeats"], wrong
                 )
+            )
+
+    # Equality is not truth: two halves that both skipped the reset agree, and
+    # that is exactly the fixed-order-against-a-growing-database confound the
+    # field exists to prevent. Same shape as a blank secret passing a
+    # decrypt-only check.
+    for report, name in ((on_report, "audit-on"), (off_report, "audit-off")):
+        if not report["identity"].get("database_reset"):
+            raise ValueError(
+                "the {} half did not restore the database snapshot; a fixed arm "
+                "order against a database that grew in between confounds the arm "
+                "with time, cache state and index size".format(name)
             )
 
     threshold = 0.99
@@ -1022,7 +1092,13 @@ def model(
                         "unavailable_rejections_delta": 0,
                         "audit_log_errors_delta": 0,
                         "audit_send_errors_delta": 0,
-                        "generator_headroom": 4.0,
+                        # Derived, not fixtured: a closed-loop generator's
+                        # apparent capacity collapses onto the relay's throughput
+                        # at saturation, and hard-coding these is how two gates
+                        # built on them stayed invisible to the suite.
+                        "attempted_over_offered": accepted / offered,
+                        "generator_headroom": (drained / duration) / rate,
+                        "generator_lag_p99_ms": 0.2,
                         "audit_completed_per_s": drained / duration,
                         "audit_service_mean_ms": 1000.0 / ceiling,
                         "audit_busy_fraction": min(1.0, drained / drain_capacity),
@@ -1044,7 +1120,9 @@ def model(
                 "unavailable_rejections_delta": 0,
                 "audit_log_errors_delta": 0,
                 "audit_send_errors_delta": 0,
-                "generator_headroom": 4.0,
+                "attempted_over_offered": 1.0,
+                "generator_headroom": 1.0,
+                "generator_lag_p99_ms": 0.2,
                 "audit_completed_per_s": None,
                 "audit_service_mean_ms": None,
                 "audit_busy_fraction": None,
