@@ -173,10 +173,13 @@ logging. [FI-TRACE-ASSERTION-VALIDATION]
 
 The exact `iss` selects an authenticated policy and key source; `iss` and at
 least one `aud` value exactly match configured values. `sub` is a non-empty
-bounded string. `exp` and `iat` are finite NumericDate values satisfying
-`now < exp`, `iat <= now + skew`, and `now < iat + maximum_assertion_age`.
-Optional `nbf` satisfies `nbf <= now + skew`. Arithmetic is overflow-safe and
-equality at an expiry is expired. [FI-TRACE-ASSERTION-VALIDATION]
+bounded string. Each policy configures a non-negative finite `skew`, a positive
+finite `maximum_assertion_age`, and, for `current-status`, a positive finite
+`maximum_status_age`; a missing value denies. `exp` and `iat` are finite
+NumericDate values satisfying `now < exp`, `iat <= now + skew`, and
+`now < iat + maximum_assertion_age`. Optional `nbf` satisfies
+`nbf <= now + skew`. Arithmetic is overflow-safe and equality at an expiry is
+expired. [FI-TRACE-ASSERTION-VALIDATION]
 
 The Nostr-key claim is named `nostr_pubkey`. When present it MUST be a
 lowercase hexadecimal encoding of exactly one 32-byte Nostr public key; other
@@ -246,11 +249,6 @@ current state; a retained key may continue, while an absent key denies.
 Unknown-key refresh is bounded and coalesced and has no attacker-triggered
 stale-key fallback. [FI-TRACE-JWKS-ADD] [FI-TRACE-JWKS-REMOVE]
 
-Thus two contract identities do not mean two total version values. Folding a
-mutable snapshot into policy identity would make benign rotation change policy
-lineage; omitting it would let evidence under a removed key survive. Stable
-semantic IDs plus explicit mutable dependency versions preserve both outcomes.
-
 The base contract compares the current authenticated snapshot and makes no
 anti-rollback promise. A deployment claiming rollback prevention records a
 separately authenticated monotonic floor and tests it. [deployment artifact:
@@ -312,14 +310,14 @@ Each protected HTTP operation declares in server policy whether its body is
 authorization-relevant; clients cannot select the declaration.
 
 For a relevant body, the NIP-98 event contains exactly one `payload` tag equal
-to lowercase hexadecimal SHA-256 of the exact bytes consumed by the
-application. Absence, duplication, mismatch, validation of only a prefix, or
-post-validation transformation denies. For an irrelevant body, no
+to lowercase hexadecimal SHA-256 of the **body bytes**: the complete content
+after transfer decoding and before any content decoding. Absence, duplication,
+mismatch, validation of only a prefix, or substitution of the body bytes after
+validation denies. For an irrelevant body, no
 Authorization decision, target, capability, or effect selector derives from a
 body field not bound by NIP-98. A `payload` tag present on an operation whose
-body is declared authorization-irrelevant is validated identically against
-lowercase hexadecimal SHA-256 of the exact body bytes received; duplication or
-mismatch denies. [FI-TRACE-BODY-BINDING]
+body is declared authorization-irrelevant is validated identically against the
+body bytes; duplication or mismatch denies. [FI-TRACE-BODY-BINDING]
 
 Every operation has finite body and spool bounds. A known oversized body is
 rejected before hashing; a stream is rejected at octet `limit + 1`; admission
@@ -479,7 +477,11 @@ private-posture rule, even `key_mismatch` joins the private-state anonymity set.
 | required current dependency unreadable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; `authorization unavailable\n` |
 
 Nostr text is the exact UTF-8 text after an applicable NIP-42/NIP-01 prefix.
-For HTTP, the compared denial contract is closed over the status, complete body,
+A denial decided on a WebSocket upgrade request, before any NIP-42 proof
+exists, is the HTTP response in the table, sent instead of `101`; a denial
+decided after the connection is established is the Nostr text. For HTTP, the
+compared denial contract is closed over the
+status, complete body,
 and exact values of only the header fields named in the table; header order and
 other fields are outside that contract and their values cannot depend on the
 private condition. The body is the shown UTF-8 bytes with one LF and no other
@@ -559,7 +561,7 @@ policy revision. NIP-FI-CONF defines evidence and mutation-adequacy rules.
 | ID | Required outcome |
 |---|---|
 | `FI-TRACE-TRANSPORT-CLOSED` | Exact one-header input succeeds; missing, repeated, combined, malformed, mixed, URL, and fallback variants deny. |
-| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, and ambiguity negative denies. |
+| `FI-TRACE-ASSERTION-VALIDATION` | Valid boundary input passes; each signature, key-selection, issuer, audience, time, size, ambiguity, and missing-configuration negative denies. |
 | `FI-TRACE-TOKEN-CLASS` | An `at+jwt` access token and a dedicated `nip-fi+jwt` assertion pass only their selected class. ID tokens, wrong/generic types outside a named compatibility policy, client-only audiences, absent or ambiguous `client_id`, resource-owner/client-subject ambiguity, and every attempted cross-class fallback deny. |
 | `FI-TRACE-CONTRACT-IDENTITIES` | Mutate each assertion semantic, transport semantic, and mutable dependency independently: semantic mutations change only their owning contract ID; snapshot/binding/lifecycle/policy/resource/status mutations change neither ID but force current revalidation. |
 | `FI-TRACE-VERIFIER-PARITY` | Equal authoritative input and policy produce the same canonical normalized result. |
@@ -568,7 +570,7 @@ policy revision. NIP-FI-CONF defines evidence and mutation-adequacy rules.
 | `FI-TRACE-CURRENT-STATUS-REVOKED` | Revocation, including one racing final admission, closes authority within the advertised tested bound. |
 | `FI-TRACE-CURRENT-STATUS-STALE` | Inactive/ambiguous status denies; an issuer, subject, or session-identifier mismatch denies; expiry equality, outage, delayed events, and changed status versions cannot mint or extend a witness. |
 | `FI-TRACE-CAPABILITY-REVOCATION` | Removal of a revocation-bounded external capability projection from authoritative local policy closes prepared evidence and lease use within the declared bound; assertion-only projection cannot satisfy this oracle. |
-| `FI-TRACE-BODY-BINDING` | Exact complete relevant body passes; absent/duplicate/mutated/partial/transformed payload variants deny without effects; a payload tag on an irrelevant-body operation validates identically and denies on duplication or mismatch. |
+| `FI-TRACE-BODY-BINDING` | Exact complete relevant body passes; absent/duplicate/mutated/partial/substituted payload variants deny without effects; a payload tag on an irrelevant-body operation validates identically and denies on duplication or mismatch. |
 | `FI-TRACE-BODY-BOUNDS` | Oversized, over-quota, and pre-EOF variants deny with bounded work, cleanup, and no effects. |
 | `FI-TRACE-DOMAIN-SPOOF` | Client routing and forwarded authority cannot replace server-owned context. |
 | `FI-TRACE-ASSERTION-KEY-MISMATCH` | Mismatch denies with no mutation and the private-state response. |
@@ -581,13 +583,33 @@ policy revision. NIP-FI-CONF defines evidence and mutation-adequacy rules.
 | `FI-TRACE-LIFECYCLE-AUTHORITY` | Unprivileged/stale transitions deny; authorized retirement/revocation/rotation is atomic. |
 | `FI-TRACE-LEASE-BOUND` | A lease ends at its earliest bound; equality at any bound is expired. |
 | `FI-TRACE-MULTI-KEY-SESSION` | One actor's lease never authorizes another key on the same connection. |
-| `FI-TRACE-DENIAL-ORACLE` | Each private row produces its exact fixed bytes; all private-state rows compare byte-identical. |
+| `FI-TRACE-DENIAL-ORACLE` | Each private row produces its exact fixed bytes on every surface where its condition can be decided — HTTP, a WebSocket upgrade, or after connect; all private-state rows compare byte-identical. |
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | Each unreadable authoritative dependency denies. |
 | `FI-TRACE-AUTHORITY-UNIFORM` | Every protected ingress reaches one current final-admission authority. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal subjects across issuers and equal pairs across domains remain distinct. |
 | `FI-TRACE-PRIVACY-NONPUBLIC` | Private identity does not enter public surfaces. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes remain identical across attested-key, TOFU, and companion enrollment modes. |
 | `FI-TRACE-TOFU-THEFT` | Stolen-assertion first use denies unless private TOFU is enabled and the attacker also proves its chosen key. |
+
+## Relationship to other work (non-normative)
+
+NIP-FI binds an access token to a key the resource server itself verifies, the
+goal DPoP (RFC 9449) and mTLS-bound tokens (RFC 8705) reach through a `cnf`
+claim. Here the proof is the NIP-42 or NIP-98 event the relay already
+validates, so no second proof is defined and the issuer need not attest the
+key; `nostr_pubkey` is the optional `cnf` analogue. Unlike those profiles the
+binding is durable server state rather than a per-token claim: a stolen
+assertion cannot reach an enrolled identity without its key, and revocation is
+a local fact rather than a token-lifetime race. One identity, one key per
+domain is stricter than WebAuthn's many-credentials-per-account model because
+the Nostr key is itself the public identity; additional devices do not create
+additional active bindings. Two contract identities plus explicit dependency
+versions exist because folding a mutable key snapshot into policy identity would make benign
+rotation change policy lineage, while omitting it would let evidence under a
+removed key survive. Denial responses deliberately collapse the conditions that
+RFC 6750 error codes distinguish. `trusted-proxy-hmac-v2` in NIP-FI-EDGE is a
+fixed-component request MAC in the family of HTTP Message Signatures (RFC 9421)
+and AWS SigV4, without negotiation and with length-prefixed canonicalization.
 
 ## Security considerations
 
@@ -605,4 +627,7 @@ atomically. Availability failures deny rather than degrade to Nostr-only access.
 - NIP-98 HTTP authentication: <https://github.com/nostr-protocol/nips/blob/6d2979b3f503a8539c983efbcdcf901bbcf9ed23/98.md>
 - JWT BCP: <https://www.rfc-editor.org/rfc/rfc8725>
 - JWT access-token profile: <https://www.rfc-editor.org/rfc/rfc9068>
+- DPoP: <https://www.rfc-editor.org/rfc/rfc9449>
+- OAuth 2.0 mTLS client certificate-bound tokens: <https://www.rfc-editor.org/rfc/rfc8705>
+- HTTP Message Signatures: <https://www.rfc-editor.org/rfc/rfc9421>
 - Non-normative composed model: [NIP-FI-MODEL.md](NIP-FI-MODEL.md)

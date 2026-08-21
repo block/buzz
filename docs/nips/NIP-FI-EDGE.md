@@ -45,7 +45,8 @@ Every trusted edge MUST:
    for the independent NIP-98 proof and MUST reach final admission unmodified;
 2. cryptographically authenticate the immediate edge to the accepting origin and
    isolate the origin from direct or alternate ingress;
-3. integrity-protect every request component used by authorization;
+3. integrity-protect every request component used by authorization other than
+   an independent Nostr proof, which is protected by its own signature;
 4. apply a positive finite provenance deadline that is included in final admission
    and every resulting lease;
 5. validate a closed upstream identity and authorization claim set and produce the
@@ -164,16 +165,17 @@ time.
   before content-coding decompression. These are exactly the octets forwarded by the
   edge and exposed to verification. HTTP framing, chunk delimiters, and trailers are
   excluded; `Content-Encoding` is not decoded. A WebSocket upgrade uses the empty
-  payload. Any transformation after the protected snapshot is forbidden.
+  payload. Substitution of the protected octets after the snapshot denies.
 - **Proof transport:** Serialize exactly one assigned octet from the registry below.
 - **Client peer:** Serialize the exact canonical ASCII field value.
 
 No authorization decision, target, resource, capability, or effect selector
-derives from any request component outside the protected pre-MAC components,
-except the independent NIP-98 proof conveyed in the `Authorization` field,
-whose integrity is protected by its own signed event rather than by this MAC;
-body interpretation follows the server-resolved body semantics, never
-unprotected transport metadata such as `Content-Type` or `Content-Encoding`.
+derives from any request or connection component outside the protected pre-MAC
+components, except an independent Nostr proof validated on its own signature,
+such as the NIP-98 event in `Authorization` or the NIP-42 event after connect,
+which the MAC does not protect; body interpretation follows the server-resolved
+body semantics, never unprotected transport metadata such as `Content-Type` or
+`Content-Encoding`.
 
 ### Freshness, replay, and key rotation
 
@@ -367,7 +369,7 @@ Every implementation MUST run these normative negative cases:
 | Authority | Unbracketed or non-RFC-5952 IPv6, uppercase host, trailing dot, or missing port denies before MAC comparison. |
 | Peer | Textual `::ffff:192.0.2.128`, padded IPv4, uppercase/noncanonical IPv6, or whitespace denies before MAC comparison. |
 | Proof | `0x00`, `0xff`, unknown stock code, or private code without a shared configured contract denies. |
-| Body | Known and unknown lengths `0`, `limit-1`, and `limit` may proceed only after EOF; `limit+1`, disconnect before EOF, aggregate-quota exhaustion, or any post-snapshot transform denies with no replay or authoritative mutation. |
+| Body | Known and unknown lengths `0`, `limit-1`, and `limit` may proceed only after EOF; `limit+1`, disconnect before EOF, aggregate-quota exhaustion, or any post-snapshot substitution of the protected octets denies with no replay or authoritative mutation. |
 | Replay | Concurrent final admissions of one valid envelope commit at most one; preparation and failed final admission consume none; secret rotation does not create a new nonce namespace. |
 | Fallback | Direct ingress, mixed evidence, and failed HMAC never retry as `client-attached` or another adapter. |
 
@@ -389,7 +391,7 @@ and these profile traces:
 | `FI-TRACE-EDGE-VECTORS` | Reproduce all three normative vectors field-for-field, including each complete pre-MAC input, diagnostic input digest, raw MAC, and wire MAC; reproduce all five timestamp serialization rows; every listed serialization and negative-matrix case produces its required denial or configuration failure. |
 | `FI-TRACE-PROXY-SPOOF` | Direct ingress, unsigned/header-only identity, unauthenticated caller, or invalid provenance denies without fallback. |
 | `FI-TRACE-PROXY-REPLAY` | Two HMAC-v2 final admissions using one nonce commit at most one; preparation consumes neither. A private adapter proves its declared replay semantics. |
-| `FI-TRACE-PROXY-CROSS-REQUEST` | Each protected component mutation denies. HMAC-v2 covers assertion, domain, method, authority, path/query, complete body, proof transport, and peer. |
+| `FI-TRACE-PROXY-CROSS-REQUEST` | Each protected component mutation denies. HMAC-v2 covers assertion, domain, method, authority, path/query, complete body, proof transport, and peer. On a `0x02` route the `Authorization` bytes at final admission equal the client-sent bytes, witnessed at both points; an edge that substitutes a valid proof from the same actor fails the witness. |
 | `FI-TRACE-EDGE-BODY-BOUNDS` | Known and streamed boundary cases prove bounded work/storage, EOF completeness, cleanup, and no pre-authorization effect. |
 | `FI-TRACE-EDGE-KEY-ROTATION` | A finite active-key set accepts an intended overlap without allowing nonce reuse or an unknown key. |
 
