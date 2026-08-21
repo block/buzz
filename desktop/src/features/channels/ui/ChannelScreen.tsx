@@ -81,6 +81,7 @@ import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useThreadOpenResumeTarget } from "./useThreadOpenResumeTarget";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
@@ -437,6 +438,7 @@ export function ChannelScreen({
     markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,
+    threadHasReadHistory,
     threadReplyTargetMessage,
     threadReplyUnreadCounts,
     threadUnreadCounts,
@@ -457,6 +459,23 @@ export function ChannelScreen({
     isThreadMuted,
     readStateVersion,
   });
+  // Placement is load-bearing: below the unread hook so both frozen open-time
+  // reads (`threadFirstUnreadReplyId`, `threadHasReadHistory`) come from this
+  // same render, and above the render so the target is present on the panel's
+  // first commit, before its layout effect bottom-pins. Every gate is
+  // explained in the hook, which owns the latch.
+  const { threadResumeScrollTargetId, onThreadResumeTargetConsumed } =
+    useThreadOpenResumeTarget({
+      openThreadHeadId: effectiveOpenThreadHeadId,
+      firstUnreadReplyId: threadFirstUnreadReplyId,
+      hasReadHistory: threadHasReadHistory,
+      externalScrollTargetId: threadScrollTargetId,
+      routeTargetMessageId: targetMessageId ?? null,
+      hasReplies:
+        threadRepliesQuery.fetchStatus === "idle" &&
+        threadPanelData.visibleReplies.length > 0,
+      isHuddleTranscript,
+    });
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
@@ -950,7 +969,9 @@ export function ChannelScreen({
                   threadPanelWidthPx={threadPanelWidthPx}
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}
+                  threadResumeScrollTargetId={threadResumeScrollTargetId}
                   threadScrollTargetId={threadScrollTargetId}
+                  onThreadResumeTargetConsumed={onThreadResumeTargetConsumed}
                   threadUnreadCounts={threadUnreadCounts}
                   threadReplyUnreadCounts={threadReplyUnreadCounts}
                   threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}

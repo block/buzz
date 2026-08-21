@@ -17,6 +17,7 @@ class _ThreadMessageList extends StatelessWidget {
   final String channelId;
   final String? currentPubkey;
   final String? highlightedMessageId;
+  final String? firstUnreadReplyId;
   final List<TimelineMessage> allMessages;
   final bool isMember;
   final bool isArchived;
@@ -41,6 +42,7 @@ class _ThreadMessageList extends StatelessWidget {
     required this.channelId,
     required this.currentPubkey,
     required this.highlightedMessageId,
+    required this.firstUnreadReplyId,
     required this.allMessages,
     required this.isMember,
     required this.isArchived,
@@ -197,6 +199,10 @@ class _ThreadMessageList extends StatelessWidget {
                             label: formatDayHeading(reply.createdAt),
                             dayTimestamp: reply.createdAt,
                             stickyDayTimestamp: stickyDayTimestamp,
+                          ),
+                        if (reply.id == firstUnreadReplyId)
+                          const UnreadDivider(
+                            key: ValueKey('thread-unread-divider'),
                           ),
                         _ThreadMessage(
                           message: reply,

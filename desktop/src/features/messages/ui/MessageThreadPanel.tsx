@@ -17,6 +17,7 @@ import {
 } from "@/features/messages/lib/messageGrouping";
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import { getActiveContinuationDepths } from "@/features/messages/lib/threadContinuationDepths";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -134,57 +135,6 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
 
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = 0;
-
-function hasLaterVisibleSibling(
-  entries: readonly MainTimelineEntry[],
-  entryIndex: number,
-): boolean {
-  const depth = entries[entryIndex]?.message.depth;
-  if (depth == null) {
-    return false;
-  }
-
-  for (let index = entryIndex + 1; index < entries.length; index += 1) {
-    const nextDepth = entries[index].message.depth;
-    if (nextDepth <= depth) {
-      return nextDepth === depth;
-    }
-  }
-
-  return false;
-}
-
-function getActiveContinuationDepths({
-  ancestors,
-  entries,
-  index,
-  message,
-}: {
-  ancestors: readonly { index: number; message: TimelineMessage }[];
-  entries: readonly MainTimelineEntry[];
-  index: number;
-  message: TimelineMessage;
-}): number[] {
-  const depths: number[] = [];
-
-  for (const ancestor of ancestors) {
-    if (ancestor.message.depth === 0) {
-      continue;
-    }
-
-    const childDepth = ancestor.message.depth + 1;
-    const pathChild =
-      message.depth === childDepth
-        ? { index, message }
-        : ancestors.find((candidate) => candidate.message.depth === childDepth);
-
-    if (pathChild && hasLaterVisibleSibling(entries, pathChild.index)) {
-      depths.push(ancestor.message.depth);
-    }
-  }
-
-  return depths;
-}
 
 export function MessageThreadPanel({
   channel,
@@ -518,7 +468,8 @@ export function MessageThreadPanel({
   } = useAnchoredScroll({
     channelId: threadHeadId,
     contentRef: threadContentRef,
-    isLoading: threadRepliesPending || repliesRenderState === "pending",
+    // A committed deferred list is ready to position even while its query refetches.
+    isLoading: repliesRenderState === "pending",
     messages: threadMessages,
     highlightTargetMessage: scrollTargetHighlights,
     onTargetReached: onScrollTargetResolved,
@@ -656,7 +607,9 @@ export function MessageThreadPanel({
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
-          {threadRepliesPending && !isHuddleTranscript ? (
+          {threadRepliesPending &&
+          repliesRenderState !== "list" &&
+          !isHuddleTranscript ? (
             <div
               className="space-y-2.5 pt-1"
               data-testid="message-thread-replies-loading"

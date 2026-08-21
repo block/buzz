@@ -37,15 +37,19 @@ import 'message_actions.dart';
 import 'message_long_press_region.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
+import '../../shared/read_state/message_read_state.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'sticky_date_header.dart';
+import 'thread_unread_marker.dart';
 import 'timeline_message.dart';
+import 'unread_divider.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
 part 'thread_detail_page/message_list.dart';
+part 'thread_detail_page/resume_target.dart';
 part 'thread_detail_page/sticky_date.dart';
 part 'thread_detail_helpers.dart';
 part 'thread_detail_page/tail_alignment.dart';
@@ -588,6 +592,19 @@ class ThreadDetailPage extends HookConsumerWidget {
       settledImeLift,
       viewportHeight,
     );
+
+    final readState = ref.watch(readStateProvider);
+
+    final resumeTarget = _useThreadResumeTarget(
+      readState: readState,
+      replies: replies,
+      channelId: channelId,
+      queryRootId: queryRootId,
+      currentPubkey: currentPubkey,
+    );
+    final firstUnreadReplyId = resumeTarget.firstUnreadReplyId;
+    final resumeReplyIndex = resumeTarget.resumeReplyIndex;
+
     useEffect(() {
       if (!hasFetchedReplies || viewportHeight <= 0) return null;
       if (initialMessageId != null) {
@@ -605,9 +622,16 @@ class ThreadDetailPage extends HookConsumerWidget {
           context: context,
           controller: itemScrollController,
           positionsListener: itemPositionsListener,
+          // Resume at the oldest unread reply, falling back to the tail once
+          // the thread is fully read (or was never read at all). Markers can
+          // land after this first schedule; readState.isReady is a dependency
+          // below, so a later run replaces the target while the settle is
+          // still pending.
           targetIndex: replies.isEmpty
               ? null
-              : indexForReply(replies.length - 1),
+              : indexForReply(
+                  resumeReplyIndex >= 0 ? resumeReplyIndex : replies.length - 1,
+                ),
           hiddenTopFraction: topOverlayFraction,
           hiddenBottomFraction:
               (composerDockHeight.value + settledImeLift) / viewportHeight,
@@ -661,8 +685,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         action: correctThreadTailInstantly,
       );
       return null;
-    }, [hasFetchedReplies, replies.length, settleGeometry]);
-    final readState = ref.watch(readStateProvider);
+    }, [hasFetchedReplies, readState.isReady, replies.length, settleGeometry]);
     final visibleReplyReadKey = replies
         .map((reply) => '${reply.id}:${reply.createdAt}')
         .join(',');
@@ -860,6 +883,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   channelId: channelId,
                   currentPubkey: currentPubkey,
                   highlightedMessageId: highlightedMessageId.value,
+                  firstUnreadReplyId: firstUnreadReplyId,
                   allMessages: allMsgs,
                   isMember: isMember,
                   isArchived: isArchived,

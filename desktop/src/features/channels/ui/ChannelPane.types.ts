@@ -174,6 +174,9 @@ export type ChannelPaneProps = {
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
   threadScrollTargetId: string | null;
+  /** Last-read reply to resume at on thread open. Never pulses. */
+  threadResumeScrollTargetId: string | null;
+  onThreadResumeTargetConsumed: () => void;
   threadUnreadCounts?: ReadonlyMap<string, number>;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadFirstUnreadReplyId?: string | null;

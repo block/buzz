@@ -304,6 +304,26 @@ export function useChannelUnreadState({
       currentPubkey,
     );
   }, [currentPubkey, getMessageReadAt, openThreadHeadId, threadMessages]);
+  // Whether the reader had a reading position here at all when they arrived —
+  // the desktop counterpart of mobile's `hasThreadReadHistory`. The resume uses
+  // it to tell "never been here" (keep today's tail pin — there is nowhere to
+  // return to) apart from "been here, everything since is new" (resume to the
+  // oldest unread reply). `threadFirstUnreadReplyId` names the first reply in
+  // both cases, so it cannot separate them.
+  //
+  // This deliberately reads openFrontierSeconds and NOT the per-reply snapshot
+  // above. Desktop read markers are hierarchical: getMessageReadAt resolves
+  // `msg:<id>` to max(own marker, ACTIVE CHANNEL marker) via the parent
+  // resolver ChannelScreen installs. Opening the channel advances that channel
+  // marker, so from the panel's first render every reply reports a non-null
+  // effective read — a first-ever open would claim read history and drag the
+  // reader to the top. openFrontierSeconds is the one read-state value frozen
+  // before any of that: it is captured during render on channel open, ahead of
+  // the mark-read effect, and answers exactly "had this reader read anything in
+  // this channel before this visit". A reader who never read the channel cannot
+  // have read a reply inside it, since reading one marks the other.
+  const threadHasReadHistory =
+    openThreadHeadId !== null && openFrontierSeconds !== null;
   // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
   // to the open thread's subtree and decided per-reply against the live
   // per-message read state (getMessageReadAt): each collapsed row's badge
@@ -507,6 +527,7 @@ export function useChannelUnreadState({
     markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,
+    threadHasReadHistory,
     threadMessages,
     threadReplyTargetMessage,
     threadReplyUnreadCounts,
