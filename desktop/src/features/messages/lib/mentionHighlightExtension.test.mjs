@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { getSchema } from "@tiptap/core";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
 import StarterKit from "@tiptap/starter-kit";
 
 import {
@@ -10,6 +11,7 @@ import {
   createMentionCaretSettlement,
   findHighlightMatches,
   insertPosForMentionTextInput,
+  MentionHighlightExtension,
   mentionTextInputInsertPos,
   positionAfterArrowLeftThroughMentionSpace,
   selectionAfterMentionTrailingSpace,
@@ -213,7 +215,6 @@ test("shouldAdvanceMentionCaret restores a remap while this editor is settling",
       from: 7,
       next: 8,
       settling: true,
-      docChanged: false,
     }),
     true,
   );
@@ -225,21 +226,18 @@ test("shouldAdvanceMentionCaret does not steal ArrowLeft after settlement is can
       from: 7,
       next: 8,
       settling: false,
-      docChanged: false,
     }),
     false,
   );
 });
 
-test("shouldAdvanceMentionCaret still advances after a document change", () => {
+test("shouldAdvanceMentionCaret does not advance on an unsettled document change", () => {
+  // Regression: `docChanged` used to force an advance. That walked the caret
+  // across a mention's trailing space on every keystroke, so typing `@name`
+  // before existing text interleaved spaces into the draft.
   assert.equal(
-    shouldAdvanceMentionCaret({
-      from: 7,
-      next: 8,
-      settling: false,
-      docChanged: true,
-    }),
-    true,
+    shouldAdvanceMentionCaret({ from: 7, next: 8, settling: false }),
+    false,
   );
 });
 
@@ -311,4 +309,72 @@ test("assignMentionHighlightNames updates when a new mention is added", () => {
     true,
   );
   assert.deepEqual(storage.names, ["bob", "quinn"]);
+});
+
+// ── caret regression: typing a mention before existing text ───────────
+//
+// Drives the real plugin through EditorState so `appendTransaction` runs.
+// Before the fix, every keystroke advanced the caret across a mention's
+// trailing space, interleaving spaces into the rest of the draft.
+
+function editorStateWithMentionHighlight(initialText, names) {
+  // The plugin factory only reads `this.storage`, so a minimal stand-in is
+  // enough to exercise it without constructing a full editor (needs a DOM).
+  const plugins = MentionHighlightExtension.config.addProseMirrorPlugins.call({
+    storage: { names, agentNames: [], channelNames: [] },
+  });
+  return EditorState.create({
+    doc: document(paragraph(text(initialText))),
+    schema,
+    plugins,
+  });
+}
+
+/** Insert `typed` one character at a time at `startPos`, as typing does. */
+function typeAt(state, startPos, typed) {
+  let next = state.apply(
+    state.tr.setSelection(TextSelection.create(state.doc, startPos)),
+  );
+  for (const char of typed) {
+    const { from, to } = next.selection;
+    const tr = next.tr.insertText(char, from, to);
+    tr.setSelection(TextSelection.create(tr.doc, tr.mapping.map(to, 1)));
+    next = next.apply(tr);
+  }
+  return next;
+}
+
+test("typing a mention before existing text does not interleave spaces", () => {
+  // Caret placed just after "hello" in "hello world", then " @qu" is typed.
+  const state = editorStateWithMentionHighlight("hello world", ["quinn"]);
+  const typed = typeAt(state, 1 + "hello".length, " @qu");
+  assert.equal(typed.doc.textContent, "hello @qu world");
+});
+
+test("typing a mention before existing text keeps the caret with the text", () => {
+  const state = editorStateWithMentionHighlight("hello world", ["quinn"]);
+  const typed = typeAt(state, 1 + "hello".length, " @qu");
+  assert.equal(typed.selection.from, 1 + "hello @qu".length);
+});
+
+test("an unknown @token before existing text is not rewritten either", () => {
+  // The trailing-space scan is purely textual, so it fired even for names
+  // that were never registered as mentions.
+  const state = editorStateWithMentionHighlight("hello world", []);
+  const typed = typeAt(state, 1 + "hello".length, " @zz");
+  assert.equal(typed.doc.textContent, "hello @zz world");
+});
+
+test("typing a mention at the end of a message still works", () => {
+  const state = editorStateWithMentionHighlight("hello world", ["quinn"]);
+  const typed = typeAt(state, 1 + "hello world".length, " @qu");
+  assert.equal(typed.doc.textContent, "hello world @qu");
+});
+
+test("typing after a completed mention keeps the separator intact", () => {
+  // "@quinn " already exists; typing at the very end must not consume or
+  // duplicate the trailing space.
+  const state = editorStateWithMentionHighlight("@quinn world", ["quinn"]);
+  const typed = typeAt(state, 1 + "@quinn world".length, "!");
+  assert.equal(typed.doc.textContent, "@quinn world!");
 });

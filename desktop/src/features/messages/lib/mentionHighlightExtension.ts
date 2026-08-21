@@ -40,19 +40,22 @@ export function createMentionCaretSettlement(): MentionCaretSettlement {
  * Whether to move an empty caret from `from` to `next` after a mention
  * trailing space. Settlement is per editor: autocomplete arms it, and
  * ArrowLeft/click cancel it so we do not steal an intentional caret.
+ *
+ * Only an armed settlement may advance the caret. Advancing on any
+ * document change instead walked the caret across the separator on every
+ * keystroke, so typing `@name` before existing text interleaved spaces
+ * into the draft (`hello @q uworld`).
  */
 export function shouldAdvanceMentionCaret({
   from,
   next,
   settling,
-  docChanged,
 }: {
   from: number;
   next: number;
   settling: boolean;
-  docChanged: boolean;
 }): boolean {
-  return next !== from && (settling || docChanged);
+  return next !== from && settling;
 }
 
 /**
@@ -334,7 +337,7 @@ export const MentionHighlightExtension = Extension.create({
             return oldDecorations.map(tr.mapping, tr.doc);
           },
         },
-        appendTransaction(transactions, _oldState, newState) {
+        appendTransaction(_transactions, _oldState, newState) {
           if (!newState.selection.empty) {
             settlement.cancel();
             return null;
@@ -346,7 +349,6 @@ export const MentionHighlightExtension = Extension.create({
               from,
               next,
               settling: settlement.peek() !== null,
-              docChanged: transactions.some((tr) => tr.docChanged),
             })
           ) {
             return null;
