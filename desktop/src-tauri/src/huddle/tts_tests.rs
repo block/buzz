@@ -54,6 +54,7 @@ fn production_worker_append_authorization_completes() {
             speaker_generations: &speaker_generations,
             active_speaker: &active_speaker,
             activity_frames: &activity_frames,
+            broadcasters: &TtsBroadcasters::default(),
             channels,
             rate,
         };
@@ -69,6 +70,7 @@ fn production_worker_append_authorization_completes() {
             None,
             0,
             floor_epoch,
+            || {},
         );
         completed_tx
             .send((accepted, tts_active.load(Ordering::Acquire)))

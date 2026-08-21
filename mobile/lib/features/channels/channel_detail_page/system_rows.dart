@@ -164,6 +164,15 @@ class _SystemMessageRow extends HookConsumerWidget {
                         ],
                       ),
               ),
+              if (systemEvent.type == SystemEventType.huddleStarted &&
+                  systemEvent.ephemeralChannelId != null)
+                _HuddleJoinSurface(
+                  message: message,
+                  allMessages: allMessages ?? const [],
+                  parentChannelId: channelId,
+                  isMember: isMember,
+                  isArchived: isArchived,
+                ),
               if (reactions.isNotEmpty)
                 Padding(
                   padding: EdgeInsets.only(

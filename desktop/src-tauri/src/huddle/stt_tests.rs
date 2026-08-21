@@ -1,9 +1,9 @@
 use std::sync::{atomic::AtomicBool, mpsc, Arc, Barrier};
 
 use super::{
-    has_enough_voiced_audio, run_stt_receive_loop, vad_flush_allowed, HumanFloor, SttLoopInput,
-    VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES, SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES,
-    VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
+    has_enough_voiced_audio, run_stt_receive_loop, vad_flush_allowed, HumanFloor, SttAudioInput,
+    SttAudioOrigin, SttLoopInput, VadEndpoint, VadFrameAction, MIN_VOICED_FRAMES,
+    SILENCE_FLUSH_FRAMES, VAD_FRAME_SAMPLES, VAD_ONSET_FRAMES, VAD_PRE_ROLL_FRAMES,
 };
 
 #[derive(Clone, Copy)]
@@ -34,7 +34,12 @@ fn assert_worker_exit_releases_floor(exit: WorkerExit) {
         );
     });
 
-    audio_tx.send(Vec::new()).expect("worker receiver is open");
+    audio_tx
+        .send(SttAudioInput {
+            pcm_bytes: Vec::new(),
+            origin: SttAudioOrigin::Local,
+        })
+        .expect("worker receiver is open");
     acquired.wait();
     assert!(human_floor.is_blocked());
     match exit {
