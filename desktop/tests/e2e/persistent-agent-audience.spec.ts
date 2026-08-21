@@ -503,6 +503,7 @@ test("a manually mentioned agent becomes selected after the message sends", asyn
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);
 
+  await input.press("Space");
   await input.type("hello");
   await input.press("Enter");
 
@@ -522,8 +523,28 @@ test("a manually mentioned agent becomes selected after the message sends", asyn
   await expect(autoPinToast).toContainText(
     "Future messages will include this agent.",
   );
+  const toastDescription = autoPinToast.locator("[data-description]");
+  await expect(
+    toastDescription.getByRole("button", { name: "Undo" }),
+  ).toBeVisible();
+  await expect(
+    toastDescription.getByRole("button", { name: "Open in settings" }),
+  ).toBeVisible();
+  await toastDescription
+    .getByRole("button", { name: "Open in settings" })
+    .click();
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await expect(composer.getByTestId("mention-options-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(
+    composer.getByTestId("mention-keep-agents-pinned-toggle"),
+  ).toBeVisible();
+  await composer.locator("[data-mention-picker-trigger]").click();
+  await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita hello"))
+    .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita  hello"))
     .toContain(AGENT_A);
 
   await input.fill("follow up");
@@ -531,6 +552,61 @@ test("a manually mentioned agent becomes selected after the message sends", asyn
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "follow up"))
     .toContain(AGENT_A);
+});
+
+test("the auto-pin toast can undo the newly pinned agent", async ({ page }) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await input.press("Tab");
+  await expect(input).toHaveText("@Morgarita ");
+  await input.press("Space");
+  await input.type("undo me");
+  await input.press("Enter");
+
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  const autoPinToast = page
+    .locator("[data-sonner-toast][data-removed='false']")
+    .filter({ hasText: "Morgarita is now pinned" });
+  await autoPinToast
+    .locator("[data-description]")
+    .getByRole("button", { name: "Undo" })
+    .click();
+
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        ({ scope }) => {
+          const stored = JSON.parse(
+            localStorage.getItem(
+              "buzz:persistent-agent-audiences:v3:e2e-default-community",
+            ) ?? "{}",
+          );
+          return stored[scope] ?? [];
+        },
+        { scope: CHANNEL_SCOPE },
+      ),
+    )
+    .toEqual([]);
+
+  await composer.locator("[data-mention-picker-trigger]").click();
+  await composer
+    .getByTestId("mention-autocomplete")
+    .getByRole("button", { name: "Mention Morgarita" })
+    .click();
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
 });
 
 test("send-button avatars restore and can be removed independently", async ({

@@ -42,6 +42,7 @@ type MentionAutocompleteProps = {
   onToggleAlwaysAddressAgent?: (suggestion: MentionSuggestion) => void;
   keepMentionedAgentsPinned?: boolean;
   onKeepMentionedAgentsPinnedChange?: (value: boolean) => void;
+  openOptionsRequest?: number;
   onDismiss?: () => void;
   position?: "above" | "below";
 };
@@ -65,6 +66,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   onToggleAlwaysAddressAgent,
   keepMentionedAgentsPinned = true,
   onKeepMentionedAgentsPinnedChange,
+  openOptionsRequest = 0,
   onDismiss,
   position = "above",
 }: MentionAutocompleteProps) {
@@ -88,6 +90,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       setOptionsOpen(false);
     }
   }, [suggestions.length]);
+
+  React.useEffect(() => {
+    if (openOptionsRequest > 0) {
+      setOptionsOpen(true);
+    }
+  }, [openOptionsRequest]);
 
   React.useEffect(() => {
     if (!onDismiss) return;

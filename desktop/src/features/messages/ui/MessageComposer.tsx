@@ -120,6 +120,8 @@ function MessageComposerImpl({
   } = useComposerLinkPreviews(previewContent, editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
+  const [mentionOptionsOpenRequest, setMentionOptionsOpenRequest] =
+    React.useState(0);
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
     Set<string>
   >(() => new Set());
@@ -300,6 +302,12 @@ function MessageComposerImpl({
   const keepMentionedAgentsPinned = useKeepMentionedAgentsPinned();
   const addressPulse = useAddressMentionPulse();
   const addressPrototype = useComposerAddressPrototype();
+  const audienceScopeRef = React.useRef(audienceScope);
+  const removeAddressedAgentRef = React.useRef<(pubkey: string) => void>(
+    persistentAudience.removePubkey,
+  );
+  const openMentionOptionsRef = React.useRef<() => void>(() => {});
+  audienceScopeRef.current = audienceScope;
   const addInlineAgentMentionsToAudience = React.useCallback(
     (pubkeys: readonly string[]) => {
       if (!audienceScope || !keepMentionedAgentsPinned) return;
@@ -318,20 +326,64 @@ function MessageComposerImpl({
       }
       if (newlyPinnedPubkeys.length === 0) return;
 
+      const undoAutoPin = () => {
+        if (audienceScopeRef.current !== audienceScope) return;
+        for (const pubkey of newlyPinnedPubkeys) {
+          removeAddressedAgentRef.current(pubkey);
+        }
+      };
+      const showAutoPinToast = (title: string, message: string) => {
+        let toastId: string | number | undefined;
+        const dismissToast = () => {
+          if (toastId !== undefined) toast.dismiss(toastId);
+        };
+        toastId = toast.success(title, {
+          description: (
+            <div>
+              <div>{message}</div>
+              <div className="mt-1 flex items-center gap-2">
+                <button
+                  className="cursor-pointer bg-transparent p-0 font-medium text-foreground underline decoration-foreground/40 underline-offset-2 hover:decoration-foreground"
+                  onClick={() => {
+                    undoAutoPin();
+                    dismissToast();
+                  }}
+                  type="button"
+                >
+                  Undo
+                </button>
+                <span aria-hidden="true">·</span>
+                <button
+                  className="cursor-pointer bg-transparent p-0 font-medium text-foreground underline decoration-foreground/40 underline-offset-2 hover:decoration-foreground"
+                  onClick={() => {
+                    openMentionOptionsRef.current();
+                    dismissToast();
+                  }}
+                  type="button"
+                >
+                  Open in settings
+                </button>
+              </div>
+            </div>
+          ),
+        });
+      };
+
       if (newlyPinnedPubkeys.length === 1) {
         const displayName = mentions
           .getMentionDisplayName(newlyPinnedPubkeys[0])
           ?.trim();
-        toast.success(
+        showAutoPinToast(
           displayName ? `${displayName} is now pinned` : "Agent is now pinned",
-          { description: "Future messages will include this agent." },
+          "Future messages will include this agent.",
         );
         return;
       }
 
-      toast.success(`${newlyPinnedPubkeys.length} agents are now pinned`, {
-        description: "Future messages will include these agents.",
-      });
+      showAutoPinToast(
+        `${newlyPinnedPubkeys.length} agents are now pinned`,
+        "Future messages will include these agents.",
+      );
     },
     [
       addressPulse.pulseOne,
@@ -460,6 +512,7 @@ function MessageComposerImpl({
     profiles,
     richText,
   });
+  removeAddressedAgentRef.current = removeAddressedAgent;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
       const { cursor } = richText.getPlainTextAndCursor();
@@ -527,6 +580,11 @@ function MessageComposerImpl({
     () => openMentionPicker(false),
     [openMentionPicker],
   );
+  const openMentionOptions = React.useCallback(() => {
+    openMentionSettings();
+    setMentionOptionsOpenRequest((request) => request + 1);
+  }, [openMentionSettings]);
+  openMentionOptionsRef.current = openMentionOptions;
   const handleAlwaysAddressShortcut = useAlwaysAddressShortcut({
     enabled: Boolean(audienceScope && editTarget == null),
     mentions,
@@ -948,6 +1006,7 @@ function MessageComposerImpl({
                   ? setKeepMentionedAgentsPinned
                   : undefined
               }
+              openOptionsRequest={mentionOptionsOpenRequest}
               onToggleAlwaysAddressAgent={
                 audienceScope && editTarget == null
                   ? toggleAlwaysAddressAgent
