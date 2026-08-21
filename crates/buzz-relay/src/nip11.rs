@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
-use crate::config::DEFAULT_MAX_FRAME_BYTES;
+use crate::config::{DEFAULT_MAX_FRAME_BYTES, DEFAULT_RELAY_DESCRIPTION, DEFAULT_RELAY_NAME};
 
 /// NIPs unconditionally supported by this relay, advertised in the NIP-11
 /// document. Kept as a module-level constant so tests can verify it without
@@ -138,7 +138,14 @@ impl RelayInfo {
     /// gates on NIP-43 events — i.e. has a stable key AND enforces
     /// membership. NIP-43 events are verified against `self`, so it is a
     /// programmer error to advertise NIP-43 without a `relay_self`.
+    ///
+    /// `name` and `description` are the operator-configured relay identity
+    /// (`BUZZ_RELAY_NAME` / `BUZZ_RELAY_DESCRIPTION`, defaults applied at
+    /// config load) — deployment-global scalars, identical for every
+    /// community on the deployment.
     pub fn build(
+        name: &str,
+        description: &str,
         relay_self: Option<&str>,
         icon: Option<&str>,
         advertise_nip43: bool,
@@ -156,8 +163,8 @@ impl RelayInfo {
         }
 
         Self {
-            name: "Buzz Relay".to_string(),
-            description: "Buzz — private team communication relay".to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
             icon: icon.filter(|s| !s.is_empty()).map(|s| s.to_string()),
             pubkey: None,
             contact: None,
@@ -241,6 +248,8 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
     let mut info = RelayInfo::build(
+        &state.config.relay_name,
+        &state.config.relay_description,
         relay_self.as_deref(),
         icon.as_deref(),
         advertise_nip43,
@@ -330,8 +339,15 @@ pub(crate) fn nip11_facts(state: &crate::state::AppState) -> (Option<String>, bo
 /// hard build break, the same way a deny-lint would. If you must change this
 /// signature, you are changing the conformance contract: update the conformance
 /// doc and prove the new input is host-scoped, not unscoped, first.
+///
+/// The leading `name`/`description` scalars are deployment-global operator
+/// config (`BUZZ_RELAY_NAME` / `BUZZ_RELAY_DESCRIPTION`), pre-resolved at
+/// config load — identical for every community, so they cannot become an
+/// enumeration oracle.
 #[allow(clippy::type_complexity)]
 const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
+    &str,
+    &str,
     Option<&str>,
     Option<&str>,
     bool,
@@ -342,6 +358,57 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `RelayInfo::build` with the default relay name/description — most
+    /// tests here exercise other fields and don't care about identity.
+    fn build_info(
+        relay_self: Option<&str>,
+        icon: Option<&str>,
+        advertise_nip43: bool,
+        max_message_length: usize,
+        pairing_relay_url: Option<&str>,
+    ) -> RelayInfo {
+        RelayInfo::build(
+            DEFAULT_RELAY_NAME,
+            DEFAULT_RELAY_DESCRIPTION,
+            relay_self,
+            icon,
+            advertise_nip43,
+            max_message_length,
+            pairing_relay_url,
+        )
+    }
+
+    #[test]
+    fn name_and_description_default_to_buzz_branding() {
+        let info = build_info(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        assert_eq!(info.name, "Buzz Relay");
+        assert_eq!(info.description, "Buzz — private team communication relay");
+    }
+
+    /// Self-hosters brand their relay via `BUZZ_RELAY_NAME` /
+    /// `BUZZ_RELAY_DESCRIPTION` — the configured values must be served
+    /// verbatim in the NIP-11 `name`/`description` fields.
+    #[test]
+    fn configured_name_and_description_are_served() {
+        let info = RelayInfo::build(
+            "Acme Chat",
+            "Acme's private relay",
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+        );
+        assert_eq!(info.name, "Acme Chat");
+        assert_eq!(info.description, "Acme's private relay");
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json.get("name").and_then(|v| v.as_str()), Some("Acme Chat"));
+        assert_eq!(
+            json.get("description").and_then(|v| v.as_str()),
+            Some("Acme's private relay")
+        );
+    }
 
     #[test]
     fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
@@ -391,13 +458,13 @@ mod tests {
 
     #[test]
     fn build_advertises_buzz_repository_url() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = build_info(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.software, "https://github.com/block/buzz");
     }
 
     #[test]
     fn configured_pairing_relay_is_advertised_and_unset_value_is_omitted() {
-        let info = RelayInfo::build(
+        let info = build_info(
             None,
             None,
             false,
@@ -411,7 +478,7 @@ mod tests {
             Some("wss://pairing.buzz.xyz")
         );
 
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = build_info(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         let json = serde_json::to_value(&info).expect("serialize");
         assert!(json.get("pairing_relay_url").is_none());
     }
@@ -421,7 +488,7 @@ mod tests {
     /// entirely so the JSON matches pre-icon documents byte-for-byte.
     #[test]
     fn icon_is_mirrored_and_empty_or_absent_is_omitted() {
-        let info = RelayInfo::build(
+        let info = build_info(
             None,
             Some("data:image/webp;base64,UklGRg=="),
             false,
@@ -439,7 +506,7 @@ mod tests {
         );
 
         for icon in [None, Some("")] {
-            let info = RelayInfo::build(None, icon, false, DEFAULT_MAX_FRAME_BYTES, None);
+            let info = build_info(None, icon, false, DEFAULT_MAX_FRAME_BYTES, None);
             assert!(info.icon.is_none());
             let json = serde_json::to_value(&info).expect("serialize");
             assert!(
@@ -459,7 +526,7 @@ mod tests {
 
     #[test]
     fn max_message_length_uses_configured_frame_limit() {
-        let info = RelayInfo::build(None, None, false, 262_144, None);
+        let info = build_info(None, None, false, 262_144, None);
         let limitation = info.limitation.expect("limitation");
         assert_eq!(limitation.max_message_length, Some(262_144));
     }
@@ -490,7 +557,7 @@ mod tests {
     /// Open relay, ephemeral key — both `self` and NIP-43 are absent.
     #[test]
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = build_info(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert!(info.relay_self.is_none());
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -503,7 +570,7 @@ mod tests {
     #[test]
     fn build_open_relay_stable_key_advertises_self_but_not_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = build_info(Some(pk), None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -512,7 +579,7 @@ mod tests {
     #[test]
     fn build_membership_relay_advertises_self_and_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, true, DEFAULT_MAX_FRAME_BYTES, None);
+        let info = build_info(Some(pk), None, true, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -523,6 +590,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
-        let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES, None);
+        let _ = build_info(None, None, true, DEFAULT_MAX_FRAME_BYTES, None);
     }
 }
