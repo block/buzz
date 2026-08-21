@@ -18,11 +18,23 @@
  * React Query stack is unavailable, see MessageComposerAutoSend.test.mjs), so
  * the terminal-surface consumer is extracted to this cheap-to-mount component.
  *
+ * Wiring guard: mounting the exported card proves the surface→card mapping,
+ * but not that the panel still ROUTES its real repliesSurface / retry callback
+ * through it — the panel could drop the card and render an unconditional empty
+ * state, restoring the false-empty bug while these mount tests stay green. The
+ * final test is a structural source tripwire that fails if the panel's terminal
+ * branch stops rendering ThreadRepliesTerminalCard fed by both
+ * surface={repliesSurface} and onRetry={onRetryThreadReplies}. Full panel mount
+ * can't observe this call site, so the source is the binding.
+ *
  * CI surface: pnpm test (node:test with @testing-library/react over JSDOM).
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { after, afterEach, before, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { JSDOM } from "jsdom";
 
@@ -112,5 +124,40 @@ test("pending surface paints nothing", async () => {
     container.textContent,
     "",
     "the pending surface must render nothing while rows stream in",
+  );
+});
+
+test("panel routes its real reply surface + retry through the terminal card", () => {
+  // Structural tripwire: the mount tests above prove the card maps surfaces to
+  // the right subcards, but they never observe the panel's call site. This
+  // guard binds that call site — if the terminal branch stops rendering
+  // <ThreadRepliesTerminalCard> fed by both the live repliesSurface and the
+  // retry callback (e.g. reverted to an unconditional empty card), the panel
+  // false-empty bug is back with these tests still green. Full panel mount
+  // can't reach this JSX (Tiptap composer / React Query stack), so the source
+  // is the only place to bind it.
+  const panelPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "MessageThreadPanel.tsx",
+  );
+  const source = fs.readFileSync(panelPath, "utf8");
+
+  // Isolate the JSX open tag (not the `function ThreadRepliesTerminalCard`
+  // definition) and its prop list.
+  const openTag = source.match(/<ThreadRepliesTerminalCard\b[^>]*\/>/s);
+  assert.ok(
+    openTag,
+    "the panel's terminal reply branch must render <ThreadRepliesTerminalCard />",
+  );
+  const props = openTag[0].replace(/\s+/g, " ");
+  assert.match(
+    props,
+    /surface=\{repliesSurface\}/,
+    "the terminal card must be fed the live repliesSurface",
+  );
+  assert.match(
+    props,
+    /onRetry=\{onRetryThreadReplies\}/,
+    "the terminal card must be fed the panel's retry callback",
   );
 });
