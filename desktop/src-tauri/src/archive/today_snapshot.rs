@@ -323,6 +323,48 @@ fn enforce_private_permissions(_path: &Path, _directory: bool) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(not(windows))]
+fn atomic_publish(temp_path: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::rename(temp_path, destination)
+        .map_err(|error| format!("atomically publish Today snapshot: {error}"))
+}
+
+#[cfg(windows)]
+fn atomic_publish(temp_path: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temp_wide = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination_wide = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths for the
+    // duration of the call. MOVEFILE_REPLACE_EXISTING preserves atomic
+    // replace semantics when a prior Today snapshot already exists.
+    let moved = unsafe {
+        MoveFileExW(
+            temp_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(format!(
+            "atomically publish Today snapshot: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 pub fn write_owner_today_snapshot(
     nest_dir: &Path,
     owner_keys: &Keys,
@@ -353,8 +395,7 @@ pub fn write_owner_today_snapshot(
             .map_err(|error| format!("sync Today snapshot: {error}"))?;
         drop(file);
         enforce_private_permissions(&temp_path, false)?;
-        std::fs::rename(&temp_path, &destination)
-            .map_err(|error| format!("atomically publish Today snapshot: {error}"))?;
+        atomic_publish(&temp_path, &destination)?;
         enforce_private_permissions(&destination, false)?;
         Ok(())
     })();
@@ -490,6 +531,10 @@ mod tests {
             write_owner_today_snapshot(dir.path(), &keys, &owner, &snapshot(&owner, 1001), 1001)
                 .unwrap();
         assert_eq!(first.path, second.path);
+        assert_ne!(first.sha256, second.sha256);
+        let replaced: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&second.path).unwrap()).unwrap();
+        assert_eq!(replaced["generatedAt"], 1001);
         let mut value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&second.path).unwrap()).unwrap();
         value["ownerPubkey"] = "b".repeat(64).into();

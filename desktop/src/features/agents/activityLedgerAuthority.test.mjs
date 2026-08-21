@@ -8,6 +8,7 @@ import {
 import {
   applyValidatedJournalAuthority,
   journalAuthorityCorrelationId,
+  journalVerificationSources,
 } from "./activityLedgerAuthority.ts";
 
 const sourceId = "a".repeat(64);
@@ -94,11 +95,19 @@ test("owner-signed verification only promotes evidence bound to the journal", ()
 
 test("verification writes use the journal correlation, not a tool-call correlation", () => {
   const journal = observedJournal();
+  const receiptSourceId = "e".repeat(64);
   const toolEvidence = {
     ...journal.events[0],
     correlationId: "tool-call-1",
     proofState: "RECEIPTED",
     category: "tool",
+    toolCallId: "tool-call-1",
+    provenance: {
+      ...journal.events[0].provenance,
+      sourceEventId: receiptSourceId,
+      toolCallId: "tool-call-1",
+      triggeringEventIds: [],
+    },
   };
   const journalWithTool = {
     ...journal,
@@ -109,6 +118,20 @@ test("verification writes use the journal correlation, not a tool-call correlati
   assert.notEqual(
     journalAuthorityCorrelationId(journalWithTool),
     toolEvidence.correlationId,
+  );
+  assert.deepEqual(journalVerificationSources(journalWithTool), {
+    sourceEventIds: [sourceId, receiptSourceId].sort(),
+    hasReceiptedEvidence: true,
+    hasCorrelationEvidence: true,
+  });
+
+  const missingCorrelationSource = {
+    ...journalWithTool,
+    correlationId: "message-without-an-observer-source",
+  };
+  assert.equal(
+    journalVerificationSources(missingCorrelationSource).hasCorrelationEvidence,
+    false,
   );
 });
 

@@ -18,6 +18,7 @@ import {
 import {
   applyValidatedJournalAuthority,
   journalAuthorityCorrelationId,
+  journalVerificationSources,
 } from "@/features/agents/activityLedgerAuthority";
 import {
   getJournalAuthorityArtifacts,
@@ -228,6 +229,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
   const [summary, setSummary] = React.useState(journal.summary);
   const [receiptRef, setReceiptRef] = React.useState("");
   const [saving, setSaving] = React.useState(false);
+  const [authorityLoading, setAuthorityLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
 
   const reloadAuthority = React.useCallback(async () => {
@@ -241,6 +243,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     setMode(null);
     setSummary(journal.summary);
     setReceiptRef("");
+    setAuthorityLoading(true);
     setError(null);
     getJournalAuthorityArtifacts(journal.id)
       .then((current) => {
@@ -254,6 +257,9 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
               : "Owner journal proof could not be loaded.",
           );
         }
+      })
+      .finally(() => {
+        if (!cancelled) setAuthorityLoading(false);
       });
     return () => {
       cancelled = true;
@@ -264,19 +270,12 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
     () => applyValidatedJournalAuthority(journal, artifacts),
     [artifacts, journal],
   );
-  const receiptedSourceIds = React.useMemo(
-    () => [
-      ...new Set(
-        journal.events
-          .filter((event) => event.proofState === "RECEIPTED")
-          .map((event) => event.provenance.sourceEventId)
-          .filter(
-            (id): id is string =>
-              typeof id === "string" && /^[0-9a-f]{64}$/i.test(id),
-          ),
-      ),
-    ],
-    [journal.events],
+  React.useEffect(() => {
+    if (mode !== "summary") setSummary(authorizedJournal.summary);
+  }, [authorizedJournal.summary, mode]);
+  const verificationSources = React.useMemo(
+    () => journalVerificationSources(journal),
+    [journal],
   );
   const saveSummary = async () => {
     if (!summary.trim() || saving) return;
@@ -302,7 +301,14 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
   };
 
   const saveVerification = async () => {
-    if (!receiptRef.trim() || receiptedSourceIds.length === 0 || saving) return;
+    if (
+      !receiptRef.trim() ||
+      !verificationSources.hasReceiptedEvidence ||
+      !verificationSources.hasCorrelationEvidence ||
+      saving
+    ) {
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -310,7 +316,7 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
         journalId: journal.id,
         correlationId: journalAuthorityCorrelationId(journal),
         receiptRef: receiptRef.trim(),
-        sourceEventIds: receiptedSourceIds,
+        sourceEventIds: verificationSources.sourceEventIds,
       });
       await reloadAuthority();
       setMode(null);
@@ -377,16 +383,26 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
             value={receiptRef}
             onChange={(event) => setReceiptRef(event.target.value)}
           />
-          {receiptedSourceIds.length === 0 ? (
+          {!verificationSources.hasReceiptedEvidence ? (
             <p className="text-xs text-destructive">
               This journal has no receipted tool evidence to verify.
+            </p>
+          ) : null}
+          {verificationSources.hasReceiptedEvidence &&
+          !verificationSources.hasCorrelationEvidence ? (
+            <p className="text-xs text-destructive">
+              The journal correlation source is unavailable. Refresh archived
+              activity before verifying.
             </p>
           ) : null}
           <div className="flex gap-2">
             <Button
               size="xs"
               disabled={
-                saving || !receiptRef.trim() || receiptedSourceIds.length === 0
+                saving ||
+                !receiptRef.trim() ||
+                !verificationSources.hasReceiptedEvidence ||
+                !verificationSources.hasCorrelationEvidence
               }
               onClick={saveVerification}
             >
@@ -401,13 +417,23 @@ function MissionJournalSummary({ journal }: { journal: MissionJournal }) {
 
       {mode == null ? (
         <div className="mt-2 flex flex-wrap gap-1">
-          <Button size="xs" variant="ghost" onClick={() => setMode("summary")}>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={authorityLoading}
+            onClick={() => {
+              setSummary(authorizedJournal.summary);
+              setMode("summary");
+            }}
+          >
             <Pencil /> Edit summary
           </Button>
           <Button
             size="xs"
             variant="ghost"
-            disabled={authorizedJournal.proofState === "VERIFIED"}
+            disabled={
+              authorityLoading || authorizedJournal.proofState === "VERIFIED"
+            }
             onClick={() => setMode("verify")}
           >
             <CheckCircle2 /> Verify receipt

@@ -30,6 +30,49 @@ export function journalAuthorityCorrelationId(
   return journal.correlationId;
 }
 
+export type JournalVerificationSources = {
+  sourceEventIds: string[];
+  hasReceiptedEvidence: boolean;
+  hasCorrelationEvidence: boolean;
+};
+
+function validSourceEventId(value: string | null | undefined): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value);
+}
+
+/**
+ * Bind verification to both the receipted work and the observer frame that
+ * carries the journal-level correlation. Those can be separate signed relay
+ * events when the observer batch flushes between turn start and tool output.
+ */
+export function journalVerificationSources(
+  journal: MissionJournal,
+): JournalVerificationSources {
+  const correlationId = journalAuthorityCorrelationId(journal);
+  const receiptedSourceIds = journal.events
+    .filter((event) => event.proofState === "RECEIPTED")
+    .map((event) => event.provenance.sourceEventId)
+    .filter(validSourceEventId);
+  const correlationSourceId = journal.events.find(
+    (event) =>
+      event.provenance.triggeringEventIds.includes(correlationId) ||
+      event.toolCallId === correlationId ||
+      event.messageId === correlationId,
+  )?.provenance.sourceEventId;
+  const hasCorrelationEvidence =
+    correlationId === journal.id || validSourceEventId(correlationSourceId);
+
+  return {
+    sourceEventIds: [
+      ...new Set(
+        [correlationSourceId, ...receiptedSourceIds].filter(validSourceEventId),
+      ),
+    ].sort(),
+    hasReceiptedEvidence: receiptedSourceIds.length > 0,
+    hasCorrelationEvidence,
+  };
+}
+
 /**
  * Overlay owner authority without rewriting the observed source journal.
  *
