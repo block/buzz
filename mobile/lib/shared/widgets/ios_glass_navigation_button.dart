@@ -138,6 +138,7 @@ class IosGlassNavigationButton extends HookWidget {
 
     return Tooltip(
       message: semanticLabel,
+      excludeFromSemantics: true,
       child: SizedBox(
         width: width,
         height: height,

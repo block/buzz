@@ -121,6 +121,10 @@ void main() {
     expect(nativeBack.creationParams, containsPair('hitTargetWidth', 48.0));
     expect(nativeBack.creationParams, containsPair('hitTargetHeight', 48.0));
     expect(find.byTooltip('Back'), findsOneWidget);
+    expect(
+      tester.widget<Tooltip>(find.byTooltip('Back')).excludeFromSemantics,
+      isTrue,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 
