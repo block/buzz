@@ -610,28 +610,7 @@ pub async fn cmd_patch(
         }
     }
 
-    // Read the diff (stdin or file). We bound it the same as `set` since the
-    // resulting value can't exceed the NIP-44 cap anyway — and we don't want
-    // a 4 GB malformed patch to OOM us.
-    let limit = engram::NIP44_PLAINTEXT_MAX + 1;
-    let diff_text = match patch_path {
-        Some(path) => std::fs::read_to_string(path)
-            .map_err(|e| CliError::Usage(format!("failed to read --patch-file {path}: {e}")))?,
-        None => {
-            let mut buf = String::new();
-            std::io::stdin()
-                .take(limit as u64)
-                .read_to_string(&mut buf)
-                .map_err(|e| CliError::Other(format!("stdin read failed: {e}")))?;
-            if buf.is_empty() {
-                return Err(CliError::Usage(
-                    "refusing to apply empty patch from stdin (an upstream pipeline step likely                      failed)"
-                        .into(),
-                ));
-            }
-            buf
-        }
-    };
+    let diff_text = read_patch_source(patch_path, PATCH_INPUT_MAX)?;
 
     let owner = resolve_owner(client, owner_flag)?;
     let agent_pubkey = client.keys().public_key();
