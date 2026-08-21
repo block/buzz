@@ -17,7 +17,6 @@ import {
 } from "@/features/projects/hooks";
 import { useRepositoryActivitySummariesQuery } from "@/features/projects/repositoryActivityHooks";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
-import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import { buildProjectSelectionAgentContext } from "@/features/projects/lib/projectDetailAgentContext";
 import type { ProjectSelectionItem } from "@/features/projects/lib/projectSelection";
@@ -112,6 +111,12 @@ import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { Button } from "@/shared/ui/button";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
 import { useProjectsOverviewAgentContext } from "./useProjectsOverviewAgentContext";
+import {
+  EMPTY_ITEMS,
+  useContextWorkItems,
+  useDeleteProjectHandler,
+  useOpenProjectTerminalHandler,
+} from "./projectsViewWorkItems";
 
 const MANY_PROJECTS_THRESHOLD = 12;
 const PROJECTS_CONTEXT_POD_MIN_VIEWPORT_PX = 1024;
@@ -543,20 +548,9 @@ export function ProjectsView() {
   );
 
   const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
-  const handleOpenTerminal = React.useCallback(
-    (project: Project) => {
-      const repository = selectProjectRepository(project, null);
-      if (!repository) return Promise.resolve();
-      return openTerminal(repository, {
-        // Check the selected repository only — not all members — so the
-        // terminal affordance reflects the repository the button will open.
-        hasLocalCheckout: hasLocalRepositoryCheckout(
-          repository,
-          localRepoNames,
-        ),
-      });
-    },
-    [localRepoNames, openTerminal],
+  const handleOpenTerminal = useOpenProjectTerminalHandler(
+    openTerminal,
+    localRepoNames,
   );
   const handleOpenRepositoryTerminal = React.useCallback(
     (repository: Repository) =>
@@ -569,18 +563,12 @@ export function ProjectsView() {
     [localRepoNames, openTerminal],
   );
 
-  const handleDeleteProject = React.useCallback(
-    async (project: Project) => {
-      try {
-        await deleteProjectMutation.mutateAsync(project);
-        toast.success("Project deleted");
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to delete project",
-        );
-      }
-    },
-    [deleteProjectMutation],
+  const handleDeleteProject = useDeleteProjectHandler(
+    deleteProjectMutation.mutateAsync,
+  );
+
+  const { contextIssues, contextPullRequests } = useContextWorkItems(
+    projectsWorkItemsQuery.data,
   );
 
   if (projectsQuery.isLoading) {
@@ -672,14 +660,16 @@ export function ProjectsView() {
         isLoading={
           repoSnapshotsQuery.isLoading || projectsWorkItemsQuery.isLoading
         }
-        issues={projectsWorkItemsQuery.data?.issues.items ?? []}
+        issues={projectsWorkItemsQuery.data?.issues.items ?? EMPTY_ITEMS}
         onOpenCommit={handleOpenCommit}
         onOpenIssue={handleOpenIssue}
         onOpenProject={handleOpenProject}
         onOpenPullRequest={handleOpenPullRequest}
         profiles={profiles}
         projects={projects}
-        pullRequests={projectsWorkItemsQuery.data?.pullRequests.items ?? []}
+        pullRequests={
+          projectsWorkItemsQuery.data?.pullRequests.items ?? EMPTY_ITEMS
+        }
         snapshots={repoSnapshotsQuery.data?.snapshots}
       />
     </>
@@ -687,8 +677,7 @@ export function ProjectsView() {
 
   const contextPanelProps = {
     filter,
-    issues:
-      projectsWorkItemsQuery.data?.issues.items.map(({ issue }) => issue) ?? [],
+    issues: contextIssues,
     onChatWithAgent: (items: ProjectSelectionItem[]) =>
       setSelectionAgentContext(buildProjectSelectionAgentContext(items)),
     onCreateIssue: () => setCreateIssueOpen(true),
@@ -696,10 +685,7 @@ export function ProjectsView() {
     onCreatePullRequest: () => setCreatePullRequestOpen(true),
     profiles,
     projects,
-    pullRequests:
-      projectsWorkItemsQuery.data?.pullRequests.items.map(
-        ({ pullRequest }) => pullRequest,
-      ) ?? [],
+    pullRequests: contextPullRequests,
     summaries: activitySummariesQuery.data,
   };
   const contextOpen = isNarrowProjectsLayout

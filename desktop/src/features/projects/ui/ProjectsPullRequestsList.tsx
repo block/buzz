@@ -1,4 +1,5 @@
 import { FolderKanban, GitPullRequest } from "lucide-react";
+import * as React from "react";
 
 import type {
   Project,
@@ -52,14 +53,20 @@ function nextStepLabel(status: ProjectPullRequest["status"]) {
   return "Open review";
 }
 
-function PullRequestGridCard({
+const PullRequestGridCard = React.memo(function PullRequestGridCard({
   project,
   pullRequest,
   onOpen,
+  repository,
 }: {
   project: Project;
   pullRequest: ProjectPullRequest;
-  onOpen: (project: Project, pullRequest: ProjectPullRequest) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    pullRequest: ProjectPullRequest,
+  ) => void;
+  repository: Repository;
 }) {
   return (
     <Card
@@ -68,7 +75,7 @@ function PullRequestGridCard({
     >
       <button
         className="absolute inset-0"
-        onClick={() => onOpen(project, pullRequest)}
+        onClick={() => onOpen(project, repository, pullRequest)}
         type="button"
       >
         <span className="sr-only">View review {pullRequest.title}</span>
@@ -96,7 +103,7 @@ function PullRequestGridCard({
       </div>
     </Card>
   );
-}
+});
 
 function reviewSelectionItem(
   project: Project,
@@ -112,7 +119,10 @@ function reviewSelectionItem(
   });
 }
 
-function PullRequestListRow({
+// Memoized: these rows render in unbounded lists, and any Projects-view
+// state change used to re-render every row. Props are kept identity-stable
+// by the list (memoized groups/selection arrays, stable onOpen).
+const PullRequestListRow = React.memo(function PullRequestListRow({
   project,
   profiles,
   pullRequest,
@@ -125,7 +135,11 @@ function PullRequestListRow({
   pullRequest: ProjectPullRequest;
   rangeItems: ReturnType<typeof reviewSelectionItem>[];
   repository: Repository;
-  onOpen: (project: Project, pullRequest: ProjectPullRequest) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    pullRequest: ProjectPullRequest,
+  ) => void;
 }) {
   const authorLabel = resolveUserLabel({
     profiles,
@@ -139,7 +153,7 @@ function PullRequestListRow({
       dateSeconds={pullRequest.updatedAt}
       dateTestId="projects-row-date"
       icon={null}
-      onClick={() => onOpen(project, pullRequest)}
+      onClick={() => onOpen(project, repository, pullRequest)}
       peopleSlot={
         <ProjectAuthorIdentity
           label={authorLabel}
@@ -161,7 +175,9 @@ function PullRequestListRow({
       }
       trailing={
         <ProjectListRowMenu label={`More options for ${pullRequest.title}`}>
-          <DropdownMenuItem onSelect={() => onOpen(project, pullRequest)}>
+          <DropdownMenuItem
+            onSelect={() => onOpen(project, repository, pullRequest)}
+          >
             <GitPullRequest className="h-4 w-4" />
             {nextStepLabel(pullRequest.status)}
           </DropdownMenuItem>
@@ -174,7 +190,7 @@ function PullRequestListRow({
       }
     />
   );
-}
+});
 
 export function ProjectsPullRequestsList({
   embedded,
@@ -188,6 +204,19 @@ export function ProjectsPullRequestsList({
   pullRequests,
   viewMode,
 }: ProjectsPullRequestsListProps) {
+  // Grouping and per-group selection arrays are identity-stable across
+  // re-renders so the memoized rows only re-render when their data changes.
+  const groups = React.useMemo(
+    () =>
+      groupProjectWorkItemsByProject(pullRequests).map((group) => ({
+        ...group,
+        selectionItems: group.rows.map((row) =>
+          reviewSelectionItem(row.project, row.repository, row.pullRequest),
+        ),
+      })),
+    [pullRequests],
+  );
+
   if (isLoading) {
     return <BuzzLoadingState label="Loading reviews" />;
   }
@@ -230,11 +259,10 @@ export function ProjectsPullRequestsList({
           {pullRequests.map(({ project, pullRequest, repository }) => (
             <PullRequestGridCard
               key={`${repository.id}:${pullRequest.id}`}
-              onOpen={(selectedProject, selectedPullRequest) =>
-                onOpen(selectedProject, repository, selectedPullRequest)
-              }
+              onOpen={onOpen}
               project={project}
               pullRequest={pullRequest}
+              repository={repository}
             />
           ))}
         </div>
@@ -242,16 +270,12 @@ export function ProjectsPullRequestsList({
     );
   }
 
-  const groups = groupProjectWorkItemsByProject(pullRequests);
-
   return (
     <div className="space-y-3">
       {loadNotice}
       <div data-testid="projects-list-container">
         {groups.map((group) => {
-          const groupSelectionItems = group.rows.map((row) =>
-            reviewSelectionItem(row.project, row.repository, row.pullRequest),
-          );
+          const groupSelectionItems = group.selectionItems;
           return (
             <ProjectSelectableGroup
               count={group.rows.length}
@@ -269,9 +293,7 @@ export function ProjectsPullRequestsList({
                 {group.rows.map(({ project, pullRequest, repository }) => (
                   <li key={`${repository.id}:${pullRequest.id}`}>
                     <PullRequestListRow
-                      onOpen={(selectedProject, selectedPullRequest) =>
-                        onOpen(selectedProject, repository, selectedPullRequest)
-                      }
+                      onOpen={onOpen}
                       profiles={profiles}
                       project={project}
                       pullRequest={pullRequest}
