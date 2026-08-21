@@ -236,6 +236,26 @@ with a TypeScript lookup table or an id comparison in a component.
    mid-conversation effort control without a plan ruling. The archived live-effort
    machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
 
+15. **Capability manifests project evidence; they never infer it.**
+    `lib/capabilityManifest.ts` combines `KnownAcpRuntime` facts,
+    managed-agent lifecycle, presence, and the encrypted owner observer stream.
+    A missing runtime field is `unknown`, an explicit `false` is
+    `unavailable`, and only a supplied fact is `reported`. Manifest projection
+    is allowlist-only: do not surface raw config, executable commands,
+    arguments, environment variables, prompts, paths, credentials, tool inputs,
+    or tool results. Reduce initialize, session-config, and command evidence
+    into the observer store independently of the capped raw transcript so a
+    long turn cannot erase the manifest. A newer initialize invalidates older
+    session and command evidence; a newer session config invalidates commands
+    until that session reports its own command update. Readiness labels are
+    local observations for the current owner, machine, process, and community;
+    they are never portable safety, reputation, or third-party delegation
+    claims. A shareable claim requires a separate authenticated event contract,
+    scoped receipts, and expiry semantics. Runtime catalog and lifecycle
+    queries must settle before the manifest renders readiness. Label the
+    positive aggregate state as "Runtime ready" and show the permission evidence
+    source so owners can distinguish runtime behavior from Buzz harness policy.
+
 12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
     managed agent. Independently operated relay agents with NIP-OA ownership
@@ -290,8 +310,6 @@ with a TypeScript lookup table or an id comparison in a component.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
-- Rust: `definition_validation` and inbound persona tests pin the shared
-  Unicode/control-character policy at local, import, publish, and sync gates.
 
 ## Keep this file true
 
