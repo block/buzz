@@ -312,9 +312,18 @@ if (-not $SkipSidecarBuild) {
 $CodexAcpBundle = New-CodexAcpOfflineBundle
 $GeneratedConfigPath = Join-Path $BuildCacheDirectory "tauri.codex-lab.generated.conf.json"
 $GeneratedConfig = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$CodexAcpResourceDirectory = Join-Path $BinariesDirectory "codex-acp"
+New-Item -ItemType Directory -Path $CodexAcpResourceDirectory -Force | Out-Null
+$BundledCodexAcpArchive = Join-Path $CodexAcpResourceDirectory "codex-acp-win-x64.zip"
+$BundledCodexAcpManifest = Join-Path $CodexAcpResourceDirectory "manifest-win-x64.json"
+Copy-Item -LiteralPath $CodexAcpBundle.ArchivePath -Destination $BundledCodexAcpArchive -Force
+Copy-Item -LiteralPath $CodexAcpBundle.ManifestPath -Destination $BundledCodexAcpManifest -Force
 $BundledResources = [ordered]@{}
-$BundledResources[[string]$CodexAcpBundle.ArchivePath] = "codex-acp/codex-acp-win-x64.zip"
-$BundledResources[[string]$CodexAcpBundle.ManifestPath] = "codex-acp/manifest-win-x64.json"
+# Tauri resolves resource sources from `desktop/src-tauri`. Keep them inside
+# that tree: Windows absolute paths outside the project can be normalized as
+# Unix-like paths when a generated config lives on another drive.
+$BundledResources["binaries/codex-acp/codex-acp-win-x64.zip"] = "codex-acp/codex-acp-win-x64.zip"
+$BundledResources["binaries/codex-acp/manifest-win-x64.json"] = "codex-acp/manifest-win-x64.json"
 $GeneratedConfig.bundle | Add-Member -MemberType NoteProperty -Name resources -Value $BundledResources -Force
 [IO.File]::WriteAllText(
     $GeneratedConfigPath,
