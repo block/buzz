@@ -15,6 +15,7 @@ import {
   useCreatePersonaMutation,
   useManagedAgentsQuery,
   usePersonasQuery,
+  useUpdateManagedAgentMutation,
   useUpdatePersonaMutation,
 } from "./hooks";
 import {
@@ -32,6 +33,11 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import { validateLinkedAgentRuntimeEdit } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
+import {
+  agentManagementInstanceUpdate,
+  validateAgentManagementBackendEdit,
+} from "./lib/agentManagementUpdate";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -65,6 +71,7 @@ export function useAgentManagement() {
   const runtimesQuery = useAcpRuntimesQuery({ enabled: true });
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
+  const updateManagedAgentMutation = useUpdateManagedAgentMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
   const [request, setRequest] = React.useState<AgentManagementRequest | null>(
     null,
@@ -151,10 +158,22 @@ export function useAgentManagement() {
   }, [personasQuery.data, request]);
   const currentPersona =
     matchingPersonas.length === 1 ? matchingPersonas[0] : undefined;
+  const matchingManagedAgents = React.useMemo(
+    () =>
+      currentPersona
+        ? (managedAgentsQuery.data ?? []).filter(
+            (agent) => agent.personaId === currentPersona.id,
+          )
+        : [],
+    [currentPersona, managedAgentsQuery.data],
+  );
+  const currentManagedAgent =
+    matchingManagedAgents.length === 1 ? matchingManagedAgents[0] : undefined;
 
   const isPending =
     createPersonaMutation.isPending ||
     updatePersonaMutation.isPending ||
+    updateManagedAgentMutation.isPending ||
     createAgentMutation.isPending;
 
   function assertAgentCanActFromOrigin(channelId: string) {
@@ -237,14 +256,43 @@ export function useAgentManagement() {
     }
   }
 
-  async function submitUpdate(input: CreatePersonaInput | UpdatePersonaInput) {
+  async function submitUpdate(
+    input: CreatePersonaInput | UpdatePersonaInput,
+    backendIntent: BackendIntent | null = null,
+  ) {
     if (request?.action !== "update" || !("id" in input)) {
       return false;
     }
     setError(null);
     try {
       assertAgentCanActFromOrigin(request.request.channelId);
-      await updatePersonaMutation.mutateAsync(input);
+      const runtimeEditError = validateLinkedAgentRuntimeEdit({
+        input,
+        managedAgent: currentManagedAgent,
+        previousPersona: currentPersona,
+        runtimes: runtimesQuery.data ?? [],
+      });
+      if (runtimeEditError) throw new Error(runtimeEditError);
+      const backendEditError = validateAgentManagementBackendEdit({
+        backendIntent,
+        managedAgent: currentManagedAgent,
+        nextName: input.displayName,
+      });
+      if (backendEditError) throw new Error(backendEditError);
+
+      const persona = await updatePersonaMutation.mutateAsync(input);
+      if (currentManagedAgent) {
+        const instanceUpdate = agentManagementInstanceUpdate({
+          backendIntent,
+          managedAgent: currentManagedAgent,
+          persona,
+          previousPersona: currentPersona,
+          runtimes: runtimesQuery.data ?? [],
+        });
+        if (instanceUpdate) {
+          await updateManagedAgentMutation.mutateAsync(instanceUpdate);
+        }
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
@@ -297,6 +345,7 @@ export function useAgentManagement() {
     createInitialValues,
     editInitialValues,
     editError,
+    currentManagedAgent,
     error,
     ...createdAgentAttachment,
     isPending,

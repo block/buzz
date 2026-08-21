@@ -113,6 +113,10 @@ type AgentDefinitionDialogProps = {
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
+  /** Existing-instance run destination shown during owner-reviewed edits. */
+  editRunSection?: React.ReactNode;
+  /** Extra edit-mode submit gate (e.g. incomplete provider config). */
+  editSubmitBlocked?: boolean;
 };
 
 export type AgentDefinitionSubmitOptions = {
@@ -136,6 +140,8 @@ export function AgentDefinitionDialog({
   publishCatalogUpdatesOnSave = false,
   createRunSection,
   createSubmitBlocked = false,
+  editRunSection,
+  editSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const runtimesLoading = runtimeCatalogStatus === "loading";
   const [displayName, setDisplayName] = React.useState("");
@@ -499,6 +505,7 @@ export function AgentDefinitionDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     (!isCreateMode || !createSubmitBlocked) &&
+    (isCreateMode || !editSubmitBlocked) &&
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
@@ -935,6 +942,8 @@ export function AgentDefinitionDialog({
           open={runtimeCanChooseLlmProvider && aiDefaultsOpen}
           returnFocusRef={aiDefaultsTriggerRef}
         />
+
+        {!isCreateMode ? editRunSection : null}
 
         <AddCustomHarnessDialog
           onOpenChange={setIsAddHarnessOpen}

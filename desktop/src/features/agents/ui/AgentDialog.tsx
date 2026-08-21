@@ -78,6 +78,8 @@ type AgentDialogDefinitionEditProps = {
     options: AgentDefinitionSubmitOptions,
   ) => Promise<unknown>;
   publishCatalogUpdatesOnSave?: boolean;
+  editRunSection?: React.ReactNode;
+  editSubmitBlocked?: boolean;
 };
 
 type AgentDialogProps =
