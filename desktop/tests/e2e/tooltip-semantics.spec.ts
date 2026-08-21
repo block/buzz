@@ -142,7 +142,10 @@ for (const theme of THEMES) {
     await expect(row).toBeVisible();
     await expectMutedSupportingText(
       row.getByRole("button", { name: "Open channel general" }),
-      /Public channel · Active \d+[mhdw] ago/,
+      // The message this spec just sent can update #general's recency before
+      // the tooltip is read, so "Active just now" is as legitimate here as it
+      // is for the message-link assertion below.
+      /Public channel · Active (just now|\d+[mhdw] ago)/,
     );
     await page.mouse.move(0, 0);
     await expectMutedSupportingText(
