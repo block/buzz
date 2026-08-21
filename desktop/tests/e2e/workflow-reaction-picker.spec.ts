@@ -73,13 +73,58 @@ test("reaction trigger uses the emoji picker instead of a free-text field", asyn
   await expect(
     dialog.getByRole("button", { name: "Clear trigger emoji" }),
   ).toHaveCount(0);
+  await expect(
+    dialog
+      .getByRole("button", { name: "Trigger: Reaction Added" })
+      .getByTestId("workflow-node-icon")
+      .locator("svg"),
+  ).toHaveCount(1);
 
   await pickEmoji(page, dialog, "rocket", EMOJI);
+
+  const triggerNode = dialog.getByRole("button", {
+    name: "Trigger: 🚀 reaction added",
+  });
+  await expect(triggerNode.getByTestId("workflow-node-icon")).toHaveText(EMOJI);
+  await expect(triggerNode).toContainText("Reaction added");
+  await expect(triggerNode).not.toContainText(`${EMOJI} reaction added`);
+  await expect(
+    triggerNode.getByTestId("workflow-node-icon").locator("svg"),
+  ).toHaveCount(0);
+  await waitForAnimations(page);
+  await triggerNode.screenshot({
+    path: "test-results/workflow-reaction-trigger-node.png",
+  });
 
   // Selecting closes the popover and shows the chosen reaction by name.
   await expect(page.locator("em-emoji-picker")).toHaveCount(0);
   await expect(pickerButton).toContainText(EMOJI_SHORTCODE);
   await expect(pickerButton).not.toContainText("Choose a reaction");
+});
+
+test("add-reaction step replaces its sequence number with the configured emoji", async ({
+  page,
+}) => {
+  const dialog = await openReactionTrigger(page);
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
+  await yamlEditor.fill(
+    (await yamlEditor.inputValue()).replace(
+      "steps: []",
+      "steps:\n  - id: step_1\n    action: add_reaction\n    emoji: ✅",
+    ),
+  );
+
+  await dialog.getByRole("tab", { name: "Form" }).click();
+  const stepNode = dialog.getByRole("button", { name: "Step 1: ✅" });
+  await expect(stepNode.getByTestId("workflow-node-icon")).toHaveText("✅");
+  await expect(stepNode).toContainText("Add Reaction");
+  await expect(stepNode).not.toContainText("✅✅");
+  await expect(stepNode.getByTestId("workflow-node-icon")).not.toHaveText("1");
+  await waitForAnimations(page);
+  await stepNode.screenshot({
+    path: "test-results/workflow-add-reaction-step-node.png",
+  });
 });
 
 test("picked reaction persists into canonical YAML and clears back out", async ({
@@ -92,15 +137,17 @@ test("picked reaction persists into canonical YAML and clears back out", async (
   const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
   const yaml = await yamlEditor.inputValue();
   expect(yaml).toContain("on: reaction_added");
-  // Stored verbatim as the reaction content the executor compares against.
-  expect(yaml).toContain(`emoji: ${EMOJI}`);
+  // Stored verbatim in the local filter expression the executor compares.
+  expect(yaml).toContain(`trigger_emoji == "${EMOJI}"`);
 
   // Clearing the optional filter removes the key entirely rather than
   // writing an empty string, so the trigger matches any reaction again.
   await dialog.getByRole("tab", { name: "Form" }).click();
   // Switching editor modes drops the inspector selection, so re-open the
   // trigger node before reaching for its fields.
-  await dialog.getByRole("button", { name: "Trigger: Reaction Added" }).click();
+  await dialog
+    .getByRole("button", { name: `Trigger: ${EMOJI} reaction added` })
+    .click();
   await dialog.getByRole("button", { name: "Clear trigger emoji" }).click();
   await expect(
     dialog.getByRole("button", { name: "Choose trigger emoji" }),
@@ -109,7 +156,7 @@ test("picked reaction persists into canonical YAML and clears back out", async (
   await dialog.getByRole("tab", { name: "YAML" }).click();
   const clearedYaml = await yamlEditor.inputValue();
   expect(clearedYaml).toContain("on: reaction_added");
-  expect(clearedYaml).not.toContain("emoji:");
+  expect(clearedYaml).not.toContain("trigger_emoji");
 });
 
 test("legacy free-text emoji values survive a trip through the picker", async ({
@@ -164,7 +211,7 @@ test("saved reaction filter round-trips back into the picker", async ({
   const editDialog = page.getByRole("dialog", { name: "Edit workflow" });
   await expect(editDialog).toBeVisible();
   await editDialog
-    .getByRole("button", { name: "Trigger: Reaction Added" })
+    .getByRole("button", { name: `Trigger: ${EMOJI} reaction added` })
     .click();
 
   // Reopening rehydrates the stored glyph into the picker, not an empty field.

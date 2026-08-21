@@ -22,9 +22,12 @@ import {
   getWorkflowEnabled,
   getWorkflowCardLabel,
   getWorkflowPrimaryAction,
+  getWorkflowPrimaryActionEmoji,
+  getWorkflowTriggerEmoji,
   getWorkflowTriggerSummary,
   getWorkflowTriggerType,
 } from "./workflowDefinition";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 
 type WorkflowCardProps = {
   workflow: Workflow;
@@ -93,6 +96,8 @@ export function WorkflowCard({
   const cardLabel = getWorkflowCardLabel(workflow.definition);
   const triggerType = getWorkflowTriggerType(workflow.definition);
   const actionType = getWorkflowPrimaryAction(workflow.definition);
+  const triggerEmoji = getWorkflowTriggerEmoji(workflow.definition);
+  const actionEmoji = getWorkflowPrimaryActionEmoji(workflow.definition);
   const TriggerIcon = triggerType ? TRIGGER_ICONS[triggerType] : undefined;
   const ActionIcon = actionType ? ACTION_ICONS[actionType] : undefined;
   const triggerAccent = triggerType ? TRIGGER_ACCENTS[triggerType] : undefined;
@@ -121,7 +126,9 @@ export function WorkflowCard({
                 triggerAccent ?? "border-slate-400/30 bg-slate-600 text-white",
               )}
             >
-              {TriggerIcon ? (
+              {triggerEmoji ? (
+                <StatusEmoji className="h-6 w-6 text-xl" value={triggerEmoji} />
+              ) : TriggerIcon ? (
                 <TriggerIcon className="h-5 w-5" />
               ) : (
                 <Zap className="h-5 w-5" />
@@ -131,7 +138,14 @@ export function WorkflowCard({
               <>
                 <ArrowRight className="h-4 w-4 text-muted-foreground/60" />
                 <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-border/65 bg-background/80 text-muted-foreground shadow-xs">
-                  <ActionIcon className="h-5 w-5" />
+                  {actionEmoji ? (
+                    <StatusEmoji
+                      className="h-6 w-6 text-xl"
+                      value={actionEmoji}
+                    />
+                  ) : (
+                    <ActionIcon className="h-5 w-5" />
+                  )}
                 </span>
               </>
             ) : null}

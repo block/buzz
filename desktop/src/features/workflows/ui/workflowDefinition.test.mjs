@@ -6,6 +6,7 @@ import {
   getWorkflowDisplayStatus,
   getWorkflowPrimaryAction,
   getWorkflowPrimaryActionEmoji,
+  getWorkflowTriggerEmoji,
   getWorkflowTriggerSummary,
   getWorkflowTriggerType,
   withWorkflowEnabled,
@@ -173,7 +174,41 @@ test("builds a concise semantic trigger label for workflow cards", () => {
   );
 });
 
-test("returns the primary add-reaction emoji for rich card rendering", () => {
+test("returns configured reaction emoji for rich card rendering", () => {
+  assert.equal(
+    getWorkflowTriggerEmoji({
+      trigger: {
+        on: "reaction_added",
+        filter: 'trigger_emoji == "👀"',
+      },
+    }),
+    "👀",
+  );
+  assert.equal(
+    getWorkflowTriggerEmoji({
+      trigger: { on: "reaction_added", emoji: ":blob-wave:" },
+    }),
+    ":blob-wave:",
+  );
+  assert.equal(
+    getWorkflowTriggerEmoji({
+      trigger: {
+        on: "reaction_added",
+        filter: 'trigger_emoji != "👀"',
+      },
+    }),
+    null,
+  );
+  assert.equal(
+    getWorkflowTriggerEmoji({
+      trigger: {
+        on: "message_posted",
+        filter: 'trigger_emoji == "👀"',
+      },
+    }),
+    null,
+  );
+
   assert.equal(
     getWorkflowPrimaryActionEmoji({
       steps: [{ action: "add_reaction", emoji: ":blob-wave:" }],

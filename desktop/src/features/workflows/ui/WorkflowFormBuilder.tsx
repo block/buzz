@@ -13,6 +13,7 @@ import * as React from "react";
 import { createPortal } from "react-dom";
 
 import type { Channel } from "@/shared/api/types";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -28,7 +29,10 @@ import { workflowStepDescription } from "./workflowStepDescription";
 import { workflowTriggerDescription } from "./workflowTriggerDescription";
 import { WorkflowScheduleFields } from "./WorkflowScheduleFields";
 import { WorkflowStepCard } from "./WorkflowStepCard";
-import type { ParsedConditionExpression } from "./workflowConditionExpression";
+import {
+  parseConditionExpressions,
+  type ParsedConditionExpression,
+} from "./workflowConditionExpression";
 import type { WorkflowEditorPane } from "./workflowEditorPane";
 import {
   DEFAULT_FORM_STATE,
@@ -257,6 +261,7 @@ function WorkflowNode({
               isNumbered && "text-sm font-semibold",
             )}
             data-selected={selected}
+            data-testid="workflow-node-icon"
           >
             {isNumbered ? number : icon}
           </span>
@@ -580,6 +585,26 @@ export const WorkflowFormBuilder = React.forwardRef<
   const selectedStepIndex = selectedStep
     ? formState.steps.findIndex((step) => step.id === selectedStep.id)
     : -1;
+  const triggerEmoji = React.useMemo(() => {
+    if (formState.trigger.on !== "reaction_added") return undefined;
+    const legacyEmoji = formState.trigger.emoji?.trim();
+    if (legacyEmoji) return legacyEmoji;
+    if (!formState.trigger.filter) return undefined;
+    const conditions = parseConditionExpressions(
+      formState.trigger.filter,
+      "reaction_added",
+    );
+    return conditions
+      ?.find(
+        ({ field, operator }) =>
+          field === "trigger_emoji" && operator === "equals",
+      )
+      ?.value.trim();
+  }, [formState.trigger]);
+  const triggerDescription = workflowTriggerDescription(formState.trigger);
+  const visibleTriggerDescription = triggerEmoji
+    ? "Reaction added"
+    : triggerDescription;
 
   return (
     <>
@@ -622,12 +647,19 @@ export const WorkflowFormBuilder = React.forwardRef<
                   {scopeField ? <div className="mb-3">{scopeField}</div> : null}
                   <ol aria-label="Workflow sequence">
                     <WorkflowNode
-                      description={workflowTriggerDescription(
-                        formState.trigger,
-                      )}
+                      description={visibleTriggerDescription}
                       disabled={disabled}
-                      icon={<Zap className="h-4 w-4" />}
-                      label={`Trigger: ${workflowTriggerDescription(formState.trigger)}`}
+                      icon={
+                        triggerEmoji ? (
+                          <StatusEmoji
+                            className="h-6 w-6 text-xl"
+                            value={triggerEmoji}
+                          />
+                        ) : (
+                          <Zap className="h-4 w-4" />
+                        )
+                      }
+                      label={`Trigger: ${triggerDescription}`}
                       onAddAfter={(action) => insertStep(0, action)}
                       onClick={() => selectNode({ type: "trigger" })}
                       selected={selectedNode?.type === "trigger"}
@@ -645,15 +677,30 @@ export const WorkflowFormBuilder = React.forwardRef<
                       const nodeDescription = workflowStepDescription(step, {
                         channelLabel,
                       });
+                      const stepEmoji =
+                        step.action === "add_reaction"
+                          ? step.emoji?.trim()
+                          : undefined;
+                      const visibleNodeDescription = stepEmoji
+                        ? actionLabel
+                        : nodeDescription;
                       const showActionSubtitle =
-                        nodeDescription !== actionLabel;
+                        !stepEmoji && nodeDescription !== actionLabel;
                       return (
                         <WorkflowNode
-                          description={nodeDescription}
+                          description={visibleNodeDescription}
                           disabled={disabled}
+                          icon={
+                            stepEmoji ? (
+                              <StatusEmoji
+                                className="h-6 w-6 text-xl"
+                                value={stepEmoji}
+                              />
+                            ) : undefined
+                          }
                           key={step.id}
                           label={`Step ${index + 1}: ${nodeDescription}`}
-                          number={index + 1}
+                          number={stepEmoji ? undefined : index + 1}
                           onAddAfter={(action) => insertStep(index + 1, action)}
                           onClick={() =>
                             selectNode({ type: "step", stepId: step.id })

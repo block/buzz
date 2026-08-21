@@ -15,6 +15,7 @@ import type {
   TriggerType,
 } from "./workflowFormTypes";
 import { workflowStepDescription } from "./workflowStepDescription";
+import { parseConditionExpressions } from "./workflowConditionExpression";
 import { workflowTriggerDescription } from "./workflowTriggerDescription";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -59,6 +60,24 @@ export function getWorkflowPrimaryActionEmoji(
 ): string | null {
   const step = getWorkflowSteps(definition)[0];
   return step?.action === "add_reaction" ? nonEmptyString(step.emoji) : null;
+}
+
+export function getWorkflowTriggerEmoji(
+  definition: Record<string, unknown>,
+): string | null {
+  const trigger = asRecord(definition.trigger);
+  if (trigger?.on !== "reaction_added") return null;
+
+  const legacyEmoji = nonEmptyString(trigger.emoji);
+  if (legacyEmoji) return legacyEmoji;
+
+  const filter = nonEmptyString(trigger.filter);
+  if (!filter) return null;
+  const conditions = parseConditionExpressions(filter, "reaction_added");
+  const emojiCondition = conditions?.find(
+    ({ field, operator }) => field === "trigger_emoji" && operator === "equals",
+  );
+  return nonEmptyString(emojiCondition?.value);
 }
 
 function getWorkflowTriggerConfig(
