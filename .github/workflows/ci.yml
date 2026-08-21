@@ -931,7 +931,7 @@ jobs:
           cmp Podfile.lock Pods/Manifest.lock
       - name: Test native review harness
         run: |
-          python3 -m unittest discover -s tools/native-review/tests -p 'test_*.py'
+          uv run --with 'pyyaml==6.0.3' python -m unittest discover -s tools/native-review/tests -p 'test_*.py'
           swift test --package-path tools/native-review/swift
 
   security:
