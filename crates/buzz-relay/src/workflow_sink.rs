@@ -429,6 +429,127 @@ impl ActionSink for RelayActionSink {
             Ok(event_id_hex)
         })
     }
+
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        target_event_id: &str,
+        emoji: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let target_event_id = target_event_id.to_owned();
+        let emoji = emoji.to_owned();
+
+        Box::pin(async move {
+            // 0. Upgrade weak reference — fails only during shutdown.
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // 1. Parse the target event ID.
+            let target_eid = nostr::EventId::parse(&target_event_id)
+                .map_err(|e| ActionSinkError::InvalidInput(format!("invalid event id: {e}")))?;
+            let target_bytes = target_eid.as_bytes().to_vec();
+
+            // 2. Resolve the target's channel (same derivation as the ingest
+            //    path's `derive_reaction_channel`): the target event's own
+            //    channel_id, failing closed when the target is unknown.
+            let stored_target = state
+                .db
+                .get_event_by_id(community_id, &target_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::InvalidInput(format!(
+                        "reaction target event not found: {target_event_id}"
+                    ))
+                })?;
+            let channel_uuid = stored_target.channel_id.ok_or_else(|| {
+                ActionSinkError::InvalidInput(format!(
+                    "reaction target {target_event_id} is not scoped to a channel"
+                ))
+            })?;
+            let channel_id_canonical = channel_uuid.to_string();
+
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            let channel = state
+                .db
+                .get_channel(tenant.community(), channel_uuid)
+                .await
+                .map_err(|e| match &e {
+                    buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
+                        ActionSinkError::ChannelNotFound(channel_id_canonical.clone())
+                    }
+                    _ => ActionSinkError::Database(e.to_string()),
+                })?;
+            if channel.archived_at.is_some() {
+                return Err(ActionSinkError::ChannelArchived(
+                    channel_id_canonical.clone(),
+                ));
+            }
+
+            // 3. Build the NIP-25 kind:7 reaction — signed by the relay
+            //    keypair, `e` tag on the target, `h` tag scoping the channel,
+            //    `buzz:workflow` tag preventing recursive workflow triggering.
+            let tags = vec![
+                Tag::parse(["e", &target_eid.to_hex()])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("e tag: {e}")))?,
+                Tag::parse(["h", &channel_id_canonical])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+            let kind = Kind::from(buzz_core::kind::KIND_REACTION as u16);
+            let event = EventBuilder::new(kind, &emoji)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            let kind_u32 = buzz_core::kind::KIND_REACTION;
+
+            info!(
+                event_id = %event_id_hex,
+                target = %target_event_id,
+                channel_id = %channel_id_canonical,
+                "Workflow AddReaction: posting kind {kind_u32} event"
+            );
+
+            // 4. Persist. Reactions carry no thread metadata of their own.
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event(tenant.community(), &event, Some(channel_uuid))
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            // 5. Post-persist side effects (fan-out) — only if actually
+            //    inserted (idempotency guard).
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    kind_u32,
+                    &stored_event.event.pubkey.to_hex(),
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
 }
 
 #[cfg(test)]

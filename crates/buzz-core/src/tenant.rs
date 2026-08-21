@@ -109,6 +109,11 @@ impl TenantContext {
 ///
 /// Rules (host only — the caller has already split off any path/scheme):
 /// - ASCII-lowercase (hosts are case-insensitive per RFC 3986);
+/// - loopback aliases collapse: `127.0.0.1` and `[::1]` (with or without a
+///   port) canonicalize to `localhost` — they name the same machine, and a
+///   deployment seeded under one spelling must also answer the others (the
+///   classic local failure: community seeded as `localhost:3999`, browser
+///   sends `Host: 127.0.0.1:3999`, resolution fails closed with a 404);
 /// - strip a single trailing dot (the FQDN root label);
 /// - strip a default port suffix (`:80`, `:443`) — non-default ports are kept,
 ///   since a deployment may legitimately serve different communities on
@@ -133,6 +138,20 @@ pub fn normalize_host(host: &str) -> String {
     // Strip a single trailing FQDN-root dot.
     if let Some(stripped) = host.strip_suffix('.') {
         host = stripped.to_string();
+    }
+    // Collapse loopback aliases. `127.0.0.1`, `[::1]`, and `localhost` name
+    // the same machine, so they must resolve to the same tenant — a community
+    // seeded under one spelling has to answer requests arriving with another.
+    // Applied after default-port stripping so `[::1]:443` → `[::1]` →
+    // `localhost` too; a non-default port (`127.0.0.1:3999`) is preserved.
+    // The alias must be the whole host or end at a port boundary — a domain
+    // like `127.0.0.1.example` is NOT loopback and stays untouched.
+    let loopback_port = ["127.0.0.1", "[::1]"].iter().find_map(|alias| {
+        host.strip_prefix(alias)
+            .filter(|rest| rest.is_empty() || rest.starts_with(':'))
+    });
+    if let Some(port) = loopback_port {
+        host = format!("localhost{port}");
     }
     host
 }
@@ -219,10 +238,13 @@ mod tests {
     }
 
     #[test]
-    fn normalize_host_leaves_ipv6_literal_intact() {
-        // IPv6 literals contain colons but no trailing default-port suffix.
-        assert_eq!(normalize_host("[::1]"), "[::1]");
-        assert_eq!(normalize_host("[::1]:443"), "[::1]");
+    fn normalize_host_collapses_ipv6_loopback_literal() {
+        // The IPv6 loopback literal is a loopback alias like 127.0.0.1 and
+        // collapses to `localhost`; non-loopback IPv6 literals stay intact.
+        assert_eq!(normalize_host("[::1]"), "localhost");
+        assert_eq!(normalize_host("[::1]:3000"), "localhost:3000");
+        assert_eq!(normalize_host("[2001:db8::1]"), "[2001:db8::1]");
+        assert_eq!(normalize_host("[2001:db8::1]:443"), "[2001:db8::1]");
     }
 
     #[test]
@@ -230,6 +252,23 @@ mod tests {
         // Empty / whitespace-only resolves to empty; resolution fails closed.
         assert_eq!(normalize_host(""), "");
         assert_eq!(normalize_host("   "), "");
+    }
+
+    #[test]
+    fn normalize_host_collapses_loopback_aliases() {
+        // All loopback spellings name the same machine and must normalize to
+        // the `localhost` form, so a community seeded as `localhost:3999`
+        // also answers `Host: 127.0.0.1:3999` (and the IPv6 literal).
+        assert_eq!(normalize_host("127.0.0.1:3999"), "localhost:3999");
+        assert_eq!(normalize_host("127.0.0.1"), "localhost");
+        assert_eq!(normalize_host("127.0.0.1:443"), "localhost");
+        assert_eq!(normalize_host("[::1]:3999"), "localhost:3999");
+        assert_eq!(normalize_host("[::1]"), "localhost");
+        assert_eq!(normalize_host("[::1]:443"), "localhost");
+        assert_eq!(normalize_host("LOCALHOST:3999"), "localhost:3999");
+        // Non-loopback hosts are untouched.
+        assert_eq!(normalize_host("127.0.0.1.example"), "127.0.0.1.example");
+        assert_eq!(normalize_host("example.com"), "example.com");
     }
 
     #[test]
@@ -260,10 +299,22 @@ mod tests {
     }
 
     #[test]
+    fn relay_url_authority_collapses_loopback_aliases() {
+        // A relay URL spelled with a loopback IP must derive the same
+        // authority as the `localhost` spelling — otherwise startup seeds the
+        // community under one host and requests arriving with the other 404.
+        assert_eq!(relay_url_authority("ws://127.0.0.1:3999"), "localhost:3999");
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "localhost:3000");
+        assert_eq!(relay_url_authority("http://127.0.0.1"), "localhost");
+    }
+
+    #[test]
     fn relay_url_authority_preserves_ipv6_brackets() {
-        // `host_str()` strips IPv6 brackets and the port; `relay_url_authority`
-        // must keep both so the authority matches `communities.host`.
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
+        // Non-loopback IPv6 literals keep brackets and port.
+        assert_eq!(
+            relay_url_authority("ws://[2001:db8::1]:3000"),
+            "[2001:db8::1]:3000"
+        );
     }
 
     #[test]

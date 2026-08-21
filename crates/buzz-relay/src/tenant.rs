@@ -236,8 +236,13 @@ mod tests {
 
     #[test]
     fn relay_url_authority_preserves_ipv6_brackets() {
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
-        assert_eq!(relay_url_authority("wss://[::1]:443"), "[::1]");
+        // Non-loopback IPv6 literals keep brackets and port; the loopback
+        // literal collapses to `localhost` like 127.0.0.1 does.
+        assert_eq!(
+            relay_url_authority("ws://[2001:db8::1]:3000"),
+            "[2001:db8::1]:3000"
+        );
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "localhost:3000");
     }
 
     #[tokio::test]

@@ -70,4 +70,22 @@ pub trait ActionSink: Send + Sync {
         author_pubkey: &str,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Add a NIP-25 reaction (kind:7) to a target event on behalf of the relay.
+    ///
+    /// - `community_id`: the server-resolved community that owns the workflow
+    ///   run driving this side effect. The reaction is published under *this*
+    ///   community.
+    /// - `target_event_id`: hex-encoded 32-byte ID of the event to react to.
+    ///   The relay resolves the target's channel itself (same derivation the
+    ///   ingest path uses), so reactions work on any channel-scoped event.
+    /// - `emoji`: the reaction content (emoji character or `:shortcode:`).
+    ///
+    /// Returns the reaction event ID hex string on success.
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        target_event_id: &str,
+        emoji: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

@@ -357,7 +357,49 @@ impl WorkflowEngine {
             return Ok(());
         }
 
-        let trigger_ctx = build_trigger_context(event);
+        let mut trigger_ctx = build_trigger_context(event);
+
+        // Reaction triggers: `{{ trigger.text }}` / `{{ trigger.author }}`
+        // must describe the *reacted-to message*, not the reaction event
+        // (whose content is just the emoji). Resolve the target via the
+        // reaction's `e` tag and overwrite the context fields; on lookup
+        // failure keep the raw reaction fields so the run still fires.
+        if kind_u32 == KIND_REACTION && !trigger_ctx.message_id.is_empty() {
+            let target_hex = trigger_ctx.message_id.clone();
+            if let Ok(target_bytes) = hex::decode(&target_hex) {
+                match self.db.get_event_by_id(community_id, &target_bytes).await {
+                    Ok(Some(target)) => {
+                        let target_kind = event_kind_u32(&target.event);
+                        // Only unwrap one level: reacting to a message yields
+                        // the message; reacting to a reaction keeps the emoji.
+                        if target_kind != KIND_REACTION {
+                            trigger_ctx.text = target.event.content.clone();
+                            trigger_ctx.author = target.event.pubkey.to_hex();
+                            trigger_ctx.timestamp =
+                                target.event.created_at.as_secs().to_string();
+                            if trigger_ctx.channel_id.is_empty() {
+                                trigger_ctx.channel_id = target
+                                    .channel_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_default();
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            target = %target_hex,
+                            "Reaction trigger: target event not found; keeping reaction fields"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target = %target_hex,
+                            "Reaction trigger: target lookup failed ({e}); keeping reaction fields"
+                        );
+                    }
+                }
+            }
+        }
 
         let trigger_ctx_json: serde_json::Value = match serde_json::to_value(&trigger_ctx) {
             Ok(v) => v,
