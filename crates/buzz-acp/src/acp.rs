@@ -116,8 +116,21 @@ pub enum AcpError {
 /// detail (e.g. a `data` field) is not lost.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
+    // The `None` arm below was the only path that preserved `data`, and it is
+    // unreachable in practice: every JSON-RPC error the ACP SDK emits carries a
+    // string `message`, so `data` was dropped on every single error.
+    //
+    // That is not cosmetic. `claude-agent-acp` reports a vanished session as
+    // `{code: -32603, message: "Internal error", data: {details: "Session not
+    // found"}}`. Dropping `data` reduces that to a bare "Internal error" in the
+    // agent log, with no way to tell it apart from any other internal error. A
+    // roster ran wedged for ~9.5h on 2026-08-11 because the one word that
+    // explained it never reached a log line.
     let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
+        Some(m) => match error.get("data") {
+            Some(d) if !d.is_null() => format!("{m} ({d})"),
+            _ => m.to_string(),
+        },
         None => error.to_string(),
     };
     AcpError::AgentError { code, message }
@@ -4791,6 +4804,35 @@ mod tests {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32001);
                 assert_eq!(message, "auth denied");
+            }
+            other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_error_from_json_keeps_data_alongside_a_present_message() {
+        // The regression this exists for: `data` used to be preserved ONLY when
+        // `message` was absent, and every ACP error carries a string `message` —
+        // so `data` was dropped every time. claude-agent-acp reports a vanished
+        // session exactly this way, which reduced a fatal, permanent condition to
+        // an indistinguishable "Internal error" in the log and left a roster
+        // wedged for ~9.5h with nothing to diagnose it from.
+        let error = serde_json::json!({
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"details": "Session not found"}
+        });
+        match super::agent_error_from_json(&error) {
+            AcpError::AgentError { code, message } => {
+                assert_eq!(code, -32603);
+                assert!(
+                    message.contains("Internal error"),
+                    "the original message must survive, got: {message}"
+                );
+                assert!(
+                    message.contains("Session not found"),
+                    "the data payload must reach the message, got: {message}"
+                );
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
