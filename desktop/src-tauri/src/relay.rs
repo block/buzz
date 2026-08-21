@@ -180,6 +180,22 @@ pub(crate) fn classify_request_error(e: &reqwest::Error) -> String {
     }
 }
 
+/// Preserve a body-consumption timeout as the stable connectivity classification.
+///
+/// `send()` resolves once response headers arrive, so a body that stalls past
+/// the request deadline trips the timeout during body consumption rather than
+/// at `send()`. That is a connectivity failure, not a malformed body or a plain
+/// status error. Both body-consumption paths — the 2xx `parse_json_response`
+/// and the non-2xx `relay_error_message` — route their consumption error
+/// through this one helper so a stalled body can never be classified as
+/// "request timed out" on one path while the other buries it under a malformed
+/// or status label. Returns `Some("relay unreachable: request timed out")` for
+/// a timeout; `None` otherwise, leaving the caller to apply its own non-timeout
+/// label.
+fn classify_body_timeout(e: &reqwest::Error) -> Option<String> {
+    e.is_timeout().then(|| classify_request_error(e))
+}
+
 /// Detect responses that were intercepted by a captive portal or auth proxy.
 ///
 /// Returns `Some(msg)` when the response clearly did not come from the relay:
@@ -244,17 +260,14 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     // as a transient unreachable-relay condition. The reqwest error detail is
     // dropped because it contains the raw URL.
     //
-    // A body-consumption timeout is the exception: `send()` resolves once headers
-    // arrive, so a body that stalls past the request deadline trips the timeout
-    // HERE rather than at send(). That is a connectivity failure, not a malformed
-    // body, so route it through the same classifier as a pre-header stall to
-    // preserve the stable "relay unreachable: request timed out" label.
+    // A body-consumption timeout is the exception: `send()` resolves once
+    // headers arrive, so a body that stalls past the request deadline trips the
+    // timeout HERE rather than at send(). That is a connectivity failure, not a
+    // malformed body, so route it through `classify_body_timeout` — the same
+    // helper the non-2xx error-body path uses — to preserve the stable
+    // "relay unreachable: request timed out" label.
     response.json::<T>().await.map_err(|e| {
-        if e.is_timeout() {
-            classify_request_error(&e)
-        } else {
-            MALFORMED_RESPONSE_MESSAGE.to_string()
-        }
+        classify_body_timeout(&e).unwrap_or_else(|| MALFORMED_RESPONSE_MESSAGE.to_string())
     })
 }
 
@@ -286,7 +299,21 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     }
 
     // Real relay error: extract the structured message field if available.
-    let body = response.text().await.unwrap_or_default();
+    // `text()` consumes the body, which — like the 2xx path — can trip the
+    // request deadline if the relay sends status headers then stalls the body.
+    // Preserve that timeout as the stable connectivity classification via the
+    // shared helper instead of letting `unwrap_or_default` swallow it into a
+    // bare status label. A non-timeout body error still degrades to an empty
+    // body → status-only message, exactly as before.
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(e) => {
+            if let Some(timeout) = classify_body_timeout(&e) {
+                return timeout;
+            }
+            String::new()
+        }
+    };
 
     // 429 Too Many Requests → typed `relay rate-limited:` prefix so the TS
     // client can activate the rate-limit gate without confusing it with a

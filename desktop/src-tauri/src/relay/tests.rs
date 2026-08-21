@@ -374,6 +374,120 @@ async fn stalled_response_body_times_out_with_classified_error() {
     let _ = handle.join();
 }
 
+// ── /query non-2xx body-stall timeout → classified error (not status) ────
+//
+// The 2xx path is not the only body-consuming path. A relay that returns a
+// non-success status (500, 429, …) routes through `relay_error_message`, which
+// consumes the body via `text()` to extract the structured error field. If the
+// relay sends the status headers and then stalls the promised body, that
+// consumption trips the same request deadline — and it must surface the stable
+// "relay unreachable: request timed out" classification, not a bare
+// "relay returned 500" that hides the connectivity failure. This drives
+// `send_query_request` against a loopback that writes 500 headers promising a
+// body it never sends.
+#[tokio::test]
+async fn stalled_error_response_body_times_out_with_classified_error() {
+    use std::io::{Read as _, Write as _};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            // 500 status headers promising a body (Content-Length) that never
+            // arrives — the "error headers arrive, body stalls" half-open case.
+            let _ = stream.write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n",
+            );
+            let _ = stream.flush();
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/query");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::send_query_request(
+            &client,
+            &url,
+            "Nostr test-auth",
+            None,
+            b"[]".to_vec(),
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect(
+        "send_query_request must honor its per-request timeout through error-body \
+         consumption and resolve within 5s",
+    );
+
+    let err = result.expect_err("a stalled error-response body must surface an error, not succeed");
+    assert_eq!(
+        err, "relay unreachable: request timed out",
+        "a non-2xx body-stall timeout must surface the classified timeout string, not the \
+         status bucket"
+    );
+
+    let _ = handle.join();
+}
+
+// ── /query non-stalled 500 → status message (timeout preservation is scoped) ─
+//
+// The timeout preservation above must not swallow genuine relay errors: a 500
+// whose body arrives promptly still surfaces as "relay returned 500". This
+// pins that `classify_body_timeout` only fires on an actual timeout, so the
+// error-classification path stays intact for live relay failures.
+#[tokio::test]
+async fn non_stalled_error_response_yields_status_message() {
+    use std::io::{Read as _, Write as _};
+    use std::time::Duration;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            // A complete 500 with a non-JSON body delivered immediately.
+            let body = "internal error";
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/query");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::send_query_request(
+            &client,
+            &url,
+            "Nostr test-auth",
+            None,
+            b"[]".to_vec(),
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect("a promptly-served 500 must resolve well within 5s");
+
+    let err = result.expect_err("a 500 must surface an error, not succeed");
+    assert_eq!(
+        err, "relay returned 500 Internal Server Error",
+        "a non-stalled 500 must keep its status classification, not be reclassified as a timeout"
+    );
+
+    let _ = handle.join();
+}
+
 // ── parse_json_response malformed-body contract ──────────────────────────
 
 #[test]
