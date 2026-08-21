@@ -243,10 +243,19 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     // "relay unreachable:" bucket so it surfaces loudly instead of being treated
     // as a transient unreachable-relay condition. The reqwest error detail is
     // dropped because it contains the raw URL.
-    response
-        .json::<T>()
-        .await
-        .map_err(|_| MALFORMED_RESPONSE_MESSAGE.to_string())
+    //
+    // A body-consumption timeout is the exception: `send()` resolves once headers
+    // arrive, so a body that stalls past the request deadline trips the timeout
+    // HERE rather than at send(). That is a connectivity failure, not a malformed
+    // body, so route it through the same classifier as a pre-header stall to
+    // preserve the stable "relay unreachable: request timed out" label.
+    response.json::<T>().await.map_err(|e| {
+        if e.is_timeout() {
+            classify_request_error(&e)
+        } else {
+            MALFORMED_RESPONSE_MESSAGE.to_string()
+        }
+    })
 }
 
 /// Extract the `retry in Ns` hint from a rate-limit error string.

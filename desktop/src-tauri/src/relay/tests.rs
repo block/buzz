@@ -313,6 +313,67 @@ async fn stalled_query_request_times_out_with_classified_error() {
     let _ = handle.join();
 }
 
+// ── /query body-stall timeout → classified error (not malformed) ─────────
+//
+// `send()` resolves once response headers arrive, so a relay that returns a
+// valid 2xx JSON header block and then stalls the body trips the request
+// deadline inside `response.json()` — the branch the pre-header stall above
+// cannot reach. That is a connectivity failure, not a malformed body, so it
+// must surface the stable "relay unreachable: request timed out" string rather
+// than the malformed-response bucket. This drives `send_query_request` against
+// a loopback that writes headers promising a body it never sends.
+#[tokio::test]
+async fn stalled_response_body_times_out_with_classified_error() {
+    use std::io::{Read as _, Write as _};
+    use std::time::Duration;
+
+    // Accept, drain the request, write a complete 2xx JSON header block that
+    // promises a body (Content-Length), then send nothing and hold the socket
+    // — the "headers arrive, body stalls" half-open case.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n",
+            );
+            let _ = stream.flush();
+            // Never write the promised body; hold past the client deadline.
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{addr}/query");
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        super::send_query_request(
+            &client,
+            &url,
+            "Nostr test-auth",
+            None,
+            b"[]".to_vec(),
+            Duration::from_millis(200),
+        ),
+    )
+    .await
+    .expect(
+        "send_query_request must honor its per-request timeout through body \
+         consumption and resolve within 5s",
+    );
+
+    let err = result.expect_err("a stalled response body must surface an error, not succeed");
+    assert_eq!(
+        err, "relay unreachable: request timed out",
+        "a body-stall timeout must surface the classified timeout string, not the \
+         malformed-response bucket"
+    );
+
+    let _ = handle.join();
+}
+
 // ── parse_json_response malformed-body contract ──────────────────────────
 
 #[test]

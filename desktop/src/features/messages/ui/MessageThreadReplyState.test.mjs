@@ -82,9 +82,14 @@ test("terminal error renders the retry card, never the empty card", async () => 
   // Raw terminal-failure state: not pending, load errored, nothing to show.
   await renderRegion({ isError: true, onRetry: () => {} });
 
-  assert.ok(
-    screen.getByTestId("message-thread-replies-error"),
-    "a terminal error must render the error card",
+  const card = screen.getByTestId("message-thread-replies-error");
+  assert.ok(card, "a terminal error must render the error card");
+  // The card appears asynchronously (after the query/retry lifecycle), so it
+  // must be an alert live region or a screen-reader user never hears it.
+  assert.equal(
+    card.getAttribute("role"),
+    "alert",
+    "the async error card must be an alert live region for assistive tech",
   );
   assert.equal(
     document.body.textContent.includes("No replies in this branch yet"),

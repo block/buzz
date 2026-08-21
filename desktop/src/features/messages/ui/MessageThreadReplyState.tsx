@@ -20,12 +20,19 @@ import { Button } from "@/shared/ui/button";
  * silently presents a broken fetch as an authoritative "no replies" and offers
  * no recovery. Any cached replies still render via the panel's "list" branch, so
  * this only surfaces when the failed load left nothing to show.
+ *
+ * `role="alert"` (implicit `aria-live="assertive"`, `aria-atomic="true"`) makes
+ * the asynchronous failure audible to assistive tech: the card appears only after
+ * the query/retry lifecycle reaches a terminal error, so without a live region a
+ * screen-reader user parked in the composer never learns the load failed or that
+ * Retry became available.
  */
 export function ThreadRepliesErrorCard({ onRetry }: { onRetry?: () => void }) {
   return (
     <div
       className="rounded-2xl border border-dashed border-destructive/50 bg-destructive/5 px-4 py-6 text-center"
       data-testid="message-thread-replies-error"
+      role="alert"
     >
       <p className="text-sm font-medium text-foreground/80">
         Couldn&apos;t load replies
