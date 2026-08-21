@@ -374,8 +374,31 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     `mention-suggestion-${managedPubkey}`,
   );
   const relayRow = dropdown.getByTestId(`mention-suggestion-${relayPubkey}`);
-  await expect(managedRow).toContainText("agent · managed here");
-  await expect(relayRow).toContainText("agent · managed elsewhere");
+  await expect(managedRow).toContainText("agent");
+  await expect(managedRow.getByTestId("mention-agent-provenance")).toHaveCount(
+    0,
+  );
+  await expect(relayRow).toContainText("agent");
+  await expect(
+    relayRow.getByTestId("mention-agent-provenance"),
+  ).toHaveAttribute("aria-label", "From another Buzz setup");
+  await expect(
+    relayRow.getByText("Other setup", { exact: true }),
+  ).toBeVisible();
+  await expect(managedRow).not.toContainText("managed by you");
+  await expect(relayRow).not.toContainText("managed by you");
+
+  await page.setViewportSize({ width: 760, height: 640 });
+  await expect(
+    relayRow.getByText("Other setup", { exact: true }),
+  ).toBeVisible();
+  const rowBox = await relayRow.boundingBox();
+  const dropdownBox = await dropdown.boundingBox();
+  expect(rowBox).not.toBeNull();
+  expect(dropdownBox).not.toBeNull();
+  expect((rowBox?.x ?? 0) + (rowBox?.width ?? 0)).toBeLessThanOrEqual(
+    (dropdownBox?.x ?? 0) + (dropdownBox?.width ?? 0) + 1,
+  );
 
   const collisionKeys = dropdown.getByTestId("mention-collision-npub");
   await expect(collisionKeys).toHaveCount(2);
@@ -399,7 +422,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     await input.press("ArrowDown");
   }
   await input.press("Enter");
-  await page.keyboard.type("local");
+  await input.fill("@carl local");
   await page.getByTestId("send-message").click();
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@carl local"))
@@ -409,10 +432,21 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await input.fill("@carl");
   const reopenedDropdown = autocomplete(page);
   await expect(reopenedDropdown).toBeVisible();
-  await reopenedDropdown
-    .getByTestId(`mention-suggestion-${relayPubkey}`)
-    .click();
-  await page.keyboard.type("remote");
+  const reopenedRows = reopenedDropdown.locator("button");
+  const relayIndex = await reopenedRows.evaluateAll(
+    (buttons, pubkey) =>
+      buttons.findIndex(
+        (button) =>
+          button.getAttribute("data-testid") === `mention-suggestion-${pubkey}`,
+      ),
+    relayPubkey,
+  );
+  expect(relayIndex).toBeGreaterThanOrEqual(0);
+  for (let index = 0; index < relayIndex; index += 1) {
+    await input.press("ArrowDown");
+  }
+  await input.press("Enter");
+  await input.fill("@carl remote");
   await page.getByTestId("send-message").click();
   const sendWithoutInviting = page.getByRole("button", { name: "Do nothing" });
   try {
@@ -424,6 +458,55 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
     .toEqual([relayPubkey]);
+
+  await page.getByTestId("channel-members-trigger").click();
+  const remoteSidebarMarker = page.getByTestId(
+    `sidebar-member-agent-provenance-${relayPubkey}`,
+  );
+  await expect(
+    page.getByTestId(`sidebar-member-agent-provenance-${managedPubkey}`),
+  ).toHaveCount(0);
+  await expect(remoteSidebarMarker).toHaveAttribute(
+    "aria-label",
+    "From another Buzz setup",
+  );
+  await expect(remoteSidebarMarker).toHaveText("Other setup");
+  const remoteSidebarRow = page.getByTestId(`sidebar-member-${relayPubkey}`);
+  const localSidebarMarker = page.getByTestId(
+    `sidebar-member-agent-provenance-${managedPubkey}`,
+  );
+  const markerRemainsVisible = () =>
+    remoteSidebarMarker.evaluate((marker) => {
+      let element: Element | null = marker;
+      while (element) {
+        const style = window.getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden") {
+          return false;
+        }
+        if (Number(style.opacity) === 0) return false;
+        element = element.parentElement;
+      }
+      return true;
+    });
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+  const sidebarMarkerBox = await remoteSidebarMarker.boundingBox();
+  const sidebarBox = await page.getByTestId("members-sidebar").boundingBox();
+  expect(sidebarMarkerBox).not.toBeNull();
+  expect(sidebarBox).not.toBeNull();
+  expect(
+    (sidebarMarkerBox?.x ?? 0) + (sidebarMarkerBox?.width ?? 0),
+  ).toBeLessThanOrEqual((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0) + 1);
+
+  await remoteSidebarRow.hover();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+
+  await page.getByTestId(`sidebar-member-open-profile-${relayPubkey}`).focus();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
 });
 
 test("relay-only shared agents emit an outbound mention tag when selected", async ({
