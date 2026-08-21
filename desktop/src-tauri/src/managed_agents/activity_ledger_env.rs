@@ -65,6 +65,7 @@ mod tests {
         );
         assert_eq!(capability, TODAY_CAPABILITY);
         assert_eq!(expected_owner, owner);
+        assert!(super::super::is_reserved_env_key(TODAY_OWNER_PUBKEY_ENV));
         assert!(honey_today_env(Some("builtin:fizz"), Some(&owner), Some(nest)).is_none());
         assert!(honey_today_env(Some("builtin:honey"), Some("bad"), Some(nest)).is_none());
         assert!(honey_today_env(Some("builtin:honey"), Some(&owner), None).is_none());

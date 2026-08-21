@@ -405,6 +405,14 @@ mod tests {
     }
 
     #[test]
+    fn desktop_canonical_payload_matches_shared_consumer_fixture() {
+        let fixture =
+            include_str!("../../../../test-fixtures/activity-ledger-today-desktop.json").trim();
+        let snapshot: UnsignedOwnerTodaySnapshot = serde_json::from_str(fixture).unwrap();
+        assert_eq!(canonical_payload_json(&snapshot).unwrap(), fixture);
+    }
+
+    #[test]
     fn snapshot_is_atomic_private_and_owner_scoped() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::parse(&"a".repeat(64)).unwrap();

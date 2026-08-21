@@ -1,4 +1,5 @@
 use nostr::{Event, JsonUtil};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::Digest;
 
@@ -667,24 +668,34 @@ fn canonical_activity_ledger_snapshot_payload_json(
     generated_at: u64,
     expires_at: u64,
 ) -> Result<String, String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CanonicalPayload<'a> {
+        schema: &'static str,
+        owner_pubkey: &'a str,
+        generated_at: u64,
+        expires_at: u64,
+        capability: &'static str,
+        surface: &'a Value,
+        raw_events: &'a [Value],
+    }
+
     let surface = object
         .get("surface")
-        .cloned()
         .ok_or_else(|| format!("{ACTIVITY_LEDGER_TODAY_TOOL}: missing surface field"))?;
     let raw_events = object
         .get("rawEvents")
         .and_then(Value::as_array)
-        .cloned()
         .ok_or_else(|| format!("{ACTIVITY_LEDGER_TODAY_TOOL}: missing rawEvents field"))?;
-    serde_json::to_string(&json!({
-        "schema": ACTIVITY_LEDGER_TODAY_SCHEMA,
-        "ownerPubkey": owner_pubkey,
-        "generatedAt": generated_at,
-        "expiresAt": expires_at,
-        "capability": ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE,
-        "surface": surface,
-        "rawEvents": raw_events,
-    }))
+    serde_json::to_string(&CanonicalPayload {
+        schema: ACTIVITY_LEDGER_TODAY_SCHEMA,
+        owner_pubkey,
+        generated_at,
+        expires_at,
+        capability: ACTIVITY_LEDGER_TODAY_CAPABILITY_VALUE,
+        surface,
+        raw_events,
+    })
     .map_err(|e| {
         format!("{ACTIVITY_LEDGER_TODAY_TOOL}: could not canonicalize snapshot payload: {e}")
     })

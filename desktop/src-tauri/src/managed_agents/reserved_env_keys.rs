@@ -61,6 +61,7 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // not redirect the reader to another file or weaken the contract marker.
     "BUZZ_ACTIVITY_LEDGER_TODAY_PATH",
     "BUZZ_ACTIVITY_LEDGER_TODAY_CAPABILITY",
+    "BUZZ_ACTIVITY_LEDGER_TODAY_OWNER_PUBKEY",
     // Remote lifetime/presence policy: user env must not disable the
     // desktop/provider-owned bounds while the saved record still promises them.
     "BUZZ_ACP_EXIT_AFTER_INACTIVITY",

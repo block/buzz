@@ -52,7 +52,13 @@ fn write_activity_snapshot(
         },
         "rawEvents": []
     });
-    let canonical_payload = serde_json::to_string(&unsigned_snapshot).unwrap();
+    let canonical_payload = canonical_activity_ledger_snapshot_payload_json(
+        unsigned_snapshot.as_object().unwrap(),
+        &owner_pubkey,
+        generated_at,
+        expires_at,
+    )
+    .unwrap();
     let snapshot_sha256 = hex::encode(sha2::Sha256::digest(canonical_payload.as_bytes()));
     let event = EventBuilder::new(
         Kind::Custom(ACTIVITY_LEDGER_TODAY_SIGNED_KIND),
@@ -105,6 +111,21 @@ fn expected_owner_pubkey() -> String {
         .unwrap()
         .public_key()
         .to_hex()
+}
+
+#[test]
+fn desktop_canonical_payload_fixture_matches_honey_reconstruction() {
+    let fixture = include_str!("../../../test-fixtures/activity-ledger-today-desktop.json").trim();
+    let root: Value = serde_json::from_str(fixture).unwrap();
+    let object = root.as_object().unwrap();
+    let reconstructed = canonical_activity_ledger_snapshot_payload_json(
+        object,
+        object["ownerPubkey"].as_str().unwrap(),
+        object["generatedAt"].as_u64().unwrap(),
+        object["expiresAt"].as_u64().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reconstructed, fixture);
 }
 
 #[test]
