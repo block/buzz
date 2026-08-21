@@ -75,6 +75,57 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
 
+/// Maximum file size for iCalendar uploads (10 MiB).
+const MAX_CALENDAR_BYTES: u64 = 10 * 1024 * 1024;
+
+fn calendar_upload_metadata(file_path: &str) -> Option<(&'static str, &'static str)> {
+    std::path::Path::new(file_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ics"))
+        .then_some(("text/calendar", "ics"))
+}
+
+pub(crate) fn sanitize_attachment_filename(file_path: &str) -> String {
+    let basename = file_path.rsplit(['/', '\\']).next().unwrap_or_default();
+    let mut sanitized = String::new();
+    for character in basename.chars().filter(|character| !character.is_control()) {
+        if sanitized.len() + character.len_utf8() > 255 {
+            break;
+        }
+        sanitized.push(character);
+    }
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        "file".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+pub(crate) fn sanitize_calendar_filename(file_path: &str) -> String {
+    let basename = sanitize_attachment_filename(file_path);
+    let stem = basename
+        .rsplit_once('.')
+        .map_or(basename.as_str(), |(stem, _)| stem);
+    let mut sanitized = String::new();
+    for character in stem.chars().filter(|character| !character.is_control()) {
+        if sanitized.len() + character.len_utf8() > 255 - ".ics".len() {
+            break;
+        }
+        sanitized.push(character);
+    }
+    let sanitized = sanitized.trim();
+    format!(
+        "{}.ics",
+        if sanitized.is_empty() {
+            "calendar"
+        } else {
+            sanitized
+        }
+    )
+}
+
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
 /// The event includes:
@@ -492,6 +543,27 @@ mod media_download_tests {
         assert!(!should_retry_legacy_upload(
             reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
         ));
+    }
+
+    #[test]
+    fn calendar_upload_metadata_is_extension_specific() {
+        assert_eq!(
+            calendar_upload_metadata("Planning.ICS"),
+            Some(("text/calendar", "ics"))
+        );
+        assert_eq!(calendar_upload_metadata("Planning.txt"), None);
+    }
+
+    #[test]
+    fn calendar_filename_is_sanitized_without_losing_ics_extension() {
+        let name = format!("folder\\bad\0{}.ics", "é".repeat(200));
+        let sanitized = sanitize_calendar_filename(&name);
+
+        assert!(sanitized.ends_with(".ics"));
+        assert!(!sanitized.contains(['/', '\\', '\0']));
+        assert!(sanitized.len() <= 255);
+        assert_eq!(sanitize_calendar_filename("Agenda.markdown"), "Agenda.ics");
+        assert_eq!(sanitize_calendar_filename("Agenda"), "Agenda.ics");
     }
 }
 
@@ -1105,21 +1177,38 @@ impl BuzzClient {
             return Err(CliError::Usage(format!("{file_path} is not a file")));
         }
 
+        let calendar_metadata = calendar_upload_metadata(file_path);
+        if calendar_metadata.is_some() && metadata.len() > MAX_CALENDAR_BYTES {
+            return Err(CliError::Usage(format!(
+                "file too large: {} bytes (max {MAX_CALENDAR_BYTES})",
+                metadata.len()
+            )));
+        }
+
         let bytes = std::fs::read(file_path)
             .map_err(|e| CliError::Other(format!("failed to read {file_path}: {e}")))?;
 
         // 2. Detect MIME from magic bytes
-        let mime = infer::get(&bytes)
-            .map(|t| t.mime_type().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let (mime, extension_hint) = if let Some((mime, extension)) = calendar_metadata {
+            (mime.to_string(), Some(extension))
+        } else {
+            (
+                infer::get(&bytes)
+                    .map(|t| t.mime_type().to_string())
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                None,
+            )
+        };
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
+        if extension_hint.is_none() && !ALLOWED_MIMES.contains(&mime.as_str()) {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
+        } else if extension_hint.is_some() {
+            MAX_CALENDAR_BYTES
         } else {
             MAX_IMAGE_BYTES
         };
@@ -1156,18 +1245,17 @@ impl BuzzClient {
                 async move {
                     let auth_header =
                         sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                    let resp = self
-                        .with_auth_tag(
-                            self.http
-                                .put(&url)
-                                .timeout(upload_timeout)
-                                .header("Authorization", auth_header)
-                                .header("Content-Type", &mime)
-                                .header("X-SHA-256", &sha256)
-                                .body(upload_body),
-                        )
-                        .send()
-                        .await?;
+                    let mut request = self
+                        .http
+                        .put(&url)
+                        .timeout(upload_timeout)
+                        .header("Authorization", auth_header)
+                        .header("Content-Type", &mime)
+                        .header("X-SHA-256", &sha256);
+                    if let Some(extension) = extension_hint {
+                        request = request.header("X-Buzz-File-Extension", extension);
+                    }
+                    let resp = self.with_auth_tag(request.body(upload_body)).send().await?;
                     let status = resp.status();
                     if !status.is_success() {
                         let s = status.as_u16();
@@ -1184,6 +1272,14 @@ impl BuzzClient {
         // itself is not retried; only transient failures on the selected legacy endpoint are.
         match result {
             Ok(desc) => return Ok(desc),
+            Err(CliError::Relay { status: s, body })
+                if extension_hint.is_some()
+                    && should_retry_legacy_upload(
+                        reqwest::StatusCode::from_u16(s).unwrap_or(reqwest::StatusCode::NOT_FOUND),
+                    ) =>
+            {
+                return Err(CliError::Relay { status: s, body });
+            }
             Err(CliError::Relay { status: s, body: _ })
                 if should_retry_legacy_upload(
                     reqwest::StatusCode::from_u16(s).unwrap_or(reqwest::StatusCode::NOT_FOUND),

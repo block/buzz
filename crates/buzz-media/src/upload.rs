@@ -13,7 +13,7 @@ use crate::thumbnail::generate_image_metadata_sync;
 use crate::types::BlobDescriptor;
 use crate::upload_record::{record_upload_event, UploadAttribution, UploadEventFacts};
 use crate::validation::{
-    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content,
+    looks_like_mp4_iso_bmff, mime_to_ext, validate_content, validate_file_content_with_hints,
     validate_video_file,
 };
 
@@ -250,6 +250,42 @@ pub async fn process_file_upload(
     body: Bytes,
     attribution: Option<UploadAttribution>,
 ) -> Result<BlobDescriptor, MediaError> {
+    process_file_upload_with_hints(
+        storage,
+        config,
+        ctx,
+        auth_event,
+        body,
+        attribution,
+        FileUploadHints::default(),
+    )
+    .await
+}
+
+/// Untrusted client hints for an attachment format with no magic bytes.
+/// Only the `text/calendar` plus `ics` pair affects validation.
+#[derive(Debug, Clone, Default)]
+pub struct FileUploadHints {
+    /// Normalized request MIME type.
+    pub declared_mime: Option<String>,
+    /// Normalized original filename extension.
+    pub extension: Option<String>,
+}
+
+/// Process a generic non-media file upload with optional format hints.
+///
+/// Storage, auth, forced-download serving, and generic deny-list behavior are
+/// identical to [`process_file_upload`]. Hints only let the validator recognize
+/// a structurally valid iCalendar text file.
+pub async fn process_file_upload_with_hints(
+    storage: &MediaStorage,
+    config: &MediaConfig,
+    ctx: &TenantContext,
+    auth_event: &nostr::Event,
+    body: Bytes,
+    attribution: Option<UploadAttribution>,
+    hints: FileUploadHints,
+) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
         BufferedUploadInput {
             storage,
@@ -259,7 +295,14 @@ pub async fn process_file_upload(
             body,
             attribution,
         },
-        |bytes, cfg| validate_file_content(bytes, cfg),
+        move |bytes, cfg| {
+            validate_file_content_with_hints(
+                bytes,
+                cfg,
+                hints.declared_mime.as_deref(),
+                hints.extension.as_deref(),
+            )
+        },
         |input| async move {
             // Minimal sidecar — no thumbnail/dim/blurhash/duration for generic files.
             let meta = BlobMeta {
