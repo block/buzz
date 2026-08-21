@@ -393,6 +393,53 @@ const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
     buzz_core::kind::KIND_NIP29_DELETE_EVENT,
 ];
 
+/// Two-hop aux closure: reactions/deletions/edits targeting the given event
+/// IDs, plus deletions targeting those aux events (the transitive second
+/// hop). One round trip for the client instead of an #e fan-out. Used by
+/// the channel-window path (via a transactional session) and by the
+/// catch-all / depth-limited thread paths (via routed reads).
+async fn collect_aux_closure(
+    db: &buzz_db::Db,
+    community: buzz_core::CommunityId,
+    root_ids_hex: Vec<String>,
+    accessible_channels: &[uuid::Uuid],
+) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
+    if root_ids_hex.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut seen_aux: std::collections::HashSet<nostr::EventId> = std::collections::HashSet::new();
+    let mut hop_ids = root_ids_hex;
+    let mut aux_events = Vec::new();
+    for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+        let mut aux_query = buzz_db::EventQuery::for_community(community);
+        aux_query.kinds = Some(hop_kinds.iter().map(|k| *k as i32).collect());
+        aux_query.e_tags = Some(std::mem::take(&mut hop_ids));
+        aux_query.limit = Some(1000);
+        let events = db
+            .query_events_routed("bridge_aux", &aux_query)
+            .await
+            .map_err(|e| internal_error(&format!("aux closure error: {e}")))?;
+        for se in events {
+            if !seen_aux.insert(se.event.id) {
+                continue;
+            }
+            // Deletions can be stored channel-less; access-check instead
+            // of channel-constraining so they aren't silently dropped.
+            if !event_in_accessible_channel(&se, accessible_channels) {
+                continue;
+            }
+            hop_ids.push(se.event.id.to_hex());
+            let v = serde_json::to_value(&se.event)
+                .map_err(|e| internal_error(&format!("aux serialize: {e}")))?;
+            aux_events.push(v);
+        }
+        if hop_ids.is_empty() {
+            break;
+        }
+    }
+    Ok(aux_events)
+}
+
 /// Serve one `top_level: true` channel-window filter on the bridge `/query`
 /// path (docs/bridge-channel-window.md). Appends, in order: row events, the
 /// aux closure (`include_aux`), `39005` thread-summary overlays
@@ -1218,6 +1265,27 @@ async fn query_events_authed(
                 events.push(v);
             }
         }
+
+        // Aux closure for the depth-limited thread path: include reactions,
+        // deletions, and edits targeting the returned replies, plus deletions
+        // targeting those aux events. The root event's aux is collected in
+        // the catch-all phase below (the root filter is an `ids` filter that
+        // falls through to catch-all when include_aux is set on it).
+        if extension_flag(raw, "include_aux") {
+            let reply_ids: Vec<String> = events
+                .iter()
+                .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            let aux = collect_aux_closure(
+                &state.db,
+                tenant.community(),
+                reply_ids,
+                &accessible_channels,
+            )
+            .await?;
+            events.extend(aux);
+        }
+
         handled.insert(idx);
     }
 
@@ -1329,6 +1397,26 @@ async fn query_events_authed(
             Err(e) => {
                 return Err(internal_error(&format!("query error: {e}")));
             }
+        }
+
+        // Aux closure for the catch-all path: include reactions, deletions,
+        // and edits targeting the returned events, plus deletions targeting
+        // those aux events. This covers `messages get` (no top_level, no
+        // depth_limit) and the root-event filter in `messages thread` (an
+        // `ids` filter that falls through to catch-all).
+        if extension_flag(&raw_filters[idx], "include_aux") {
+            let result_ids: Vec<String> = events
+                .iter()
+                .filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            let aux = collect_aux_closure(
+                &state.db,
+                tenant.community(),
+                result_ids,
+                &accessible_channels,
+            )
+            .await?;
+            events.extend(aux);
         }
     }
 

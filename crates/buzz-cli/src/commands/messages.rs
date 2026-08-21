@@ -353,6 +353,7 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -360,6 +361,7 @@ pub async fn cmd_get_messages(
     before: Option<i64>,
     since: Option<i64>,
     kinds: Option<&str>,
+    include_aux: bool,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
@@ -384,6 +386,9 @@ pub async fn cmd_get_messages(
     }
     if let Some(s) = since {
         filter["since"] = serde_json::json!(s);
+    }
+    if include_aux {
+        filter["include_aux"] = serde_json::json!(true);
     }
 
     let resp = client.query(&filter).await?;
@@ -424,6 +429,7 @@ pub async fn cmd_get_thread(
     expected_root_id: Option<&str>,
     limit: Option<u32>,
     depth_limit: Option<u32>,
+    include_aux: bool,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let expected_channel_id = parse_uuid(channel_id)?;
@@ -446,11 +452,17 @@ pub async fn cmd_get_thread(
     if let Some(d) = depth_limit {
         reply_filter["depth_limit"] = serde_json::json!(d);
     }
-    let root_filter = serde_json::json!({
+    if include_aux {
+        reply_filter["include_aux"] = serde_json::json!(true);
+    }
+    let mut root_filter = serde_json::json!({
         "ids": [root_event_id.as_str()],
         "#h": [channel_id],
         "limit": 1
     });
+    if include_aux {
+        root_filter["include_aux"] = serde_json::json!(true);
+    }
     let resp = client.query_multi(&[reply_filter, root_filter]).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     events.sort_by_key(|event| {
@@ -987,6 +999,7 @@ pub async fn dispatch(
             before,
             since,
             kinds,
+            include_aux,
         } => {
             cmd_get_messages(
                 client,
@@ -995,6 +1008,7 @@ pub async fn dispatch(
                 before,
                 since,
                 kinds.as_deref(),
+                include_aux,
                 format,
             )
             .await
@@ -1005,6 +1019,7 @@ pub async fn dispatch(
             link,
             limit,
             depth_limit,
+            include_aux,
         } => {
             let (channel, event, expected_root) =
                 match link {
@@ -1027,6 +1042,7 @@ pub async fn dispatch(
                 expected_root.as_deref(),
                 limit,
                 depth_limit,
+                include_aux,
                 format,
             )
             .await
