@@ -178,11 +178,12 @@ pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
     }
 }
 
-/// Read message content, bounding non-interactive stdin so an inherited open
-/// pipe cannot leave an agent send blocked forever.
+/// Read message content, bounding how long non-interactive stdin may remain
+/// completely idle so an inherited open pipe cannot block an agent forever.
 ///
 /// A terminal remains interactive and may wait for a human to finish input.
-/// Pipes must deliver their complete payload (including EOF) promptly.
+/// Once a pipe produces its first byte, the complete payload may take as long
+/// as its producer needs.
 pub fn read_message_or_stdin(value: &str) -> Result<String, CliError> {
     if value != "-" {
         return Ok(value.to_string());
@@ -198,21 +199,47 @@ pub fn read_message_or_stdin(value: &str) -> Result<String, CliError> {
         return Ok(buf);
     }
 
-    const PIPE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let mut buf = String::new();
-        let result = std::io::stdin()
-            .read_to_string(&mut buf)
-            .map(|_| buf)
-            .map_err(|e| CliError::Other(format!("failed to read stdin: {e}")));
-        let _ = tx.send(result);
+        let mut stdin = std::io::stdin();
+        let mut first = [0_u8; 1];
+        match stdin.read(&mut first) {
+            Ok(0) => {
+                let _ = ready_tx.send(Ok(()));
+                let _ = result_tx.send(Ok(String::new()));
+            }
+            Ok(_) => {
+                if ready_tx.send(Ok(())).is_err() {
+                    return;
+                }
+                let mut bytes = vec![first[0]];
+                let result = stdin
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| CliError::Other(format!("failed to read stdin: {e}")))
+                    .and_then(|_| {
+                        String::from_utf8(bytes).map_err(|e| {
+                            CliError::Other(format!("failed to read stdin as UTF-8: {e}"))
+                        })
+                    });
+                let _ = result_tx.send(result);
+            }
+            Err(error) => {
+                let _ = ready_tx.send(Err(CliError::Other(format!(
+                    "failed to read stdin: {error}"
+                ))));
+            }
+        }
     });
 
-    match rx.recv_timeout(PIPE_READ_TIMEOUT) {
-        Ok(result) => result,
+    match ready_rx.recv_timeout(FIRST_BYTE_TIMEOUT) {
+        Ok(Ok(())) => result_rx.recv().map_err(|_| {
+            CliError::Other("failed to read stdin: reader stopped unexpectedly".into())
+        })?,
+        Ok(Err(error)) => Err(error),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CliError::Usage(
-            "stdin did not reach EOF within 2 seconds; pipe content explicitly or redirect a file"
+            "stdin produced no data within 5 seconds; pipe content explicitly or redirect a file"
                 .into(),
         )),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CliError::Other(

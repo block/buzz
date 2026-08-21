@@ -60,7 +60,7 @@ fn open_non_tty_stdin_without_data_times_out() {
         .expect("spawn buzz");
     let writer = child.stdin.take().expect("piped stdin");
 
-    let deadline = started + Duration::from_secs(5);
+    let deadline = started + Duration::from_secs(7);
     loop {
         if child.try_wait().expect("poll child").is_some() {
             break;
@@ -75,10 +75,39 @@ fn open_non_tty_stdin_without_data_times_out() {
     drop(writer);
     let output = child.wait_with_output().expect("collect output");
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(started.elapsed() < Duration::from_secs(7));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("stdin did not reach EOF within 2 seconds"));
+    assert!(stderr.contains("stdin produced no data within 5 seconds"));
     assert!(!stderr.contains("network_error"));
+}
+
+#[test]
+fn slow_producer_that_eventually_writes_is_not_timed_out() {
+    let started = Instant::now();
+    let mut child = base_command()
+        .arg("--content")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn buzz");
+    let mut writer = child.stdin.take().expect("piped stdin");
+    let producer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        writer.write_all(b"hello after a slow start\n")
+    });
+
+    let output = child.wait_with_output().expect("collect output");
+    producer
+        .join()
+        .expect("join producer")
+        .expect("write stdin");
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("network_error"), "{stderr}");
+    assert!(!stderr.contains("stdin produced no data"));
 }
 
 #[test]
