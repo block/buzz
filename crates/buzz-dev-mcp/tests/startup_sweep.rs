@@ -196,6 +196,7 @@ fn a_real_server_sweeps_orphans_claims_its_own_dirs_and_is_reclaimed_after_a_har
 }
 
 /// Send one line of JSON-RPC to a server's stdin.
+#[cfg(unix)]
 fn send(server: &mut Child, line: &serde_json::Value) {
     use std::io::Write as _;
     let stdin = server.stdin.as_mut().expect("server stdin");
@@ -205,6 +206,7 @@ fn send(server: &mut Child, line: &serde_json::Value) {
 
 /// Read one line from `reader`, or panic after [`DEADLINE`]. Keeps a stalled
 /// handshake from hanging the whole test binary.
+#[cfg(unix)]
 fn read_line_or_timeout(rx: &std::sync::mpsc::Receiver<String>, what: &str) -> String {
     rx.recv_timeout(DEADLINE)
         .unwrap_or_else(|e| panic!("no {what} from the server within {DEADLINE:?}: {e}"))
@@ -213,6 +215,7 @@ fn read_line_or_timeout(rx: &std::sync::mpsc::Receiver<String>, what: &str) -> S
 /// Drive the MCP handshake and call the `shell` tool with `command`, without
 /// waiting for its result — the point of every caller here is that the
 /// command outlives the server it was asked of.
+#[cfg(unix)]
 fn call_shell(server: &mut Child, command: &str) {
     let stdout = server.stdout.take().expect("server stdout");
     let (tx, rx) = std::sync::mpsc::channel();
