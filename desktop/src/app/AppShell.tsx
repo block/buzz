@@ -100,6 +100,7 @@ import { SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { AppShellTrayMenu } from "@/app/useAppShellTrayMenu";
+import { ScheduledMessageDelivery } from "@/features/scheduled/ScheduledMessageDelivery";
 import { AppProfilePanelProvider } from "@/app/AppProfilePanelProvider";
 import { AppWorkflowEditorOverlayProvider } from "@/app/AppWorkflowEditorOverlayProvider";
 import { LazySettingsScreen } from "@/app/LazySettingsScreen";
@@ -698,6 +699,7 @@ export function AppShell() {
           openCreateChannel={handleOpenCreateChannel}
         />
       ) : null}
+      <ScheduledMessageDelivery />
       <ChannelNavigationProvider channels={channels}>
         <AppShellProvider
           value={{
