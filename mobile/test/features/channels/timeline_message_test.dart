@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel_window.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 NostrEvent _textMsg({
   required String id,
@@ -401,6 +402,62 @@ void main() {
       expect(result[1].content, 'world');
       expect(result[0].isSystem, false);
       expect(result[0].edited, false);
+    });
+
+    nostr.Event workflowEvent() {
+      const actorPubkey =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      return nostr.Event.from(
+        kind: EventKind.streamMessage,
+        content: 'workflow result',
+        secretKey:
+            '1111111111111111111111111111111111111111111111111111111111111111',
+        createdAt: 1700000000,
+        tags: const [
+          ['p', actorPubkey],
+          ['h', 'ch1'],
+          ['buzz:workflow', 'true'],
+        ],
+      );
+    }
+
+    test('displays a relay-signed workflow message as its actor', () {
+      const actorPubkey =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final event = workflowEvent();
+
+      final result = formatTimeline([
+        NostrEvent.fromJson(event.toMap()),
+      ], relaySelfPubkey: event.pubkey);
+
+      expect(result.single.pubkey, actorPubkey);
+    });
+
+    test('keeps the signer for a workflow message not signed by the relay', () {
+      const relayPubkey =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      final event = workflowEvent();
+
+      final result = formatTimeline([
+        NostrEvent.fromJson(event.toMap()),
+      ], relaySelfPubkey: relayPubkey);
+
+      expect(result.single.pubkey, event.pubkey);
+    });
+
+    test('keeps the signer for a workflow message with a tampered signature', () {
+      final event = workflowEvent();
+      final tamperedEvent = NostrEvent.fromJson({
+        ...event.toMap(),
+        'sig':
+            '${event.sig.substring(0, 127)}${event.sig.endsWith('0') ? '1' : '0'}',
+      });
+
+      final result = formatTimeline([
+        tamperedEvent,
+      ], relaySelfPubkey: event.pubkey);
+
+      expect(result.single.pubkey, event.pubkey);
     });
 
     test('filters deleted messages', () {

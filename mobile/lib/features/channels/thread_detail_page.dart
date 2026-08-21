@@ -101,6 +101,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       return session.registerVisibleChannel(channelId);
     }, [channelId]);
     final sendMessage = ref.read(sendMessageProvider);
+    final relaySelfPubkey = ref.watch(relaySelfProvider).value;
     // Relay thread queries are keyed by the outermost root, even when this
     // page displays a nested branch. Query that root, then select this head's
     // direct children from the returned subtree below.
@@ -124,6 +125,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       return formatTimeline(
         mergeThreadEvents(events, liveChannelEvents),
         currentPubkey: currentPubkey,
+        relaySelfPubkey: relaySelfPubkey,
       );
     });
 
