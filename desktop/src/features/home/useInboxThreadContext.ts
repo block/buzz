@@ -46,6 +46,27 @@ function getThreadRootId(event: RelayEvent): string {
   return thread.rootId ?? thread.parentId ?? event.id;
 }
 
+/**
+ * The channel-window read model intentionally contains only top-level rows.
+ * That is right for stream channels, where replies belong behind their thread
+ * root, but a DM is one flat conversation: agents commonly publish a NIP-10
+ * reply to the incoming message. Keep the direct all-content fetch alongside
+ * the window rows so those replies survive Inbox opens and window refreshes.
+ */
+export function mergeFullChannelContext(
+  selectedEvent: RelayEvent,
+  channelMessages: RelayEvent[] | undefined,
+  fetchedEvents: RelayEvent[],
+): RelayEvent[] {
+  return dedupeEvents([
+    selectedEvent,
+    ...fetchedEvents,
+    ...(channelMessages ?? []).filter((event) =>
+      CHANNEL_CONTEXT_EVENT_KINDS.has(event.kind),
+    ),
+  ]);
+}
+
 export function useInboxThreadContext(
   item: FeedItem | null,
   channelMessages: RelayEvent[] | undefined,
@@ -76,7 +97,7 @@ export function useInboxThreadContext(
   React.useEffect(() => {
     let isCancelled = false;
 
-    if (fullChannel || !selectedEvent || !selectedThreadRootId) {
+    if (!selectedEvent || !selectedThreadRootId) {
       setFetchedEvents([]);
       setHasLoadError(false);
       setIsLoading(false);
@@ -96,6 +117,23 @@ export function useInboxThreadContext(
       setHasLoadError(false);
 
       try {
+        if (fullChannel) {
+          if (!selectedChannelId) {
+            setFetchedEvents([]);
+            return;
+          }
+
+          const events = await relayClient.fetchEvents({
+            "#h": [selectedChannelId],
+            kinds: [...CHANNEL_TIMELINE_CONTENT_KINDS],
+            limit: THREAD_CONTEXT_LIMIT,
+          });
+          if (!isCancelled) {
+            setFetchedEvents(dedupeEvents(events));
+          }
+          return;
+        }
+
         const selection = {
           selectedChannelId,
           selectedEventId: targetEvent.id,
@@ -214,12 +252,11 @@ export function useInboxThreadContext(
     }
 
     if (fullChannel) {
-      return dedupeEvents([
+      return mergeFullChannelContext(
         selectedEvent,
-        ...(channelMessages ?? []).filter((event) =>
-          CHANNEL_CONTEXT_EVENT_KINDS.has(event.kind),
-        ),
-      ]);
+        channelMessages,
+        fetchedEvents,
+      );
     }
 
     const localContext = (channelMessages ?? []).filter((event) => {
@@ -369,9 +406,11 @@ export function useInboxThreadContext(
   return {
     events,
     hasLoadError: fullChannel
-      ? options.hasChannelLoadError === true
+      ? hasLoadError || Boolean(options.hasChannelLoadError)
       : hasLoadError,
-    isLoading: fullChannel ? options.isChannelLoading === true : isLoading,
+    isLoading: fullChannel
+      ? isLoading || Boolean(options.isChannelLoading)
+      : isLoading,
     structuralEvents,
     refreshStructuralEvents,
     reactionEvents,

@@ -321,7 +321,11 @@ export function useChannelSubscription(channel: Channel | null) {
           (current = []) => mergeMessages(current, event),
         );
       }
-      if (!isBroadcastReply(event.tags)) return;
+      // Channel windows omit normal thread replies for stream channels, but a
+      // direct message is one conversation. Retain a live agent reply in the
+      // DM projection so it does not disappear before the Inbox context fetch
+      // completes or when another message arrives.
+      if (!isBroadcastReply(event.tags) && channelType !== "dm") return;
     }
     if (!isTimelineRow && !CHANNEL_AUX_KINDS.has(event.kind)) return;
     if (!isTimelineRow) {
