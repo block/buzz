@@ -15,7 +15,7 @@ import {
   type SoundSlot,
 } from "@/features/notifications/lib/sound";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import { Switch } from "@/shared/ui/switch";
 import {
   SettingsOptionGroup,
@@ -92,14 +92,6 @@ export function NotificationSettingsCard({
                   ? "Requesting..."
                   : "Desktop alerts"}
               </label>
-              <p
-                className="text-sm font-normal text-muted-foreground/70"
-                data-settings-subcopy
-              >
-                {notificationSettings.desktopEnabled
-                  ? "Native desktop alerts are enabled for the categories you have armed below."
-                  : "Request OS permission and surface new mentions or needs-action items outside the app."}
-              </p>
             </div>
             <Switch
               checked={notificationSettings.desktopEnabled}
@@ -152,14 +144,8 @@ export function NotificationSettingsCard({
                     className="text-sm font-medium"
                     htmlFor="notification-sound-switch"
                   >
-                    Sound
+                    Play sound for notifications
                   </label>
-                  <p
-                    className="text-sm font-normal text-muted-foreground/70"
-                    data-settings-subcopy
-                  >
-                    Alert with a sound for the events below.
-                  </p>
                 </div>
                 <Switch
                   checked={anyAlertsOn}
@@ -265,15 +251,8 @@ export function NotificationSettingsCard({
                 className="text-sm font-medium"
                 htmlFor="home-badge-switch"
               >
-                Home badge
+                Badge application icon
               </label>
-              <p
-                className="text-sm font-normal text-muted-foreground/70"
-                data-settings-subcopy
-              >
-                Show a Home badge for mentions and needs-action items in the
-                sidebar.
-              </p>
             </div>
             <Switch
               checked={notificationSettings.homeBadgeEnabled}

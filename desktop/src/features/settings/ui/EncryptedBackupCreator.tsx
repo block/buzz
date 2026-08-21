@@ -3,7 +3,7 @@ import * as React from "react";
 
 import { generateBackupPassphrase } from "@/shared/api/tauriIdentity";
 import { useEncryptedBackup } from "@/features/settings/EncryptedBackupProvider";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import {
   Dialog,
   DialogContent,

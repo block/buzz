@@ -11,7 +11,7 @@ import {
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "@/features/agents/ui/agentConfigOptions";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 

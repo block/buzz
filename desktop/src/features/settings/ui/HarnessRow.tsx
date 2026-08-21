@@ -15,7 +15,7 @@ import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import {
   AlertDialog,
   AlertDialogAction,

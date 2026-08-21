@@ -32,7 +32,7 @@ import {
 } from "@/features/settings/lib/moderationQueue";
 import { cn } from "@/shared/lib/cn";
 import { truncatePubkey } from "@/shared/lib/pubkey";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import {
   DropdownMenu,
   DropdownMenuContent,

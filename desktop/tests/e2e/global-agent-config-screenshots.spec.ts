@@ -192,6 +192,10 @@ test.describe("global agent config screenshots", () => {
     await card.scrollIntoViewIfNeeded();
     await waitForAnimations(page);
 
+    const saveButton = card.getByRole("button", { name: "Save defaults" });
+    await expect(saveButton).toHaveClass(/rounded-full/);
+    await expect(saveButton).toHaveClass(/!shadow-none/);
+
     await card.screenshot({
       path: `${SHOTS}/01-global-agent-config-card-populated.png`,
     });

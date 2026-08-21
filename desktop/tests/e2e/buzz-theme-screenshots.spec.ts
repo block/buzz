@@ -661,21 +661,18 @@ test("app font size and conversation density apply independently", async ({
   const defaultSize = page.getByTestId("font-size-default");
   const larger = page.getByTestId("font-size-larger");
   const fontSizeIndicator = page.getByTestId("font-size-control-indicator");
-  const preview = page.getByTestId("conversation-preview");
-  const previewSurface = page.getByTestId("conversation-preview-surface");
-  const previewContent = page.getByTestId("conversation-preview-content");
-  const previewChip = preview.getByText("Preview");
+  const preview = page.getByTestId("appearance-workspace-preview");
+  const previewSurface = page.getByTestId(
+    "appearance-workspace-preview-surface",
+  );
+  const previewContent = page.getByTestId(
+    "appearance-workspace-preview-messages",
+  );
   const firstPreviewMessage = previewSurface.locator("article").first();
-  const previewMessage = preview.getByText(
+  const previewMessage = previewContent.getByText(
     "The revised conversation layout is ready to review.",
   );
-  const previewTimestamp = preview.getByText("9:41");
-  const densityDescription = page
-    .getByTestId("conversation-density-row")
-    .locator("[data-settings-subcopy]");
-  const fontSizeDescription = page
-    .getByTestId("font-size-row")
-    .locator("[data-settings-subcopy]");
+  const previewTimestamp = previewContent.getByText("9:41");
   const readScale = () =>
     root.evaluate((element) => {
       const style = window.getComputedStyle(element);
@@ -743,16 +740,18 @@ test("app font size and conversation density apply independently", async ({
   await expect(fontSizeControl).toHaveAccessibleName("Font size");
   await expect(comfortable).toHaveText("Comfy");
   await expect(defaultSize).toHaveText("Default");
-  await expect(preview).toContainText("Preview");
-  await expect(preview).not.toContainText("Message #design");
+  await expect(preview.getByText("Preview", { exact: true })).toBeVisible();
+  await expect(preview).toContainText("Message #design");
   await expect(comfortable).toHaveAttribute("aria-pressed", "true");
   await expect(defaultSize).toHaveAttribute("aria-pressed", "true");
-  await expect(densityDescription).toHaveText(
-    "Spacing in conversations and Markdown content across Buzz",
-  );
-  await expect(fontSizeDescription).toHaveText(
-    "Applies across conversations and interface text",
-  );
+  await expect(
+    page
+      .getByTestId("conversation-density-row")
+      .locator("[data-settings-subcopy]"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("font-size-row").locator("[data-settings-subcopy]"),
+  ).toHaveCount(0);
   await expect.poll(readScale).toEqual({
     authorLineHeight: 16,
     bodyGap: 0.125,
@@ -798,62 +797,20 @@ test("app font size and conversation density apply independently", async ({
   await expect(densityIndicator).toHaveCSS("transition-property", /transform/);
   await expect(fontSizeIndicator).toHaveCSS("transition-duration", "0.2s");
   await expect(fontSizeIndicator).toHaveCSS("transition-property", /transform/);
-  await expect
-    .poll(async () => {
-      const [previewBackground, labelBackground, controlBackground] =
-        await Promise.all([
-          previewSurface.evaluate(
-            (element) => window.getComputedStyle(element).backgroundColor,
-          ),
-          previewChip.evaluate(
-            (element) => window.getComputedStyle(element).backgroundColor,
-          ),
-          densityControl.evaluate(
-            (element) => window.getComputedStyle(element).backgroundColor,
-          ),
-        ]);
-      return {
-        labelIsAnnotation: labelBackground !== controlBackground,
-        previewBackground,
-      };
-    })
-    .toEqual({
-      labelIsAnnotation: true,
-      previewBackground: "rgba(0, 0, 0, 0)",
-    });
   const previewSurfaceBox = await previewSurface.boundingBox();
-  const previewChipBox = await previewChip.boundingBox();
+  const previewContentBox = await previewContent.boundingBox();
   const firstPreviewMessageBox = await firstPreviewMessage.boundingBox();
   expect(previewSurfaceBox).not.toBeNull();
-  expect(previewChipBox).not.toBeNull();
+  expect(previewContentBox).not.toBeNull();
   expect(firstPreviewMessageBox).not.toBeNull();
-  if (!previewSurfaceBox || !previewChipBox || !firstPreviewMessageBox) {
+  if (!previewSurfaceBox || !previewContentBox || !firstPreviewMessageBox) {
     throw new Error("Conversation preview geometry is missing");
   }
-  const previewChipRightInset =
-    previewSurfaceBox.x +
-    previewSurfaceBox.width -
-    (previewChipBox.x + previewChipBox.width);
-  expect(previewChipRightInset).toBeGreaterThanOrEqual(13);
-  expect(previewChipRightInset).toBeLessThanOrEqual(15);
-  const previewChipTopInset = previewChipBox.y - previewSurfaceBox.y;
-  expect(previewChipTopInset).toBeGreaterThanOrEqual(13);
-  expect(previewChipTopInset).toBeLessThanOrEqual(15);
-  await expect(previewContent).toHaveCSS("padding-top", "16px");
-  await expect(previewContent).toHaveCSS("padding-right", "16px");
-  await expect(previewContent).toHaveCSS("padding-bottom", "16px");
-  await expect(previewContent).toHaveCSS("padding-left", "16px");
-  expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeGreaterThanOrEqual(
-    15,
-  );
-  expect(firstPreviewMessageBox.x - previewSurfaceBox.x).toBeLessThanOrEqual(
-    17,
-  );
-  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeGreaterThanOrEqual(
-    15,
-  );
-  expect(firstPreviewMessageBox.y - previewSurfaceBox.y).toBeLessThanOrEqual(
-    17,
+  expect(previewSurfaceBox.height).toBe(360);
+  await expect(previewContent).toHaveCSS("padding-top", "4px");
+  await expect(previewContent).toHaveCSS("padding-left", "12px");
+  expect(firstPreviewMessageBox.x - previewContentBox.x).toBeGreaterThanOrEqual(
+    0,
   );
   await densityIndicator.evaluate((element) => {
     element.addEventListener(
@@ -1508,14 +1465,36 @@ test("settings content uses the same inset surface as the main app", async ({
   });
 });
 
-test("appearance hides accent picker under Buzz", async ({ page }) => {
+test("appearance applies accent colors under Buzz", async ({ page }) => {
   await seedTheme(page, "buzz");
   await installMockBridge(page);
   const panel = await openAppearance(page, "light");
-  // The accent picker is hidden while a Buzz theme is active. Its neutral
-  // swatch testid must not be present.
-  await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
-  await panel.screenshot({ path: `${SHOTS}/10-appearance-no-accent.png` });
+  await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
+  const initialPrimary = await page
+    .locator("html")
+    .evaluate((element) =>
+      getComputedStyle(element).getPropertyValue("--primary").trim(),
+    );
+  await page.getByTestId("accent-color-pink").click();
+  await expect(page.getByTestId("accent-color-pink")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect
+    .poll(() =>
+      page
+        .locator("html")
+        .evaluate((element) =>
+          getComputedStyle(element).getPropertyValue("--primary").trim(),
+        ),
+    )
+    .not.toBe(initialPrimary);
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.localStorage.getItem("buzz-accent-color")),
+    )
+    .toBe("#ec4899");
+  await panel.screenshot({ path: `${SHOTS}/10-appearance-buzz-accent.png` });
 });
 
 test("glass background keeps the content panel solid", async ({ page }) => {
@@ -1740,11 +1719,7 @@ test("non-Buzz glass preserves the selected theme sidebar tint", async ({
   expect(tint.actual).toBe(tint.expected);
 });
 
-test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
-  // Start on a non-Buzz theme so the accent picker is present, then select the
-  // Buzz tile — the picker should animate out and unmount. Reselecting a
-  // non-Buzz tile brings it back. Asserts the presence toggle (the motion
-  // wrapper) works end to end.
+test("accent picker stays available when toggling Buzz", async ({ page }) => {
   await seedTheme(page, "github-light");
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "platform", {
@@ -1768,16 +1743,16 @@ test("accent picker reveals/hides when toggling Buzz", async ({ page }) => {
     "glass-background-row",
   ]);
 
-  // Switch to Buzz — picker should leave (allow the exit animation to settle).
+  // Accent selection remains available on first-party Buzz themes.
   await page.getByTestId("theme-style-trigger").click();
   await page.getByTestId("theme-option-buzz").click();
   await expect(page.getByTestId("theme-style-trigger")).toHaveAttribute(
     "aria-expanded",
     "true",
   );
-  await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
+  await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
 
-  // Back to a non-Buzz theme — picker returns.
+  // It also remains available after returning to a syntax theme.
   await page.getByTestId("theme-option-github-light").click();
   await expect(page.getByTestId("accent-color-neutral")).toBeVisible();
   await expect(page.getByTestId("theme-style-trigger")).toHaveAttribute(

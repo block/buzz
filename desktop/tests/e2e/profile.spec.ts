@@ -2319,6 +2319,94 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
   await expect.poll(getAppBadgeCount).toBe(baseline);
 });
 
+test("notification settings simplify copy and show sound progress", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openSettings(page, "notifications");
+
+  const settings = page.getByTestId("settings-notifications");
+  await expect(
+    settings.getByText("Play sound for notifications", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    settings.getByText("Badge application icon", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    settings.getByText("Native desktop alerts are enabled", { exact: false }),
+  ).toHaveCount(0);
+  await expect(
+    settings.getByText("Alert with a sound for the events below."),
+  ).toHaveCount(0);
+  await expect(
+    settings.getByText("Show a Home badge", { exact: false }),
+  ).toHaveCount(0);
+
+  const viewAll = settings.getByTestId("notifications-toggle-coming-soon");
+  await expect(viewAll).toHaveClass(/!shadow-none/);
+
+  const badgeToggle = settings.getByTestId("notifications-home-badge-toggle");
+  const badgeThumb = badgeToggle.locator('[data-slot="switch-thumb"]');
+  const restingCapsuleWidth = await badgeToggle.evaluate(
+    (element) => element.getBoundingClientRect().width,
+  );
+  const restingThumbWidth = await badgeThumb.evaluate(
+    (element) => element.getBoundingClientRect().width,
+  );
+  const badgeStartsChecked = await badgeToggle.isChecked();
+  await expect(badgeThumb).toHaveCSS(
+    "clip-path",
+    badgeStartsChecked
+      ? "inset(0px 0px 0px 8px round 999px)"
+      : "inset(0px 8px 0px 0px round 999px)",
+  );
+  const restingThumbBox = await badgeThumb.boundingBox();
+  await badgeToggle.hover();
+  await expect
+    .poll(() =>
+      badgeToggle.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBe(restingCapsuleWidth);
+  await expect
+    .poll(() =>
+      badgeThumb.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBe(restingThumbWidth);
+  await expect(badgeThumb).toHaveCSS("clip-path", "inset(0px round 999px)");
+  const stretchedThumbBox = await badgeThumb.boundingBox();
+  if (!restingThumbBox || !stretchedThumbBox) {
+    throw new Error("Switch thumb geometry is missing");
+  }
+  const restingEdge = badgeStartsChecked
+    ? restingThumbBox.x + restingThumbBox.width
+    : restingThumbBox.x;
+  const stretchedEdge = badgeStartsChecked
+    ? stretchedThumbBox.x + stretchedThumbBox.width
+    : stretchedThumbBox.x;
+  expect(Math.abs(restingEdge - stretchedEdge)).toBeLessThanOrEqual(0.5);
+  await badgeToggle.click();
+  await expect
+    .poll(() =>
+      badgeThumb.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBe(restingThumbWidth);
+
+  const soundPicker = settings.getByTestId("sound-picker").first();
+  await soundPicker.getByRole("button", { name: /^Preview / }).click();
+  const waveform = soundPicker.getByTestId("sound-picker-waveform");
+  await expect(waveform).toBeVisible();
+  await expect
+    .poll(async () =>
+      Number.parseFloat(
+        (await waveform.getAttribute("data-playback-progress")) ?? "0",
+      ),
+    )
+    .toBeGreaterThan(0.9);
+  await expect(
+    soundPicker.getByRole("button", { name: /^Preview / }),
+  ).toBeVisible({ timeout: 3_000 });
+});
+
 test("desktop notification clicks open the matching forum thread", async ({
   page,
 }) => {

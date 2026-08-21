@@ -6,7 +6,7 @@ import {
   verifyNcryptsecBackup,
   type BackupVerification,
 } from "@/shared/api/tauriIdentity";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import { Input } from "@/shared/ui/input";
 import { PubKey } from "@/shared/ui/PubKey";
 import { Spinner } from "@/shared/ui/spinner";

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { PageHeader } from "@/shared/ui/PageHeader";
+import { cn } from "@/shared/lib/cn";
 
 /**
  * Page title for a Settings card. Thin wrapper over the shared {@link PageHeader}
@@ -8,21 +9,25 @@ import { PageHeader } from "@/shared/ui/PageHeader";
  */
 export function SettingsSectionHeader({
   action,
+  className,
   description,
   title,
 }: {
   action?: ReactNode;
-  description: ReactNode;
+  className?: string;
+  description?: ReactNode;
   title: ReactNode;
 }) {
   return (
     <PageHeader
       action={action}
-      className="mb-12"
+      className={cn("mb-12", className)}
       description={
-        <span data-settings-subcopy className="text-muted-foreground/70">
-          {description}
-        </span>
+        description ? (
+          <span data-settings-subcopy className="text-muted-foreground/70">
+            {description}
+          </span>
+        ) : undefined
       }
       title={title}
     />

@@ -42,7 +42,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/shared/ui/alert-dialog";
-import { Button, buttonVariants } from "@/shared/ui/button";
+import { buttonVariants } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import {
   Dialog,
   DialogContent,

@@ -39,6 +39,7 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { SettingsActionButton } from "@/features/settings/ui/SettingsActionButton";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -259,6 +260,7 @@ export function AgentDefaultsEditor({
   const progressiveFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : PROGRESSIVE_FIELDS_TRANSITION;
+  const SaveButton = flatLayout ? SettingsActionButton : Button;
 
   return (
     <div className={cn("min-w-0", flatLayout ? "space-y-7" : "space-y-4")}>
@@ -337,7 +339,7 @@ export function AgentDefaultsEditor({
           )}
           <div className="ml-auto flex items-center gap-3">
             {secondaryAction}
-            <Button
+            <SaveButton
               disabled={
                 !dirty ||
                 !configIsValid ||
@@ -351,7 +353,7 @@ export function AgentDefaultsEditor({
                 <Loader className="mr-1.5 size-3.5 animate-spin" />
               ) : null}
               Save defaults
-            </Button>
+            </SaveButton>
           </div>
         </div>
       )}

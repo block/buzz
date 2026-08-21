@@ -50,12 +50,53 @@ test.describe("observer archive policy — Settings toggle", () => {
 
     const card = await openLocalArchiveSettings(page);
     const toggle = card.getByTestId("local-archive-observer-toggle");
+    const thumb = toggle.locator('[data-slot="switch-thumb"]');
     await expect(toggle).toBeVisible({ timeout: 5_000 });
     await expect(toggle).toBeChecked();
+    await expect(thumb).toHaveCSS(
+      "clip-path",
+      "inset(0px 0px 0px 8px round 999px)",
+    );
+
+    const restingCheckedBox = await thumb.boundingBox();
+    await toggle.hover();
+    await expect(thumb).toHaveCSS("clip-path", "inset(0px round 999px)");
+    const stretchedCheckedBox = await thumb.boundingBox();
+    if (!restingCheckedBox || !stretchedCheckedBox) {
+      throw new Error("Observer switch thumb geometry is missing");
+    }
+    expect(
+      Math.abs(
+        restingCheckedBox.x +
+          restingCheckedBox.width -
+          (stretchedCheckedBox.x + stretchedCheckedBox.width),
+      ),
+    ).toBeLessThanOrEqual(0.5);
 
     // OFF: removes kind 24200.
     await toggle.click();
     await expect(toggle).not.toBeChecked();
+
+    await page.mouse.move(0, 0);
+    await thumb.evaluate(async (element) => {
+      await Promise.all(
+        element.getAnimations().map((animation) => animation.finished),
+      );
+    });
+    await expect(thumb).toHaveCSS(
+      "clip-path",
+      "inset(0px 8px 0px 0px round 999px)",
+    );
+    const restingUncheckedBox = await thumb.boundingBox();
+    await toggle.hover();
+    await expect(thumb).toHaveCSS("clip-path", "inset(0px round 999px)");
+    const stretchedUncheckedBox = await thumb.boundingBox();
+    if (!restingUncheckedBox || !stretchedUncheckedBox) {
+      throw new Error("Observer switch thumb geometry is missing");
+    }
+    expect(
+      Math.abs(restingUncheckedBox.x - stretchedUncheckedBox.x),
+    ).toBeLessThanOrEqual(0.5);
 
     // ON again: re-creates the row from empty.
     await toggle.click();

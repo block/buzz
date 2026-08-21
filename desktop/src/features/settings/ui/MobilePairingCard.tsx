@@ -16,7 +16,7 @@ import {
   startPairing,
 } from "@/shared/api/tauri";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./SettingsActionButton";
 import { StyledQrCode } from "@/shared/ui/styled-qr-code";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";

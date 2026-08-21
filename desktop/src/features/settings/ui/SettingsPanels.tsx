@@ -33,7 +33,9 @@ import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiS
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
 import { cn } from "@/shared/lib/cn";
 import { useCommunities } from "@/features/communities/useCommunities";
+import type { ThreadViewMode } from "@/features/channels/lib/threadViewModePreference";
 import { Badge } from "@/shared/ui/badge";
+import type { LinkPreviewStyle } from "@/shared/lib/linkPreviewStylePreference";
 import { isBuzzTheme, useTheme } from "@/shared/theme/ThemeProvider";
 import {
   LIGHT_THEMES,
@@ -55,6 +57,7 @@ import {
 import { appearanceCommunityLabel } from "../lib/appearanceScopeCopy";
 import {
   AccentPickerContent,
+  AppearanceWorkspacePreview,
   ConversationDisplaySettings,
   GlassBackgroundSetting,
   LinkPreviewStyleSetting,
@@ -406,18 +409,6 @@ const APPEARANCE_MODE_OPTIONS = [
   { mode: "dark" as const, label: "Dark", Icon: Moon },
 ] as const;
 
-// Reveal/hide motion for the accent picker: a small translate + opacity fade.
-// The picker sits below the theme grid and reads as tucking up behind it, so
-// it enters from above (slides *down* into place when a non-Buzz theme reveals
-// it) and exits upward (slides up behind the grid when Buzz hides it). No
-// height/scale — height collapse clipped the swatches behind the grid's bottom
-// fade (the "white bar"). Snappier than the modal 0.2s since this is a small
-// settings control, sharing the modal/ProfileSettingsCard easing curve.
-const ACCENT_PICKER_TRANSITION = {
-  duration: 0.16,
-  ease: [0.23, 1, 0.32, 1] as const,
-};
-
 function ThemeSettingsCard() {
   const {
     setTheme,
@@ -437,11 +428,7 @@ function ThemeSettingsCard() {
   const showCommunityScope = communities.length > 1;
   const communityLabel = appearanceCommunityLabel(activeCommunity?.name);
 
-  // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
-  // so the accent picker is hidden while a Buzz theme is active. `themeName` is
-  // the effective theme, so this also covers System mode resolving to Buzz.
   const buzzThemeSelected = isBuzzTheme(themeName);
-  const accentPickerHidden = buzzThemeSelected;
   const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
@@ -456,6 +443,10 @@ function ThemeSettingsCard() {
 
   const [selectedMode, setSelectedMode] = useState<AppearanceMode>(activeMode);
   const [themeStyleExpanded, setThemeStyleExpanded] = useState(false);
+  const [previewLinkStyle, setPreviewLinkStyle] =
+    useState<LinkPreviewStyle | null>(null);
+  const [previewThreadMode, setPreviewThreadMode] =
+    useState<ThreadViewMode | null>(null);
 
   const getVars = (name: SyntaxThemeName) =>
     withAccentPreviewVars(
@@ -575,19 +566,6 @@ function ThemeSettingsCard() {
               "linear-gradient(to bottom, hsl(var(--background)), hsl(var(--background) / 0))",
           }}
         />
-        {/* Bottom fade — hidden while the accent picker is visible so its
-            near-white gradient (Buzz light) can't mask the swatches below it
-            (the "white bar"). Kept only when the picker is hidden. */}
-        {accentPickerHidden ? (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
-            style={{
-              background:
-                "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
-            }}
-          />
-        ) : null}
         <div className="max-h-[430px] overflow-y-auto rounded-lg pt-2">
           <div className="flex flex-wrap gap-4 p-1">
             {selectedMode === "system" &&
@@ -636,9 +614,10 @@ function ThemeSettingsCard() {
       className="flex min-h-0 flex-1 flex-col overflow-y-auto"
       data-testid="settings-theme"
     >
-      <SettingsSectionHeader
-        title="Appearance"
-        description="Choose how Buzz looks and feels."
+      <SettingsSectionHeader className="mb-6" title="Appearance" />
+      <AppearanceWorkspacePreview
+        previewLinkStyle={previewLinkStyle}
+        previewThreadMode={previewThreadMode}
       />
 
       <SettingsOptionGroupList>
@@ -669,12 +648,6 @@ function ThemeSettingsCard() {
           <SettingsOptionRow data-testid="appearance-color-mode-row">
             <div className="min-w-0">
               <p className="text-sm font-medium">Color mode</p>
-              <p
-                className="text-sm font-normal text-muted-foreground/70"
-                data-settings-subcopy
-              >
-                Follow your system or choose a light or dark appearance.
-              </p>
             </div>
             <SegmentedControl
               indicatorTestId="appearance-color-mode-indicator"
@@ -694,12 +667,6 @@ function ThemeSettingsCard() {
           <SettingsOptionRow data-testid="theme-style-row">
             <div className="min-w-0">
               <p className="text-sm font-medium">Theme style</p>
-              <p
-                className="text-sm font-normal text-muted-foreground/70"
-                data-settings-subcopy
-              >
-                Choose the colors used throughout Buzz.
-              </p>
             </div>
             <button
               aria-label={`Theme style, ${selectedThemeLabel}`}
@@ -749,38 +716,10 @@ function ThemeSettingsCard() {
             </AnimatePresence>
           )}
 
-          {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
-              Reveal/hide with the translate-up + opacity fade defined by
-              ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
-              and just renders/unrenders. */}
-          {shouldReduceMotion ? (
-            accentPickerHidden ? null : (
-              <AccentPickerContent
-                accentColor={accentColor}
-                isDark={isDark}
-                setAccentColor={setAccentColor}
-              />
-            )
-          ) : (
-            <AnimatePresence initial={false}>
-              {accentPickerHidden ? null : (
-                <motion.div
-                  animate={{ opacity: 1, y: 0 }}
-                  className="will-change-[opacity,transform]"
-                  exit={{ opacity: 0, y: -10 }}
-                  initial={{ opacity: 0, y: -10 }}
-                  key="accent-picker"
-                  transition={ACCENT_PICKER_TRANSITION}
-                >
-                  <AccentPickerContent
-                    accentColor={accentColor}
-                    isDark={isDark}
-                    setAccentColor={setAccentColor}
-                  />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          )}
+          <AccentPickerContent
+            accentColor={accentColor}
+            setAccentColor={setAccentColor}
+          />
 
           <GlassBackgroundSetting />
           {buzzThemeSelected ? <ProminentActiveTabSetting /> : null}
@@ -791,8 +730,8 @@ function ThemeSettingsCard() {
           title="Preferences"
         >
           <ConversationDisplaySettings />
-          <LinkPreviewStyleSetting />
-          <ThreadLayoutSetting />
+          <LinkPreviewStyleSetting onPreviewChange={setPreviewLinkStyle} />
+          <ThreadLayoutSetting onPreviewChange={setPreviewThreadMode} />
         </SettingsOptionGroup>
       </SettingsOptionGroupList>
     </section>

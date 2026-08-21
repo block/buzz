@@ -17,7 +17,7 @@ import {
 } from "@/shared/constants/kinds";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "@/features/settings/ui/SettingsActionButton";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { Switch } from "@/shared/ui/switch";
 import {

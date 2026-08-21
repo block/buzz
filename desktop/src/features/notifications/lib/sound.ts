@@ -137,10 +137,14 @@ export function shouldPlayNotificationSound(
 
 const cache = new Map<SoundName, HTMLAudioElement>();
 
+export function createNotificationSound(name: SoundName): HTMLAudioElement {
+  return new Audio(`/sounds/${name}.mp3`);
+}
+
 function getAudio(name: SoundName): HTMLAudioElement {
   let audio = cache.get(name);
   if (!audio) {
-    audio = new Audio(`/sounds/${name}.mp3`);
+    audio = createNotificationSound(name);
     cache.set(name, audio);
   }
   return audio;

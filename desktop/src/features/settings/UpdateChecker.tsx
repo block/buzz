@@ -1,6 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "./ui/SettingsActionButton";
 import {
   SettingsOptionGroup,
   SettingsOptionRow,

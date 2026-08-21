@@ -339,7 +339,7 @@ export function SettingsView({
             data-testid="settings-content-scroll"
           >
             <div
-              className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4"
+              className="mx-auto flex min-h-full w-full max-w-[640px] flex-col gap-4"
               data-testid={`settings-panel-${section}`}
             >
               {renderSettingsSection(section, {

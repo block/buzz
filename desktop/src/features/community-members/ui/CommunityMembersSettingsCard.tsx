@@ -20,7 +20,7 @@ import type {
   UserProfileSummary,
 } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { Button } from "@/shared/ui/button";
+import { SettingsActionButton as Button } from "@/features/settings/ui/SettingsActionButton";
 import {
   DropdownMenu,
   DropdownMenuContent,

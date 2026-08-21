@@ -23,6 +23,7 @@ import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
 import { PrivateKeyBackupRow } from "./PrivateKeyBackupRow";
+import { SettingsActionButton } from "./SettingsActionButton";
 import {
   SettingsOptionGroup,
   SettingsOptionGroupList,
@@ -74,9 +75,8 @@ function IdentityRow({
         </p>
       </div>
       {copyValue ? (
-        <button
+        <SettingsActionButton
           aria-label={`Copy ${label}`}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           data-testid={`copy-${testId}`}
           onClick={async () => {
             await writeTextToClipboard(copyValue);
@@ -84,10 +84,11 @@ function IdentityRow({
           }}
           title={`Copy ${label}`}
           type="button"
+          variant="secondary"
         >
           <Copy className="h-4 w-4 shrink-0" />
           Copy
-        </button>
+        </SettingsActionButton>
       ) : null}
     </div>
   );
@@ -111,23 +112,18 @@ function EditProfileMetadataButton({
   const accessibleLabel = isEditing ? `Done editing ${label}` : `Edit ${label}`;
 
   return (
-    <button
+    <SettingsActionButton
       aria-label={accessibleLabel}
-      className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60",
-        isEditing
-          ? "border-transparent bg-primary text-primary-foreground shadow hover:bg-primary/90"
-          : "border-transparent bg-muted text-foreground hover:bg-muted/80",
-      )}
       data-testid={testId}
       disabled={disabled}
       onClick={onClick}
       title={accessibleLabel}
       type="button"
+      variant="secondary"
     >
       <Icon className="h-4 w-4 shrink-0" />
       {actionLabel}
-    </button>
+    </SettingsActionButton>
   );
 }
 
@@ -484,10 +480,7 @@ export function ProfileSettingsCard({
       ref={sectionRef}
     >
       <div>
-        <SettingsSectionHeader
-          title="Profile"
-          description="Update how your name, avatar, and bio appear across Buzz."
-        />
+        <SettingsSectionHeader title="Profile" />
 
         <div className="space-y-3">
           {profileQuery.error instanceof Error ? (
@@ -760,7 +753,7 @@ export function ProfileSettingsCard({
 
                         <SettingsOptionGroup title="Identity">
                           <details
-                            className="group divide-y divide-border/55"
+                            className="group"
                             data-testid="profile-identity-card"
                           >
                             <summary
@@ -782,7 +775,7 @@ export function ProfileSettingsCard({
                               <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-[color,transform] duration-150 ease-out group-open:rotate-180 group-hover/identity:text-foreground group-focus-visible/identity:text-foreground" />
                             </summary>
                             <div
-                              className="divide-y divide-border/55"
+                              className="divide-y divide-border/55 border-t border-border/55"
                               data-testid="profile-identity-details"
                             >
                               <IdentityRow

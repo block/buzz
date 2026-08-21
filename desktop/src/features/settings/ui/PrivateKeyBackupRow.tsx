@@ -12,7 +12,6 @@ import {
 } from "@/features/settings/ui/BackupTestFlow";
 import { EncryptedBackupCreator } from "@/features/settings/ui/EncryptedBackupCreator";
 import { getNsec } from "@/shared/api/tauriIdentity";
-import { Button } from "@/shared/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -20,6 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { SettingsActionButton } from "./SettingsActionButton";
 
 function BackupAvailabilityFill({
   availableUntil,
@@ -127,22 +127,22 @@ export function PrivateKeyBackupRow() {
           <p className="text-sm font-medium">Private key</p>
           <div className="flex shrink-0 items-center gap-2">
             {backupAvailable ? (
-              <Button
-                className="relative overflow-hidden rounded-full"
+              <SettingsActionButton
+                className="relative overflow-hidden"
                 data-testid="encrypted-backup-download"
                 disabled={isSaving}
                 onClick={() => void downloadBackup()}
                 type="button"
+                variant="secondary"
               >
                 {availableUntil !== null ? (
                   <BackupAvailabilityFill availableUntil={availableUntil} />
                 ) : null}
                 <span className="relative z-10">Download backup</span>
-              </Button>
+              </SettingsActionButton>
             ) : null}
-            <Button
+            <SettingsActionButton
               aria-label={isOpen ? "Hide private key" : "Reveal private key"}
-              className="rounded-full"
               data-testid="profile-private-key-toggle"
               onClick={() => void handleReveal()}
               type="button"
@@ -159,7 +159,7 @@ export function PrivateKeyBackupRow() {
                   Reveal
                 </>
               )}
-            </Button>
+            </SettingsActionButton>
           </div>
         </div>
         {isOpen ? (
