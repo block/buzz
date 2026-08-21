@@ -240,6 +240,10 @@ test("accepts the generated name through the first form mutation", async ({
 
   await dialog.getByRole("button", { name: "Add first step" }).click();
   await dialog.getByRole("button", { name: "Create workflow" }).click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await activationConfirmation.getByRole("button", { name: "Turn on" }).click();
 
   await expect(page.getByTestId("workflows-view")).toContainText(generatedName);
 });
@@ -278,9 +282,9 @@ test("shows executable guidance for diff trigger conditions", async ({
     .getByRole("menuitem", { name: "Diff Posted", exact: true })
     .click();
 
-  await expect(dialog.getByLabel("Condition (optional)")).toHaveAttribute(
+  await expect(dialog.getByLabel("Diff text")).toHaveAttribute(
     "placeholder",
-    'e.g. str_contains(trigger_text, "deploy")',
+    "e.g. deploy",
   );
 });
 
@@ -329,11 +333,9 @@ test("captures workflow library across responsive viewports", async ({
 
 test("captures disabled diff workflows in the list UI", async ({ page }) => {
   const workflowName = `diff_workflow_${Date.now()}`;
-  const description = "Watches diff events for src/ changes";
 
   await navigateToWorkflows(page);
   await createWorkflow(page, workflowName, {
-    description,
     enabled: false,
     trigger: "diff_posted",
     stepName: "Notify reviewers",
@@ -345,10 +347,13 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
     .locator('[data-testid^="workflow-card-"]')
     .filter({ hasText: workflowName })
     .first();
-  await expect(card.getByText("Diff Posted", { exact: true })).toBeVisible();
-  await expect(card.locator("h3")).toHaveText(workflowName);
-  await expect(card.getByText(description, { exact: true })).toBeVisible();
-  await expect(card).toContainText("disabled");
+  await expect(card.locator("h3")).toHaveText(
+    "When a diff is posted, send “Workflow notification”",
+  );
+  await expect(card).toContainText(workflowName);
+  await expect(
+    card.getByRole("switch", { name: "Disable workflow" }),
+  ).toBeChecked();
 });
 
 test("enables and disables a workflow from its card status toggle", async ({
@@ -803,7 +808,7 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
   await dialog.getByLabel("Duration").fill("5m");
   await expect(page).toHaveURL(/pane=step%3Astep_2/);
 
-  await dialog.getByRole("button", { name: "Step 1: Send Message" }).click();
+  await dialog.getByRole("button", { name: /^Step 1:/ }).click();
   await expect(page).toHaveURL(/pane=step%3Astep_1/);
   await dialog
     .getByTestId("workflow-node-inspector")
@@ -818,7 +823,7 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
   const yaml = await yamlEditor.inputValue();
   await yamlEditor.fill(yaml.replace("duration: 5m", "duration: 10m"));
   await dialog.getByRole("tab", { name: "Form" }).click();
-  await dialog.getByRole("button", { name: "Step 1: Delay" }).click();
+  await dialog.getByRole("button", { name: /^Step 1:/ }).click();
   await expect(dialog.getByLabel("Duration")).toHaveValue("10m");
 });
 

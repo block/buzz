@@ -286,7 +286,9 @@ test("round-trips and reopens structured message-text conditions", async ({
   expect(secondOperatorBox).not.toBeNull();
   expect(thirdOperatorBox).not.toBeNull();
   expect(secondOperatorBox?.x).toBeGreaterThan(firstOperatorBox?.x ?? 0);
-  expect(thirdOperatorBox?.x).toBe(firstOperatorBox?.x);
+  expect(
+    Math.abs((secondOperatorBox?.y ?? 0) - (firstOperatorBox?.y ?? 0)),
+  ).toBeLessThan(1);
   expect(thirdOperatorBox?.y).toBeGreaterThan(firstOperatorBox?.y ?? 0);
   await waitForAnimations(page);
   await matchControls.screenshot({
